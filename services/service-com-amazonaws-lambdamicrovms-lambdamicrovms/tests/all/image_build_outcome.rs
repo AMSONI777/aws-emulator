@@ -207,14 +207,16 @@ fn text(value: &Value, member: &str) -> String {
     value[member].as_str().unwrap_or_default().to_string()
 }
 
-/// Assert that a settled version's `versionStateTimeBucket` is the bucket of the instant
-/// the version's state settled in — the `updatedAt` the same answer reports — rather than
-/// merely present: the member is a projection of the record, so it must agree with it.
+/// Assert that a settled version's `versionStateTimeBucket` is the state the version
+/// settled in and the bucket of the instant it settled at — the `state` and the
+/// `updatedAt` the same answer reports — rather than merely present: the member is a
+/// projection of the record, so it must agree with it.
 fn assert_state_time_bucket(version: &Value, case: &str) {
     let updated_at = version["updatedAt"]
         .as_f64()
         .unwrap_or_else(|| panic!("case {case:?}: a settled version reports updatedAt: {version}"));
-    let expected = state_time_bucket(aws_smithy_types::DateTime::from_secs_f64(updated_at));
+    let expected = state_time_bucket(aws_smithy_types::DateTime::from_secs_f64(updated_at))
+        .map(|bucket| format!("{}#{bucket}", text(version, "state")));
     let actual = version["versionStateTimeBucket"].as_str().map(str::to_string);
     assert_eq!(
         actual, expected,

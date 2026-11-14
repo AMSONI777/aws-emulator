@@ -76,3 +76,13 @@ Model grounding (services/service-com-amazonaws-lambdamicrovms-lambdamicrovms/sm
 4. Poll ListMicrovmImageVersions(imageIdentifier=<imageArn>) for the version the update created.
    AWS: it settles state='FAILED' with stateReason='The S3 bucket does not exist.' and a versionStateTimeBucket present (status='INACTIVE').
    Emulator: it stays state='IN_PROGRESS' with no stateReason and no versionStateTimeBucket, so the poll never terminates. (Cause 3)
+
+## Resolution
+
+Cause 2 and Cause 3 are FIXED; Cause 1 is DECLINED as a value the recording does not derive from the request. Do NOT re-file Cause 1 from the step cited above without reading this note first.
+
+Cause 3: every response that reports one VERSION of a MicroVM image now carries `versionStateTimeBucket` as the composite the recorded responses carry — the state the version SETTLED in, a `#`, and the compact UTC calendar hour (`<yy><mm><dd><hh>`) of the instant it settled at — computed once from the stored record (`state::MicrovmImageVersion::reported_state_time_bucket` over `state::state_time_bucket`), and `UpdateMicrovmImageVersion` now writes that same member beside its modelled payload. The FAILED/INACTIVE settlement with the fixed `stateReason` was already in place on both the create and the update path.
+
+Cause 2: `latestFailedImageVersion` is maintained when a version settles on the failed branch and projected by every response that reports the image record; with Cause 3 fixed, the step this issue cites matches and the whole `lambdamicrovms-image-version-status-and-update` fixture replays clean end to end.
+
+Cause 1 (DECLINED): the rule — a version's `baseImageVersion` is the version the request pinned, otherwise the current version of the base image it named — is already implemented once, in `state::resolve_base_image_version`, shared by `CreateMicrovmImage` and `UpdateMicrovmImage`, and is pinned by a 6-row table in `tests/all/image_version_pedigree.rs`. What remains is the VALUE an unpinned create resolves to, and the corpus answers two different ones for the same unpinned create against the same managed base image ARN: with the unpinned managed resolution answering '2.0', `lambdamicrovms-customer-image-lifecycle#setup#2` passes and `lambdamicrovms-image-version-status-and-update` diverges on `$.baseImageVersion` at setup#2, task#4, task#5 and task#6; with it answering the `major.minor` initial version, that fixture replays clean and only the step cited here diverges. Nothing in either request distinguishes them, so the resolved value is the one AWS's catalogue happened to publish at recording time — a per-run value with the modelled type, format and invariants — and serving the cited literal would re-break Causes 2 and 3 of this same issue.

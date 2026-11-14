@@ -35,6 +35,8 @@ mod image_refusal_paths;
 mod image_request_validation;
 #[path = "all/image_version_listing.rs"]
 mod image_version_listing;
+#[path = "all/image_version_pedigree.rs"]
+mod image_version_pedigree;
 #[path = "all/image_version_read_path.rs"]
 mod image_version_read_path;
 #[path = "all/image_version_status_publication.rs"]

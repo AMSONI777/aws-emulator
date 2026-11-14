@@ -24,12 +24,12 @@
 //!   shape declares `imageArn`, `imageVersion`, `status`, `createdAt` and `updatedAt`
 //!   alone (same `smithy_query`).
 //! * `versionStateTimeBucket` on every response that reports one VERSION of a MicroVM
-//!   image — the time bucket that version's state settled in
+//!   image — the state that version settled in and the time bucket it settled in
 //!   ([`crate::state::MicrovmImageVersion::reported_state_time_bucket`]), which a client
 //!   reading a settled build groups its own records by.
-//!   `GetMicrovmImageVersionOutput` and `MicrovmImageVersionSummary` declare the
-//!   version's build inputs, `state`, `status`, `stateReason`, `createdAt`, `updatedAt`
-//!   and `tags` and no such member
+//!   `GetMicrovmImageVersionOutput`, `MicrovmImageVersionSummary` and
+//!   `UpdateMicrovmImageVersionResponse` declare the version's build inputs, `state`,
+//!   `status`, `stateReason`, `createdAt`, `updatedAt` and `tags` and no such member
 //!   (`smithy_query(query="shape",shape="GetMicrovmImageVersionOutput,MicrovmImageVersionSummary",model_path="services/service-com-amazonaws-lambdamicrovms-lambdamicrovms/smithy-model/com-amazonaws-lambdamicrovms-lambdamicrovms.json")`).
 //!
 //! Each member schema is declared in the `com.amazonaws.lambdamicrovms.recorded`
@@ -143,6 +143,20 @@ pub const VERSION_STATE_TIME_BUCKET_ON_VERSION_SUMMARY: ::aws_smithy_schema::Sch
     ::aws_smithy_schema::Schema::new_member(
         ::aws_smithy_schema::ShapeId::from_static(
             "com.amazonaws.lambdamicrovms.recorded#MicrovmImageVersionSummary$versionStateTimeBucket",
+            RECORDED_NAMESPACE,
+            "versionStateTimeBucket",
+        ),
+        ::aws_smithy_schema::ShapeType::String,
+        "versionStateTimeBucket",
+        20,
+    );
+
+/// `versionStateTimeBucket` on `UpdateMicrovmImageVersionResponse`, whose 20 modelled
+/// members occupy indices `0..=19`.
+pub const VERSION_STATE_TIME_BUCKET_ON_UPDATE_VERSION_RESPONSE: ::aws_smithy_schema::Schema =
+    ::aws_smithy_schema::Schema::new_member(
+        ::aws_smithy_schema::ShapeId::from_static(
+            "com.amazonaws.lambdamicrovms.recorded#UpdateMicrovmImageVersionResponse$versionStateTimeBucket",
             RECORDED_NAMESPACE,
             "versionStateTimeBucket",
         ),

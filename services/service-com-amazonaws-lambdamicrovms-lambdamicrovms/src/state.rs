@@ -1219,16 +1219,20 @@ impl MicrovmImageVersion {
     }
 
     /// The `versionStateTimeBucket` a response reporting this version answers with: the
-    /// time bucket the version's state settled in ([`state_time_bucket`]), and nothing
-    /// at all while the build it is waiting on is still in flight.
+    /// state the version settled in, a `#`, and the time bucket it settled in
+    /// ([`state_time_bucket`]) — and nothing at all while the build it is waiting on is
+    /// still in flight.
     ///
     /// The member is recorded AWS behaviour rather than modelled (the shapes reporting a
     /// version declare no such member), so it is written beside the modelled payload —
-    /// see [`crate::ops::types::RecordedMembers`]. The ONE projection of the stored
-    /// settlement instant, so a read of a version and a listing row for it cannot
-    /// disagree.
+    /// see [`crate::ops::types::RecordedMembers`]. It is a COMPOSITE key of the state and
+    /// the bucket, the form the recorded responses carry, which is what lets a client
+    /// group the settlements it polls by outcome as well as by time. The ONE projection
+    /// of the stored state and settlement instant, so a read of a version and a listing
+    /// row for it cannot disagree.
     pub fn reported_state_time_bucket(&self) -> Option<String> {
-        state_time_bucket(self.state_settled_at?)
+        let bucket = state_time_bucket(self.state_settled_at?)?;
+        Some(format!("{}#{bucket}", self.state))
     }
 
     /// This version's state-time bucket, as the recorded-only member a response writes
@@ -1245,24 +1249,19 @@ impl MicrovmImageVersion {
     }
 }
 
-/// How long one `versionStateTimeBucket` spans.
+/// The time bucket the instant `at` falls in, as the recorded responses write it: the
+/// CALENDAR HOUR in UTC, in the compact `<yy><mm><dd><hh>` digits the recorded
+/// `versionStateTimeBucket` carries after its `#`. `None` when the instant falls outside
+/// the calendar, which leaves the member unwritten rather than reported as something
+/// else.
 ///
-/// A BUCKET is an interval rather than an instant: the member is recorded AWS behaviour
-/// and AWS publishes neither its width nor its form, so the width is chosen — the hour
-/// the state settled in, the coarsest bucket a client polling a build can still tell two
-/// builds of one day apart by.
-pub const VERSION_STATE_TIME_BUCKET: Duration = Duration::from_secs(60 * 60);
-
-/// The time bucket the instant `at` falls in: the start of its
-/// [`VERSION_STATE_TIME_BUCKET`]-wide interval, as the ISO-8601 instant every timestamp
-/// of this service's JSON bodies is written as. `None` when the instant cannot be
-/// rendered, which leaves the member unwritten rather than reported as something else.
+/// A BUCKET is an interval rather than an instant, and the recorded form is what fixes
+/// its width at one hour: the digits name a year, a month, a day and an hour and nothing
+/// finer, so two settlements of the same hour share a bucket and two of different hours
+/// do not.
 pub fn state_time_bucket(at: DateTime) -> Option<String> {
-    let width = i64::try_from(VERSION_STATE_TIME_BUCKET.as_secs()).ok()?;
-    let start = at.secs() - at.secs().rem_euclid(width);
-    DateTime::from_secs(start)
-        .fmt(::aws_smithy_types::date_time::Format::DateTime)
-        .ok()
+    let calendar = ::chrono::DateTime::from_timestamp(at.secs(), 0)?;
+    Some(calendar.format("%y%m%d%H").to_string())
 }
 
 /// A MicroVM image, keyed in [`ComAmazonawsLambdamicrovmsLambdamicrovmsState::images`] by its name.

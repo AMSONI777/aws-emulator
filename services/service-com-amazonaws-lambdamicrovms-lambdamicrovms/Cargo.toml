@@ -45,6 +45,10 @@ aws-sdk-ec2 = { version = "1", default-features = false, features = ["rt-tokio",
 # so its own records are read through the engine both services live in — the seam
 # `service-com-amazonaws-lambda-awsgirapiservice` reads Amazon ECR's images through.
 service-com-amazonaws-lambdacore-lambdacoreapiservice = { workspace = true }
+# Renders the calendar hour a MicroVM image version's state settled in, which is what the
+# recorded `versionStateTimeBucket` names (`src/state.rs`): no calendar arithmetic is
+# hand-written here.
+chrono = { version = "0.4", default-features = false, features = ["std"] }
 # Reads an IPv4 prefix (a subnet's CIDR, a security-group rule's range) and answers
 # whether one contains an address or another prefix, so no address arithmetic is
 # hand-written here.
