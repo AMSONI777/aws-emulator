@@ -1,15 +1,14 @@
 // SPDX-License-Identifier: CC0-1.0
 
 //! @op GetConfigurationBundleVersion
-//! SCAFFOLDED, NOT IMPLEMENTED: this operation answers HTTP 501 `NotImplemented` and
-//! asserts NOTHING about `GetConfigurationBundleVersion`'s real behaviour. Implement it here — this is
-//! the ONLY file to touch for this operation.
 //!
-//! A 501 from this operation means "nobody has written it yet", never "the emulator is
-//! broken". Replace the `Err(..)` in [`GetConfigurationBundleVersion::handle`] with real behaviour and
-//! delete the SCAFFOLDED marker line above; that line is the machine-readable record of
-//! which operations are still stubs (`grep -rl '^//! SCAFFOLDED, NOT IMPLEMENTED:' */src/ops/`),
-//! so leaving it on an implemented operation under-reports progress.
+//! Reads ONE version of a configuration bundle, addressed by the `versionId` a
+//! commit of that bundle minted, off the bundle record
+//! ([`crate::state::ConfigurationBundleRecord`]) every operation of this family
+//! shares: the bundle's identity and create instant, and the components,
+//! description, encryption key, lineage and commit instant of exactly that
+//! version. A `bundleId` naming no stored bundle, and a `versionId` that bundle
+//! holds no commit for, are both the family's modelled 404.
 //!
 //! ## Shape of an operation
 //!
@@ -173,20 +172,40 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
     async fn handle(
         &self,
         input: Self::Input,
-        ctx: &smithy_server_runtime::OperationContext<'_>,
+        _ctx: &smithy_server_runtime::OperationContext<'_>,
     ) -> Result<Self::Output, Self::Error> {
-        // The engine is reachable from `&self` (constructor-injected); `ctx` carries
-        // request metadata. Both are bound here so an implementer has them in scope.
-        let _ = (&input, ctx, &self.engine);
-        // Implement `GetConfigurationBundleVersion` here, then delete the SCAFFOLDED marker at the top of
-        // this file. Return modeled failures as
-        // `Err(GetConfigurationBundleVersionErrorModeled::Variant(..).into())` — the `From` impl above lifts it.
-        //
-        // To refuse a bad request this operation models no error for, return
-        // `Err(crate::scaffolded::Scaffolded::validation("..."))` — a 400
-        // `ValidationException`. Do NOT answer 501 for it: 501 means "not written yet",
-        // not "bad request". Modeled constraints are already refused BEFORE this
-        // handler runs, so reaching here means the input satisfies every one of them.
-        Err(crate::scaffolded::Scaffolded::not_implemented("GetConfigurationBundleVersion"))
+        let state = crate::state::service_state(&*self.engine).ok_or_else(|| {
+            GetConfigurationBundleVersionErrorModeled::InternalServerException(
+                InternalServerException {
+                    message: Some("the configuration bundle store is unavailable".to_string()),
+                },
+            )
+        })?;
+        let store = state.lock();
+
+        // The store is keyed by the `bundleId` a create minted; an id naming no
+        // stored bundle is the family's modelled 404 rather than an empty
+        // envelope.
+        let record = store
+            .configuration_bundles
+            .get(&input.bundle_id)
+            .ok_or_else(|| {
+                GetConfigurationBundleVersionErrorModeled::ResourceNotFoundException(
+                    crate::state::configuration_bundle_not_found(),
+                )
+            })?;
+
+        // "Gets a specific version of a configuration bundle by its version
+        // identifier": the version the request names, on whatever branch it was
+        // committed to, never the latest one as a substitute. A `versionId`
+        // this bundle holds no commit for — including one another bundle
+        // minted — is the same modelled 404, in the family's own words.
+        let version = record.version(&input.version_id).ok_or_else(|| {
+            GetConfigurationBundleVersionErrorModeled::ResourceNotFoundException(
+                crate::state::configuration_bundle_not_found(),
+            )
+        })?;
+
+        Ok(record.version_output(version))
     }
 }

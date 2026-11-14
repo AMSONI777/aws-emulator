@@ -37,6 +37,8 @@ mod code_interpreter_lifecycle;
 mod configuration_bundle_deletion;
 #[path = "all/configuration_bundle_lifecycle.rs"]
 mod configuration_bundle_lifecycle;
+#[path = "all/configuration_bundle_version_read.rs"]
+mod configuration_bundle_version_read;
 #[path = "all/control_plane_preconditions.rs"]
 mod control_plane_preconditions;
 #[path = "all/credential_provider_external_secret_decryption.rs"]

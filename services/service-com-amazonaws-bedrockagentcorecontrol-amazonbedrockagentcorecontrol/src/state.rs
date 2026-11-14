@@ -104,7 +104,7 @@ use crate::ops::types::{
     DeleteGatewayTargetOutput,
     FilesystemConfiguration, GatewayInterceptorConfiguration, GatewayPolicyEngineConfiguration,
     GatewayProtocolConfiguration, GatewaySummary, GetGatewayOutput, GetGatewayTargetOutput,
-    GetConfigurationBundleOutput, GetRegistryOutput,
+    GetConfigurationBundleOutput, GetConfigurationBundleVersionOutput, GetRegistryOutput,
     Harness, HarnessAgentCoreRuntimeEnvironment, HarnessAgentCoreRuntimeEnvironmentRequest,
     HarnessEndpoint,
     HarnessEnvironmentArtifact, HarnessEnvironmentProvider, HarnessEnvironmentProviderRequest,
@@ -3203,6 +3203,35 @@ impl ConfigurationBundleRecord {
             lineage_metadata: Some(version.lineage_metadata()),
             created_at: timestamp(self.created_at),
             updated_at: timestamp(self.updated_at),
+            kms_key_arn: version.kms_key_arn.clone(),
+        }
+    }
+
+    /// What a read of ONE version of this bundle, addressed by its own
+    /// `versionId`, reports: the bundle's identity and the content and lineage
+    /// of exactly that commit.
+    ///
+    /// It carries the two instants `GetConfigurationBundleVersionResponse`
+    /// declares separately — `createdAt`, "The timestamp when the configuration
+    /// bundle was created", which belongs to the bundle, and
+    /// `versionCreatedAt`, "The timestamp when this specific version was
+    /// created", which belongs to the commit — so a read of an older version
+    /// reports when that version was committed rather than when the bundle was
+    /// last updated.
+    pub fn version_output(
+        &self,
+        version: &ConfigurationBundleVersionRecord,
+    ) -> GetConfigurationBundleVersionOutput {
+        GetConfigurationBundleVersionOutput {
+            bundle_arn: self.bundle_arn.clone(),
+            bundle_id: self.bundle_id.clone(),
+            bundle_name: self.bundle_name.clone(),
+            description: version.description.clone(),
+            version_id: version.version_id.clone(),
+            components: version.component_map(),
+            lineage_metadata: Some(version.lineage_metadata()),
+            created_at: timestamp(self.created_at),
+            version_created_at: timestamp(version.created_at),
             kms_key_arn: version.kms_key_arn.clone(),
         }
     }
