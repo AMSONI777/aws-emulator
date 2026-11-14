@@ -2934,3 +2934,9 @@ mod cloudformation_firehose_stream_direct_put_delivers;
 #[path = "all/s3_object_events_update_their_search_index.rs"]
 mod s3_object_events_update_their_search_index;
 // `zz_probe` ONCE further up this tail: two landings each appended their own copy here, and a
+// role attachment a stack declares is applied at all is decided by Amazon Cognito Identity,
+// which serves the `SetIdentityPoolRoles` call CloudFormation makes for it and refuses an
+// incomplete role mapping, while IAM holds the role the attachment names — so no single
+// service crate's test target can deploy the stack and then read the pool's roles back.
+#[path = "all/cloudformation_cognito_identity_role_attachment_refusal.rs"]
+mod cloudformation_cognito_identity_role_attachment_refusal;
