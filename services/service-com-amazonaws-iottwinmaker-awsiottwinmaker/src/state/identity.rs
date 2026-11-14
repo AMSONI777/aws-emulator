@@ -149,12 +149,26 @@ impl ComponentTypeReferences {
 /// "the entity is there, the component on it is not", which is a different miss
 /// from [`entity_not_found_message`]'s and is reported as a bad reference rather
 /// than as a missing resource.
+///
+/// A component is addressed by a name on some of those paths and by a
+/// `ComponentPath` on the others, and that path is bounded as widely as the
+/// member the reason travels on, so the message is brought within that bound
+/// HERE ([`clamped_message`]) rather than at each reader of it — as
+/// [`workspace_not_found_message`] and [`resource_not_found_message`] are: the
+/// bound then holds for every caller of this construction, including one added
+/// later. A reader that states this reason on a NARROWER member still applies
+/// that member's own bound, which this one leaves room for.
 pub fn component_not_found_message(
     workspace_id: &str,
     entity_id: &str,
     component: &str,
 ) -> String {
-    format!("Component {component} of Entity {entity_id} in workspace {workspace_id} not found.")
+    clamped_message(
+        format!(
+            "Component {component} of Entity {entity_id} in workspace {workspace_id} not found."
+        ),
+        ERROR_MESSAGE_MAX_CHARS,
+    )
 }
 
 /// The message for a scene the workspace the request named does not hold.

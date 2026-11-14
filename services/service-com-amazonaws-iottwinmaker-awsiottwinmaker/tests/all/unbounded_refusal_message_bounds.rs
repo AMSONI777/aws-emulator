@@ -139,7 +139,12 @@ pub(crate) fn resource_not_found(resource_arn: &str) -> String {
 
 /// The reason every operation that resolves a workspace in order to read or
 /// write something it contains words for a workspace this service does not hold.
-fn workspace_not_found(workspace: &str) -> String {
+///
+/// This crate's ONE wording of that reason, so a suite about the same reason
+/// reached through another member (`tests/all/workspace_label_refusal_bound.rs`,
+/// which drives the workspace LABEL) states it through this rather than
+/// restating it.
+pub(crate) fn workspace_not_found(workspace: &str) -> String {
     format!("Unable to find workspace for id: {workspace}")
 }
 

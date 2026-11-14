@@ -296,6 +296,9 @@ mod workspace_built_in_component_types;
 #[path = "all/workspace_entity_lifecycle.rs"]
 mod workspace_entity_lifecycle;
 
+#[path = "all/workspace_label_refusal_bound.rs"]
+mod workspace_label_refusal_bound;
+
 #[path = "all/workspace_listing.rs"]
 mod workspace_listing;
 
