@@ -258,6 +258,20 @@ pub(super) fn naming_rules(resource_type: &str) -> Option<NameRules> {
         crate::state::provisioner::redshift_parameter_groups::REDSHIFT_CLUSTER_PARAMETER_GROUP => {
             rules(255, Characters::LowercaseAlphanumeric)
         }
+        // Amazon Redshift `CreateSnapshotCopyGrant.SnapshotCopyGrantName`: "Must contain from 1
+        // to 63 alphanumeric characters or hyphens", "Alphabetic characters must be lowercase",
+        // "First character must be a letter", "Cannot end with a hyphen or contain two
+        // consecutive hyphens" (that member's own doc) — Redshift's model carries no `@length`
+        // for it. Lower case is required of the value itself, so a name carrying upper case
+        // names a grant that service does not hold — the position the group names above are in.
+        // The three remaining constraints need no further rule here: [`within`] gives this
+        // character set a name that begins and ends with an alphanumeric and collapses a run
+        // of separators to ONE hyphen, and that leading alphanumeric is a LETTER because a
+        // stack name is `[a-zA-Z][-a-zA-Z0-9]*`, so only the LENGTH is a bound a generated
+        // name could break.
+        crate::state::provisioner::redshift_snapshot_copy_grants::REDSHIFT_SNAPSHOT_COPY_GRANT => {
+            rules(63, Characters::LowercaseAlphanumeric)
+        }
         // Amazon EC2 `CreateSecurityGroup.GroupName`: "Up to 255 characters in length"
         // (Amazon EC2 API reference) — EC2's model carries no `@length` for it.
         EC2_SECURITY_GROUP => rules(255, Characters::AsGenerated),

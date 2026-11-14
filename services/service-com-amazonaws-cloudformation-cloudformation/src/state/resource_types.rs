@@ -78,6 +78,7 @@
 //! template to this catalogue would refuse types the expansion would have produced. Such a
 //! template is admitted, and its resources are recorded as declared.
 
+use super::provisioner::redshift_snapshot_copy_grants::REDSHIFT_SNAPSHOT_COPY_GRANT;
 use super::template::{
     DeclaredResource, Template, ACMPCA_CERTIFICATE, ACMPCA_CERTIFICATE_AUTHORITY,
     ACMPCA_CERTIFICATE_AUTHORITY_ACTIVATION, ACMPCA_PERMISSION, AMPLIFYUIBUILDER_COMPONENT,
@@ -754,11 +755,13 @@ pub const AWS_RESOURCE_TYPES: &[&str] = &[
     "AWS::RDS::OptionGroup",
     // Amazon CloudWatch RUM
     "AWS::RUM::AppMonitor",
-    // Amazon Redshift
+    // Amazon Redshift. The snapshot copy grant is created in the owning service
+    // (`super::provisioner`), through that service's own `CreateSnapshotCopyGrant`.
     "AWS::Redshift::Cluster",
     "AWS::Redshift::ClusterParameterGroup",
     "AWS::Redshift::ClusterSecurityGroup",
     "AWS::Redshift::ClusterSubnetGroup",
+    REDSHIFT_SNAPSHOT_COPY_GRANT,
     // Amazon Rekognition
     "AWS::Rekognition::Collection",
     "AWS::Rekognition::Project",

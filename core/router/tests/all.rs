@@ -3696,3 +3696,19 @@ mod iam_denial_reason_attribution;
 // before the first item.)
 // (An appended fragment of the header above, kept as a line comment because an inner doc
 // comment is only legal before the first item: it checks this file and every service
+// Declared in this same tail, for the same reason: the snapshot copy grant a stack declares,
+// created in Amazon Redshift with the Key Management Service key it covers resolved there.
+#[path = "all/cloudformation_provisions_redshift_snapshot_copy_grants.rs"]
+mod cloudformation_provisions_redshift_snapshot_copy_grants;
+// (`cloudfront_edge_4xx_share_decides_the_alarm` is declared ONCE, in the sorted span above:
+// two branches landing at once each appended a second declaration of it here, and a module
+// (The SESv2 event-destination suite is declared ONCE in the span above: two branches landing
+// at once each appended a second declaration of it here, which compiles neither copy.)
+// (`pricing_plan_subscription_resource_eligibility` is declared ONCE, in the head region of
+// this file: two branches landing in the same window each appended their own copy here, and a
+// (`cloudformation_kms_encrypted_sns_sqs_pipeline` is declared ONCE, in the sorted span above:
+// two landings each appended a second declaration of it here, which compiles neither copy.)
+// (The Pricing Plan Manager subscription-eligibility suite is declared ONCE, in the head
+// region of this file: two landings each appended a declaration of it here as well.)
+// it here. The `sfn_relayed_dynamodb_request_id` declaration that stood here is the same
+// case: it is declared once, a few lines above.)

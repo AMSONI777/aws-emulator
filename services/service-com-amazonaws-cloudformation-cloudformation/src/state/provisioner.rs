@@ -831,6 +831,15 @@ pub(super) enum Provisioner {
     /// one for real too — exactly the position [`Provisioner::RedshiftClusterSubnetGroup`] is
     /// in.
     RedshiftClusterParameterGroup,
+    /// `AWS::Redshift::SnapshotCopyGrant`: the grant that permits Amazon Redshift to encrypt
+    /// copied snapshots with a Key Management Service key, which `CreateSnapshotCopyGrant`
+    /// creates under the name the declaration states — the name this type's `Ref` returns —
+    /// `DescribeSnapshotCopyGrants` reports and `DeleteSnapshotCopyGrant` deletes.
+    ///
+    /// The grant's whole content is the KEY it covers, which Amazon Redshift resolves against
+    /// Key Management Service before it holds one, so a declaration naming a key that service
+    /// cannot read is that service's own refusal on this resource.
+    RedshiftSnapshotCopyGrant,
     EventsRule,
     /// `AWS::Pipes::Pipe`: a pipe of Amazon EventBridge Pipes, which `CreatePipe` creates
     /// under the name the template states, `UpdatePipe` changes and `DeletePipe` deletes.
@@ -1110,6 +1119,7 @@ pub(super) fn provisioner_for(resource_type: &str) -> Option<Provisioner> {
         REDSHIFT_CLUSTER => Some(Provisioner::RedshiftCluster),
         REDSHIFT_CLUSTER_SUBNET_GROUP => Some(Provisioner::RedshiftClusterSubnetGroup),
         REDSHIFT_CLUSTER_PARAMETER_GROUP => Some(Provisioner::RedshiftClusterParameterGroup),
+        REDSHIFT_SNAPSHOT_COPY_GRANT => Some(Provisioner::RedshiftSnapshotCopyGrant),
         EVENTS_RULE => Some(Provisioner::EventsRule),
         PIPES_PIPE => Some(Provisioner::PipesPipe),
         RESOURCE_GROUPS_GROUP => Some(Provisioner::ResourceGroupsGroup),
@@ -1451,6 +1461,12 @@ impl Provisioner {
                     propagated,
                 ))
                 .await
+            }
+            // `AWS::Redshift::SnapshotCopyGrant` publishes `Tags` as the `{Key, Value}` list
+            // `CreateSnapshotCopyGrant`'s own `Tags` member takes, so a grant a stack creates
+            // carries the tags CloudFormation gives it beside the declared ones.
+            Self::RedshiftSnapshotCopyGrant => {
+                Box::pin(create_snapshot_copy_grant(ctx, region, resource, propagated)).await
             }
             Self::RdsDbSubnetGroup => {
                 create_db_subnet_group(ctx, region, resource, propagated).await
@@ -1920,6 +1936,11 @@ impl Provisioner {
                 // check its own crate's tag validation makes — so a group carries the stack's
                 // own tags without the three.
                 | Self::ResourceGroupsGroup
+                // Amazon Redshift refuses a tag key in the reserved namespace on
+                // `CreateSnapshotCopyGrant`'s own `Tags` member and on `CreateTags` alike, in
+                // the one check its own crate's tag validation makes — so a grant carries the
+                // stack's own tags without the three.
+                | Self::RedshiftSnapshotCopyGrant
         );
         propagated
             .iter()
@@ -2480,6 +2501,10 @@ impl Provisioner {
             Self::RedshiftClusterParameterGroup => {
                 Box::pin(update_cluster_parameter_group(ctx, region, resource, declared)).await
             }
+            // A snapshot copy grant has nothing Amazon Redshift can change on it — that
+            // service publishes no modify for one — so the arm decides whether the change is
+            // one the grant the stack has can take at all.
+            Self::RedshiftSnapshotCopyGrant => update_snapshot_copy_grant(resource, declared),
             // Every member of a health check's configuration that can change on a live one
             // is a member of `UpdateHealthCheck`, so a changed declaration is applied to the
             // health check the stack created — under the id its `Ref` resolves to — rather
@@ -3029,6 +3054,9 @@ impl Provisioner {
             }
             Self::RedshiftClusterSubnetGroup => {
                 delete_cluster_subnet_group(ctx, region, physical_resource_id).await
+            }
+            Self::RedshiftSnapshotCopyGrant => {
+                delete_snapshot_copy_grant(ctx, region, physical_resource_id).await
             }
             Self::RdsDbSubnetGroup => {
                 delete_db_subnet_group(ctx, region, physical_resource_id).await
@@ -3802,6 +3830,11 @@ impl Provisioner {
             Self::RedshiftClusterSubnetGroup => {
                 describe_cluster_subnet_group(ctx, region, physical_resource_id).await
             }
+            // Amazon Redshift's own read of the snapshot copy grant the stack created, by the
+            // name it was created under.
+            Self::RedshiftSnapshotCopyGrant => {
+                describe_snapshot_copy_grant(ctx, region, physical_resource_id).await
+            }
             // The AgentCore control plane's own read of the identity, by the name it was
             // created under.
             Self::BedrockAgentCoreWorkloadIdentity => {
@@ -3917,9 +3950,14 @@ pub(super) mod elasticache_caches;
 /// the service that owns it so a member DB instance of that cluster resolves it.
 pub(super) mod rds_db_clusters;
 pub(super) mod redshift_parameter_groups;
+/// The Amazon Redshift SNAPSHOT COPY GRANT arm: the grant an
+/// `AWS::Redshift::SnapshotCopyGrant` declares, created in the service that owns it so a
+/// client's own read of that service resolves the name the stack publishes.
+pub(super) mod redshift_snapshot_copy_grants;
 use elasticache_caches::*;
 use rds_db_clusters::*;
 use redshift_parameter_groups::*;
+use redshift_snapshot_copy_grants::*;
 use ssm_associations::*;
 use ssm_documents::*;
 use resource_groups::*;
