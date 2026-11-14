@@ -25,8 +25,7 @@
 
 use serde_json::json;
 use service_com_amazonaws_apigateway_backplanecontrolservice::state::{
-    domain_name_has_base_path_mappings, rest_api_in_use_by_base_path_mapping,
-    stage_in_use_by_base_path_mapping, BasePathMappingReference, NONE_BASE_PATH,
+    domain_name_has_base_path_mappings, NONE_BASE_PATH,
 };
 
 use crate::base_path_mapping::{create_mapping, deployed_api};
@@ -88,6 +87,29 @@ fn assert_bad_request(answer: &Answer, message: &str, case: &str) {
         "case {case}: expected the message {message:?}, got {:?}",
         answer.body["message"]
     );
+}
+
+/// The refusal AWS states for a REST API a base path mapping of `domain_names` still
+/// names, written out here rather than taken from the handler's own renderer: the FIXED
+/// text is what this test pins, and the VARIABLE parts are the identifier the request
+/// addressed and the domain names the mappings belong to.
+fn api_refusal(rest_api_id: &str, domain_names: &[&str]) -> String {
+    format!(
+        "Deleting RestApi {rest_api_id} failed. Please remove all base path mappings \
+         related to the RestApi in your domains: {}",
+        domain_names.join(", ")
+    )
+}
+
+/// The same sentence over the STAGE a mapping names, which is the record `DeleteStage`
+/// addresses; see [`api_refusal`]. The recorded refusals spell each record's kind as that
+/// refusal spells it — the shape name for the API, the common noun for the stage.
+fn stage_refusal(stage_name: &str, domain_names: &[&str]) -> String {
+    format!(
+        "Deleting stage {stage_name} failed. Please remove all base path mappings related \
+         to the stage in your domains: {}",
+        domain_names.join(", ")
+    )
 }
 
 /// One row: the case, the base path the mapping is created under, and whether the mapping
@@ -253,16 +275,8 @@ async fn a_stage_a_base_path_mapping_still_names_cannot_be_deleted() {
         )
         .await;
 
-        let referencing = BasePathMappingReference {
-            domain_name: domain_name.clone(),
-            base_path: row.base_path.to_string(),
-        };
         let refused = delete_stage(&gateway, &api, &stage).await;
-        assert_bad_request(
-            &refused,
-            &stage_in_use_by_base_path_mapping(&stage, &referencing),
-            row.case,
-        );
+        assert_bad_request(&refused, &stage_refusal(&stage, &[&domain_name]), row.case);
 
         // The stage survives the refusal.
         let read = get_stage(&gateway, &api, &stage).await;
@@ -348,16 +362,8 @@ async fn a_rest_api_a_base_path_mapping_still_names_cannot_be_deleted() {
         }
         create_mapping(&gateway, &domain_name, request).await;
 
-        let referencing = BasePathMappingReference {
-            domain_name: domain_name.clone(),
-            base_path: row.base_path.to_string(),
-        };
         let refused = delete_api(&gateway, &api).await;
-        assert_bad_request(
-            &refused,
-            &rest_api_in_use_by_base_path_mapping(&api, &referencing),
-            row.case,
-        );
+        assert_bad_request(&refused, &api_refusal(&api, &[&domain_name]), row.case);
 
         // The API survives the refusal, with the stage the mapping routes to.
         let read = gateway
@@ -423,5 +429,137 @@ async fn a_mapping_that_names_no_stage_holds_no_stage() {
         );
         // Restored for the next row.
         create_deployed_stage(&gateway, &api, &stage).await;
+    }
+}
+
+/// One row of the sentence table: how many custom domain names hold a mapping of the API,
+/// how many mappings each of them holds, and the domain names the refusal must list.
+struct DomainsRow {
+    case: &'static str,
+    /// The base paths to map, per domain name: one entry per domain name, each listing the
+    /// base paths of that domain name's mappings of the API under test.
+    mappings: &'static [&'static [&'static str]],
+}
+
+#[tokio::test]
+async fn the_refusal_lists_the_domain_names_whose_mappings_hold_the_record() {
+    // The rule: a delete of a record a base path mapping names is refused with AWS's
+    // sentence, which asks the caller to remove ALL base path mappings of the record from
+    // the DOMAIN NAMES that hold them — so what the message carries is the list of those
+    // domain names, in creation order and each named once, and never a base path.
+    //
+    // The rows differ along what the rule generalises over: how many domain names hold a
+    // mapping of the record (one, two, three), how many mappings each of them holds (one,
+    // several), and the spelling of those base paths (a plain one and the `(none)` the
+    // member documents). Each row drives BOTH refusals of one reference — the API the
+    // mapping names and the stage of it — because one sentence states both.
+    let rows = [
+        DomainsRow {
+            case: "one domain name holding one mapping",
+            mappings: &[&["v1"]],
+        },
+        DomainsRow {
+            case: "one domain name holding several mappings of the same record",
+            mappings: &[&["v1", "v2", NONE_BASE_PATH]],
+        },
+        DomainsRow {
+            case: "two domain names",
+            mappings: &[&["v1"], &[NONE_BASE_PATH]],
+        },
+        DomainsRow {
+            case: "three domain names, one of them holding two mappings",
+            mappings: &[&["alpha"], &["beta", "gamma"], &["delta"]],
+        },
+    ];
+
+    for (index, row) in rows.iter().enumerate() {
+        let gateway = Gateway::new();
+        let (api, stage) = deployed_api(&gateway, &format!("listed-api-{index}"), "prod").await;
+        // An API of its own behind a mapping of every one of these domain names: its
+        // mappings must not put its domain names in the refusal of the API under test.
+        let (other_api, other_stage) =
+            deployed_api(&gateway, &format!("listed-other-{index}"), "prod").await;
+
+        let mut domain_names: Vec<String> = Vec::new();
+        for (held, base_paths) in row.mappings.iter().enumerate() {
+            let domain_name = format!("listed-{index}-{held}.example.com");
+            created_domain(&gateway, &domain_name, json!({})).await;
+            for base_path in *base_paths {
+                let created = create_mapping(
+                    &gateway,
+                    &domain_name,
+                    json!({ "basePath": base_path, "restApiId": api, "stage": stage }),
+                )
+                .await;
+                assert_eq!(
+                    created.status, 201,
+                    "case {}: expected 201 from CreateBasePathMapping, got {} with {:?}",
+                    row.case, created.status, created.body
+                );
+            }
+            let other = create_mapping(
+                &gateway,
+                &domain_name,
+                json!({ "basePath": "other", "restApiId": other_api, "stage": other_stage }),
+            )
+            .await;
+            assert_eq!(
+                other.status, 201,
+                "case {}: expected 201 from CreateBasePathMapping, got {} with {:?}",
+                row.case, other.status, other.body
+            );
+            domain_names.push(domain_name);
+        }
+        let listed: Vec<&str> = domain_names.iter().map(String::as_str).collect();
+
+        let refused_api = delete_api(&gateway, &api).await;
+        assert_bad_request(&refused_api, &api_refusal(&api, &listed), row.case);
+        let refused_stage = delete_stage(&gateway, &api, &stage).await;
+        assert_bad_request(&refused_stage, &stage_refusal(&stage, &listed), row.case);
+
+        // The sentence names the domain names and nothing else: no base path of any
+        // mapping rides on it, which is what tells the caller to remove ALL of them.
+        for message in [&refused_api, &refused_stage] {
+            let stated = message.body["message"].as_str().unwrap_or_default();
+            for base_paths in row.mappings {
+                for base_path in *base_paths {
+                    assert!(
+                        !stated.contains(base_path),
+                        "case {}: the refusal must name no base path, got {stated:?} naming \
+                         {base_path:?}",
+                        row.case
+                    );
+                }
+            }
+        }
+
+        // The other API, whose own mappings live on every one of those domain names, is
+        // held by its own mappings and by nothing of the record above: the refusal it
+        // earns lists the same domain names, under its own identifier.
+        let refused_other = delete_api(&gateway, &other_api).await;
+        assert_bad_request(&refused_other, &api_refusal(&other_api, &listed), row.case);
+
+        // Releasing every mapping of the record releases it: a domain name whose last
+        // mapping of it has gone drops out of the sentence, and the delete goes through
+        // when the list is empty.
+        let mut left = listed.clone();
+        for base_paths in row.mappings {
+            for base_path in *base_paths {
+                delete_mapping(&gateway, left[0], base_path).await;
+            }
+            left.remove(0);
+            if left.is_empty() {
+                break;
+            }
+            let still = delete_api(&gateway, &api).await;
+            assert_bad_request(&still, &api_refusal(&api, &left), row.case);
+        }
+        let deleted = delete_api(&gateway, &api).await;
+        assert_eq!(
+            deleted.status, 202,
+            "case {}: expected 202 from DeleteRestApi once every mapping is gone, got {} \
+             with {:?}",
+            row.case, deleted.status, deleted.body
+        );
     }
 }

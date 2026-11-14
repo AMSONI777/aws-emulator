@@ -716,3 +716,8 @@ mod rest_api_policy_reporting;
 // Lambda and Amazon DynamoDB on one engine.
 #[path = "all/stage_cognito_gate_spares_its_backend.rs"]
 mod stage_cognito_gate_spares_its_backend;
+// Appended for the reason the note above gives: the WARNINGS a definition import reports
+// for a model reference the posted document does not resolve, and the `failOnWarnings`
+// refusal that states them.
+#[path = "all/rest_api_import_model_reference_warnings.rs"]
+mod rest_api_import_model_reference_warnings;

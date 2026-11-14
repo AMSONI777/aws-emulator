@@ -3899,3 +3899,6 @@ mod cloudformation_provisions_redshift_snapshot_copy_grants;
 // header that a landing appended here: past the first item a `//!` line is `E0753` and
 // compiles no suite in this target, so it stands as an ordinary comment.)
 // an ordinary comment for the reason the lines around it record.)
+// suite left at the top level of `tests/` fails the build. (An ordinary comment, for the
+// reason the lines above record: a `//!` line past the first item of this crate root is
+// `E0753` and compiles no suite in this target.)

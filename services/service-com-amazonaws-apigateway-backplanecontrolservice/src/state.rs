@@ -1607,31 +1607,6 @@ pub struct BasePathMappingEntry {
     pub sequence: u64,
 }
 
-/// WHICH stored `BasePathMapping` one is: the custom domain name that holds it (by the
-/// [`domain_name_key`] it is addressed under) and the base path it answers to.
-///
-/// A mapping has no identifier of its own — it is addressed by its domain name and its
-/// base path — so this pair is how a refusal names the mapping that still stands in the
-/// way of a delete, the way [`MethodReference`] names the method that still references an
-/// authorizer.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct BasePathMappingReference {
-    /// The key of the [`DomainNameEntry`] that holds the mapping; see [`domain_name_key`].
-    pub domain_name: String,
-    /// The mapping's base path, which is its address under that domain name.
-    pub base_path: String,
-}
-
-impl ::std::fmt::Display for BasePathMappingReference {
-    /// The mapping as a refusal names it: the domain name and the base path, joined the
-    /// way the URL the mapping serves joins them, because a base path is unique only
-    /// within one domain name. One terse composite, as this service's other in-use
-    /// refusals render the reference that blocks a delete ([`MethodReference`]).
-    fn fmt(&self, formatter: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
-        write!(formatter, "{}/{}", self.domain_name, self.base_path)
-    }
-}
-
 /// The base path a `BasePathMapping` is stored and addressed under, from the (possibly
 /// absent) `basePath` a request carried.
 ///
@@ -3252,39 +3227,50 @@ impl ComAmazonawsApigatewayBackplanecontrolserviceState {
             .any(|association| association.domain_name_arn == domain_name_arn)
     }
 
-    /// The base path mapping that still routes to the API `rest_api_id` — to the stage
-    /// `stage_name` of it when one is named, or to the API at all when none is — or `None`
-    /// when none does.
+    /// The custom domain names whose `BasePathMapping`s still route to the API
+    /// `rest_api_id` — to the stage `stage_name` of it when one is named, or to the API at
+    /// all when none is — each once and in creation order; empty when none does.
     ///
     /// A `BasePathMapping` names "the string identifier of the associated RestApi" and
     /// "the name of the associated stage", so a mapping carrying those is a REFERENCE to
     /// that API and that stage — the same kind of reference
     /// [`Self::integration_referencing_vpc_link`] finds for a VPC link. A mapping is a
     /// record of a custom domain name and a domain name belongs to the ACCOUNT, so the
-    /// walk covers every stored domain name; both walks are in key order, so a refusal
-    /// NAMES the same mapping on every call for one set of records.
+    /// walk covers every stored domain name.
+    ///
+    /// What the refusal of such a delete NAMES is the domain names the caller has to
+    /// remove mappings from ([`rest_api_in_use_by_base_path_mapping`]), so that is what
+    /// this reports: the records are walked in creation order, with the key breaking a
+    /// tie, so one set of records always yields one list — and a domain name holding
+    /// several mappings of the API appears once, because the refusal asks for "all base
+    /// path mappings" of it.
     ///
     /// A mapping whose `stage` is absent, or is the `(none)` spelling that leaves the
     /// stage to the caller, names no stage and so references none — while still
     /// referencing its API.
-    pub fn base_path_mapping_referencing_api(
+    pub fn domain_names_mapping_rest_api(
         &self,
         rest_api_id: &str,
         stage_name: Option<&str>,
-    ) -> Option<BasePathMappingReference> {
-        self.domain_names.values().find_map(|domain| {
-            domain
-                .base_path_mappings
-                .values()
-                .find(|mapping| {
+    ) -> Vec<String> {
+        let mut referencing: Vec<&DomainNameEntry> = self
+            .domain_names
+            .values()
+            .filter(|domain| {
+                domain.base_path_mappings.values().any(|mapping| {
                     mapping.rest_api_id == rest_api_id
                         && stage_name.is_none_or(|stage| mapping.stage.as_deref() == Some(stage))
                 })
-                .map(|mapping| BasePathMappingReference {
-                    domain_name: domain.key(),
-                    base_path: mapping.base_path.clone(),
-                })
-        })
+            })
+            .collect();
+        referencing.sort_by_key(|domain| (domain.sequence, domain.key()));
+        let mut names: Vec<String> = Vec::new();
+        for domain in referencing {
+            if !names.contains(&domain.domain_name) {
+                names.push(domain.domain_name.clone());
+            }
+        }
+        names
     }
 
     /// The method whose integration still reaches the VPC link `vpc_link_id`, with the
@@ -3956,36 +3942,55 @@ pub fn domain_name_has_base_path_mappings(domain_name: &str, base_path: &str) ->
     )
 }
 
-/// The `BadRequestException` message for a stage a `BasePathMapping` still names, which is
-/// what `DeleteStage` refuses while the reference stands (see
-/// [`ComAmazonawsApigatewayBackplanecontrolserviceState::base_path_mapping_referencing_api`]).
+/// How a refusal that names SEVERAL custom domain names lists them: the member it fills is
+/// plural ("in your domains"), and a list a human reads is comma separated.
+const DOMAIN_NAME_LIST_SEPARATOR: &str = ", ";
+
+/// The `BadRequestException` message for a record a `BasePathMapping` still names, which is
+/// what the delete of that record is refused with while the reference stands (see
+/// [`ComAmazonawsApigatewayBackplanecontrolserviceState::domain_names_mapping_rest_api`]).
 ///
-/// BUILT FROM STATE, in the shape of this service's sibling in-use sentences
-/// ([`authorizer_in_use`], [`vpc_link_in_use`]): the fixed text names the condition and
-/// the variable parts are the stage's own name and the referencing mapping
-/// ([`BasePathMappingReference`]), so a client is told which record has to go first.
-pub fn stage_in_use_by_base_path_mapping(
-    stage_name: &str,
-    referencing: &BasePathMappingReference,
-) -> String {
-    format!("Cannot delete stage '{stage_name}', is referenced in base path mapping: {referencing}")
+/// VERBATIM from the recorded refusals: the FIXED text is "Deleting ", " failed. Please
+/// remove all base path mappings related to the " and " in your domains: ", and the
+/// VARIABLE parts are the KIND of record the request addressed (`kind`, as each recorded
+/// refusal spells that record: the shape name `RestApi` for an API, the common noun
+/// `stage` for one stage of it), the identifier it addressed that record by, and — from
+/// STATE — the custom domain names whose mappings stand in the way, which is what tells
+/// the caller where to make the `DeleteBasePathMapping` calls. ONE sentence for the whole
+/// class, so the refusal of an API and the refusal of one stage of it differ only in the
+/// record they name.
+///
+/// The sentence names the DOMAIN NAMES and not the base paths of the mappings: a domain
+/// name is what the caller has to go to, and "all base path mappings" of it is what has to
+/// go from there.
+fn in_use_by_base_path_mapping(kind: &str, identifier: &str, domain_names: &[String]) -> String {
+    format!(
+        "Deleting {kind} {identifier} failed. Please remove all base path mappings related \
+         to the {kind} in your domains: {}",
+        domain_names.join(DOMAIN_NAME_LIST_SEPARATOR)
+    )
+}
+
+/// The `BadRequestException` message for a stage a `BasePathMapping` still names, which is
+/// what `DeleteStage` refuses while the reference stands: the shared sentence
+/// ([`in_use_by_base_path_mapping`]) over the stage, which the recorded refusal names by
+/// the common noun.
+pub fn stage_in_use_by_base_path_mapping(stage_name: &str, domain_names: &[String]) -> String {
+    in_use_by_base_path_mapping("stage", stage_name, domain_names)
 }
 
 /// The `BadRequestException` message for a REST API a `BasePathMapping` still names, which
 /// is what `DeleteRestApi` refuses while the reference stands.
 ///
 /// The same condition one level up: a mapping names the API as well as the stage of it, so
-/// deleting the API would leave the mapping pointing at an API that does not exist. Worded
-/// as [`stage_in_use_by_base_path_mapping`] words it over the stage, so the two refusals of
-/// one reference differ only in which record they name.
+/// deleting the API would leave the mapping pointing at an API that does not exist. The
+/// recorded wording of this refusal is what [`in_use_by_base_path_mapping`] states for
+/// both.
 pub fn rest_api_in_use_by_base_path_mapping(
     rest_api_id: &str,
-    referencing: &BasePathMappingReference,
+    domain_names: &[String],
 ) -> String {
-    format!(
-        "Cannot delete REST API '{rest_api_id}', is referenced in base path mapping: \
-         {referencing}"
-    )
+    in_use_by_base_path_mapping("RestApi", rest_api_id, domain_names)
 }
 
 /// The `BadRequestException` message for ANY caller-supplied value this service could

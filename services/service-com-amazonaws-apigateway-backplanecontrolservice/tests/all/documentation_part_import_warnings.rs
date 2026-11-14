@@ -244,7 +244,10 @@ async fn a_model_reference_the_document_does_not_resolve_is_what_fail_on_warning
     // Swagger 2.0's bare `schema`), along where it sits (a response and a request body),
     // along the media type and the verb it is declared for, and along a reference that
     // points outside the document altogether — with one row whose reference resolves, so
-    // the rule's own boundary is a row too.
+    // the rule's own boundary is a row too. A reference is reported once per PLACE the
+    // import resolves it, which is why the rows whose schema is keyed BY MEDIA TYPE earn
+    // the sentence twice: the model that media type names and the binding of that model
+    // are two resolutions of the one reference.
     struct Row {
         case: &'static str,
         /// The document the import reads, without its documentation extension.
@@ -269,7 +272,10 @@ async fn a_model_reference_the_document_does_not_resolve_is_what_fail_on_warning
                     } },
                 } } } } },
             }),
-            warnings: &["Reference to model 'DoesNotExist' not found. Ignoring."],
+            warnings: &[
+                "Reference to model 'DoesNotExist' not found. Ignoring.",
+                "Reference to model 'DoesNotExist' not found. Ignoring.",
+            ],
             documents: vec![entry(
                 json!({ "type": "RESPONSE", "path": "/", "method": "GET", "statusCode": "200" }),
                 "ok",
@@ -287,7 +293,10 @@ async fn a_model_reference_the_document_does_not_resolve_is_what_fail_on_warning
                     "responses": { "201": { "description": "created" } },
                 } } },
             }),
-            warnings: &["Reference to model 'Absent' not found. Ignoring."],
+            warnings: &[
+                "Reference to model 'Absent' not found. Ignoring.",
+                "Reference to model 'Absent' not found. Ignoring.",
+            ],
             documents: vec![entry(
                 json!({ "type": "RESPONSE", "path": "/orders", "method": "POST", "statusCode": "201" }),
                 "created",

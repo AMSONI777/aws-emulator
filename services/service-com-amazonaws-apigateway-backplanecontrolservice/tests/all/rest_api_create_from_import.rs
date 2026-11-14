@@ -108,7 +108,10 @@ fn yaml_definition(title: &str, paths: &[PathRow]) -> String {
 
 /// `ImportRestApi`: the operation's own route (`POST /restapis?mode=import`), with `body`
 /// sent verbatim and the request's `parameters` carried in the query string.
-async fn import(
+///
+/// `pub(crate)` because the import's WARNING contract is tested beside this file, against
+/// the same route.
+pub(crate) async fn import(
     gateway: &Gateway,
     body: &str,
     fail_on_warnings: bool,
@@ -138,7 +141,7 @@ async fn import_created(gateway: &Gateway, case: &str, body: &str) -> Value {
 }
 
 /// How many APIs the account holds.
-async fn api_count(gateway: &Gateway, case: &str) -> usize {
+pub(crate) async fn api_count(gateway: &Gateway, case: &str) -> usize {
     let answer = gateway.call("GET", "/restapis", None).await;
     assert_eq!(
         answer.status, 200,

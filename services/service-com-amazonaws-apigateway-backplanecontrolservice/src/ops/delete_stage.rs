@@ -204,14 +204,14 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         // delete is refused while the reference stands and the stage survives; dropping
         // the mapping (or pointing it at another stage) is the mapping's own operations'
         // call, not something this one does on the caller's behalf.
-        if let Some(referencing) =
-            store.base_path_mapping_referencing_api(&input.rest_api_id, Some(&input.stage_name))
-        {
+        let holding =
+            store.domain_names_mapping_rest_api(&input.rest_api_id, Some(&input.stage_name));
+        if !holding.is_empty() {
             return Err(DeleteStageErrorModeled::BadRequestException(
                 BadRequestException {
                     message: Some(crate::state::stage_in_use_by_base_path_mapping(
                         &input.stage_name,
-                        &referencing,
+                        &holding,
                     )),
                 },
             )

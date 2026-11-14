@@ -1062,13 +1062,16 @@ fn referenced_model(reference: &str) -> &str {
 }
 
 /// The warnings a document earns for the MODEL REFERENCES it does not itself resolve, in
-/// document order and each reported once.
+/// document order and one per PLACE the import resolves each of them.
 ///
 /// A `$ref` names the model a part of the document stands for, so one whose target the
 /// document does not declare — or whose target is outside the document altogether — names
 /// no model at all: API Gateway reports it by the MODEL's own name ([`referenced_model`])
 /// rather than by the pointer that failed, and carries on with the rest of the document,
-/// which is what "Ignoring." says.
+/// which is what "Ignoring." says. It reports it ONCE PER RESOLUTION rather than once per
+/// reference: once where the document CARRIES the reference, and once more for every media
+/// type that declares its model by it ([`media_type_bindings`]), which is why a document
+/// declaring one unresolvable schema under a media type earns the sentence twice.
 ///
 /// `pub` because `ImportDocumentationParts` reads the same OpenAPI document — its `body`
 /// is "a JSON object" of the same shape, carrying the documentation set in an extension of
@@ -1077,15 +1080,94 @@ fn referenced_model(reference: &str) -> &str {
 /// that is about the methods a definition import creates, which a documentation import
 /// creates none of.
 pub fn model_reference_warnings(document: &Node) -> Vec<String> {
-    unresolved_references(document)
-        .iter()
-        .map(|reference| {
-            format!(
-                "Reference to model '{}' not found. Ignoring.",
-                referenced_model(reference)
-            )
-        })
-        .collect()
+    // Counted ONCE for the whole document rather than per reference, so reporting costs
+    // the document once however many references it carries.
+    let bindings = media_type_bindings(document);
+    let mut warnings: Vec<String> = Vec::new();
+    for reference in unresolved_references(document) {
+        let warning = format!(
+            "Reference to model '{}' not found. Ignoring.",
+            referenced_model(&reference)
+        );
+        let resolutions = 1 + bindings.get(&reference).copied().unwrap_or_default();
+        for _ in 0..resolutions {
+            // Bounded exactly as every other diagnostic this import reports is: a
+            // document cannot earn more warnings than a response carries.
+            if warnings.len() >= crate::state::MAX_COLLECTION_ENTRIES {
+                return warnings;
+            }
+            warnings.push(warning.clone());
+        }
+    }
+    warnings
+}
+
+/// How many media types of a method's payload or of one of its responses declare their
+/// MODEL by each reference the document carries, which is how many times an import
+/// resolves that reference BESIDE the place the document carries it
+/// ([`model_reference_warnings`]).
+///
+/// A `content` map keys the schema BY media type, so the model that media type names and
+/// the binding of that model to the method are two resolutions of the one reference.
+/// Swagger 2.0's bare `schema` declares no media type of its own — the media type is what
+/// the operation or the document `produces`/`consumes` — and so adds no second resolution.
+/// The counts are what the recorded warning sets for the two spellings carry.
+///
+/// A reference the DOCUMENT repeats is resolved once wherever it is carried
+/// ([`ReferenceWalk::resolved`] is what bounds that walk), so what a repeat adds is its own
+/// media-type binding. ONE walk over the document, which is itself bounded
+/// ([`MAX_DEFINITION_NODES`]), so this costs the document once.
+fn media_type_bindings(document: &Node) -> BTreeMap<String, usize> {
+    let mut bindings: BTreeMap<String, usize> = BTreeMap::new();
+    for (_, item) in document
+        .member("paths")
+        .and_then(Node::entries)
+        .unwrap_or_default()
+    {
+        for (operation, declared) in item.entries().unwrap_or_default() {
+            let operation = operation.to_ascii_lowercase();
+            if !OPERATION_KEYS
+                .iter()
+                .any(|(candidate, _)| *candidate == operation.as_str())
+            {
+                continue;
+            }
+            for schema in media_type_schemas(declared) {
+                if let Some(reference) = schema.member(REFERENCE_KEY).and_then(Node::text) {
+                    *bindings.entry(reference.to_string()).or_default() += 1;
+                }
+            }
+        }
+    }
+    bindings
+}
+
+/// The schemas `operation` declares UNDER A MEDIA TYPE: the entries of the `content` map
+/// of its payload (`requestBody`) and of each of its responses, which is OpenAPI 3's
+/// spelling of a declared body. Reading one operation costs what that operation declares,
+/// so the walk over a document stays linear in it.
+fn media_type_schemas(operation: &Node) -> Vec<&Node> {
+    let mut containers: Vec<&Node> = operation.member("requestBody").into_iter().collect();
+    for (_, response) in operation
+        .member("responses")
+        .and_then(Node::entries)
+        .unwrap_or_default()
+    {
+        containers.push(response);
+    }
+    let mut schemas = Vec::new();
+    for container in containers {
+        for (_, keyed) in container
+            .member("content")
+            .and_then(Node::entries)
+            .unwrap_or_default()
+        {
+            if let Some(schema) = keyed.member("schema") {
+                schemas.push(schema);
+            }
+        }
+    }
+    schemas
 }
 
 /// The media type a body or a response is read as when the document names none for it:
