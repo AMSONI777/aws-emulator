@@ -19,6 +19,8 @@ mod already_exists_conflict_messages;
 mod analysis_rule_column_reference_refusals;
 #[path = "all/analysis_template_deletion.rs"]
 mod analysis_template_deletion;
+#[path = "all/analysis_template_not_found_message.rs"]
+mod analysis_template_not_found_message;
 #[path = "all/authorization_failure_messages.rs"]
 mod authorization_failure_messages;
 #[path = "all/cleanrooms_analysis_templates.rs"]

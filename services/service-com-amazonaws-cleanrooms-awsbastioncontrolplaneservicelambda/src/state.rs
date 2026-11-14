@@ -1980,13 +1980,16 @@ pub fn membership_not_found_message(membership_id: &str, account_id: &str) -> St
 /// The message an analysis-template lookup reports when the identifier names no template
 /// of the membership in the path.
 ///
-/// Composed from the request's two identifiers: a template is a sub-resource of ONE
-/// membership, so the membership is what says the lookup failed in that membership's
-/// namespace rather than that the template id exists nowhere. Shared by every operation
-/// that addresses a stored template, so a read and a delete of the same resource report
-/// the same thing.
+/// One sentence in the frame this service states a missing membership sub-resource in —
+/// the same frame [`privacy_budget_template_not_found_message`] carries: the resource
+/// class, the identifier that resolved to nothing, and the membership the lookup was
+/// scoped to. Composed from the request's two identifiers, verbatim: a template is a
+/// sub-resource of ONE membership, so the membership is what says the lookup failed in
+/// that membership's namespace rather than that the template id exists nowhere. Shared by
+/// every operation that addresses a stored template, so a read and a delete of the same
+/// resource report the same thing.
 pub fn analysis_template_not_found_message(template_id: &str, membership_id: &str) -> String {
-    format!("analysis template {template_id} not found in membership {membership_id}")
+    format!("No analysis template found with id {template_id} for membership {membership_id}")
 }
 
 /// The message `CreateMembership` reports when the account it would create a membership

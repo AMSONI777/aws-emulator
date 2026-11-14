@@ -21,6 +21,7 @@
 
 use serde_json::{json, Value};
 
+use super::analysis_template_not_found_message::expected_not_found_message;
 use super::cleanrooms_analysis_templates::{
     artifacts_source, create_analysis_template, get_analysis_template, membership_id,
     synthetic_data_parameters, NAME_MAX_LEN,
@@ -254,7 +255,7 @@ async fn deleting_an_analysis_template_removes_it_and_frees_its_name() {
         );
         assert_eq!(
             error_message(&refused),
-            format!("analysis template {target_id} not found in membership {membership}"),
+            expected_not_found_message(&target_id, &membership),
             "case {label_text:?}: unexpected message, got {refused}"
         );
 
@@ -451,7 +452,7 @@ async fn deleting_an_analysis_template_refuses_an_identifier_its_membership_does
         );
         assert_eq!(
             error_message(&refused),
-            format!("analysis template {template_id} not found in membership {membership}"),
+            expected_not_found_message(&template_id, &membership),
             "case {case:?}: unexpected message, got {refused}"
         );
         assert_eq!(
