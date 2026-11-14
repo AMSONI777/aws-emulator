@@ -13,7 +13,7 @@
 //! table — built from the Smithy model at compile time. You do not edit the
 //! entry; you edit the behavioral seams below.
 //!
-//! Five opt-in seams are yours to change; every one defaults to the framework's
+//! Six opt-in seams are yours to change; every one defaults to the framework's
 //! own behaviour, so an unedited service still routes and answers correctly:
 //!
 //! - `can_handle` — which requests this service claims. The default matches the
@@ -36,6 +36,9 @@
 //!   failure the orchestrator detects up front (e.g. a malformed `aws-chunked`
 //!   body). The default returns `None`, keeping the entry's protocol-correct
 //!   rendering. Return `Some(resp)` to reword it if desired.
+//! - `override_protocol` — EDITED HERE. The model's own `restJson1`, with an error
+//!   document that always carries the error shape's `Message` member: the sentence the
+//!   error class words, or JSON `null` where it words none. See [`wire`].
 //!
 //! The model-derived half of this service — its identity, wire protocol, routing
 //! table, and the default error renderers — lives in the generated `ServiceDefinition`
@@ -138,6 +141,11 @@ use smithy_server_runtime::{
 };
 use std::sync::Arc;
 
+/// How this service's error document carries a modelled exception's `Message` member: the
+/// sixth seam, `override_protocol`, which this service takes for the one thing the generic
+/// renderer cannot express.
+pub mod wire;
+
 /// The wire error code for a request this service refuses as invalid: the shape
 /// `com.amazonaws.iotmanagedintegrations#ValidationException`, which every operation of
 /// this service lists and whose only member the model calls `Message`.
@@ -159,6 +167,10 @@ pub struct EmulatedService<Eng: Send + Sync + 'static> {
     /// protocol resolves — the key the generated table uses — and built from the SAME
     /// shared engine, so a wrapped operation reads and writes the one store.
     in_modelled_envelope: OperationRoutingTable,
+    /// This service's wire protocol: the model's own `restJson1`, with the error document
+    /// of [`wire`]. Built once here because [`Service::override_protocol`] hands back a
+    /// borrow of it.
+    protocol: wire::NullMessageRestJson,
 }
 
 /// Wire one `crate::ops::<module>::<Operation>` per line into `table`, each wrapped in
@@ -278,6 +290,7 @@ impl<Eng: Send + Sync + 'static> EmulatedService<Eng> {
         Self {
             entry: crate::ServiceDefinition::new(engine),
             in_modelled_envelope,
+            protocol: wire::NullMessageRestJson::new(),
         }
     }
 }
@@ -630,5 +643,14 @@ impl<Eng: Send + Sync + 'static> Service for EmulatedService<Eng> {
         // consume it on `None`.
         let _ = error;
         None
+    }
+
+    fn override_protocol(&self) -> Option<&dyn smithy_server_runtime::ServerHttpProtocol> {
+        // The model's own restJson1 codec, with the ONE difference the generic renderer
+        // cannot express: a modelled exception's `Message` member is present in the error
+        // document even where that error class states no sentence, as JSON `null` rather
+        // than dropped (see [`wire`]). Borrowed from the field built in `new`, never
+        // constructed per request.
+        Some(&self.protocol)
     }
 }

@@ -2915,7 +2915,6 @@ mod cloudformation_provisions_lambda_event_invoke_configs;
 // `cloudformation_scripted_queue_deploy` are declared ONCE each, in the spans above: a module
 // (`cognito_vended_session_is_bounded_by_its_role_policy`, `cognito_rules_role_mapping` and
 // `iam_secretsmanager_denial_envelope_by_protocol` are declared ONCE each, further up this
-// A suite left at the top level of `tests/` fails the build. Declare each suite exactly
 // Declared HERE for the same reason its sibling above is: the X-Ray GROUP suite is the
 // other half of the same CloudFormation-to-X-Ray provisioning concern.
 #[path = "all/cloudformation_provisions_xray_groups.rs"]
@@ -3470,3 +3469,5 @@ mod chime_deleted_meeting_tagging;
 // (… and for every service crate's `tests/all.rs`: the tail of that same appended note,
 // which has to be an ordinary `//` comment here, since an inner doc comment may only
 // precede the first item of the file.)
+// (An orphaned line of that same appended note; it stands as an ordinary comment for the
+// reason the span above records.) this file and for every service crate's `tests/all.rs`.

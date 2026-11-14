@@ -45,6 +45,8 @@ mod device_discovery_running_phase;
 mod enum_value_set_listing;
 #[path = "all/enum_value_set_rendering.rs"]
 mod enum_value_set_rendering;
+#[path = "all/error_document_message.rs"]
+mod error_document_message;
 #[path = "all/error_message_wording.rs"]
 mod error_message_wording;
 #[path = "all/event_log_configuration_lifecycle.rs"]
@@ -65,6 +67,8 @@ mod managed_thing_read_side_attributes;
 mod minted_identifier_opacity;
 #[path = "all/not_found_messages.rs"]
 mod not_found_messages;
+#[path = "all/notification_configuration_delete.rs"]
+mod notification_configuration_delete;
 #[path = "all/notification_configuration_lifecycle.rs"]
 mod notification_configuration_lifecycle;
 #[path = "all/ota_task_configuration_delete_isolation.rs"]

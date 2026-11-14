@@ -1,15 +1,12 @@
 // SPDX-License-Identifier: CC0-1.0
 
 //! @op DeleteNotificationConfiguration
-//! SCAFFOLDED, NOT IMPLEMENTED: this operation answers HTTP 501 `NotImplemented` and
-//! asserts NOTHING about `DeleteNotificationConfiguration`'s real behaviour. Implement it here — this is
-//! the ONLY file to touch for this operation.
 //!
-//! A 501 from this operation means "nobody has written it yet", never "the emulator is
-//! broken". Replace the `Err(..)` in [`DeleteNotificationConfiguration::handle`] with real behaviour and
-//! delete the SCAFFOLDED marker line above; that line is the machine-readable record of
-//! which operations are still stubs (`grep -rl '^//! SCAFFOLDED, NOT IMPLEMENTED:' */src/ops/`),
-//! so leaving it on an implemented operation under-reports progress.
+//! Removes the notification configuration `crate::state`'s `notification_configurations`
+//! store holds for the region and `EventType` the URI names, so the reads that follow
+//! resolve nothing for that event type. An event type this region holds no configuration
+//! for is the modelled `ResourceNotFoundException`, stated the way every operation of this
+//! surface states it.
 //!
 //! ## Shape of an operation
 //!
@@ -142,6 +139,22 @@ pub struct DeleteNotificationConfiguration<Eng> {
     engine: ::std::sync::Arc<Eng>,
 }
 
+/// Record this state-changing call for attribution: the access key id the caller presented
+/// (a public identifier, never a secret), the region and event type the configuration was
+/// held under, and how the call ended — worded exactly as
+/// `CreateNotificationConfiguration` records its own.
+fn audit(akid: &str, region: &str, event_type: &str, outcome: &str) {
+    ::tracing::info!(
+        target: "emulator::audit",
+        operation = "DeleteNotificationConfiguration",
+        akid = %akid,
+        region = %region,
+        event_type = %event_type,
+        outcome = %outcome,
+        "state-changing operation"
+    );
+}
+
 impl<Eng> DeleteNotificationConfiguration<Eng> {
     /// Construct the operation from the shared engine. INFALLIBLE — the engine is a
     /// construction-time dependency, so engine access is guaranteed by the time any
@@ -168,18 +181,45 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         input: Self::Input,
         ctx: &smithy_server_runtime::OperationContext<'_>,
     ) -> Result<Self::Output, Self::Error> {
-        // The engine is reachable from `&self` (constructor-injected); `ctx` carries
-        // request metadata. Both are bound here so an implementer has them in scope.
-        let _ = (&input, ctx, &self.engine);
-        // Implement `DeleteNotificationConfiguration` here, then delete the SCAFFOLDED marker at the top of
-        // this file. Return modeled failures as
-        // `Err(DeleteNotificationConfigurationErrorModeled::Variant(..).into())` — the `From` impl above lifts it.
-        //
-        // To refuse a bad request this operation models no error for, return
-        // `Err(crate::scaffolded::Scaffolded::validation("..."))` — a 400
-        // `ValidationException`. Do NOT answer 501 for it: 501 means "not written yet",
-        // not "bad request". Modeled constraints are already refused BEFORE this
-        // handler runs, so reaching here means the input satisfies every one of them.
-        Err(crate::scaffolded::Scaffolded::not_implemented("DeleteNotificationConfiguration"))
+        // The credential scope's access key id is read only to ATTRIBUTE the change
+        // ([`audit`]); the region it names is the region this configuration lived in.
+        let akid = ::emulator_server::extract_akid(&ctx.parts().headers);
+        let region = crate::state::request_region(ctx.parts());
+
+        let state = crate::state::service_state(&*self.engine).ok_or_else(|| {
+            audit(&akid, &region, &input.event_type, "unavailable");
+            DeleteNotificationConfigurationErrorModeled::InternalServerException(
+                InternalServerException {
+                    message: Some(
+                        "the notification-configuration store is unavailable".to_string(),
+                    ),
+                },
+            )
+        })?;
+
+        let mut store = state.lock();
+        // A notification configuration is regional, as every resource of this service is:
+        // only the region that created it resolves — and deletes — it.
+        let removed = store
+            .notification_configurations
+            .remove(&crate::state::RegionalName::new(&region, &input.event_type));
+        drop(store);
+
+        if removed.is_none() {
+            audit(&akid, &region, &input.event_type, "not-found");
+            // The notification-configuration surface states an event type it holds nothing
+            // for with the BARE exception, carrying none of the shape's optional members, so
+            // a delete of an event type nothing is configured for reads exactly the way a
+            // read or an update of it does.
+            return Err(
+                DeleteNotificationConfigurationErrorModeled::ResourceNotFoundException(
+                    crate::state::bare_resource_not_found(),
+                )
+                .into(),
+            );
+        }
+
+        audit(&akid, &region, &input.event_type, "deleted");
+        Ok(DeleteNotificationConfigurationOutput)
     }
 }
