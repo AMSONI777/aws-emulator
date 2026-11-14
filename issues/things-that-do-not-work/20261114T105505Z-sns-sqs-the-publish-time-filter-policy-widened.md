@@ -1,0 +1,29 @@
+Issue-Severity: HIGH
+Issue-Corpus: simparity-behavioral-aws-v1
+Issue-Corpus-Kind: behavioral
+Issue-Trace-Ids: sns__sqs.a-message-filtered-out-at-publish-time-is-never-redelivered-when-the-policy-is-relaxed
+Issue-Key: sns__sqs.a-message-filtered-out-at-publish-time-is-never-redelivered-when-the-policy-is-relaxed|_drain#38|Timeout|resp = sqs.receive_message(QueueUrl=url, MaxNumberOfMessages=10, WaitTimeSeconds=5)
+Issue-Commit: 54cc30c6fad79cfe6c1612c15a6c83a97395199b
+
+# sns__sqs: the publish-time filter-policy / widened-FilterPolicy scenario never reaches a verdict — the no-retroactive-delivery check is cut off at its 60s budget
+
+> _Note: this issue was identified against the code base at commit `54cc30c6fad79cfe6c1612c15a6c83a97395199b`. If you are an issue fixer working on this, the code base you are currently working in can have drifted, so you might need to trace the issue back to the current code base._
+
+## Operation
+SetSubscriptionAttributes
+
+## Description
+Cause 1 of 1: an SQS subscription whose FilterPolicy is narrowed, then widened with SetSubscriptionAttributes, never produces the sequence of observable deliveries AWS produces, so the check reaches no verdict at all.
+AWS: SetSubscriptionAttributes is modelled with AttributeName/AttributeValue free-form strings (errors InvalidParameter 400 / NotFound 404 / FilterPolicyLimitExceeded 403), so the semantics here are recorded behavior only. In the recording: (a) a subscription whose FilterPolicy is {"kind":["wanted"]} receives a publish carrying MessageAttributes kind=wanted, while an unfiltered twin subscription on the same topic receives every publish; (b) a publish carrying kind=unwanted reaches the twin and is withheld from the filtered subscription, whose queue also reports zero depth across ApproximateNumberOfMessages/NotVisible/Delayed; (c) after SetSubscriptionAttributes widens the policy to {"kind":["wanted","unwanted"]}, GetSubscriptionAttributes reports the widened FilterPolicy and NEW kind=unwanted publishes begin to be delivered, while the message that was rejected at publish time is never delivered retroactively and the already-delivered message is not delivered a second time.
+Emulator: the check is cut off with "Error: Check timed out after 60.0s" before any of its assertions produce a pass or fail. The assertions that run without waiting (the stored narrow FilterPolicy on the subject subscription, and the twin carrying no FilterPolicy) did not fire, so the stall is in one of the delivery-observation loops: the warm-up poll for the admitted kind=wanted message, the poll for the twin's copy of the withheld message, or the post-widening probe loop that re-publishes a fresh kind=unwanted nonce until the widened policy admits it. Hypothesis: the widened FilterPolicy written by SetSubscriptionAttributes is not applied to subsequent publishes (the probe loop then never converges), or filtered SNS->SQS delivery stalls on this wiring; the replay output records only the budget exhaustion, not which beat blocked.
+Why: a client that relies on filtering at publish time gets no answer either way — it cannot tell that an updated filter policy takes effect for new messages, nor that a filtered-out message stays dropped. If the widened policy is in fact never applied, a customer who relaxes a filter to start receiving a message class silently keeps receiving nothing; if instead a backlog were flushed, messages the customer was told were dropped would be delivered late. Either outcome is a data-plane divergence, and the hang also makes the scenario untestable.
+Fix: the SNS subscription filter-policy evaluation on the publish path and the SetSubscriptionAttributes FilterPolicy state update it reads (and the SNS->SQS delivery worker for the filtered subscription), not the SQS side.
+Traces: check sns__sqs.a-message-filtered-out-at-publish-time-is-never-redelivered-when-the-policy-is-relaxed.
+
+## Evidence
+Check sns__sqs.a-message-filtered-out-at-publish-time-is-never-redelivered-when-the-policy-is-relaxed.
+Expected (AWS, recorded): kind=wanted is delivered to the subscription filtered by {"kind":["wanted"]}; kind=unwanted reaches the unfiltered twin only and the filtered queue stays at depth 0; after SetSubscriptionAttributes widens the policy to {"kind":["wanted","unwanted"]} (and GetSubscriptionAttributes reports it), a freshly published kind=unwanted message IS delivered, while the earlier withheld message and the already-delivered warm-up message are never delivered again; final queue depth 0.
+Actual (emulator): no verdict — "Error: Check timed out after 60.0s". No assertion in the check fired; the run blocked in one of the delivery-observation polls (warm-up admit, twin receipt, or the post-widening probe loop), so none of the deliveries above were observed within the budget.
+
+## Steps to Reproduce
+CreateTopic; create two SQS queues and set each queue's Policy to allow sns.amazonaws.com sqs:SendMessage with Condition ArnEquals aws:SourceArn=<topic>. Subscribe queue A with Attributes {FilterPolicy: {"kind":["wanted"]}, RawMessageDelivery: "false"} and queue B (the twin) with {RawMessageDelivery: "false"} and no FilterPolicy. 1) Publish Message={"nonce":"warm-..."} with MessageAttributes kind=wanted and ReceiveMessage on A — the message must arrive. 2) Publish a second nonce with kind=unwanted — it must arrive on B and never on A, and A's ApproximateNumberOfMessages/NotVisible/Delayed must all be 0. 3) SetSubscriptionAttributes(SubscriptionArn=<A's sub>, AttributeName="FilterPolicy", AttributeValue={"kind":["wanted","unwanted"]}); confirm GetSubscriptionAttributes reports it; then Publish a fresh kind=unwanted nonce — it must be delivered to A, while the nonce from step 2 and the warm-up nonce from step 1 must never appear on A again. Against the emulator the scenario does not complete within 60s.

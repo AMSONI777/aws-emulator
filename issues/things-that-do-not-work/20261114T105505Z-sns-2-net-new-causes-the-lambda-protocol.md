@@ -1,0 +1,46 @@
+Issue-Severity: HIGH
+Issue-Corpus: simparity-behavioral-aws-v1
+Issue-Corpus-Kind: behavioral
+Issue-Trace-Ids: sns.lambda-subscription-invocation-carries-the-sns-records-envelope sns.https-subscription-with-a-zero-retry-delivery-policy-attempts-a-failing-notification-exactly-once
+Issue-Shape-Id: com.amazonaws.sns#AmazonSimpleNotificationService
+Issue-Key: sns.lambda-subscription-invocation-carries-the-sns-records-envelope|run#24|AssertionError|assert msg.get("MessageAttributes") == {
+Issue-Key: sns.https-subscription-with-a-zero-retry-delivery-policy-attempts-a-failing-notification-exactly-once|_captured#5|Timeout|resp = sqs.receive_message(QueueUrl=capture_url, MaxNumberOfMessages=10, WaitTimeSeconds=2)
+Issue-Commit: 54cc30c6fad79cfe6c1612c15a6c83a97395199b
+
+# sns: 2 net-new causes — the lambda-protocol Records envelope types a Number attribute as "Number" instead of "String", and an HTTPS subscription with a numRetries=0 DeliveryPolicy never reaches a delivery/dead-letter outcome
+
+> _Note: this issue was identified against the code base at commit `54cc30c6fad79cfe6c1612c15a6c83a97395199b`. If you are an issue fixer working on this, the code base you are currently working in can have drifted, so you might need to trace the issue back to the current code base._
+
+## Operation
+Publish
+
+## Description
+Two distinct, net-new SNS defects found by this behavioral sweep. Both are about what SNS does AFTER accepting a Publish (the delivery path), not about the Publish API's own response.
+
+Cause 1 of 2: a Number message attribute is typed "Number" in the lambda-protocol Records envelope, where AWS types it "String".
+AWS: Smithy models only the API side (Publish.MessageAttributes -> MessageAttributeMap of MessageAttributeValue{DataType, StringValue, BinaryValue}); the shape of the Lambda invocation payload is not modelled, so this is recorded behavior only. In the recorded behavior, a lambda-protocol subscription is invoked with a single-record {"Records":[{"EventSource":"aws:sns","EventVersion":"1.0","EventSubscriptionArn":<sub>,"Sns":{...}}]} event whose Sns.MessageAttributes is a map of {"Type": <t>, "Value": <v>}; an attribute published with DataType "Number" is reported with Type "String" and its decimal text as Value, an attribute published with DataType "String" is reported Type "String", and a Binary attribute is reported Type "Binary" with its bytes base64-encoded. The whole map, not one entry, is the requirement: for a publish carrying String/Number/Binary attributes the delivered map is {"<string-name>":{"Type":"String","Value":<the published text>}, "<number-name>":{"Type":"String","Value":<the published decimal text>}, "<binary-name>":{"Type":"Binary","Value":<base64 of the published bytes>}}; a publish with no attributes delivers an empty map.
+Emulator: it echoes the API-side DataType verbatim, so the Number entry arrives as {"Type":"Number","Value":"42"}. Replay output for the failing check: AssertionError: MessageAttributes in the Lambda event are {'blob': {'Type': 'Binary', 'Value': 'AAFzaW0ycmVhbP8='}, 'color': {'Type': 'String', 'Value': 'blue'}, 'count': {'Type': 'Number', 'Value': '42'}} — the names/values shown are that run's generated data; the requirement is the per-DataType Type mapping above. Every earlier assertion of the same check now passes (envelope keys, one record per notification, aws:sns/1.0, EventSubscriptionArn, Type/MessageId/TopicArn/Message/Subject, the ...Url key casing, SignatureVersion "1" plus a Signature, and the millisecond Timestamp), so this is narrower than and separate from the open issue 20261107T054154Z-sns-the-lambda-protocol-notification-record-omits-signatureversion.md.
+Why: a function that switches on Sns.MessageAttributes[...]["Type"] — the standard way to branch on an attribute's declared type, and what the AWS-published SNS-to-Lambda record shape documents — takes the wrong branch under the emulator and parses, routes or rejects differently than it does against AWS. The bug is invisible to the SQS/HTTP envelope path, so it only shows up for Lambda subscribers.
+Fix: the lambda-protocol delivery serializer that builds the Records/Sns envelope (the attribute-map projection), not the Publish handler or its validation.
+Traces: check sns.lambda-subscription-invocation-carries-the-sns-records-envelope.
+
+Cause 2 of 2: an HTTPS subscription carrying a healthyRetryPolicy with numRetries=0 never produces an observable attempt-then-dead-letter outcome; the check is cut off at its 60s budget with no assertion ever reached.
+AWS: recorded behavior only (DeliveryPolicy/EffectiveDeliveryPolicy are free-form JSON attribute values in the model — SetSubscriptionAttributes/GetSubscriptionAttributes just carry attributeValue strings). In the recording, a confirmed https subscription whose endpoint answers 500 is POSTed exactly once when its healthyRetryPolicy.numRetries is 0 and then the notification is written to the RedrivePolicy.deadLetterTargetArn queue; a twin subscription on the same endpoint with numRetries=1 is POSTed at least twice. GetSubscriptionAttributes must report an EffectiveDeliveryPolicy whose healthyRetryPolicy.numRetries equals the configured value.
+Emulator: nothing observable happens inside the budget — no POST reaches the endpoint, no dead-letter message appears, and the check reaches no verdict: "Error: Check timed out after 60.0s". This is consistent with the HTTPS delivery path not running at all; the open issue 20261109T163411Z-iam-lambda-sns-sqs-sns-never-delivers-to-an-https-subscription-endpoint.md and 20261027T030148Z-sns-6-net-new-behavioral-root-causes-no.md describe neighbouring HTTPS-delivery symptoms but neither carries this check's replay key, and this check additionally requires the retry BUDGET to be honoured (exactly one attempt at numRetries=0, more than one at numRetries=1) and the dead-letter write to happen. Hypothesis: with no HTTPS delivery attempt, neither the delivery policy nor the redrive policy is ever consulted.
+Why: a client that tunes numRetries/RedrivePolicy to bound how often a failing endpoint is hit, and that drains the DLQ for what was dropped, observes neither behaviour: no retry accounting and no dead-lettered notification. A test suite that asserts on the retry budget hangs instead of failing.
+Fix: the http/https subscription delivery worker — the attempt loop that applies the subscription's effective delivery policy and, on exhaustion, the redrive (dead-letter) write — plus the EffectiveDeliveryPolicy projection in GetSubscriptionAttributes.
+Traces: check sns.https-subscription-with-a-zero-retry-delivery-policy-attempts-a-failing-notification-exactly-once.
+
+## Evidence
+Cause 1 — check sns.lambda-subscription-invocation-carries-the-sns-records-envelope.
+Expected (AWS, recorded): Sns.MessageAttributes == {"color": {"Type": "String", "Value": "<published string>"}, "count": {"Type": "String", "Value": "<published decimal text>"}, "blob": {"Type": "Binary", "Value": "<base64 of published bytes>"}} — a Number DataType is projected to Type "String".
+Actual (emulator): {'blob': {'Type': 'Binary', 'Value': 'AAFzaW0ycmVhbP8='}, 'color': {'Type': 'String', 'Value': 'blue'}, 'count': {'Type': 'Number', 'Value': '42'}} — i.e. Type "Number" for the Number attribute. Raised at check_sns_lambda_subscription_invocation_carries_the_sns_records_envelope.py line 79 (AssertionError). All preceding envelope assertions passed.
+
+Cause 2 — check sns.https-subscription-with-a-zero-retry-delivery-policy-attempts-a-failing-notification-exactly-once.
+Expected (AWS, recorded): with healthyRetryPolicy.numRetries=0, the always-500 HTTPS endpoint receives exactly 1 POST per notification (stable across two trials) and the notification lands in the subscription's deadLetterTargetArn queue; the twin subscription with numRetries=1 receives >= 2 POSTs.
+Actual (emulator): no attempt and no dead-letter observable; the check never reaches any of those assertions and is cut off — "Error: Check timed out after 60.0s".
+
+## Steps to Reproduce
+Cause 1: CreateTopic; create a Lambda function and Subscribe it with Protocol="lambda", Endpoint=<function ARN>, ReturnSubscriptionArn=true; Publish with MessageAttributes {"color":{DataType:"String",StringValue:"blue"},"count":{DataType:"Number",StringValue:"42"},"blob":{DataType:"Binary",BinaryValue:<bytes>}}; capture the event the function is invoked with and read Records[0].Sns.MessageAttributes. The Number entry must carry Type "String"; the emulator carries Type "Number". Also Publish with no attributes and confirm the map is {}.
+
+Cause 2: CreateTopic; Subscribe an https endpoint that always answers 500 and confirm it with ConfirmSubscription; SetSubscriptionAttributes DeliveryPolicy={"healthyRetryPolicy":{"numRetries":0,"minDelayTarget":1,"maxDelayTarget":1,"numNoDelayRetries":0,"numMinDelayRetries":0,"numMaxDelayRetries":0,"backoffFunction":"linear"}} and RedrivePolicy={"deadLetterTargetArn":<SQS ARN whose policy allows sns.amazonaws.com SendMessage>}; verify GetSubscriptionAttributes.EffectiveDeliveryPolicy.healthyRetryPolicy.numRetries == 0; Publish once and count POSTs at the endpoint and messages in the DLQ. Repeat with a twin subscription at numRetries=1 and confirm it is attempted at least twice.
