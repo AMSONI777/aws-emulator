@@ -1517,6 +1517,15 @@ pub const TRANSIT_GATEWAY_METERING_POLICY_STATE_PENDING: &str = "pending";
 /// clock owes a freshly created policy.
 pub const TRANSIT_GATEWAY_METERING_POLICY_STATE_AVAILABLE: &str = "available";
 
+/// A metering policy whose deletion has been asked for and has not settled yet: that enum's
+/// `deleting` member, which is what `DeleteTransitGatewayMeteringPolicy` answers with.
+pub const TRANSIT_GATEWAY_METERING_POLICY_STATE_DELETING: &str = "deleting";
+
+/// The state that enum reaches once the deletion has settled: `deleted`, which the clock owes
+/// a [`TRANSIT_GATEWAY_METERING_POLICY_STATE_DELETING`] policy one [`TRANSITION_DELAY`] after
+/// the call that deleted it.
+pub const TRANSIT_GATEWAY_METERING_POLICY_STATE_DELETED: &str = "deleted";
+
 /// The `ResourceType` a `CreateTransitGatewayMeteringPolicy` tag specification may name: the
 /// metering policy it creates ("The tags to assign to the metering policy",
 /// `CreateTransitGatewayMeteringPolicyRequest$TagSpecifications`), which is the `ResourceType`
@@ -1542,7 +1551,10 @@ pub const INVALID_TRANSIT_GATEWAY_METERING_POLICY_ID_MALFORMED: &str =
 
 /// Refuse a request that named a transit gateway metering policy id no policy of the account
 /// has: HTTP 400 `InvalidTransitGatewayMeteringPolicyId.NotFound`, worded the way
-/// [`invalid_transit_gateway_id_not_found`] words the transit gateway's own.
+/// [`invalid_transit_gateway_id_not_found`] words the transit gateway's own — with the
+/// resource named as AWS names it for THIS kind, which spells out the ID the request sent
+/// (`Transit Gateway Metering Policy Id <id> was deleted or does not exist.`): the fixed text
+/// is this sentence and the only variable part is the id the REQUEST carried.
 pub fn invalid_transit_gateway_metering_policy_id_not_found<E>(
     transit_gateway_metering_policy_id: &str,
 ) -> Scaffolded<E> {
@@ -1550,8 +1562,8 @@ pub fn invalid_transit_gateway_metering_policy_id_not_found<E>(
         INVALID_TRANSIT_GATEWAY_METERING_POLICY_ID_NOT_FOUND,
         400,
         format!(
-            "Transit Gateway Metering Policy {transit_gateway_metering_policy_id} was deleted or \
-             does not exist."
+            "Transit Gateway Metering Policy Id {transit_gateway_metering_policy_id} was deleted \
+             or does not exist."
         ),
     )
 }
@@ -1690,6 +1702,64 @@ impl ComAmazonawsEc2Amazonec2State {
             .get(&metering_policy_id)
             .cloned()
     }
+
+    /// Start deleting the transit gateway metering policy `transit_gateway_metering_policy_id`
+    /// names, and answer it as the store then holds it — `None` when the account holds no such
+    /// policy.
+    ///
+    /// "Deletes a transit gateway metering policy" is work AWS reports as under way: the
+    /// `TransitGatewayMeteringPolicyState` catalog carries both
+    /// [`TRANSIT_GATEWAY_METERING_POLICY_STATE_DELETING`] and
+    /// [`TRANSIT_GATEWAY_METERING_POLICY_STATE_DELETED`], so the policy is left in the
+    /// TRANSIENT one with the clock owing it the terminal one ([`PendingStateMove`], applied by
+    /// [`Self::materialize_due_transitions`]) — the same arrangement, on the same clock, as the
+    /// `pending` a create leaves it in ([`Self::insert_pending_transit_gateway_metering_policy`])
+    /// and the one [`Self::begin_ipam_prefix_list_resolver_deletion`] gives a deleted resolver.
+    /// The span is never zero and nothing is slept for, so a caller reading straight back still
+    /// sees the deletion under way.
+    ///
+    /// "The date and time when the metering policy update becomes effective"
+    /// (`TransitGatewayMeteringPolicy$UpdateEffectiveAt`) is that same instant, read off the
+    /// wall clock exactly as the create reads it, so the member and the owed move cannot
+    /// disagree about when this change takes effect. Any move the clock still owed the policy is
+    /// superseded: one on its way out is not going to land in the state its creation was moving
+    /// it to.
+    ///
+    /// The record STAYS in the store, because a policy in either delete state still has a state
+    /// to report — so its caller-chosen bytes stay charged to the store's budget, which still
+    /// holds them, exactly as [`Self::begin_ipam_policy_deletion`] keeps a deleted policy's.
+    pub fn begin_transit_gateway_metering_policy_deletion(
+        &mut self,
+        transit_gateway_metering_policy_id: &str,
+    ) -> Option<TransitGatewayMeteringPolicy> {
+        let policy = self
+            .transit_gateway_metering_policies
+            .get_mut(transit_gateway_metering_policy_id)?;
+        policy.state = Some(TRANSIT_GATEWAY_METERING_POLICY_STATE_DELETING.to_string());
+        policy.update_effective_at = Some(system_time_to_date_time(
+            SystemTime::now() + TRANSITION_DELAY,
+        ));
+        let view = policy.clone();
+        self.transit_gateway_metering_policy_moves.insert(
+            transit_gateway_metering_policy_id.to_string(),
+            PendingStateMove::starting_now(TRANSIT_GATEWAY_METERING_POLICY_STATE_DELETED),
+        );
+        Some(view)
+    }
+}
+
+/// Whether `policy` has had its deletion asked for already — either delete state counts, so no
+/// path restarts the clock on a policy that is on its way out or already gone.
+///
+/// The one definition of "this metering policy is being deleted", read by the delete that
+/// refuses a second one, the way
+/// [`ipam_prefix_list_resolver_is_deleting`] is that resource's.
+pub fn transit_gateway_metering_policy_is_deleting(policy: &TransitGatewayMeteringPolicy) -> bool {
+    matches!(
+        policy.state.as_deref(),
+        Some(TRANSIT_GATEWAY_METERING_POLICY_STATE_DELETING)
+            | Some(TRANSIT_GATEWAY_METERING_POLICY_STATE_DELETED)
+    )
 }
 
 // =============================================================================

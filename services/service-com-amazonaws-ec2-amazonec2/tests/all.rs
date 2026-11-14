@@ -2221,6 +2221,12 @@ mod retired_bundle_api_actions;
 // error class, with only the parts AWS interpolates. Declared at the tail of this file, which
 #[path = "all/aws_worded_refusal_sentences.rs"]
 mod aws_worded_refusal_sentences;
+// What `DeleteTransitGatewayMeteringPolicy` records: the transit gateway metering policy the
+// request names left in the transient delete state its own catalog carries, reported with every
+// other member the store holds for it, with the clock owing it the terminal one — and the ids, the
+// dry run and the second delete it refuses without recording anything. Declared at the tail of
+#[path = "all/delete_transit_gateway_metering_policy.rs"]
+mod delete_transit_gateway_metering_policy;
 // WHICH sentence a value that is no local-gateway-route-table id is refused with: the request
 // boundary's `The local-gateway-route-table ID '<id>' is malformed` for a value that is no
 // identifier at all, and the owning service's `Invalid LocalGateway Route Table id <id>` where
