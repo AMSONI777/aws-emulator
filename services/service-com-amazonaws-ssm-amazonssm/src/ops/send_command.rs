@@ -324,6 +324,17 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         // catalogue carries resolves without any create.
         let region = crate::state::request_region(ctx.parts());
         let now = ::std::time::SystemTime::now();
+        // The registration an instance of this Region had already made by now was owed at
+        // the same instant whether or not anybody called, and a send resolves its nodes
+        // against the inventory, so it is materialised before anything here resolves one
+        // (`crate::state::node_registration::settle_registrations`).
+        crate::state::node_registration::settle_registrations(&*self.engine, &region);
+        // Everything this store decides, decided with its guard held and HANDED BACK: the
+        // invocations the send creates, the script each node's agent is to run, and the
+        // command as it will be recorded. The guard ends with this block, so the deliveries
+        // below — which reach the store that owns the guests, and yield between nodes — hold
+        // no guard of this service's own.
+        let (mut invocations, scripts, record) = {
         let mut store = state.lock();
         let Some(document) = store.resolve_document_for_request(&input.document_name, &region, now)
         else {
@@ -483,7 +494,10 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
                 resolved.push(id);
             }
         }
-        let invocations = resolved
+        let invocations: ::std::collections::BTreeMap<
+            String,
+            crate::state::commands::CommandInvocationRecord,
+        > = resolved
             .iter()
             .map(|id| {
                 let instance_name = store.managed_node(&region, id).and_then(|node| {
@@ -502,6 +516,25 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
             })
             .collect();
 
+        // The script each node's agent runs, and the platform it runs it on: the step of
+        // THIS document that the node's platform runs, with the document's parameters
+        // resolved. Read while the node inventory is to hand, performed below with no guard
+        // of this store held.
+        let scripts: Vec<(String, crate::state::guest_execution::ShellStep)> = resolved
+            .iter()
+            .filter_map(|id| {
+                let node = store.managed_node(&region, id)?;
+                let platform = node.properties.platform_type.as_deref()?;
+                let step = crate::state::guest_execution::shell_step(
+                    &version.content,
+                    platform,
+                    &supplied,
+                    &version.parsed.parameters,
+                )?;
+                Some((id.clone(), step))
+            })
+            .collect();
+
         let command_id = store.mint_command_id();
         let record = crate::state::commands::CommandRecord {
             command_id,
@@ -512,7 +545,7 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
             document_version,
             step_names: version.parsed.step_names.clone(),
             comment: input.comment.clone(),
-            parameters: supplied,
+            parameters: supplied.clone(),
             instance_ids: named,
             targets,
             output_s3_bucket_name: input.output_s3_bucket_name.clone(),
@@ -535,7 +568,72 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
             requested_at: now,
             status: crate::state::commands::COMMAND_STATUS_PENDING.to_string(),
             status_details: crate::state::commands::COMMAND_STATUS_PENDING.to_string(),
+            invocations: ::std::collections::BTreeMap::new(),
+        };
+        (invocations, scripts, record)
+        };
+        // The agent in each node's guest RUNS the script: performed with this store's guard
+        // released, since the run reaches the store that owns the guest. What it answered is
+        // recorded on the invocation, whose move off `Pending` the clock then owes
+        // (`commands::INVOCATION_COMPLETES_AFTER`) — so the send itself still answers
+        // `Pending`, the status Run Command answers a send with.
+        //
+        // A node nothing could deliver to — one this emulator holds no running, booted guest
+        // for, one the document declares no step its platform runs, and one past the guests
+        // a single send performs a script in
+        // (`commands::MAX_GUEST_DELIVERIES_PER_SEND`, the guard on what one request can make
+        // this process do) — is NOT left `Pending` for ever: "`ExpiresAfter` is calculated
+        // based on the total timeout for the overall command" (`Command$ExpiresAfter`), so
+        // its invocation is owed the delivery timeout the send ran with, after which it
+        // reports that the command was never delivered.
+        let due_at = now + crate::state::commands::INVOCATION_COMPLETES_AFTER;
+        let undelivered_at = record.expires_after();
+        let mut ran_on: Vec<String> = Vec::new();
+        for (id, step) in scripts
+            .into_iter()
+            .take(crate::state::commands::MAX_GUEST_DELIVERIES_PER_SEND)
+        {
+            // One delivery per node, each performing a bounded run: the yield between them
+            // is what keeps this handler's task cancellable and the runtime responsive while
+            // a send to many nodes is being delivered.
+            ::tokio::task::yield_now().await;
+            let Some(run) = crate::state::guest_execution::perform_in_guest(
+                &*self.engine,
+                &id,
+                &step.commands,
+                now,
+            ) else {
+                continue;
+            };
+            if let Some(invocation) = invocations.get_mut(&id) {
+                invocation.delivered(crate::state::commands::InvocationOutcome {
+                    plugin_name: step.name,
+                    output: run.output,
+                    response_code: run.status,
+                    due_at,
+                    delivered: true,
+                });
+                ran_on.push(id);
+            }
+        }
+        for (id, invocation) in invocations.iter_mut() {
+            if ran_on.contains(id) {
+                continue;
+            }
+            invocation.delivered(crate::state::commands::InvocationOutcome {
+                // No step ran, so there is no step to name and no exit code to report.
+                plugin_name: String::new(),
+                output: Vec::new(),
+                response_code: crate::state::commands::NO_RESPONSE_CODE,
+                due_at: undelivered_at,
+                delivered: false,
+            });
+        }
+
+        let mut store = state.lock();
+        let record = crate::state::commands::CommandRecord {
             invocations,
+            ..record
         };
         let command = record.to_command();
         store.insert_command(record);

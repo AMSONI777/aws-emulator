@@ -3772,3 +3772,18 @@ mod cloudformation_provisions_redshift_snapshot_copy_grants;
 // build, and each suite is declared exactly ONCE, since this is one crate root and a
 // second `mod` for the same name is `E0428` — stands in the module doc at the HEAD of this
 // file, and `all/all_rs_declares_each_suite_once.rs` and
+// (`apigateway_sns_service_integration` is declared ONCE, in the span above: two branches
+// landing in the same window declared it here as well.)
+// (`sdb_legacy_query_api_on_the_assembled_router` is declared ONCE, in the sorted head
+// region above: two branches landing in the same window declared it here as well.)
+// (`apigateway_cognito_authorizer_app_client_audience` is declared ONCE, in that same head
+// region: likewise.)
+// (`lambda_sqs_event_source_visibility_hold` and `codebuild_s3_build_output` are each
+// declared ONCE above too: likewise.)
+// (`cloudformation_scripted_queue_deploy` is declared ONCE, in the span above: two branches
+// (`cloudfront_edge_4xx_share_decides_the_alarm` is declared ONCE, further up this file:
+// two branches landing in the same window declared it here as well.)
+// this tail: two branches landing in the same window declared it here as well.)
+// this file: two branches landing in the same window declared it here as well.)
+// (`cloudformation_provisions_cloudfront_resources` is declared ONCE, above: two branches
+// (`cloudformation_kms_encrypted_sns_sqs_pipeline` is declared ONCE, further up this file:

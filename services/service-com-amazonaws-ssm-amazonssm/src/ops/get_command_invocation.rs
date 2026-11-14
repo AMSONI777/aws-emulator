@@ -301,30 +301,66 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
             }
         }
 
+        // What the agent in the node's guest ran and answered, once the clock has made the
+        // invocation's move off `Pending` due: before that there is no finished run to
+        // report, and "if the command hasn't finished running, then this string is empty"
+        // (`StandardOutputContent`) with "-1 … the command hasn't started running on the
+        // managed node" for the response code (`ResponseCode`).
+        let finished = crate::state::commands::TERMINAL_INVOCATION_STATUSES
+            .contains(&invocation.status.as_str());
+        // An invocation no guest took reports no output and no exit code: nothing ran, so
+        // there is nothing a plugin wrote or exited with to report.
+        let ran = invocation
+            .outcome
+            .as_ref()
+            .filter(|outcome| finished && outcome.delivered);
+
         Ok(GetCommandInvocationOutput {
             command_id: Some(command.command_id.clone()),
             instance_id: Some(invocation.instance_id.clone()),
             comment: command.comment.clone(),
             document_name: Some(command.document_name.clone()),
             document_version: Some(command.document_version.clone()),
-            plugin_name: input.plugin_name.clone(),
-            // "If the response code is -1, then the command hasn't started running on the
-            // managed node, or it wasn't received by the node"
-            // (`GetCommandInvocationResult$ResponseCode`) — which is this invocation.
-            response_code: crate::state::commands::NO_RESPONSE_CODE,
+            // "The name of the plugin, or step name, for which details are reported": the
+            // step the request asked about, and otherwise the step the node's agent ran.
+            plugin_name: input
+                .plugin_name
+                .clone()
+                .or_else(|| ran.map(|ran| ran.plugin_name.clone())),
+            response_code: ran.map_or(
+                crate::state::commands::NO_RESPONSE_CODE,
+                |ran| ran.response_code,
+            ),
             // "If the plugin hasn't started to run, the string is empty"
-            // (`ExecutionStartDateTime`, `ExecutionEndDateTime`), and the elapsed time is
-            // measured since a start there has not been.
-            execution_start_date_time: Some(String::new()),
-            execution_elapsed_time: Some(String::new()),
-            execution_end_date_time: Some(String::new()),
+            // (`ExecutionStartDateTime`, `ExecutionEndDateTime`): an invocation whose run
+            // has finished reports when the agent took it, when the run was owed to have
+            // finished, and the span between the two.
+            execution_start_date_time: Some(
+                ran.map(|_| crate::state::commands::iso8601(command.requested_at))
+                    .unwrap_or_default(),
+            ),
+            execution_elapsed_time: Some(
+                ran.map(|ran| {
+                    crate::state::commands::iso8601_elapsed(command.requested_at, ran.due_at)
+                })
+                .unwrap_or_default(),
+            ),
+            execution_end_date_time: Some(
+                ran.map(|ran| crate::state::commands::iso8601(ran.due_at))
+                    .unwrap_or_default(),
+            ),
             status: Some(invocation.status.clone()),
             status_details: Some(invocation.status_details.clone()),
             // "If the command hasn't finished running, then this string is empty"
-            // (`StandardOutputContent`, `StandardErrorContent`); the URLs name the files
-            // a plugin wrote to Amazon S3, of which there are none.
-            standard_output_content: Some(String::new()),
+            // (`StandardOutputContent`): a finished invocation reports what the guest wrote.
+            standard_output_content: Some(
+                ran.map(|ran| ran.standard_output()).unwrap_or_default(),
+            ),
             standard_output_url: Some(String::new()),
+            // The guest's session reports ONE stream — what the program wrote to its
+            // standard output — so there is no second stream to report here, and a
+            // diagnostic invented for a command that failed would be text nothing wrote.
+            // The URLs name the files a plugin wrote to Amazon S3, of which there are none.
             standard_error_content: Some(String::new()),
             standard_error_url: Some(String::new()),
             cloud_watch_output_config: command.cloud_watch_output_config.clone(),

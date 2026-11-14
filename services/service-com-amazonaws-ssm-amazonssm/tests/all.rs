@@ -49,6 +49,8 @@ mod command_history;
 mod default_patch_baselines;
 #[path = "all/documents.rs"]
 mod documents;
+#[path = "all/ec2_instance_managed_nodes.rs"]
+mod ec2_instance_managed_nodes;
 #[path = "all/ec2_managed_node_registration.rs"]
 mod ec2_managed_node_registration;
 #[path = "all/ecs_optimized_image_manifests.rs"]
@@ -139,6 +141,8 @@ mod resource_tags;
 mod restricted_parameter_hierarchy;
 #[path = "all/run_command.rs"]
 mod run_command;
+#[path = "all/run_command_in_the_guest.rs"]
+mod run_command_in_the_guest;
 #[path = "all/secretsmanager_reference.rs"]
 mod secretsmanager_reference;
 #[path = "all/secure_string_decryption.rs"]

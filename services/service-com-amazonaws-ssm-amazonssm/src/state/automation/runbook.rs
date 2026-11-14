@@ -285,14 +285,10 @@ fn text_of(declaration: &Map<String, Value>, member: &str) -> Option<String> {
 }
 
 /// The reference form a runbook's inputs carry a variable in: `{{ Name }}`, with any
-/// amount of space inside the braces.
-///
-/// One regular expression, compiled once for the process: the references are read out of
-/// caller-supplied content, so the scan is the `regex` crate's rather than a hand-rolled
-/// one, and it cannot nest (a reference holds no brace).
-static REFERENCE: ::std::sync::LazyLock<::regex::Regex> = ::std::sync::LazyLock::new(|| {
-    ::regex::Regex::new(r"\{\{\s*([^{}]+?)\s*\}\}").expect("the reference form is a valid regex")
-});
+/// amount of space inside the braces — the one scan every document of this service reads
+/// its references through ([`crate::state::document_references`]), so a runbook's step
+/// inputs and a command document's script cannot disagree about what a reference is.
+use crate::state::document_references::{resolved_from_map, ReferenceProblem};
 
 /// How many bytes of RESOLVED step inputs one execution may produce.
 ///
@@ -352,50 +348,21 @@ fn resolve_within(
 /// `text` with every reference in it resolved, or the FIRST name `variables` holds no
 /// value for — or the budget it would have run over.
 ///
-/// The expansion is MEASURED before it is built: a reference is some seven bytes of
-/// content and the value it resolves to may be thousands, so the length the substitution
-/// would produce is accumulated reference by reference and checked against what is left of
-/// the budget FIRST. Nothing larger than the budget is ever allocated, and an execution
-/// that runs over it spends the budget, so a later step of the same execution cannot
-/// attempt its own full-size expansion.
+/// The scan, the measurement and the substitution are the shared ones
+/// ([`crate::state::document_references::resolved_text`]); what belongs to an Automation
+/// execution is the WORDING of the two failures, which is what this adds.
 fn resolve_text(
     text: &str,
     variables: &BTreeMap<String, String>,
     budget: &mut usize,
 ) -> Result<String, String> {
-    let over_budget = || {
-        format!(
+    resolved_from_map(text, variables, budget).map_err(|problem| match problem {
+        ReferenceProblem::Unresolved(name) => format!("Failed to resolve input parameter {name}"),
+        ReferenceProblem::OverBudget => format!(
             "Resolving the inputs of this automation's steps produced more than \
              {MAX_RESOLVED_INPUT_BYTES} bytes"
-        )
-    };
-    let mut projected = text.len();
-    if projected > *budget {
-        *budget = 0;
-        return Err(over_budget());
-    }
-    for captured in REFERENCE.captures_iter(text) {
-        let reference = captured.get(0).map_or(0, |reference| reference.len());
-        let name = captured.get(1).map_or("", |name| name.as_str());
-        let Some(held) = variables.get(name) else {
-            return Err(format!("Failed to resolve input parameter {name}"));
-        };
-        projected = projected
-            .saturating_sub(reference)
-            .saturating_add(held.len());
-        if projected > *budget {
-            *budget = 0;
-            return Err(over_budget());
-        }
-    }
-    // Every reference resolves and the whole substitution fits in what is left of the
-    // budget, which is what this builds.
-    let resolved = REFERENCE.replace_all(text, |captured: &::regex::Captures<'_>| {
-        let name = captured.get(1).map_or("", |name| name.as_str());
-        variables.get(name).cloned().unwrap_or_default()
-    });
-    *budget = budget.saturating_sub(resolved.len());
-    Ok(resolved.into_owned())
+        ),
+    })
 }
 
 /// A step's whole `inputs` mapping with every reference in it resolved ([`resolve`]), or

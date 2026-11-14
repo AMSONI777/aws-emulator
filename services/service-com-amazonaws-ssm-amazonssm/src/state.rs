@@ -269,6 +269,19 @@ pub mod service_settings;
 /// addresses it.
 pub mod tagging;
 
+/// The `{{ Name }}` references an SSM document's content carries, and resolving them
+/// against the values a call supplied — the one scan and the one substitution every
+/// document of this service reads its parameters through.
+pub mod document_references;
+
+/// Running a command document's own script in the GUEST of the node a command was sent to,
+/// which is what an invocation's output and exit code come from.
+pub mod guest_execution;
+
+/// Where this service's EC2-facing work lives: the registration half and the delivery half,
+/// and why they are separate.
+pub mod ec2_managed_nodes;
+
 use service_settings::ServiceSettingRecord;
 
 use crate::ops::types::{
@@ -3587,6 +3600,13 @@ impl ComAmazonawsSsmAmazonssmState {
         // at `now`, whether or not anybody called.
         self.commands
             .retain(|_, command| now < command.retained_until());
+        // And the invocations whose run had finished by `now` carry the status the plugin's
+        // exit code gives them, with the command's own status read off them
+        // (`commands::CommandRecord::materialize_due`): owed at that instant whether or not
+        // anybody called.
+        for command in self.commands.values_mut() {
+            command.materialize_due(now);
+        }
         // An automation execution's pickup and every step of its walk that `now` allows
         // were owed whether or not anybody called (`automation`).
         self.advance_automations(now);

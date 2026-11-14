@@ -355,6 +355,99 @@ async fn a_rule_the_group_already_holds_is_refused_naming_that_rule() {
     }
 }
 
+/// A rule's DESCRIPTION is not part of what makes it that rule, so re-authorizing a rule the
+/// group already holds with a different description is the same duplicate refusal, naming the
+/// rule by its members — and the group still holds exactly the rule it had, with the
+/// description it was created with.
+///
+/// "If the security group rule has a description, you do not need to specify the description
+/// to revoke the rule" (`RevokeSecurityGroupIngress`): a rule is its protocol, its port range
+/// and its source, which is why the description cannot make a second rule out of one.
+#[tokio::test]
+async fn re_authorizing_with_only_the_description_changed_is_still_the_duplicate_refusal() {
+    let (router, _engine) = emulator();
+
+    // (case, the direction, the rule, the member its description arrives on, the sentence)
+    let rows: Vec<(&str, &str, Rule, &str, String)> = vec![
+        (
+            "a TCP port from an IPv4 range, inbound",
+            INGRESS,
+            Rule::new("tcp", Some((22, 22)), Peer::Ipv4("172.31.0.0/16".to_string())),
+            "IpRanges.1.Description",
+            "peer: 172.31.0.0/16, TCP, from port: 22, to port: 22, ALLOW".to_string(),
+        ),
+        (
+            "a UDP port range from an IPv4 range, inbound",
+            INGRESS,
+            Rule::new("udp", Some((500, 510)), Peer::Ipv4("198.51.100.0/24".to_string())),
+            "IpRanges.1.Description",
+            "peer: 198.51.100.0/24, UDP, from port: 500, to port: 510, ALLOW".to_string(),
+        ),
+        (
+            "a TCP port from an IPv6 range, outbound",
+            EGRESS,
+            Rule::new(
+                "tcp",
+                Some((443, 443)),
+                Peer::Ipv6("2001:db8:2::/48".to_string()),
+            ),
+            "Ipv6Ranges.1.Description",
+            "peer: 2001:db8:2::/48, TCP, from port: 443, to port: 443, ALLOW".to_string(),
+        ),
+    ];
+
+    for (index, (case, action, rule, description_member, descriptor)) in rows.iter().enumerate() {
+        let group_id = create_group(case, &router, &format!("described-{index}")).await;
+        let described = |description: &str| {
+            let mut params = request_params(&group_id, std::slice::from_ref(rule));
+            params.push(param(
+                &format!("IpPermissions.1.{description_member}"),
+                description,
+            ));
+            params
+        };
+
+        let first = ok(case, &router, action, &described("as first authorized")).await;
+        assert_eq!(
+            element(&first, "return").as_deref(),
+            Some("true"),
+            "case {case:?}: expected <return>true</return> from {action}, got {first}"
+        );
+        let stored = stored_rule_ids(case, &router, &group_id).await;
+
+        // The same rule again, described differently: the rule is the one that already
+        // exists, so the refusal is about the rule rather than about the description.
+        let (status, body) = call(&router, action, &described("a different description")).await;
+        assert_duplicate(case, status, &body, descriptor);
+        for rule_id in &stored {
+            assert!(
+                !body.contains(rule_id.as_str()),
+                "case {case:?}: expected no rule id in the refusal, got {rule_id:?} in {body}"
+            );
+        }
+        let after = stored_rule_ids(case, &router, &group_id).await;
+        assert_eq!(
+            after, stored,
+            "case {case:?}: expected the refusal to change nothing, got {after:?} where the \
+             group held {stored:?}"
+        );
+        let held = ok(
+            case,
+            &router,
+            "DescribeSecurityGroupRules",
+            &[
+                param("Filter.1.Name", "group-id"),
+                param("Filter.1.Value.1", &group_id),
+            ],
+        )
+        .await;
+        assert!(
+            held.contains("as first authorized"),
+            "case {case:?}: the rule keeps the description it was created with, got {held}"
+        );
+    }
+}
+
 /// One row of the same-request table: the rules ONE call describes, and the rule the refusal
 /// must name.
 #[derive(Debug, Clone)]

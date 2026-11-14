@@ -350,6 +350,21 @@ pub const AWS_MANAGED_POLICIES: &[AwsManagedPolicy] = &[
         is_attachable: true,
         document: r#"{"Version":"2012-10-17","Statement":[{"Effect":"Allow","Action":["sqs:*"],"Resource":"*"}]}"#,
     },
+    // The policy AWS documents for the instance profile of a node that is to be managed
+    // by Systems Manager ("Configure instance permissions required for Systems Manager",
+    // Systems Manager User Guide): its grants are what let the SSM Agent on an instance
+    // register the node and keep reporting it, which is why an instance carrying it
+    // becomes a managed node and one that does not never registers.
+    AwsManagedPolicy {
+        path: "/",
+        policy_name: "AmazonSSMManagedInstanceCore",
+        policy_id: "ANPAWT3JQZMKV5PNHLRBD",
+        default_version_id: "v1",
+        published: "2017-08-14T19:32:43Z",
+        revised: "2017-08-14T19:32:43Z",
+        is_attachable: true,
+        document: r#"{"Version":"2012-10-17","Statement":[{"Effect":"Allow","Action":["ssm:DescribeAssociation","ssm:GetDeployablePatchSnapshotForInstance","ssm:GetDocument","ssm:DescribeDocument","ssm:GetManifest","ssm:ListAssociations","ssm:ListInstanceAssociations","ssm:PutInventory","ssm:PutComplianceItems","ssm:PutConfigurePackageResult","ssm:UpdateAssociationStatus","ssm:UpdateInstanceAssociationStatus","ssm:UpdateInstanceInformation"],"Resource":"*"},{"Effect":"Allow","Action":["ssmmessages:CreateControlChannel","ssmmessages:CreateDataChannel","ssmmessages:OpenControlChannel","ssmmessages:OpenDataChannel"],"Resource":"*"},{"Effect":"Allow","Action":["ec2messages:AcknowledgeMessage","ec2messages:DeleteMessage","ec2messages:FailMessage","ec2messages:GetEndpoint","ec2messages:GetMessages","ec2messages:SendReply"],"Resource":"*"}]}"#,
+    },
     // Recommended by the EKS add-on catalog for the
     // `amazon-cloudwatch-observability` add-on's `cloudwatch-agent` service account.
     AwsManagedPolicy {

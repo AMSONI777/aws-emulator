@@ -140,7 +140,130 @@ pub struct CommandInvocationRecord {
     pub status: String,
     /// The detailed status, in the spelling `CommandInvocation$StatusDetails` documents.
     pub status_details: String,
+    /// What the node's agent ran and what it answered, for an invocation something has
+    /// been delivered to; `None` for one that reached no guest to run in.
+    pub outcome: Option<InvocationOutcome>,
 }
+
+/// What the agent on one node ran for one invocation, and what the guest answered.
+///
+/// A delivery is PERFORMED when the command is sent — the agent is in the guest and the
+/// guest is this emulator's own ([`super::guest_execution`]) — and the invocation's move off
+/// `Pending` is what the clock then owes: [`InvocationOutcome::due_at`] is when the run has
+/// finished as far as a caller reading it is concerned, so a client that reads straight
+/// after the send still sees `Pending`, the status Run Command answers a send with.
+#[derive(Debug, Clone)]
+pub struct InvocationOutcome {
+    /// The step of the document whose plugin ran — what `GetCommandInvocation`'s
+    /// `PluginName` names ([`CommandRecord::step_names`] holds every step the document
+    /// declared).
+    pub plugin_name: String,
+    /// The lines the guest wrote to its standard output, in the order it wrote them.
+    pub output: Vec<String>,
+    /// "The exit code of the plugin script" (`GetCommandInvocationResult$ResponseCode`):
+    /// the status the guest's own shell answered with.
+    pub response_code: i32,
+    /// When the invocation's move off `Pending` falls due.
+    pub due_at: SystemTime,
+    /// Whether a guest took the command at all. `false` for a node nothing could deliver
+    /// to — one whose instance this emulator holds no running, booted guest for — whose
+    /// invocation times out at the send's own delivery timeout instead of reporting an exit
+    /// code no plugin produced.
+    pub delivered: bool,
+}
+
+impl InvocationOutcome {
+    /// The `CommandInvocationStatus` this outcome leaves the invocation in: "Success: The
+    /// command … was received by the SSM Agent and … returned an exit code of zero",
+    /// against "Failed: The command … was not successful on the managed node. For a plugin,
+    /// this indicates that the result code was not zero" (`CommandInvocation$StatusDetails`)
+    /// — and "Delivery Timed Out: The command wasn't delivered to the managed node before
+    /// the delivery timeout expired" for one no guest took.
+    pub fn status(&self) -> &'static str {
+        if !self.delivered {
+            INVOCATION_STATUS_TIMED_OUT
+        } else if self.response_code == 0 {
+            INVOCATION_STATUS_SUCCESS
+        } else {
+            INVOCATION_STATUS_FAILED
+        }
+    }
+
+    /// The detailed status, in the spelling `CommandInvocation$StatusDetails` documents.
+    pub fn status_details(&self) -> &'static str {
+        if self.delivered {
+            self.status()
+        } else {
+            DELIVERY_TIMED_OUT_STATUS_DETAILS
+        }
+    }
+
+    /// The whole of what the guest wrote, as `StandardOutputContent` carries it: the lines
+    /// in order, each ended by a newline the way a terminal writes them.
+    pub fn standard_output(&self) -> String {
+        self.output
+            .iter()
+            .map(|line| format!("{line}\n"))
+            .collect()
+    }
+}
+
+/// `at` as the ISO-8601 instant a command invocation's execution times are written in:
+/// "date and time are written in ISO-8601 format"
+/// (`GetCommandInvocationResult$ExecutionStartDateTime`), rendered by the one timestamp
+/// writer this tree formats a modelled instant with.
+pub fn iso8601(at: SystemTime) -> String {
+    ::aws_smithy_types::DateTime::from(at)
+        .fmt(::aws_smithy_types::date_time::Format::DateTime)
+        .unwrap_or_default()
+}
+
+/// How long the invocation took, as an ISO-8601 duration: the span between the instant the
+/// agent took the command and the instant its run was owed to have finished
+/// (`GetCommandInvocationResult$ExecutionElapsedTime`).
+pub fn iso8601_elapsed(from: SystemTime, to: SystemTime) -> String {
+    let seconds = to
+        .duration_since(from)
+        .unwrap_or_default()
+        .as_secs();
+    format!("PT{seconds}S")
+}
+
+/// The `CommandInvocationStatus` of an invocation whose plugin exited zero (from the
+/// modelled enum, `crate::ops::types::COMMAND_INVOCATION_STATUS_VALUES`).
+pub const INVOCATION_STATUS_SUCCESS: &str = "Success";
+
+/// The `CommandInvocationStatus` of one whose plugin did not (same enum).
+pub const INVOCATION_STATUS_FAILED: &str = "Failed";
+
+/// The `CommandInvocationStatus` of one the command never reached (same enum), whose
+/// detailed status is [`DELIVERY_TIMED_OUT_STATUS_DETAILS`].
+pub const INVOCATION_STATUS_TIMED_OUT: &str = "TimedOut";
+
+/// The `CommandStatus` of a command whose invocations have not all finished: "InProgress:
+/// The command has been sent to at least one managed node but hasn't reached a final state
+/// on all managed nodes" (`Command$StatusDetails`).
+pub const COMMAND_STATUS_IN_PROGRESS: &str = "InProgress";
+
+/// How long after a send the invocation it created has finished running.
+///
+/// CHOSEN: the span this emulator gives a transition the clock owes. The span is never
+/// zero, so a caller reading an invocation straight after `SendCommand` sees the `Pending`
+/// the send itself reported, and a client polling for a terminal status converges well
+/// inside any budget.
+pub const INVOCATION_COMPLETES_AFTER: Duration = Duration::from_secs(3);
+
+/// How many guests ONE send performs its document's script in.
+///
+/// The emulator's own guard, NOT an AWS quota: a send selects its nodes by criteria the
+/// caller writes (`Key=InstanceIds,Values=*` selects every node of the Region), and each
+/// delivery performs a caller-supplied script in a guest — so the work ONE request can make
+/// this process do is the PRODUCT of the nodes it selects and the bound on one run
+/// (`ComAmazonawsEc2Amazonec2State::run_in_instance_guest`). This caps the first factor,
+/// which is what keeps that product small enough to be beside the point on a developer's
+/// machine. A node past it is reported as one the command was not delivered to, the same
+/// way a node with no guest to run in is, rather than as one whose script ran.
+pub const MAX_GUEST_DELIVERIES_PER_SEND: usize = 64;
 
 impl CommandInvocationRecord {
     /// The invocation a send creates for `node`: nothing has been delivered to the node
@@ -151,7 +274,24 @@ impl CommandInvocationRecord {
             instance_name,
             status: COMMAND_STATUS_PENDING.to_string(),
             status_details: COMMAND_STATUS_PENDING.to_string(),
+            outcome: None,
         }
+    }
+
+    /// Record what the agent ran for this invocation, with its move off `Pending` owed at
+    /// `due_at`.
+    pub fn delivered(&mut self, outcome: InvocationOutcome) {
+        self.outcome = Some(outcome);
+    }
+
+    /// Materialise the move the clock owes this invocation at `now`: an invocation whose
+    /// run had finished by then carries the status the plugin's exit code gives it.
+    pub fn materialize_due(&mut self, now: SystemTime) {
+        let Some(outcome) = self.outcome.as_ref().filter(|held| now >= held.due_at) else {
+            return;
+        };
+        self.status = outcome.status().to_string();
+        self.status_details = outcome.status_details().to_string();
     }
 }
 
@@ -258,6 +398,52 @@ impl CommandRecord {
     /// created none for that node.
     pub fn invocation(&self, instance_id: &str) -> Option<&CommandInvocationRecord> {
         self.invocations.get(instance_id)
+    }
+
+    /// Materialise the moves the clock owes this command at `now`: every invocation whose
+    /// run had finished by then, and the command's own status, which is what its
+    /// invocations have reached.
+    ///
+    /// "Pending: The command hasn't been sent to any managed nodes"; "InProgress: The
+    /// command has been sent to at least one managed node but hasn't reached a final state
+    /// on all managed nodes"; "Success: The command successfully ran on all invocations";
+    /// "Failed: The value of MaxErrors or more command invocations shows a status of Failed"
+    /// (`Command$StatusDetails`) — so a command is read off its invocations rather than
+    /// recorded a second time.
+    pub fn materialize_due(&mut self, now: SystemTime) {
+        for invocation in self.invocations.values_mut() {
+            invocation.materialize_due(now);
+        }
+        // Only a command something DELIVERED is read off its invocations: a record whose
+        // invocations nothing has run carries the status whatever wrote it recorded, and
+        // this is not the place to overwrite it.
+        if !self
+            .invocations
+            .values()
+            .any(|invocation| {
+                invocation
+                    .outcome
+                    .as_ref()
+                    .is_some_and(|outcome| outcome.delivered)
+            })
+        {
+            return;
+        }
+        let terminal = self.completed_count();
+        let failed = self.error_count();
+        let status = if terminal < self.target_count() {
+            if terminal == 0 {
+                COMMAND_STATUS_PENDING
+            } else {
+                COMMAND_STATUS_IN_PROGRESS
+            }
+        } else if failed > 0 {
+            INVOCATION_STATUS_FAILED
+        } else {
+            INVOCATION_STATUS_SUCCESS
+        };
+        self.status = status.to_string();
+        self.status_details = status.to_string();
     }
 
     /// Whether a `Status` filter value selects this command.

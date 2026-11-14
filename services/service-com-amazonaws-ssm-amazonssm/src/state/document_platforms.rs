@@ -79,6 +79,25 @@ pub fn declared_platform_types(map: &::yaml_rust2::yaml::Hash) -> Vec<String> {
         .collect()
 }
 
+/// Whether the step `step` declares runs on a node of `platform_type`: its ACTION has to
+/// run there and its `platformType` precondition, where it carries one, has to name it.
+///
+/// The same two restrictions [`declared_platform_types`] reads a document's compatibility
+/// from, asked of ONE step and ONE platform — which is the question a delivery to a node
+/// asks ("which step of this document does this node's agent run?"), so the two cannot
+/// disagree about where a step runs.
+pub fn step_runs_on(step: &::yaml_rust2::yaml::Hash, platform_type: &str) -> bool {
+    let action = mapping_get(step, "action")
+        .and_then(scalar_string)
+        .unwrap_or_default();
+    let by_action = plugin_platform_types(&action).unwrap_or(DOCUMENT_PLATFORM_TYPES);
+    if !by_action.contains(&platform_type) {
+        return false;
+    }
+    let precondition = precondition_platform_types(step);
+    precondition.is_empty() || precondition.iter().any(|named| named == platform_type)
+}
+
 /// One entry per step `content` declares, as `(the plugin it runs, the platforms its
 /// `platformType` precondition names)`.
 ///

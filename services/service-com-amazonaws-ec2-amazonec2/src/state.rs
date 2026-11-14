@@ -2515,6 +2515,12 @@ pub use instance_status_checks::*;
 pub mod guest_console;
 pub use guest_console::*;
 
+/// Running a program in the GUEST of one running instance, for an agent that is already in
+/// it — the seam Systems Manager's Run Command delivers a document's commands through. A
+/// SUBMODULE for the same reason [`image_usage_reports`] is one.
+pub mod guest_commands;
+pub use guest_commands::*;
+
 /// Which capacity resources each of Capacity Manager's metrics measures, and the DIMENSION
 /// VALUES each of those resources carries — the one reading every operation that answers
 /// along Capacity Manager's dimensions shares, so the report of the available dimensions and

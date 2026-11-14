@@ -552,45 +552,9 @@ fn run_guest_program(
     program: &GuestProgram,
     files: &BTreeMap<String, String>,
 ) -> (Vec<GuestOutput>, BTreeMap<String, String>) {
-    let mut volume = ShellVolume::new(VolumeLimits {
-        files: MAX_GUEST_FILES,
-        bytes: MAX_GUEST_FILE_BYTES,
-        device_lines: MAX_BOOT_CONSOLE_LINES,
-        device_line_bytes: MAX_BOOT_CONSOLE_LINE_BYTES,
-        ..VolumeLimits::default()
-    });
-    for directory in GUEST_DIRECTORIES {
-        volume.make_directories(directory);
-    }
-    for (path, contents) in files {
-        volume.put_file(path, contents);
-    }
-    // What the kernel and the init system publish to this guest: readable by its program,
-    // never writable by it.
-    volume.seal_file(GUEST_BOOT_ID_PATH, &format!("{boot_id}\n"));
-    volume.seal_file(GUEST_MACHINE_ID_PATH, &format!("{}\n", guest_machine_id(machine)));
-    volume.seal_file(GUEST_HOSTNAME_PATH, &format!("{}\n", machine.private_dns_name));
-    volume.seal_file(GUEST_CMDLINE_PATH, &format!("{}\n", guest_command_line(machine)));
-    volume.seal_file(GUEST_INSTANCE_ID_PATH, &format!("{}\n", machine.instance_id));
-    volume.add_keeping_device(GUEST_CONSOLE_DEVICE);
-    volume.add_discarding_device(GUEST_NULL_DEVICE);
-
-    let environment = BTreeMap::from([
-        (
-            "PATH".to_string(),
-            "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin".to_string(),
-        ),
-        ("HOME".to_string(), "/root".to_string()),
-        ("USER".to_string(), "root".to_string()),
-        ("SHELL".to_string(), "/bin/sh".to_string()),
-        ("HOSTNAME".to_string(), machine.private_dns_name.clone()),
-        (
-            "CLOUD_INIT_BOOT".to_string(),
-            number.to_string(),
-        ),
-    ]);
+    let volume = guest_volume(machine, boot_id, files);
     let mut session = ShellSession::in_volume(
-        environment,
+        guest_environment(machine, number),
         SessionConfig {
             bounds: Bounds {
                 // The bound on the work one boot costs the store's guard; every other bound
@@ -628,6 +592,60 @@ fn run_guest_program(
         .map(|(path, contents)| (path.to_string(), contents.to_string()))
         .collect();
     (written, files)
+}
+
+/// The TREE a program of this machine's guest runs in: exactly this machine's storage, the
+/// values the kernel publishes to its guest and its two devices.
+///
+/// The ONE construction of that tree, so every program a guest runs — the boot's own
+/// user-data program and a command something later sends it — reads the same machine, with
+/// the same paths sealed and the same bounds, rather than two readings of one guest.
+pub(super) fn guest_volume(
+    machine: &GuestMachine,
+    boot_id: &str,
+    files: &BTreeMap<String, String>,
+) -> ShellVolume {
+    let mut volume = ShellVolume::new(VolumeLimits {
+        files: MAX_GUEST_FILES,
+        bytes: MAX_GUEST_FILE_BYTES,
+        device_lines: MAX_BOOT_CONSOLE_LINES,
+        device_line_bytes: MAX_BOOT_CONSOLE_LINE_BYTES,
+        ..VolumeLimits::default()
+    });
+    for directory in GUEST_DIRECTORIES {
+        volume.make_directories(directory);
+    }
+    for (path, contents) in files {
+        volume.put_file(path, contents);
+    }
+    // What the kernel and the init system publish to this guest: readable by its program,
+    // never writable by it.
+    volume.seal_file(GUEST_BOOT_ID_PATH, &format!("{boot_id}\n"));
+    volume.seal_file(GUEST_MACHINE_ID_PATH, &format!("{}\n", guest_machine_id(machine)));
+    volume.seal_file(GUEST_HOSTNAME_PATH, &format!("{}\n", machine.private_dns_name));
+    volume.seal_file(GUEST_CMDLINE_PATH, &format!("{}\n", guest_command_line(machine)));
+    volume.seal_file(GUEST_INSTANCE_ID_PATH, &format!("{}\n", machine.instance_id));
+    volume.add_keeping_device(GUEST_CONSOLE_DEVICE);
+    volume.add_discarding_device(GUEST_NULL_DEVICE);
+    volume
+}
+
+/// The environment a program of this machine's guest is given, as the init system gives one:
+/// the search path, the user it runs as and the host name the guest answers to.
+///
+/// The ONE reading of it, for the same reason [`guest_volume`] is.
+pub(super) fn guest_environment(machine: &GuestMachine, boot: u32) -> BTreeMap<String, String> {
+    BTreeMap::from([
+        (
+            "PATH".to_string(),
+            "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin".to_string(),
+        ),
+        ("HOME".to_string(), "/root".to_string()),
+        ("USER".to_string(), "root".to_string()),
+        ("SHELL".to_string(), "/bin/sh".to_string()),
+        ("HOSTNAME".to_string(), machine.private_dns_name.clone()),
+        ("CLOUD_INIT_BOOT".to_string(), boot.to_string()),
+    ])
 }
 
 #[cfg(test)]
