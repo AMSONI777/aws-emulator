@@ -23,6 +23,8 @@ mod date_time_wire_form;
 mod document_content;
 #[path = "all/inline_agent_invocations.rs"]
 mod inline_agent_invocations;
+#[path = "all/inline_agent_return_control.rs"]
+mod inline_agent_return_control;
 #[path = "all/invocations.rs"]
 mod invocations;
 #[path = "all/knowledge_base_retrieval.rs"]

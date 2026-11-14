@@ -4,8 +4,8 @@
 //!
 //! `POST /agents/{sessionId} -> 200`. Serves one invocation of an agent the REQUEST
 //! composes — "Invokes an inline Amazon Bedrock agent using the configurations you provide
-//! with the request" — as a `vnd.amazon.eventstream` body: the `chunk` event the modelled
-//! `InlineAgentResponseStream` declares for the agent's answer.
+//! with the request" — as a `vnd.amazon.eventstream` body: the `chunk`, `returnControl` and
+//! `trace` events the modelled `InlineAgentResponseStream` declares.
 //!
 //! ## What is real here
 //!
@@ -26,16 +26,36 @@
 //! * the CONVERSATION is this plane's own store: the caller's own `sessionId` opens one,
 //!   reusing it continues the same conversation, `endSession` ends it, and one idle past its
 //!   `idleSessionTTLInSeconds` is released — which is why the answer can report which turn
-//!   of which conversation was served.
+//!   of which conversation was served;
+//! * RETURNING CONTROL is this operation's own half of a contract that needs no model: an
+//!   action group whose `actionGroupExecutor` is `customControl: RETURN_CONTROL` is carried
+//!   out by the CALLER — "to return the action group invocation results directly in the
+//!   `InvokeInlineAgent` response, specify `RETURN_CONTROL`" — so the turn hands the
+//!   functions that action group declares back as the modelled `returnControl` event, the
+//!   LAST member of the turn, under an `invocationId` this plane issues and remembers on the
+//!   conversation. The caller then returns the results under that id in
+//!   `inlineSessionState.returnControlInvocationResults`, which re-enter the next turn's
+//!   orchestration prompt; an `invocationId` no response of this conversation issued is the
+//!   modelled `ValidationException` (400), and a result list outside the modelled 1..5 is
+//!   refused by the model's own bound. That bound's refusal names the member and states the
+//!   requirement and quotes no value, because the constraint envelope that words it
+//!   (`aws_smithy_schema_server::constraints`, vendored and read-only) renders no value for
+//!   a COLLECTION — this service's wording for every such member, pinned across its
+//!   operations by `tests/all/collection_length_refusals.rs` — while AWS additionally quotes
+//!   the submitted list. That difference is the envelope's for every service in this
+//!   workspace, not one operation's to special-case.
 //!
 //! NO LANGUAGE MODEL RUNS IN THIS EMULATOR, and nothing here pretends otherwise. The
 //! `chunk` events carry the notice the Bedrock Runtime plane of this same emulator answers
 //! every inference surface with, extended with the facts of the invocation that was really
 //! served (`crate::state::inline_agent::completion_notice`): the model the agent was
-//! composed against, the turn and conversation, and the capabilities the request configured
-//! that went unused. The caller's own `inputText` is never handed back as if an agent had
-//! replied to it, and a chunk carries no `attribution`: no knowledge base was queried, so
-//! there is no source to cite.
+//! composed against, the turn and conversation, the capabilities the request configured
+//! that went unused, and the results that re-entered the turn. The caller's own `inputText`
+//! is never handed back as if an agent had replied to it, a chunk carries no `attribution`
+//! (no knowledge base was queried, so there is no source to cite), and no parameter VALUE is
+//! invented for a function handed back: a value is what a model elicits from the
+//! conversation, so the `returnControl` event carries the parameter NAMES and TYPES the
+//! request declared and nothing more.
 //!
 //! ## What it refuses rather than answers
 //!
@@ -43,24 +63,28 @@
 //! because a plausible-looking success is worse than an error: `guardrailConfiguration` and
 //! `streamingConfigurations.applyGuardrailInterval` (no guardrail policy is evaluated, so
 //! neither an intervention nor its absence can be reported), `promptOverrideConfiguration`
-//! and `promptCreationConfigurations` (both change a prompt nothing reads),
-//! `inlineSessionState` (its attributes replace those placeholders and its
-//! `returnControlInvocationResults` answer an invocation this service returned control for
-//! nowhere), `collaborators` / `collaboratorConfigurations` / a non-`DISABLED`
-//! `agentCollaboration` (no collaboration is orchestrated) and `customOrchestration` /
+//! and `promptCreationConfigurations` (both change a prompt nothing reads), the four
+//! `inlineSessionState` members that ask for work nothing here performs (its
+//! `sessionAttributes` and `promptSessionAttributes` replace those placeholders, its `files`
+//! are read by a code interpreter nothing runs and its `conversationHistory` replaces the
+//! conversation this plane records itself — each refused by name, because every member of
+//! that shape is declared and so the handler sees which one the request carried),
+//! `collaborators` / `collaboratorConfigurations` / a non-`DISABLED` `agentCollaboration`
+//! (no collaboration is orchestrated) and `customOrchestration` /
 //! `orchestrationType: CUSTOM_ORCHESTRATION` (a custom orchestration runs a function this
 //! emulator invokes nothing of).
 //!
-//! `actionGroups` and `knowledgeBases` are SERVED: each configures a capability the agent
-//! uses only once its model elicits an action or a query, and AWS answers such a request
-//! with a plain `chunk` whenever none is elicited — so the configuration does not change
-//! what this invocation can answer, and the notice states how many of each were configured
-//! and that none was used. `enableTrace` is served for the opposite reason: it adds a
-//! report ALONGSIDE the answer rather than changing it, so the request is answered and the
-//! notice states that the trace carries no step, because a trace reports the orchestration
-//! steps a model took and no model took any — a `trace` event is never invented for steps
-//! nothing performed. `bedrockModelConfigurations` names a latency profile, which does not
-//! change what an answer says, and `streamingConfigurations.streamFinalResponse` is
+//! `actionGroups` and `knowledgeBases` are SERVED: a knowledge base is queried only once a
+//! model elicits a query, so the notice states how many of each were configured, while an
+//! action group executed by the CALLER is served by returning control for it, as above. An
+//! action group's `apiSchema` stays unread: it names its operations inside an OpenAPI
+//! document nothing here parses, so no operation of one can be elicited. `enableTrace` adds
+//! a report ALONGSIDE the answer: the turn then carries the modelled `trace` events for the
+//! orchestration step it really performed — the prompt it assembled
+//! (`orchestrationTrace.modelInvocationInput`) and the action-group invocation it returned
+//! control for (`orchestrationTrace.invocationInput`) — and no step a model would have
+//! taken past them is invented. `bedrockModelConfigurations` names a latency profile, which
+//! does not change what an answer says, and `streamingConfigurations.streamFinalResponse` is
 //! honoured as the FRAMING it is: the same notice delivered in several `chunk` events
 //! instead of one.
 //!
@@ -171,6 +195,12 @@ fn quota(message: String) -> InvokeInlineAgentError {
 /// (`smithy_query(query="shape",shape="InlineAgentResponseStream")`).
 const CHUNK_EVENT: &str = "chunk";
 
+/// The member of that same stream an invocation handed back to the caller travels under.
+const RETURN_CONTROL_EVENT: &str = "returnControl";
+
+/// The member of that same stream one part of the orchestration trace travels under.
+const TRACE_EVENT: &str = "trace";
+
 /// The operation name, which names the IAM action this call is authorized against
 /// (`bedrock:InvokeInlineAgent`). Declared here because this operation has no generated
 /// `impl Operation` to carry a `NAME`.
@@ -247,34 +277,32 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> InvokeInlineAgent
         unservable_leg(input)?;
 
         let served = self.record_turn(input, &model_id)?;
-        let notice = inline::completion_notice(&served);
-        // `streamFinalResponse` is about FRAMING: with it the one answer is delivered in
-        // several chunks, whose concatenation is the same text a single chunk carries.
-        let parts = if streams_final_response(input) {
-            inline::streamed_chunks(&notice)
-        } else {
-            vec![notice]
-        };
         let mut frames = Vec::new();
-        for part in parts {
-            let frame = frame_event(
-                protocol,
-                CHUNK_EVENT,
-                false,
-                &InlineAgentPayloadPart {
-                    bytes: Some(part.into_bytes()),
-                    // No knowledge base was queried on this path, so there is no retrieved
-                    // source for the chunk to be attributed to.
-                    attribution: None,
-                },
-                &InlineAgentPayloadPart::SCHEMA,
-            )
-            .map_err(|error| {
-                internal(format!(
-                    "the {CHUNK_EVENT} event could not be framed: {error}"
-                ))
-            })?;
-            frames.extend_from_slice(&frame);
+        // A trace reports ALONGSIDE the answer, so it comes first: what the turn was
+        // assembled from, and the invocation it is about to hand back.
+        if served.trace_requested {
+            frames.extend_from_slice(&trace_frames(protocol, &served)?);
+        }
+        match served.returned_control.as_deref() {
+            // The agent is WAITING on the caller: the invocation it handed back is the last
+            // member of the turn, and there is no answer to deliver beside it.
+            Some(invocation_id) => {
+                frames.extend_from_slice(&return_control_frame(protocol, &served, invocation_id)?);
+            }
+            None => {
+                let notice = inline::completion_notice(&served);
+                // `streamFinalResponse` is about FRAMING: with it the one answer is
+                // delivered in several chunks, whose concatenation is the same text a single
+                // chunk carries.
+                let parts = if streams_final_response(input) {
+                    inline::streamed_chunks(&notice)
+                } else {
+                    vec![notice]
+                };
+                for part in parts {
+                    frames.extend_from_slice(&chunk_frame(protocol, part)?);
+                }
+            }
         }
 
         event_stream_response(
@@ -309,6 +337,11 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> InvokeInlineAgent
         let mut guard = store.lock();
         inline::expire_idle_conversations(&mut guard.inline_agent_sessions, at);
         let sessions = &mut guard.inline_agent_sessions;
+        // The CALLER's half of the return-control contract, decided before anything is
+        // written: results are taken only under an `invocationId` this conversation really
+        // returned control under, so a request naming one no response of it issued records
+        // no turn.
+        let returned = returned_invocation(input, sessions.get(&input.session_id))?;
         // A request whose id this store holds none of OPENS a conversation, so what is
         // bounded there is the store; a request that continues one is bounded by the turns
         // that conversation already holds.
@@ -362,6 +395,19 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> InvokeInlineAgent
             at,
         });
         let turn = session.turns.len();
+        // The actions the caller itself carries out, and whether this turn hands them back:
+        // a turn that already carries the results of an earlier invocation answers with
+        // them instead of handing control back again.
+        let offered = inline::offered_functions(input.action_groups.as_deref().unwrap_or_default());
+        let returned_control = if returned.is_none() && !offered.is_empty() {
+            let invocation_id = crate::state::new_uuid();
+            // Remembered on the conversation, which is what lets a later turn of it return
+            // the results of this invocation.
+            session.issue_invocation(invocation_id.clone());
+            Some(invocation_id)
+        } else {
+            None
+        };
         let session_ended = input.end_session == Some(true);
         if session_ended {
             // Ending the session releases the conversation, so a later request under the
@@ -377,8 +423,222 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> InvokeInlineAgent
             knowledge_bases: input.knowledge_bases.as_ref().map_or(0, Vec::len),
             session_ended,
             trace_requested: input.enable_trace == Some(true),
+            instruction: input.instruction.clone(),
+            input_text: input.input_text.clone(),
+            at,
+            offered,
+            returned_control,
+            returned,
         })
     }
+}
+
+/// The results the request returns for an invocation of this conversation, read once the
+/// store is held so the id can be checked against the conversation that issued it.
+///
+/// THE RULE is the model's own, stated on the member: `inlineSessionState.invocationId`
+/// "must match the `invocationId` returned in the `InvokeInlineAgent` response for the
+/// action whose results are provided in the `returnControlInvocationResults` field"
+/// (`smithy_query(query="shape",shape="InlineSessionState")`), so results carrying an id no
+/// response of this conversation issued — or no id at all — are the modelled
+/// `ValidationException` (400). The list's own 1..5 bound is the model's and is checked at
+/// the boundary, before this runs.
+///
+/// An `invocationId` that matches but answers nothing leaves the turn an ordinary one:
+/// there is no result to re-enter its prompt. So does a session state that carries neither
+/// of the two — it answers no invocation and names none, so the turn is served from the
+/// request's own `inputText`.
+fn returned_invocation(
+    input: &InvokeInlineAgentInput,
+    session: Option<&inline::InlineAgentSession>,
+) -> Result<Option<inline::ReturnedInvocation>, InvokeInlineAgentError> {
+    let Some(state) = input.inline_session_state.as_ref() else {
+        return Ok(None);
+    };
+    let results = state
+        .return_control_invocation_results
+        .as_deref()
+        .unwrap_or_default();
+    let Some(invocation_id) = state.invocation_id.as_deref() else {
+        // A session state that answers NOTHING names no invocation, and needs none: it is
+        // the request's own inputText that the turn is served from.
+        if results.is_empty() {
+            return Ok(None);
+        }
+        return Err(validation(inline::unissued_invocation_message(None)));
+    };
+    if !session.is_some_and(|session| session.has_issued(invocation_id)) {
+        return Err(validation(inline::unissued_invocation_message(Some(
+            invocation_id,
+        ))));
+    }
+    if results.is_empty() {
+        return Ok(None);
+    }
+    Ok(Some(inline::ReturnedInvocation {
+        invocation_id: invocation_id.to_string(),
+        results: inline::returned_results(results),
+    }))
+}
+
+/// One `chunk` event carrying `part` of the answer.
+fn chunk_frame(
+    protocol: &dyn ServerHttpProtocol,
+    part: String,
+) -> Result<Vec<u8>, InvokeInlineAgentError> {
+    frame_event(
+        protocol,
+        CHUNK_EVENT,
+        false,
+        &InlineAgentPayloadPart {
+            bytes: Some(part.into_bytes()),
+            // No knowledge base was queried on this path, so there is no retrieved source
+            // for the chunk to be attributed to.
+            attribution: None,
+        },
+        &InlineAgentPayloadPart::SCHEMA,
+    )
+    .map_err(|error| {
+        internal(format!(
+            "the {CHUNK_EVENT} event could not be framed: {error}"
+        ))
+    })
+}
+
+/// The `returnControl` event the turn hands the caller: the id the results come back under,
+/// and one `functionInvocationInput` per function the agent handed back.
+///
+/// Each input is the DECLARATION the request carried — the action group that declared the
+/// function, the function, and the names and types of its parameters. No parameter value is
+/// filled in: a value is what a model elicits from the conversation, and none runs here.
+fn return_control_frame(
+    protocol: &dyn ServerHttpProtocol,
+    served: &inline::ServedInvocation,
+    invocation_id: &str,
+) -> Result<Vec<u8>, InvokeInlineAgentError> {
+    let invocation_inputs = served
+        .offered
+        .iter()
+        .map(|function| {
+            InvocationInputMember::functionInvocationInput(FunctionInvocationInput {
+                action_group: function.action_group.clone(),
+                function: Some(function.function.clone()),
+                parameters: Some(
+                    function
+                        .parameters
+                        .iter()
+                        .map(|parameter| FunctionParameter {
+                            name: Some(parameter.name.clone()),
+                            r#type: Some(parameter.parameter_type.clone()),
+                            value: None,
+                        })
+                        .collect(),
+                ),
+                ..FunctionInvocationInput::default()
+            })
+        })
+        .collect();
+    frame_event(
+        protocol,
+        RETURN_CONTROL_EVENT,
+        false,
+        &InlineAgentReturnControlPayload {
+            invocation_inputs: Some(invocation_inputs),
+            invocation_id: Some(invocation_id.to_string()),
+        },
+        &InlineAgentReturnControlPayload::SCHEMA,
+    )
+    .map_err(|error| {
+        internal(format!(
+            "the {RETURN_CONTROL_EVENT} event could not be framed: {error}"
+        ))
+    })
+}
+
+/// The `trace` events of the turn: the orchestration step it really performed.
+///
+/// The first reports the PROMPT the turn was assembled from
+/// (`orchestrationTrace.modelInvocationInput`), which is what lets a caller see its own
+/// returned result re-enter the next turn; one more reports each action-group invocation the
+/// turn returned control for (`orchestrationTrace.invocationInput`, `executionType`
+/// `RETURN_CONTROL`). No step past them is invented: what would follow is a model's output,
+/// and no model runs here.
+fn trace_frames(
+    protocol: &dyn ServerHttpProtocol,
+    served: &inline::ServedInvocation,
+) -> Result<Vec<u8>, InvokeInlineAgentError> {
+    let mut step = 1;
+    let mut frames = trace_frame(
+        protocol,
+        served,
+        OrchestrationTrace::modelInvocationInput(ModelInvocationInput {
+            trace_id: Some(inline::trace_id(served.turn, step)),
+            text: Some(inline::orchestration_prompt(served)),
+            r#type: Some(inline::ORCHESTRATION_PROMPT_TYPE.to_string()),
+            prompt_creation_mode: Some(inline::DEFAULT_PROMPT_CREATION_MODE.to_string()),
+            foundation_model: Some(served.model_id.clone()),
+            ..ModelInvocationInput::default()
+        }),
+    )?;
+    if let Some(invocation_id) = served.returned_control.as_deref() {
+        for function in &served.offered {
+            step += 1;
+            let invocation = ActionGroupInvocationInput {
+                action_group_name: Some(function.action_group.clone()),
+                function: Some(function.function.clone()),
+                parameters: Some(
+                    function
+                        .parameters
+                        .iter()
+                        .map(|parameter| Parameter {
+                            name: Some(parameter.name.clone()),
+                            r#type: Some(parameter.parameter_type.clone()),
+                            value: None,
+                        })
+                        .collect(),
+                ),
+                execution_type: Some(inline::RETURN_CONTROL.to_string()),
+                invocation_id: Some(invocation_id.to_string()),
+                ..ActionGroupInvocationInput::default()
+            };
+            frames.extend_from_slice(&trace_frame(
+                protocol,
+                served,
+                OrchestrationTrace::invocationInput(InvocationInput {
+                    trace_id: Some(inline::trace_id(served.turn, step)),
+                    invocation_type: Some(inline::ACTION_GROUP_INVOCATION_TYPE.to_string()),
+                    action_group_invocation_input: Some(invocation),
+                    ..InvocationInput::default()
+                }),
+            )?);
+        }
+    }
+    Ok(frames)
+}
+
+/// One `trace` event carrying `trace` as the orchestration part of the turn it was performed
+/// in.
+fn trace_frame(
+    protocol: &dyn ServerHttpProtocol,
+    served: &inline::ServedInvocation,
+    trace: OrchestrationTrace,
+) -> Result<Vec<u8>, InvokeInlineAgentError> {
+    frame_event(
+        protocol,
+        TRACE_EVENT,
+        false,
+        &InlineAgentTracePart {
+            session_id: Some(served.session_id.clone()),
+            trace: Some(Trace::orchestrationTrace(trace)),
+            event_time: Some(served.at),
+        },
+        &InlineAgentTracePart::SCHEMA,
+    )
+    .map_err(|error| {
+        internal(format!(
+            "the {TRACE_EVENT} event could not be framed: {error}"
+        ))
+    })
 }
 
 /// Whether the request asked for the final response to be STREAMED, which is the one thing
@@ -390,6 +650,42 @@ fn streams_final_response(input: &InvokeInlineAgentInput) -> bool {
         .streaming_configurations
         .as_ref()
         .is_some_and(|streaming| streaming.stream_final_response)
+}
+
+/// The first member of an `inlineSessionState` this service cannot compute, as the sentence
+/// the modelled `ValidationException` states.
+///
+/// `invocationId` and `returnControlInvocationResults` are the served pair: they answer an
+/// action-group invocation this service returned control for. Each of the other four asks
+/// for work nothing here performs, so it is REFUSED rather than dropped — the handler sees
+/// every member of the shape, which is why it can refuse the one the request carried instead
+/// of the whole member.
+fn unservable_session_state_member(state: &InlineSessionState) -> Option<&'static str> {
+    if state.session_attributes.is_some() || state.prompt_session_attributes.is_some() {
+        return Some(
+            "inlineSessionState.sessionAttributes and \
+             inlineSessionState.promptSessionAttributes: each carries attributes that \
+             persist across the session, which an action group's function reads and which \
+             replace the placeholders of a prompt nothing reads here, so neither can change \
+             what this invocation answers; omit both",
+        );
+    }
+    if state.files.is_some() {
+        return Some(
+            "inlineSessionState.files: they are the source files a code interpreter reads, \
+             and this emulator runs no code interpreter, so nothing would read them; omit \
+             files",
+        );
+    }
+    if state.conversation_history.is_some() {
+        return Some(
+            "inlineSessionState.conversationHistory: its messages replace the conversation \
+             this service records from the turns it really served, so a supplied history \
+             cannot change what this invocation answers; reuse the same sessionId to \
+             continue a conversation, and omit conversationHistory",
+        );
+    }
+    None
 }
 
 /// The first leg of the request this service cannot compute, as the sentence the modelled
@@ -429,15 +725,10 @@ fn unservable_leg(input: &InvokeInlineAgentInput) -> Result<(), InvokeInlineAgen
              selection cannot change what this invocation answers; omit it",
         ));
     }
-    if input.inline_session_state.is_some() {
-        return Err(validation(
-            "inlineSessionState: its attributes replace the placeholders of a prompt nothing \
-             reads here, its returnControlInvocationResults answer an action-group \
-             invocation whose invocationId must match one an earlier InvokeInlineAgent \
-             response returned and this service returns control for no action, and its files \
-             are read by a code interpreter nothing runs; omit inlineSessionState to invoke \
-             the inline agent with the request's own inputText",
-        ));
+    if let Some(state) = input.inline_session_state.as_ref() {
+        if let Some(refusal) = unservable_session_state_member(state) {
+            return Err(validation(refusal));
+        }
     }
     if input.collaborators.is_some() || input.collaborator_configurations.is_some() {
         return Err(validation(

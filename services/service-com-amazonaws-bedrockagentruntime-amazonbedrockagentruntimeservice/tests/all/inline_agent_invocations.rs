@@ -44,12 +44,12 @@ use serde_json::{json, Value};
 
 use service_com_amazonaws_bedrockagentruntime_amazonbedrockagentruntimeservice::state::inline_agent;
 
-use crate::agent_and_flow_invocations::{decode_frames, frame_names, EVENT_STREAM};
+use crate::agent_and_flow_invocations::{decode_frames, frame_names, Frame, EVENT_STREAM};
 use crate::agent_memory::{allow, deny, Emulator, ACCOUNT_KEY, REGION};
 
 /// An `instruction` long enough for the modelled `@length(min: 40)`, so a row is never
 /// refused for the instruction when it is about something else.
-const INSTRUCTION: &str =
+pub(crate) const INSTRUCTION: &str =
     "Answer questions about the pump service schedule of the fleet, politely.";
 
 /// The `contentType` an inline agent response stream is reported under, which the modelled
@@ -58,17 +58,17 @@ const RESPONSE_CONTENT_TYPE: &str = "application/json";
 
 /// One answer to an `InvokeInlineAgent` call, read the way a client reads it: the status,
 /// the body's content type, the two modelled response headers and the body itself.
-struct Answer {
-    status: u16,
-    content_type: String,
+pub(crate) struct Answer {
+    pub status: u16,
+    pub content_type: String,
     agent_content_type: Option<String>,
     session_header: Option<String>,
-    body: Bytes,
+    pub body: Bytes,
 }
 
 impl Answer {
     /// The body as JSON, or `Value::Null` for an empty one.
-    fn json(&self, case: &str) -> Value {
+    pub(crate) fn json(&self, case: &str) -> Value {
         if self.body.is_empty() {
             return Value::Null;
         }
@@ -81,7 +81,7 @@ impl Answer {
     }
 
     /// The wire error code restJson1 carries in `__type`, or `""` on a success body.
-    fn error_code(&self, case: &str) -> String {
+    pub(crate) fn error_code(&self, case: &str) -> String {
         self.json(case)
             .get("__type")
             .and_then(Value::as_str)
@@ -93,7 +93,7 @@ impl Answer {
     }
 
     /// The error body's `message`.
-    fn message(&self, case: &str) -> String {
+    pub(crate) fn message(&self, case: &str) -> String {
         self.json(case)
             .get("message")
             .and_then(Value::as_str)
@@ -101,17 +101,29 @@ impl Answer {
             .to_string()
     }
 
+    /// Every frame of the stream, in the order it arrived.
+    pub(crate) fn frames(&self, case: &str) -> Vec<Frame> {
+        decode_frames(case, &self.body)
+    }
+
+    /// The `InlineAgentResponseStream` member of every frame, in order — which is what a
+    /// client reading the union sees.
+    pub(crate) fn event_keys(&self, case: &str) -> Vec<String> {
+        let frames = self.frames(case);
+        frame_names(&frames)
+            .iter()
+            .map(|name| (*name).to_string())
+            .collect()
+    }
+
     /// The text of every `chunk` event of the stream, in order, each decoded from the
-    /// base64 `bytes` the frame's payload carries.
-    fn chunks(&self, case: &str) -> Vec<String> {
-        let frames = decode_frames(case, &self.body);
-        assert!(
-            frame_names(&frames).iter().all(|name| *name == "chunk"),
-            "case {case:?}: expected only the modelled chunk event, got {:?}",
-            frame_names(&frames)
-        );
+    /// base64 `bytes` the frame's payload carries. A member of the stream that is not a
+    /// `chunk` carries no answer text, so it is not one of these.
+    pub(crate) fn chunks(&self, case: &str) -> Vec<String> {
+        let frames = self.frames(case);
         frames
             .iter()
+            .filter(|frame| frame.name == "chunk")
             .map(|frame| {
                 assert_eq!(
                     frame.message_type, "event",
@@ -137,14 +149,19 @@ impl Answer {
     }
 
     /// The whole answer the stream delivered: every chunk, concatenated.
-    fn text(&self, case: &str) -> String {
+    pub(crate) fn text(&self, case: &str) -> String {
         self.chunks(case).concat()
     }
 }
 
 impl Emulator {
     /// One `InvokeInlineAgent` call over the modelled URI, signed with `key`.
-    async fn invoke_inline_agent(&self, key: &str, session: &str, body: Value) -> Answer {
+    pub(crate) async fn invoke_inline_agent(
+        &self,
+        key: &str,
+        session: &str,
+        body: Value,
+    ) -> Answer {
         let request = http::Request::builder()
             .method("POST")
             .uri(format!("/agents/{session}"))
@@ -183,12 +200,12 @@ impl Emulator {
 }
 
 /// One request body composing an inline agent against `foundation_model`.
-fn request(foundation_model: &str) -> Value {
+pub(crate) fn request(foundation_model: &str) -> Value {
     json!({ "foundationModel": foundation_model, "instruction": INSTRUCTION })
 }
 
 /// Assert `answer` is a served invocation and give back the answer the stream delivered.
-fn served(case: &str, answer: &Answer, session: &str) -> String {
+pub(crate) fn served(case: &str, answer: &Answer, session: &str) -> String {
     assert_eq!(
         answer.status,
         200,
@@ -721,12 +738,18 @@ async fn a_leg_this_emulator_cannot_compute_is_refused_rather_than_ignored() {
             refused_member: Some("promptCreationConfigurations"),
         },
         Row {
-            case: "a session state carrying return-control results",
+            case: "a session state carrying files for a code interpreter",
             session: "leg-session-05",
             extra: json!({
                 "inlineSessionState": {
-                    "invocationId": "11111111-2222-3333-4444-555555555555",
-                    "returnControlInvocationResults": [],
+                    "files": [{
+                        "name": "pump-specs.csv",
+                        "useCase": "CODE_INTERPRETER",
+                        "source": {
+                            "sourceType": "BYTE_CONTENT",
+                            "byteContent": { "mediaType": "text/csv", "data": "c2l0ZQo=" },
+                        },
+                    }],
                 },
             }),
             refused_member: Some("inlineSessionState"),
@@ -869,17 +892,29 @@ async fn a_leg_this_emulator_cannot_compute_is_refused_rather_than_ignored() {
                      against, got {text:?}",
                     row.case
                 );
-                // A trace is a report ALONGSIDE the answer, so a request that enables one
-                // is answered and told that it carries no step.
+                // A trace is a report ALONGSIDE the answer, so a request that enables one is
+                // answered AND carries the modelled trace member for the step it performed.
+                let traced = row.extra.get("enableTrace") == Some(&json!(true));
                 assert_eq!(
-                    text.contains("The trace this request enabled reports no step"),
-                    row.extra.get("enableTrace") == Some(&json!(true)),
-                    "case {:?}: the answer must say whether an enabled trace reports \
-                     anything, got {text:?}",
+                    answer
+                        .event_keys(row.case)
+                        .iter()
+                        .any(|key| key == "trace"),
+                    traced,
+                    "case {:?}: the stream must carry a trace member only when enableTrace \
+                     is set, got {:?}",
+                    row.case,
+                    answer.event_keys(row.case)
+                );
+                assert_eq!(
+                    text.contains("The trace this request enabled reports the prompt"),
+                    traced,
+                    "case {:?}: the answer must say what an enabled trace reports, got \
+                     {text:?}",
                     row.case
                 );
                 assert!(
-                    !text.contains("trace") || row.extra.get("enableTrace") == Some(&json!(true)),
+                    !text.contains("trace") || traced,
                     "case {:?}: an answer must not mention a trace nobody asked for, got \
                      {text:?}",
                     row.case

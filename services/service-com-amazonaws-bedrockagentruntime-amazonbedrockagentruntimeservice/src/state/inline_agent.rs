@@ -39,12 +39,37 @@
 //! which of the capabilities the request configured went unused because no model elicited
 //! them. It is never the caller's own `inputText` handed back as if an agent had replied,
 //! and never prose synthesised to look like orchestration.
+//!
+//! What an action group whose executor is the CUSTOM CONTROL method asks for is the
+//! exception to that, and it needs no model: "To return the action group invocation results
+//! directly in the `InvokeInlineAgent` response, specify `RETURN_CONTROL`"
+//! (`ActionGroupExecutor$customControl`) — the action is carried out by the CALLER, so the
+//! service's half is to hand the invocation back and then take the results. Both halves are
+//! here:
+//!
+//! * [`offered_functions`] reads the functions such an action group declares, straight from
+//!   the request's own `functionSchema`, and the turn hands them back under an
+//!   `invocationId` this plane issues and REMEMBERS on the conversation
+//!   ([`InlineAgentSession::issue_invocation`]);
+//! * [`returned_results`] reads the results the next turn's
+//!   `inlineSessionState.returnControlInvocationResults` carries, which are accepted only
+//!   under an `invocationId` this conversation really issued
+//!   ([`InlineAgentSession::has_issued`]) and re-enter that turn's orchestration prompt
+//!   ([`orchestration_prompt`]).
+//!
+//! No parameter VALUE is invented for an offered function: a value is what the model elicits
+//! from the conversation, so what is handed back is the parameter the request declared — its
+//! name and its data type — and nothing more.
 
 use std::collections::BTreeMap;
 
 use ::aws_smithy_types::DateTime;
 
 use ::service_com_amazonaws_bedrockruntime_amazonbedrockfrontendservice::state as runtime_state;
+
+use crate::ops::types::{
+    ActionGroupExecutor, AgentActionGroup, FunctionSchema, InvocationResultMember,
+};
 
 /// Resource guard, NOT an AWS quota: the most inline-agent conversations this store holds at
 /// once. The same guard the rest of this service's store declares
@@ -104,6 +129,16 @@ pub struct InlineAgentSession {
     pub encryption_key_arn: Option<String>,
     /// The turns taken in the conversation, oldest first.
     pub turns: Vec<InlineAgentTurn>,
+    /// The `invocationId`s this conversation has RETURNED CONTROL under, oldest first.
+    ///
+    /// The model's own rule for the caller's half of the contract is what this is for:
+    /// `inlineSessionState.invocationId` "must match the `invocationId` returned in the
+    /// `InvokeInlineAgent` response for the action whose results are provided in the
+    /// `returnControlInvocationResults` field", so the ids this conversation issued are the
+    /// ids its later turns accept results under. Bounded by
+    /// [`MAX_TURNS_PER_INLINE_AGENT_SESSION`]: a turn returns control at most once, and the
+    /// conversation records at most that many turns.
+    pub issued_invocations: Vec<String>,
 }
 
 impl InlineAgentSession {
@@ -121,6 +156,7 @@ impl InlineAgentSession {
             idle_ttl_seconds,
             encryption_key_arn,
             turns: Vec::new(),
+            issued_invocations: Vec::new(),
         }
     }
 
@@ -128,6 +164,19 @@ impl InlineAgentSession {
     pub fn record(&mut self, turn: InlineAgentTurn) {
         self.last_used_at = turn.at;
         self.turns.push(turn);
+    }
+
+    /// Remember that this conversation returned control under `invocation_id`, which is what
+    /// lets a later turn of it carry the results of that invocation.
+    pub fn issue_invocation(&mut self, invocation_id: String) {
+        self.issued_invocations.push(invocation_id);
+    }
+
+    /// Whether this conversation really returned control under `invocation_id`.
+    pub fn has_issued(&self, invocation_id: &str) -> bool {
+        self.issued_invocations
+            .iter()
+            .any(|issued| issued == invocation_id)
     }
 
     /// The instant the conversation's idle lifetime ends: the last turn plus the TTL it is
@@ -220,6 +269,176 @@ pub fn resolve_model<Eng: Send + Sync + 'static>(
     }
 }
 
+/// The `CustomControlMethod` an action group names when the CALLER carries its actions out
+/// (`smithy_query(query="shape",shape="CustomControlMethod")` -> the one value,
+/// `RETURN_CONTROL`), which is also the `ExecutionType` such an invocation is traced under.
+pub const RETURN_CONTROL: &str = "RETURN_CONTROL";
+
+/// The most invocation inputs ONE returned control hands back
+/// (`smithy_query(query="shape",shape="InvocationInputs")` -> `@length` min 1, max 5). A
+/// turn offering more functions than that hands back the first five, because the member
+/// cannot carry more.
+pub const MAX_INVOCATION_INPUTS: usize = 5;
+
+/// The content type a returned result's body travels under when it is text
+/// (`FunctionResult$responseBody` -> "The key of the object is the content type. You can
+/// only specify one type"), which is the one form a prompt can read.
+pub const TEXT_RESPONSE_BODY: &str = "TEXT";
+
+/// One parameter of a function an action group offers, as the request DECLARED it.
+///
+/// No `value`: the value of a parameter is what a model elicits from the conversation, and
+/// no model runs here, so none is invented.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OfferedParameter {
+    /// The parameter name, as the `functionSchema` spells it.
+    pub name: String,
+    /// Its declared `ParameterType` (`string`, `number`, `integer`, `boolean`, `array`).
+    pub parameter_type: String,
+    /// Whether the function needs it to be fulfilled.
+    pub required: bool,
+}
+
+/// One function a turn hands back to its caller: the action group that declared it, the
+/// function itself, and the parameters it declares.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OfferedFunction {
+    pub action_group: String,
+    pub function: String,
+    /// The declared parameters, by name, so one turn's invocation inputs are ordered.
+    pub parameters: Vec<OfferedParameter>,
+}
+
+/// Whether `group` is carried out by the CALLER: its `actionGroupExecutor` is the custom
+/// control method, which is the only executor that returns the invocation in the response.
+fn returns_control(group: &AgentActionGroup) -> bool {
+    matches!(
+        group.action_group_executor.as_ref(),
+        Some(ActionGroupExecutor::customControl(method)) if method == RETURN_CONTROL
+    )
+}
+
+/// The functions the turn hands back: every function declared by an action group whose
+/// executor is the custom control method, in the order the request declared them, capped at
+/// [`MAX_INVOCATION_INPUTS`].
+///
+/// An action group executed by a Lambda function offers none — its action is carried out by
+/// that function, not by the caller — and one that declares no `functionSchema` offers none
+/// either, because an action group's functions are what that member declares.
+pub fn offered_functions(action_groups: &[AgentActionGroup]) -> Vec<OfferedFunction> {
+    let mut offered: Vec<OfferedFunction> = Vec::new();
+    for group in action_groups.iter().filter(|group| returns_control(group)) {
+        let Some(FunctionSchema::Functions(functions)) = group.function_schema.as_ref() else {
+            continue;
+        };
+        for function in functions {
+            if offered.len() >= MAX_INVOCATION_INPUTS {
+                return offered;
+            }
+            let mut parameters: Vec<OfferedParameter> = function
+                .parameters
+                .iter()
+                .flatten()
+                .map(|(name, detail)| OfferedParameter {
+                    name: name.clone(),
+                    parameter_type: detail.r#type.clone(),
+                    required: detail.required == Some(true),
+                })
+                .collect();
+            parameters.sort_by(|left, right| left.name.cmp(&right.name));
+            offered.push(OfferedFunction {
+                action_group: group.action_group_name.clone(),
+                function: function.name.clone(),
+                parameters,
+            });
+        }
+    }
+    offered
+}
+
+/// One result the CALLER returned for an invocation this service handed control for.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ReturnedResult {
+    /// The action group the result belongs to (`@required` on both result members).
+    pub action_group: String,
+    /// What the result answers for: the function that was called, or the API path of the
+    /// operation that was.
+    pub operation: Option<String>,
+    /// The body the caller returned, when it returned one under a content type.
+    pub body: Option<String>,
+}
+
+/// The one body a returned result carries: `responseBody` maps a content type to the body
+/// under it and "you can only specify one type", so the `TEXT` entry is taken when there is
+/// one and otherwise the lowest-named entry, which keeps the reading of a map deterministic.
+fn result_body(
+    response_body: Option<&std::collections::HashMap<String, crate::ops::types::ContentBody>>,
+) -> Option<String> {
+    let body = response_body?;
+    let mut entries: Vec<(&String, &crate::ops::types::ContentBody)> = body.iter().collect();
+    entries.sort_by(|left, right| left.0.cmp(right.0));
+    let chosen = entries
+        .iter()
+        .find(|(content_type, _)| content_type.as_str() == TEXT_RESPONSE_BODY)
+        .or_else(|| entries.first())?;
+    chosen.1.body.clone()
+}
+
+/// The results `inlineSessionState.returnControlInvocationResults` carries, read as the
+/// prompt of the next turn reads them: which action group's function (or API operation) each
+/// one answers for, and the body it returned.
+pub fn returned_results(results: &[InvocationResultMember]) -> Vec<ReturnedResult> {
+    results
+        .iter()
+        .map(|result| match result {
+            InvocationResultMember::functionResult(function) => ReturnedResult {
+                action_group: function.action_group.clone(),
+                operation: function.function.clone(),
+                body: result_body(function.response_body.as_ref()),
+            },
+            InvocationResultMember::apiResult(api) => ReturnedResult {
+                action_group: api.action_group.clone(),
+                operation: api.api_path.clone(),
+                body: result_body(api.response_body.as_ref()),
+            },
+        })
+        .collect()
+}
+
+/// The refusal a session state earns when the invocation its results answer is not one this
+/// conversation returned control under: an `invocationId` no response of it issued, or
+/// results carrying none at all.
+///
+/// THE SOURCE OF THIS WORDING is the rule the MODEL states on the member, which is the
+/// requirement where no refusal of AWS's is recorded for the member: `invocationId` "must
+/// match the `invocationId` returned in the `InvokeInlineAgent` response for the action
+/// whose results are provided in the `returnControlInvocationResults` field"
+/// (`smithy_query(query="shape",shape="InlineSessionState")`). The sentence names the member
+/// and, when the request carried one, the identifier it submitted — taken from the request,
+/// never from any one exchange — so the caller can fix the request from the text alone.
+pub fn unissued_invocation_message(submitted: Option<&str>) -> String {
+    let opening = match submitted {
+        Some(invocation_id) => {
+            format!("inlineSessionState.invocationId: {invocation_id} does not match an")
+        }
+        None => "inlineSessionState.invocationId: it is required alongside \
+                 returnControlInvocationResults and must match the"
+            .to_string(),
+    };
+    format!(
+        "{opening} invocationId returned in the InvokeInlineAgent response for the action \
+         whose results are provided in the returnControlInvocationResults field"
+    )
+}
+
+/// The results an earlier invocation of the conversation was answered with, under the id it
+/// was issued as.
+#[derive(Debug, Clone)]
+pub struct ReturnedInvocation {
+    pub invocation_id: String,
+    pub results: Vec<ReturnedResult>,
+}
+
 /// The facts of one served invocation the response stream reports.
 #[derive(Debug, Clone)]
 pub struct ServedInvocation {
@@ -231,20 +450,37 @@ pub struct ServedInvocation {
     pub agent_name: Option<String>,
     /// Which turn of the conversation this is, counting from one.
     pub turn: usize,
-    /// How many action groups the request configured, none of which was invoked.
+    /// How many action groups the request configured.
     pub action_groups: usize,
     /// How many knowledge bases the request configured, none of which was queried.
     pub knowledge_bases: usize,
     /// Whether this request ended the conversation.
     pub session_ended: bool,
-    /// Whether the request asked for the orchestration TRACE, which carries no step here.
+    /// Whether the request asked for the orchestration TRACE.
     pub trace_requested: bool,
+    /// The `instruction` the agent was composed with, which the orchestration prompt opens
+    /// with.
+    pub instruction: String,
+    /// The `inputText` the turn was submitted with, when it carried one.
+    pub input_text: Option<String>,
+    /// When the turn was served.
+    pub at: DateTime,
+    /// The functions the request's return-control action groups offer the caller, which are
+    /// the actions this turn can hand back.
+    pub offered: Vec<OfferedFunction>,
+    /// The identifier this turn handed those functions back under, when it handed them back:
+    /// a turn that carries the results of an earlier invocation answers instead of handing
+    /// control back again.
+    pub returned_control: Option<String>,
+    /// The results the caller returned for an earlier invocation of this conversation, when
+    /// the request carried them.
+    pub returned: Option<ReturnedInvocation>,
 }
 
 /// The text the `chunk` events of a served invocation carry: that no model ran, the model
 /// the agent was composed against, which turn of which conversation was served, which
-/// configured capabilities went unused, whether a requested trace reports anything, and
-/// whether the conversation was ended.
+/// configured capabilities went unused, what a requested trace reports, which returned
+/// results re-entered the turn, and whether the conversation was ended.
 ///
 /// The caller's own `inputText` is NOT part of it: a prompt handed back would read as an
 /// agent that had replied to it.
@@ -266,10 +502,18 @@ pub fn completion_notice(served: &ServedInvocation) -> String {
             served.action_groups, served.knowledge_bases
         ));
     }
+    if let Some(returned) = served.returned.as_ref() {
+        notice.push_str(&format!(
+            " The {} result(s) returned under invocation {} re-entered this turn's \
+             orchestration prompt.",
+            returned.results.len(),
+            returned.invocation_id
+        ));
+    }
     if served.trace_requested {
         notice.push_str(
-            " The trace this request enabled reports no step: a trace reports the \
-             orchestration steps a model took, and no model took any.",
+            " The trace this request enabled reports the prompt this turn was assembled \
+             from: the orchestration steps past it are a model's, and no model took any.",
         );
     }
     if served.session_ended {
@@ -293,4 +537,87 @@ pub fn streamed_chunks(notice: &str) -> Vec<String> {
         .chunks(STREAMED_CHUNK_CHARACTERS)
         .map(|chunk| chunk.iter().collect())
         .collect()
+}
+
+/// The `PromptType` the orchestration step of the agent sequence is traced under
+/// (`smithy_query(query="shape",shape="PromptType")` -> PRE_PROCESSING, ORCHESTRATION,
+/// KNOWLEDGE_BASE_RESPONSE_GENERATION, POST_PROCESSING, ROUTING_CLASSIFIER).
+pub const ORCHESTRATION_PROMPT_TYPE: &str = "ORCHESTRATION";
+
+/// The `CreationMode` of a prompt no `promptOverrideConfiguration` replaced
+/// (`smithy_query(query="shape",shape="CreationMode")` -> DEFAULT, OVERRIDDEN); this
+/// service refuses an override, so every prompt it assembles is the default one.
+pub const DEFAULT_PROMPT_CREATION_MODE: &str = "DEFAULT";
+
+/// The `InvocationType` an action-group step is traced under
+/// (`smithy_query(query="shape",shape="InvocationType")` -> ACTION_GROUP, KNOWLEDGE_BASE,
+/// FINISH, ACTION_GROUP_CODE_INTERPRETER, AGENT_COLLABORATOR).
+pub const ACTION_GROUP_INVOCATION_TYPE: &str = "ACTION_GROUP";
+
+/// The identifier one traced step of a turn carries.
+///
+/// The modelled `TraceId` is a string of 2..16 characters
+/// (`smithy_query(query="shape",shape="TraceId")`), too short for a UUID, so a step is
+/// identified by the turn it belongs to and its position in that turn — unique inside the
+/// conversation the trace reports on, which is what a trace reader correlates by.
+pub fn trace_id(turn: usize, step: usize) -> String {
+    format!("{turn}-{step}")
+}
+
+/// The prompt the turn was assembled from, which `enableTrace` reports as the orchestration
+/// step's `modelInvocationInput.text`.
+///
+/// Assembled from the REQUEST and this conversation's state, never from anything a model
+/// produced: the instruction the agent was composed with, the conversation and turn the
+/// prompt was assembled for, the actions the caller can carry out, the input the caller
+/// submitted, and the results the caller returned for an earlier invocation — which is what
+/// makes a returned result observably re-enter the next turn's prompt.
+pub fn orchestration_prompt(served: &ServedInvocation) -> String {
+    let mut prompt = format!("Instruction: {}\n", served.instruction);
+    prompt.push_str(&format!(
+        "Session {}, turn {}, orchestrated with {}.\n",
+        served.session_id, served.turn, served.model_id
+    ));
+    for function in &served.offered {
+        let parameters: Vec<String> = function
+            .parameters
+            .iter()
+            .map(|parameter| {
+                let requirement = if parameter.required {
+                    "required"
+                } else {
+                    "optional"
+                };
+                format!(
+                    "{} ({}, {requirement})",
+                    parameter.name, parameter.parameter_type
+                )
+            })
+            .collect();
+        prompt.push_str(&format!(
+            "Action: {}.{} returns control to the caller; parameters: {}.\n",
+            function.action_group,
+            function.function,
+            if parameters.is_empty() {
+                "none declared".to_string()
+            } else {
+                parameters.join(", ")
+            }
+        ));
+    }
+    if let Some(input_text) = served.input_text.as_deref() {
+        prompt.push_str(&format!("User input: {input_text}\n"));
+    }
+    if let Some(returned) = served.returned.as_ref() {
+        for result in &returned.results {
+            prompt.push_str(&format!(
+                "Result of {}.{} under invocation {}: {}\n",
+                result.action_group,
+                result.operation.as_deref().unwrap_or_default(),
+                returned.invocation_id,
+                result.body.as_deref().unwrap_or_default()
+            ));
+        }
+    }
+    prompt
 }
