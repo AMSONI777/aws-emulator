@@ -17,7 +17,12 @@ pub struct GetAllowListInput {
     pub id: String,
 }
 
-#[smithy_macros::smithy(shape = "com.amazonaws.macie2#GetAllowListResponse")]
+// `GetAllowListOutput`'s schema and codec are written out by hand rather than
+// derived with `#[smithy_macros::smithy(shape = ...)]`, because `createdAt` and
+// `updatedAt` target `__timestampIso8601` and the derive drops that shape's
+// `@timestampFormat("date-time")`. See `super::date_time_wire` for the whole
+// reason and for when to delete this block; everything else below mirrors the
+// derive exactly.
 #[derive(Debug, Clone, Default)]
 pub struct GetAllowListOutput {
     pub arn: Option<String>,
@@ -31,10 +36,133 @@ pub struct GetAllowListOutput {
     pub updated_at: Option<::aws_smithy_types::DateTime>,
 }
 
+impl GetAllowListOutput {
+    pub const M_ARN: ::aws_smithy_schema::Schema = super::date_time_wire::member(
+        "com.amazonaws.macie2#GetAllowListResponse$arn",
+        "arn",
+        ::aws_smithy_schema::ShapeType::String,
+        0,
+    );
+    /// `@timestampFormat("date-time")`, from the `__timestampIso8601` shape it
+    /// targets. THE reason this schema is hand-written.
+    pub const M_CREATED_AT: ::aws_smithy_schema::Schema = super::date_time_wire::date_time_member(
+        "com.amazonaws.macie2#GetAllowListResponse$createdAt",
+        "createdAt",
+        1,
+    );
+    pub const M_CRITERIA: ::aws_smithy_schema::Schema = super::date_time_wire::member(
+        "com.amazonaws.macie2#GetAllowListResponse$criteria",
+        "criteria",
+        ::aws_smithy_schema::ShapeType::Structure,
+        2,
+    );
+    pub const M_DESCRIPTION: ::aws_smithy_schema::Schema = super::date_time_wire::member(
+        "com.amazonaws.macie2#GetAllowListResponse$description",
+        "description",
+        ::aws_smithy_schema::ShapeType::String,
+        3,
+    );
+    pub const M_ID: ::aws_smithy_schema::Schema = super::date_time_wire::member(
+        "com.amazonaws.macie2#GetAllowListResponse$id",
+        "id",
+        ::aws_smithy_schema::ShapeType::String,
+        4,
+    );
+    pub const M_NAME: ::aws_smithy_schema::Schema = super::date_time_wire::member(
+        "com.amazonaws.macie2#GetAllowListResponse$name",
+        "name",
+        ::aws_smithy_schema::ShapeType::String,
+        5,
+    );
+    pub const M_STATUS: ::aws_smithy_schema::Schema = super::date_time_wire::member(
+        "com.amazonaws.macie2#GetAllowListResponse$status",
+        "status",
+        ::aws_smithy_schema::ShapeType::Structure,
+        6,
+    );
+    pub const M_TAGS: ::aws_smithy_schema::Schema = super::date_time_wire::member(
+        "com.amazonaws.macie2#GetAllowListResponse$tags",
+        "tags",
+        ::aws_smithy_schema::ShapeType::Map,
+        7,
+    );
+    /// `@timestampFormat("date-time")`, as `createdAt` above.
+    pub const M_UPDATED_AT: ::aws_smithy_schema::Schema = super::date_time_wire::date_time_member(
+        "com.amazonaws.macie2#GetAllowListResponse$updatedAt",
+        "updatedAt",
+        8,
+    );
+
+    pub const SCHEMA: ::aws_smithy_schema::Schema = ::aws_smithy_schema::Schema::new_struct(
+        ::aws_smithy_schema::ShapeId::from_static(
+            "com.amazonaws.macie2#GetAllowListResponse",
+            "com.amazonaws.macie2",
+            "GetAllowListResponse",
+        ),
+        ::aws_smithy_schema::ShapeType::Structure,
+        &[
+            &Self::M_ARN,
+            &Self::M_CREATED_AT,
+            &Self::M_CRITERIA,
+            &Self::M_DESCRIPTION,
+            &Self::M_ID,
+            &Self::M_NAME,
+            &Self::M_STATUS,
+            &Self::M_TAGS,
+            &Self::M_UPDATED_AT,
+        ],
+    );
+}
+
+pub static GET_ALLOW_LIST_OUTPUT_SCHEMA: &::aws_smithy_schema::Schema = &GetAllowListOutput::SCHEMA;
+
+impl ::aws_smithy_schema::serde::SerializableStruct for GetAllowListOutput {
+    fn serialize_members(
+        &self,
+        s: &mut dyn ::aws_smithy_schema::serde::ShapeSerializer,
+    ) -> ::std::result::Result<(), ::aws_smithy_schema::serde::SerdeError> {
+        // Every member is optional, so each is written only when present — the
+        // derive's `is_option` split.
+        if let Some(value) = self.arn.as_ref() {
+            s.write_string(&Self::M_ARN, value.as_str())?;
+        }
+        if let Some(value) = self.created_at.as_ref() {
+            s.write_timestamp(&Self::M_CREATED_AT, value)?;
+        }
+        if let Some(value) = self.criteria.as_ref() {
+            s.write_struct(&Self::M_CRITERIA, value)?;
+        }
+        if let Some(value) = self.description.as_ref() {
+            s.write_string(&Self::M_DESCRIPTION, value.as_str())?;
+        }
+        if let Some(value) = self.id.as_ref() {
+            s.write_string(&Self::M_ID, value.as_str())?;
+        }
+        if let Some(value) = self.name.as_ref() {
+            s.write_string(&Self::M_NAME, value.as_str())?;
+        }
+        if let Some(value) = self.status.as_ref() {
+            s.write_struct(&Self::M_STATUS, value)?;
+        }
+        if let Some(value) = self.tags.as_ref() {
+            s.write_map(&Self::M_TAGS, &|sm| {
+                for (key, tag) in value.iter() {
+                    sm.write_string(&Self::M_TAGS, key.as_str())?;
+                    sm.write_string(&Self::M_TAGS, tag.as_str())?;
+                }
+                Ok(())
+            })?;
+        }
+        if let Some(value) = self.updated_at.as_ref() {
+            s.write_timestamp(&Self::M_UPDATED_AT, value)?;
+        }
+        Ok(())
+    }
+}
+
 #[smithy_macros::smithy(shape = "com.amazonaws.macie2#AllowListStatus")]
 #[derive(Debug, Clone, Default)]
 pub struct AllowListStatus {
     pub code: String,
     pub description: Option<String>,
 }
-

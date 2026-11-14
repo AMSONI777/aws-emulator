@@ -23,11 +23,21 @@
 //! The member plane lives here too: the accounts `CreateMember` associates with
 //! this administrator account, which `GetMember` projects and `ListMembers`
 //! enumerates.
+//!
+//! One plane of this state has a file of its own: the allow lists
+//! (`CreateAllowList` stores one, `GetAllowList` projects it together with the
+//! status it derives for it, `ListAllowLists` enumerates them) live in
+//! [`allow_lists`], which is where the object-store read that status rests on
+//! lives too.
 
 use std::collections::BTreeMap;
 use std::time::SystemTime;
 
 use crate::ops::types::{ClassificationExportConfiguration, S3Destination, SeverityLevel};
+
+pub mod allow_lists;
+
+pub use allow_lists::{AllowList, AllowListCriterion};
 
 /// Region used when a request carries no SigV4 credential scope to read one
 /// from (an unsigned in-process call), matching the emulator's default region.
@@ -545,6 +555,10 @@ pub struct ComAmazonawsMacie2Macie2State {
     /// Custom data identifiers keyed by id, so an id-addressed read is
     /// O(log n) and an enumeration is in a stable total order.
     pub custom_data_identifiers: BTreeMap<String, CustomDataIdentifier>,
+    /// Allow lists keyed by id, for the same reasons as
+    /// [`Self::custom_data_identifiers`]: an id-addressed read is O(log n) and
+    /// `ListAllowLists` enumerates them in a stable total order.
+    pub allow_lists: BTreeMap<String, AllowList>,
     /// The accounts associated with this administrator account, keyed by the
     /// region the association was made in and the member's account id — the
     /// same account may be a member in two regions, and each association is its
@@ -614,6 +628,30 @@ impl ComAmazonawsMacie2Macie2State {
             .filter(|identifier| identifier.region == region)
     }
 
+    /// The allow list `id` of `region`, or `None` when the region holds none
+    /// under that id — which is what an id from another region answers too.
+    pub fn allow_list(&self, region: &str, id: &str) -> Option<&AllowList> {
+        self.allow_lists
+            .get(id)
+            .filter(|allow_list| allow_list.region == region)
+    }
+
+    /// The same record, for a write.
+    pub fn allow_list_mut(&mut self, region: &str, id: &str) -> Option<&mut AllowList> {
+        self.allow_lists
+            .get_mut(id)
+            .filter(|allow_list| allow_list.region == region)
+    }
+
+    /// The allow lists `ListAllowLists` enumerates for `region`, in id order —
+    /// the order the store holds them in, so the total order a page boundary
+    /// rests on is stable.
+    pub fn allow_lists_of<'a>(&'a self, region: &'a str) -> impl Iterator<Item = &'a AllowList> {
+        self.allow_lists
+            .values()
+            .filter(move |allow_list| allow_list.region == region)
+    }
+
     /// The identifiers `ListCustomDataIdentifiers` enumerates for `region`, in
     /// id order.
     ///
@@ -633,8 +671,8 @@ impl ComAmazonawsMacie2Macie2State {
     /// Retire everything Macie holds for `region`: `DisableMacie` "Disables
     /// Amazon Macie and deletes all settings and resources for a Macie
     /// account", so the session, the region's automated-discovery
-    /// configuration, its custom data identifiers and the client tokens that
-    /// minted them all go.
+    /// configuration, its custom data identifiers, its allow lists and the
+    /// client tokens that minted them all go.
     pub fn forget_region(&mut self, region: &str) {
         self.sessions.remove(region);
         self.automated_discovery.remove(region);
@@ -642,6 +680,8 @@ impl ComAmazonawsMacie2Macie2State {
         self.classification_export.remove(region);
         self.custom_data_identifiers
             .retain(|_, identifier| identifier.region != region);
+        self.allow_lists
+            .retain(|_, allow_list| allow_list.region != region);
         self.members.retain(|_, member| member.region != region);
         let prefix = region_key_prefix(region);
         self.idempotency.retain(|key, _| !key.starts_with(&prefix));

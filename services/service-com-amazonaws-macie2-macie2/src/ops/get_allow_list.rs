@@ -1,15 +1,8 @@
 // SPDX-License-Identifier: CC0-1.0
 
 //! @op GetAllowList
-//! SCAFFOLDED, NOT IMPLEMENTED: this operation answers HTTP 501 `NotImplemented` and
-//! asserts NOTHING about `GetAllowList`'s real behaviour. Implement it here — this is
-//! the ONLY file to touch for this operation.
-//!
-//! A 501 from this operation means "nobody has written it yet", never "the emulator is
-//! broken". Replace the `Err(..)` in [`GetAllowList::handle`] with real behaviour and
-//! delete the SCAFFOLDED marker line above; that line is the machine-readable record of
-//! which operations are still stubs (`grep -rl '^//! SCAFFOLDED, NOT IMPLEMENTED:' */src/ops/`),
-//! so leaving it on an implemented operation under-reports progress.
+//! Implemented: projects the allow list `crate::state` holds under the requested id,
+//! together with the status it DERIVES for the list's criteria now.
 //!
 //! ## Shape of an operation
 //!
@@ -169,18 +162,60 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         input: Self::Input,
         ctx: &smithy_server_runtime::OperationContext<'_>,
     ) -> Result<Self::Output, Self::Error> {
-        // The engine is reachable from `&self` (constructor-injected); `ctx` carries
-        // request metadata. Both are bound here so an implementer has them in scope.
-        let _ = (&input, ctx, &self.engine);
-        // Implement `GetAllowList` here, then delete the SCAFFOLDED marker at the top of
-        // this file. Return modeled failures as
-        // `Err(GetAllowListErrorModeled::Variant(..).into())` — the `From` impl above lifts it.
-        //
-        // To refuse a bad request this operation models no error for, return
-        // `Err(crate::scaffolded::Scaffolded::validation("..."))` — a 400
-        // `ValidationException`. Do NOT answer 501 for it: 501 means "not written yet",
-        // not "bad request". Modeled constraints are already refused BEFORE this
-        // handler runs, so reaching here means the input satisfies every one of them.
-        Err(crate::scaffolded::Scaffolded::not_implemented("GetAllowList"))
+        let Some(store) = crate::state::service_state(&*self.engine) else {
+            return Err(GetAllowListErrorModeled::InternalServerException(
+                InternalServerException {
+                    message: Some("the allow list store is unavailable on this engine".to_string()),
+                },
+            )
+            .into());
+        };
+        let region = crate::state::request_region(ctx);
+
+        // The stored record is taken out from under the lock, because the
+        // status below is derived by asking the object store — a call this read
+        // must not hold the store's lock across.
+        let allow_list = {
+            let state = store.lock();
+            if state.session(&region).is_none() {
+                return Err(GetAllowListErrorModeled::AccessDeniedException(
+                    AccessDeniedException {
+                        message: Some(crate::state::MACIE_NOT_ENABLED_MESSAGE.to_string()),
+                    },
+                )
+                .into());
+            }
+            let Some(allow_list) = state.allow_list(&region, &input.id) else {
+                return Err(GetAllowListErrorModeled::ResourceNotFoundException(
+                    ResourceNotFoundException {
+                        message: Some(crate::state::allow_lists::allow_list_not_found_message(
+                            &input.id,
+                        )),
+                    },
+                )
+                .into());
+            };
+            allow_list.clone()
+        };
+
+        // "Retrieves the settings and status of an allow list": the settings
+        // come out of the store, and the status is what Macie can do with those
+        // settings NOW, so it is derived rather than read back. Deriving it
+        // changes nothing a later caller sees.
+        let status =
+            crate::state::allow_lists::derive_status(ctx.callback(), &region, &allow_list.criteria)
+                .await;
+
+        Ok(GetAllowListOutput {
+            arn: Some(allow_list.arn.clone()),
+            created_at: Some(crate::state::to_date_time(allow_list.created_at)),
+            criteria: Some(allow_list.criteria.to_modeled()),
+            description: allow_list.description.clone(),
+            id: Some(allow_list.id.clone()),
+            name: Some(allow_list.name.clone()),
+            status: Some(status),
+            tags: allow_list.tags_output(),
+            updated_at: Some(crate::state::to_date_time(allow_list.updated_at)),
+        })
     }
 }

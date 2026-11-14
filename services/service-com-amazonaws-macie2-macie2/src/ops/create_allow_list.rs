@@ -1,15 +1,10 @@
 // SPDX-License-Identifier: CC0-1.0
 
 //! @op CreateAllowList
-//! SCAFFOLDED, NOT IMPLEMENTED: this operation answers HTTP 501 `NotImplemented` and
-//! asserts NOTHING about `CreateAllowList`'s real behaviour. Implement it here — this is
-//! the ONLY file to touch for this operation.
-//!
-//! A 501 from this operation means "nobody has written it yet", never "the emulator is
-//! broken". Replace the `Err(..)` in [`CreateAllowList::handle`] with real behaviour and
-//! delete the SCAFFOLDED marker line above; that line is the machine-readable record of
-//! which operations are still stubs (`grep -rl '^//! SCAFFOLDED, NOT IMPLEMENTED:' */src/ops/`),
-//! so leaving it on an implemented operation under-reports progress.
+//! Implemented: validates the ONE criterion the request specifies — resolving an
+//! `s3WordsList` address against this emulator's own Amazon S3 before anything is
+//! stored — then mints the allow list in `crate::state` and reports the id and ARN
+//! it assigned.
 //!
 //! ## Shape of an operation
 //!
@@ -171,18 +166,161 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         input: Self::Input,
         ctx: &smithy_server_runtime::OperationContext<'_>,
     ) -> Result<Self::Output, Self::Error> {
-        // The engine is reachable from `&self` (constructor-injected); `ctx` carries
-        // request metadata. Both are bound here so an implementer has them in scope.
-        let _ = (&input, ctx, &self.engine);
-        // Implement `CreateAllowList` here, then delete the SCAFFOLDED marker at the top of
-        // this file. Return modeled failures as
-        // `Err(CreateAllowListErrorModeled::Variant(..).into())` — the `From` impl above lifts it.
-        //
-        // To refuse a bad request this operation models no error for, return
-        // `Err(crate::scaffolded::Scaffolded::validation("..."))` — a 400
-        // `ValidationException`. Do NOT answer 501 for it: 501 means "not written yet",
-        // not "bad request". Modeled constraints are already refused BEFORE this
-        // handler runs, so reaching here means the input satisfies every one of them.
-        Err(crate::scaffolded::Scaffolded::not_implemented("CreateAllowList"))
+        let Some(store) = crate::state::service_state(&*self.engine) else {
+            return Err(CreateAllowListErrorModeled::InternalServerException(
+                InternalServerException {
+                    message: Some("the allow list store is unavailable on this engine".to_string()),
+                },
+            )
+            .into());
+        };
+        // An allow list belongs to one region: the region the create addressed,
+        // which is also the region in its ARN.
+        let region = crate::state::request_region(ctx);
+        let now = ::std::time::SystemTime::now();
+
+        // The criteria have to specify exactly one criterion, which no modelled
+        // constraint can express, so this is where a request specifying both or
+        // neither is refused — before the store or the object store is touched.
+        let criterion = match crate::state::AllowListCriterion::from_modeled(&input.criteria) {
+            Ok(criterion) => criterion,
+            Err(message) => {
+                return Err(CreateAllowListErrorModeled::ValidationException(
+                    ValidationException {
+                        message: Some(message),
+                    },
+                )
+                .into())
+            }
+        };
+
+        {
+            let state = store.lock();
+            if state.session(&region).is_none() {
+                return Err(CreateAllowListErrorModeled::AccessDeniedException(
+                    AccessDeniedException {
+                        message: Some(crate::state::MACIE_NOT_ENABLED_MESSAGE.to_string()),
+                    },
+                )
+                .into());
+            }
+
+            // A retry carrying the same `clientToken` replays the list that
+            // token minted instead of minting a second one.
+            if let Some(minted) = replayed_list(&state, &region, Self::NAME, &input.client_token) {
+                return Ok(CreateAllowListOutput {
+                    arn: Some(minted.arn.clone()),
+                    id: Some(minted.id.clone()),
+                });
+            }
+        }
+
+        // The S3 object a `s3WordsList` criterion names is resolved UP FRONT:
+        // the list is a list of the text in that object, so an address the
+        // object store answers that it holds nothing at names no list that
+        // could ever be built, and the request is refused with nothing stored.
+        // Every other answer — an object that is there, one the store will not
+        // serve, one too large or empty, or no answer at all — leaves the
+        // create to succeed and the list's STATUS to report what Macie can do
+        // with the criteria, which is what that status is for.
+        if let crate::state::AllowListCriterion::WordsList {
+            bucket_name,
+            object_key,
+        } = &criterion
+        {
+            let answered = crate::state::allow_lists::read_words_list(
+                ctx.callback(),
+                &region,
+                bucket_name,
+                object_key,
+            )
+            .await;
+            if answered.is_absent() {
+                return Err(CreateAllowListErrorModeled::ValidationException(
+                    ValidationException {
+                        message: Some(crate::state::allow_lists::s3_object_absent_message(
+                            bucket_name,
+                            object_key,
+                        )),
+                    },
+                )
+                .into());
+            }
+        }
+
+        let mut state = store.lock();
+
+        // Another call may have minted this token's list while the object store
+        // was being asked, so the replay is checked once more before a second
+        // list is minted for it.
+        if let Some(minted) = replayed_list(&state, &region, Self::NAME, &input.client_token) {
+            return Ok(CreateAllowListOutput {
+                arn: Some(minted.arn.clone()),
+                id: Some(minted.id.clone()),
+            });
+        }
+
+        // The EMULATOR's own bound on the store, reported through the quota
+        // error this operation models: without it a caller could grow one
+        // process's heap without limit.
+        if state.allow_lists.len() >= crate::state::allow_lists::MAX_ALLOW_LISTS {
+            return Err(
+                CreateAllowListErrorModeled::ServiceQuotaExceededException(
+                    ServiceQuotaExceededException {
+                        message: Some(format!(
+                            "This emulator holds the maximum of {} allow lists. \
+                             Delete an allow list before creating another.",
+                            crate::state::allow_lists::MAX_ALLOW_LISTS
+                        )),
+                    },
+                )
+                .into(),
+            );
+        }
+
+        let id = crate::state::new_resource_id(state.next_id_seed(), now);
+        let allow_list = crate::state::AllowList {
+            arn: crate::state::allow_lists::allow_list_arn(&region, &id),
+            id: id.clone(),
+            region: region.clone(),
+            name: input.name.clone(),
+            description: input.description.clone(),
+            criteria: criterion,
+            tags: input
+                .tags
+                .clone()
+                .unwrap_or_default()
+                .into_iter()
+                .collect::<::std::collections::BTreeMap<_, _>>(),
+            created_at: now,
+            // Nothing has changed the settings yet, so they were last changed
+            // when they were written.
+            updated_at: now,
+        };
+        let arn = allow_list.arn.clone();
+
+        let replay_key =
+            crate::state::idempotency_key(&region, Self::NAME, input.client_token.as_str());
+        state.idempotency.insert(replay_key, id.clone());
+        state.allow_lists.insert(id.clone(), allow_list);
+
+        Ok(CreateAllowListOutput {
+            arn: Some(arn),
+            id: Some(id),
+        })
     }
+}
+
+/// The allow list `client_token` already minted in `region`, or `None` when
+/// that token has minted none — which is also the answer once the list it
+/// minted is gone, since the token then replays nothing.
+fn replayed_list<'a>(
+    state: &'a crate::state::ComAmazonawsMacie2Macie2State,
+    region: &str,
+    operation: &str,
+    client_token: &str,
+) -> Option<&'a crate::state::AllowList> {
+    let replay_key = crate::state::idempotency_key(region, operation, client_token);
+    let minted = state.idempotency.get(&replay_key)?;
+    state.allow_list(region, minted)
 }

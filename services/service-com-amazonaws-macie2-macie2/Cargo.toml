@@ -28,14 +28,28 @@ hex = { workspace = true }
 # member is a pattern this service can run before it is stored.
 regex = "1.13"
 # `service-common` carries this tree's ONE rendering of 16 service-produced bytes
-# as the text of a UUID, which is the form a custom data identifier's id takes.
+# as the text of a UUID, which is the form a custom data identifier's id takes,
+# plus the one in-process Amazon S3 client and the one reading of what that store
+# answered about an object — which is how an allow list's `s3WordsList` criteria
+# are resolved.
 service-common = { path = "../common" }
+# The AWS SDK for Amazon S3, driven over the in-process callback
+# (`OperationContext::callback`): an allow list's criteria name an object of THIS
+# emulator's own object store, and whether that object is there is what the list's
+# status reports. Only the generated client is needed — the emulator supplies the
+# transport, so the SDK's own HTTPS stack and runtime are left out.
+aws-sdk-s3 = { version = "1", default-features = false }
 
 [build-dependencies]
 emulator-core-build-support = { workspace = true }
 
 [dev-dependencies]
 sha2 = { workspace = true }
+# An allow list's `s3WordsList` criteria name an object of this emulator's own
+# object store, so the suite that drives the allow-list loop end to end mounts
+# Amazon S3 beside this service on ONE engine: the objects a criterion resolves
+# against are real objects, staged through S3's own API.
+service-com-amazonaws-s3-amazons3 = { workspace = true }
 
 [lints]
 workspace = true
