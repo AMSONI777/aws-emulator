@@ -8,6 +8,7 @@
 //! always a projection of one of these records onto one component of the
 //! submitted SBOM — never a literal in the handler.
 
+use sha2::Digest;
 use std::collections::{HashMap, VecDeque};
 use std::time::SystemTime;
 
@@ -126,6 +127,79 @@ impl OutputFormat {
 /// digest and the format it was reported in.
 pub type ScanKey = (String, OutputFormat);
 
+/// How many hex digits one component build id of [`ScannerBuild`] is written
+/// with.
+const BUILD_ID_HEX_DIGITS: usize = 8;
+
+/// The build id of the deployed scan API — the request-serving half of the
+/// scanner this state belongs to.
+///
+/// A build id identifies a BUILD, so it is part of the scanner's configuration
+/// rather than something derived per request: it moves when the emulated
+/// scanner deployment moves, and never with the packaging of whatever is
+/// serving it.
+const SCANNER_API_BUILD_ID: &str = "9f4c0b21";
+
+/// The build id of the deployed rule matcher — the half that evaluates an
+/// advisory's affected range against a resolved package coordinate. Held for
+/// the same reason as [`SCANNER_API_BUILD_ID`].
+const SCANNER_MATCHER_BUILD_ID: &str = "c7d81e60";
+
+/// The build identity of the scanner that answers a scan: the build ids of the
+/// parts a scan's answer is produced by.
+///
+/// This is what a CycloneDX report attributes to the scanning service in
+/// `metadata.tools.services[].version`, and a client records it to tell WHICH
+/// scanner produced a report — so it describes the scanner and nothing else.
+/// The advisory-snapshot id is computed from the advisory data actually held
+/// ([`ScannerBuild::of`]), so a store scanning against different data reports a
+/// different build identity, and two reports answered from the same data
+/// compare equal.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ScannerBuild {
+    /// The scan API's build id.
+    pub api: String,
+    /// The rule matcher's build id.
+    pub matcher: String,
+    /// The build id of the advisory snapshot the matcher evaluated.
+    pub advisory_snapshot: String,
+}
+
+impl ScannerBuild {
+    /// The build identity of a scanner matching against `db`.
+    ///
+    /// The snapshot id is the leading [`BUILD_ID_HEX_DIGITS`] hex digits of a
+    /// sha-256 over the advisory set's identifying fields, taken in a sorted
+    /// order so it depends on the CONTENT of the data and not on how the
+    /// records happen to be ordered.
+    pub fn of(db: &[VulnRecord]) -> Self {
+        let mut identities: Vec<String> = db
+            .iter()
+            .map(|record| {
+                format!(
+                    "{}|{}|{}|{}",
+                    record.package_type, record.package_name, record.cve_id, record.modified
+                )
+            })
+            .collect();
+        identities.sort();
+        let digest = sha2::Sha256::digest(identities.join("\n").as_bytes());
+        Self {
+            api: SCANNER_API_BUILD_ID.to_string(),
+            matcher: SCANNER_MATCHER_BUILD_ID.to_string(),
+            advisory_snapshot: hex::encode(digest)
+                .chars()
+                .take(BUILD_ID_HEX_DIGITS)
+                .collect(),
+        }
+    }
+
+    /// The reported form: the component build ids joined by `+`.
+    pub fn version(&self) -> String {
+        format!("{}+{}+{}", self.api, self.matcher, self.advisory_snapshot)
+    }
+}
+
 /// Per-service state for com-amazonaws-inspectorscan-inspectorscan. A handler reaches it through [`service_state`].
 #[derive(Debug)]
 pub struct ComAmazonawsInspectorscanInspectorscanState {
@@ -205,6 +279,17 @@ impl ComAmazonawsInspectorscanInspectorscanState {
         self.index
             .get(&lookup_key(package_type, package_name))
             .is_some_and(|candidates| !candidates.is_empty())
+    }
+
+    /// The build identity of this scanner, as the report attributes it to the
+    /// scanning service.
+    ///
+    /// Computed from the advisory data held here rather than stored beside it,
+    /// so it can never fall out of step with the data a scan actually matched
+    /// against — a reseeded store reports its own snapshot, and repeated reads
+    /// of an unchanged store report the identical value.
+    pub fn scanner_build(&self) -> ScannerBuild {
+        ScannerBuild::of(&self.vulnerability_db)
     }
 
     /// The scan already recorded for this document and output format, if any.

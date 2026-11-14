@@ -86,7 +86,7 @@ use crate::state::{OutputFormat, ScanRecord, VulnRecord};
 use aws_smithy_types::{Document, Number};
 use serde_json::{json, Map, Value};
 use sha2::Digest;
-use std::collections::{BTreeSet, HashMap, HashSet};
+use std::collections::{BTreeSet, HashMap};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 // `#[operation_error]` below expands to an invocation of the LOCAL declarative
@@ -232,17 +232,81 @@ const INSPECTOR_RATING_SOURCE: &str = "Amazon Inspector";
 /// report's `metadata.tools.services`.
 const SCANNER_SERVICE_NAME: &str = "Amazon Inspector Scan SBOM API";
 
-/// The `version` reported beside [`SCANNER_SERVICE_NAME`]: the build version of
-/// the service that answered the scan, which for this emulator is the version
-/// of the crate serving it. Resolved by the compiler from this crate's own
-/// manifest — it is not read from the host at run time.
-const SCANNER_SERVICE_VERSION: &str = env!("CARGO_PKG_VERSION");
+/// WHY a scan drew no conclusion about a component: the skip condition that
+/// fired for it, which is what the report tells the caller so it can act on the
+/// difference.
+///
+/// The two conditions are not interchangeable. A purl that names no package the
+/// scanner looks up is a permanent gap — nothing in that ecosystem, or under
+/// that half-stated coordinate, can ever be ruled on, so the caller must state
+/// the coordinate differently or scan it elsewhere — while a package the
+/// advisory data holds no rule for is in scope and simply matched nothing. The
+/// condition is decided per component, from the component's own resolved
+/// coordinate, so one scan reports both where a document carries both.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SkipReason {
+    /// The component's purl does not name a package the scanner can look up:
+    /// its ecosystem is outside [`SCANNED_ECOSYSTEMS`], or the coordinate
+    /// carries no `namespace` where that ecosystem's packages are named with
+    /// one ([`Namespace::Required`]).
+    UnsupportedPurlNamespace,
+    /// The purl names a package the scanner scans for, but the advisory data
+    /// holds no rule for this package coordinate.
+    NoSupportedRules,
+}
 
-/// What a scan reports for a component it holds no rule for — the component was
-/// seen but nothing could be concluded about it. It is reported both as that
-/// component's CycloneDX `…:info` property and as the `info_message` of the
-/// Inspector report's `messages[]` entry for it.
-const SKIPPED_COMPONENT_MESSAGE: &str = "Component skipped: no supported rules found.";
+impl SkipReason {
+    /// The sentence this condition is reported as — fixed text, with no part
+    /// taken from the component: the entry's `purl` is what names the component
+    /// the sentence is about.
+    ///
+    /// One source for both renderings of one decision: the Inspector report's
+    /// `messages[].info_message` and the component's CycloneDX
+    /// `…:info` property, which therefore cannot disagree.
+    fn info_message(self) -> &'static str {
+        match self {
+            Self::UnsupportedPurlNamespace => "Component skipped: unsupported purl namespace.",
+            Self::NoSupportedRules => "Component skipped: no supported rules found.",
+        }
+    }
+}
+
+/// Why the scan drew no conclusion about `component`, or `None` when it was
+/// ruled on (the advisory data holds rules for its package, whether or not this
+/// release fell inside an affected range).
+fn skip_reason(
+    store: &crate::state::ComAmazonawsInspectorscanInspectorscanState,
+    component: &ScannedComponent,
+) -> Option<SkipReason> {
+    // Whether the purl names a package the scanner looks up AT ALL is settled
+    // first, and against the scanner's own coverage rather than against what the
+    // advisory data happens to hold: a coordinate the scanner cannot resolve
+    // holds no rules for exactly that reason, and reporting it as merely
+    // rule-less would tell the caller to look for a rule that can never exist.
+    // A component carrying no `purl` names no coordinate at all — there is no
+    // ecosystem or namespace to judge — so it falls through to the lookup below.
+    if component.purl.is_some() && !resolves_to_a_scanned_package(component) {
+        return Some(SkipReason::UnsupportedPurlNamespace);
+    }
+    if !store.has_supported_rules(&component.package_type, &component.package_name) {
+        return Some(SkipReason::NoSupportedRules);
+    }
+    None
+}
+
+/// Does `component`'s purl name a package in an ecosystem this scanner scans?
+///
+/// Two conditions, both about the coordinate rather than about the advisory
+/// data: the ecosystem is one of [`SCANNED_ECOSYSTEMS`], and the coordinate
+/// carries the `namespace` that ecosystem names its packages with (see
+/// [`Namespace`]).
+fn resolves_to_a_scanned_package(component: &ScannedComponent) -> bool {
+    match scanned_ecosystem(&component.package_type) {
+        None => false,
+        Some((_, Namespace::Required)) => component.purl_namespace.is_some(),
+        Some((_, Namespace::Optional)) => true,
+    }
+}
 
 /// The prefix of the document-local `bom-ref` a scan assigns every component of
 /// the report (`comp-1`, `comp-2`, …).
@@ -438,6 +502,12 @@ struct ScannedComponent {
     version: String,
     /// The submitted `purl`, when present.
     purl: Option<String>,
+    /// The `namespace` of the submitted purl, `None` when the coordinate
+    /// carries none. Kept beside the resolved name because whether the
+    /// coordinate names a package at all depends on it (see [`Namespace`]),
+    /// while the name itself may not include it (an OS package's namespace is
+    /// the distribution, not part of the package name).
+    purl_namespace: Option<String>,
 }
 
 /// One `pkg:` coordinate, decomposed into the parts the purl specification
@@ -729,7 +799,7 @@ fn resolve_component_tree(
             return Err(invalid(SbomDefect::InvalidValue("name")));
         }
 
-        let (package_type, package_name, version) = match purl {
+        let (package_type, package_name, version, purl_namespace) = match purl {
             Some(raw) => {
                 let parsed =
                     parse_purl(raw).ok_or_else(|| invalid(SbomDefect::InvalidValue("purl")))?;
@@ -743,11 +813,17 @@ fn resolve_component_tree(
                     parsed.ty.clone(),
                     canonical_package_name(&parsed.ty, parsed.namespace.as_deref(), &parsed.name),
                     version,
+                    parsed.namespace.clone(),
                 )
             }
             // No purl: the entry names no ecosystem, so it is scanned under its
             // own name and matches only an advisory recorded without one.
-            None => (String::new(), name.to_string(), declared_version.to_string()),
+            None => (
+                String::new(),
+                name.to_string(),
+                declared_version.to_string(),
+                None,
+            ),
         };
 
         // A coordinate with no version matches nothing: `version_in_range`
@@ -768,6 +844,7 @@ fn resolve_component_tree(
             package_name,
             version,
             purl: purl.map(str::to_string),
+            purl_namespace,
         });
 
         // The stamped entry, with its children resolved the same way, so the
@@ -1096,24 +1173,79 @@ impl ScanSummary {
     }
 }
 
+/// Whether a purl in one ecosystem NAMES its packages with a `namespace`.
+///
+/// purl defines the namespace per type, and in most ecosystems it is what
+/// qualifies the name into a package: the maven groupId, the module path of a
+/// Go module, a composer vendor, the distribution an OS package was built by.
+/// A coordinate in such an ecosystem carrying no namespace identifies no
+/// package at all — which is a different answer from the scanner holding no
+/// rule for the package a coordinate does identify. Where the namespace is
+/// optional (an npm scope) or the ecosystem has none (PyPI, RubyGems,
+/// crates.io, NuGet), the `name` alone identifies the package.
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Namespace {
+    /// The coordinate names a package only together with its namespace.
+    Required,
+    /// The `name` alone names the package.
+    Optional,
+}
+
+/// The purl ecosystems this scanner scans, each with the Amazon Inspector
+/// `packageManager` it reports a finding in that ecosystem under and whether a
+/// purl names a package in it with a `namespace`.
+///
+/// This is the scanner's COVERAGE, and it answers two questions at once: which
+/// package-manager vocabulary a finding is reported in, and whether a component
+/// could be ruled on at all (see [`SkipReason`]). Keeping it as one table is
+/// what keeps those two answers from disagreeing — an ecosystem reported as
+/// `OTHER` is precisely one the scan draws no conclusions in.
+///
+/// The purl `type` keys are the specification's own (lowercase) type names.
+const SCANNED_ECOSYSTEMS: &[(&str, &str, Namespace)] = &[
+    // An npm scope is optional, and PyPI, crates.io, RubyGems and NuGet have no
+    // namespace at all: the name alone is the package.
+    ("npm", "NPM", Namespace::Optional),
+    ("pypi", "PIP", Namespace::Optional),
+    ("cargo", "CARGO", Namespace::Optional),
+    ("gem", "BUNDLER", Namespace::Optional),
+    ("nuget", "NUGET", Namespace::Optional),
+    // A maven artifact is named by its group, a Go module by its path and a
+    // composer package by its vendor.
+    ("maven", "POM", Namespace::Required),
+    ("golang", "GOMOD", Namespace::Required),
+    ("composer", "COMPOSER", Namespace::Required),
+    // The OS package ecosystems are all reported under one package manager, and
+    // each names the DISTRIBUTION its packages were built by: `debian`,
+    // `redhat`, `alpine`. The same package name is a different package, with
+    // different advisories, in each of them, so a coordinate naming none of
+    // them identifies no OS package.
+    ("deb", "OS", Namespace::Required),
+    ("rpm", "OS", Namespace::Required),
+    ("apk", "OS", Namespace::Required),
+];
+
+/// The Inspector `packageManager` and namespace rule for a purl ecosystem this
+/// scanner scans, and `None` for an ecosystem outside [`SCANNED_ECOSYSTEMS`].
+///
+/// The purl specification makes the `type` case-insensitive and canonically
+/// lowercase, so the lookup folds it.
+fn scanned_ecosystem(package_type: &str) -> Option<(&'static str, Namespace)> {
+    let lowered = package_type.to_ascii_lowercase();
+    SCANNED_ECOSYSTEMS
+        .iter()
+        .find(|(ty, _, _)| *ty == lowered)
+        .map(|(_, package_manager, namespace)| (*package_manager, *namespace))
+}
+
 /// The Amazon Inspector `packageManager` name for a purl ecosystem.
 ///
 /// Maps the purl `type` the SBOM states onto the package-manager vocabulary
 /// Inspector reports findings under; an ecosystem outside that vocabulary is
 /// reported as `OTHER` rather than invented.
 fn inspector_package_manager(package_type: &str) -> &'static str {
-    match package_type.to_ascii_lowercase().as_str() {
-        "npm" => "NPM",
-        "pypi" => "PIP",
-        "maven" => "POM",
-        "golang" => "GOMOD",
-        "cargo" => "CARGO",
-        "gem" => "BUNDLER",
-        "nuget" => "NUGET",
-        "composer" => "COMPOSER",
-        "deb" | "rpm" | "apk" => "OS",
-        _ => "OTHER",
-    }
+    scanned_ecosystem(package_type).map_or("OTHER", |(package_manager, _)| package_manager)
 }
 
 /// The CycloneDX `vulnerability` object for one finding.
@@ -1183,10 +1315,15 @@ fn cyclonedx_vulnerability(finding: &Finding) -> Value {
 
 /// The CycloneDX `metadata.tools.services` entry the scanning service reports
 /// itself under.
-fn scanner_service() -> Value {
+///
+/// `version` is the BUILD IDENTITY of the scanner that answered the request,
+/// read from the service's own state ([`crate::state::ScannerBuild`]) — it
+/// describes the scanner, so it is never taken from the packaging of whatever
+/// is serving it.
+fn scanner_service(scanner_version: &str) -> Value {
     json!({
         "name": SCANNER_SERVICE_NAME,
-        "version": SCANNER_SERVICE_VERSION,
+        "version": scanner_version,
     })
 }
 
@@ -1212,14 +1349,18 @@ fn tool_component(entry: &Value) -> Value {
     Value::Object(component)
 }
 
-/// Report, on every component of `components` the scan held no rule for, that
-/// it was skipped.
+/// Report, on every component of `components` the scan drew no conclusion
+/// about, WHY it was skipped.
 ///
 /// The annotation is appended to the component's own `properties`, so what the
 /// caller submitted there is preserved beside it. The walk is bounded exactly
 /// as the two resolution passes are: the tree it walks came from
 /// [`resolve_component_tree`], which refuses anything deeper.
-fn annotate_skipped_components(components: &mut Value, skipped: &HashSet<String>, depth: usize) {
+fn annotate_skipped_components(
+    components: &mut Value,
+    skipped: &HashMap<String, SkipReason>,
+    depth: usize,
+) {
     if depth > MAX_COMPONENT_NESTING {
         return;
     }
@@ -1233,11 +1374,12 @@ fn annotate_skipped_components(components: &mut Value, skipped: &HashSet<String>
         let was_skipped = object
             .get("bom-ref")
             .and_then(Value::as_str)
-            .is_some_and(|bom_ref| skipped.contains(bom_ref));
-        if was_skipped {
+            .and_then(|bom_ref| skipped.get(bom_ref))
+            .copied();
+        if let Some(reason) = was_skipped {
             let property = json!({
                 "name": format!("{INSPECTOR_PROPERTY_NAMESPACE}:info"),
-                "value": SKIPPED_COMPONENT_MESSAGE,
+                "value": reason.info_message(),
             });
             match object.get_mut("properties") {
                 Some(Value::Array(list)) => list.push(property),
@@ -1252,15 +1394,29 @@ fn annotate_skipped_components(components: &mut Value, skipped: &HashSet<String>
     }
 }
 
+/// What the SCAN stamps on a CycloneDX report, beside the findings: the instant
+/// it answered at, the serial number it derived for a document that names none,
+/// and the build identity of the scanner that answered it.
+#[derive(Debug, Clone, Copy)]
+struct ReportStamp<'s> {
+    /// The content-derived `urn:uuid:` serial number, used only when the
+    /// submitted document names none.
+    serial_number: &'s str,
+    /// The scan's instant, as `metadata.timestamp`.
+    timestamp: &'s str,
+    /// The scanning service's own build identity, as
+    /// `metadata.tools.services[].version`.
+    scanner_version: &'s str,
+}
+
 /// The input BOM augmented with the scan's results — the `CYCLONE_DX_1_5` form.
 fn cyclonedx_report(
     submitted: &Map<String, Value>,
     parsed: &ParsedSbom,
     findings: &[Finding],
-    skipped: &HashSet<String>,
+    skipped: &HashMap<String, SkipReason>,
     summary: &ScanSummary,
-    serial_number: &str,
-    timestamp: &str,
+    stamp: ReportStamp<'_>,
 ) -> Value {
     let mut report = submitted.clone();
 
@@ -1289,7 +1445,7 @@ fn cyclonedx_report(
     if !submitted_serial {
         report.insert(
             "serialNumber".to_string(),
-            Value::String(serial_number.to_string()),
+            Value::String(stamp.serial_number.to_string()),
         );
     }
     // `version` is the BOM's own revision number. It is PRESERVED as submitted —
@@ -1301,7 +1457,7 @@ fn cyclonedx_report(
 
     // The resolved component tree, with the `bom-ref` this scan assigned on
     // every entry — the ref each `affects[].ref` resolves to — and the
-    // scanner's own annotation on every component it held no rule for.
+    // scanner's own annotation on every component it drew no conclusion about.
     if let Some(components) = &parsed.components_value {
         let mut components = components.clone();
         annotate_skipped_components(&mut components, skipped, 0);
@@ -1312,7 +1468,10 @@ fn cyclonedx_report(
         Some(Value::Object(existing)) => existing.clone(),
         _ => Map::new(),
     };
-    metadata.insert("timestamp".to_string(), Value::String(timestamp.to_string()));
+    metadata.insert(
+        "timestamp".to_string(),
+        Value::String(stamp.timestamp.to_string()),
+    );
 
     // The scan reports WHO scanned the document: the scanning service, under
     // `metadata.tools.services`, beside whatever the submitted document already
@@ -1330,9 +1489,12 @@ fn cyclonedx_report(
         _ => Map::new(),
     };
     match tools.get_mut("services") {
-        Some(Value::Array(services)) => services.push(scanner_service()),
+        Some(Value::Array(services)) => services.push(scanner_service(stamp.scanner_version)),
         _ => {
-            tools.insert("services".to_string(), json!([scanner_service()]));
+            tools.insert(
+                "services".to_string(),
+                json!([scanner_service(stamp.scanner_version)]),
+            );
         }
     }
     metadata.insert("tools".to_string(), Value::Object(tools));
@@ -1427,9 +1589,11 @@ fn inspector_finding(finding: &Finding) -> Value {
 /// What the report says about the scan as a whole is NOT chosen: it carries
 /// `vulnerabilities` (one entry per matched advisory, each naming the advisory
 /// `id` and the `severity` it was rated at), the unconditional per-severity
-/// `vulnerability_count`, and `messages`, one entry per component the scanner
-/// held no rule for — so a reader can tell a clean scan from an uncovered one
-/// instead of reading an empty report as either.
+/// `vulnerability_count`, and `messages`, one entry per component the scan drew
+/// no conclusion about — each carrying the condition that fired for it — so a
+/// reader can tell a clean scan from an uncovered one, and an uncovered
+/// ecosystem from an uncovered package, instead of reading an empty report as
+/// any of them.
 ///
 /// The rest of the ENVELOPE IS CHOSEN, NOT MODELLED. `sbom` is a Smithy
 /// `document`, and neither the model nor this operation's documentation states
@@ -1557,20 +1721,23 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
             .and_then(Value::as_str)
             .map(str::to_string);
 
-        // Match every component against the stored advisories, note the ones
-        // the store holds no rule for, then settle this scan's identity, all
-        // under one lock.
-        let (scan_id, received_at, findings, skipped) = {
+        // Match every component against the stored advisories, note WHY the
+        // scan drew no conclusion about the ones it could not rule on, read the
+        // scanner's build identity, then settle this scan's identity, all under
+        // one lock.
+        let (scan_id, received_at, findings, skipped, scanner_version) = {
             let mut store = state.lock();
 
             let mut findings: Vec<Finding> = Vec::new();
-            // The components the scan could not rule on: the store holds no
-            // advisory for their package at all, which is a different answer
-            // from "a rule applied and cleared this version".
-            let mut skipped: HashSet<String> = HashSet::new();
+            // The components the scan could not rule on, each with the skip
+            // condition that fired for it: the ecosystem is one the scanner
+            // does not scan, or the store holds no advisory for the package at
+            // all. Either is a different answer from "a rule applied and
+            // cleared this version".
+            let mut skipped: HashMap<String, SkipReason> = HashMap::new();
             for component in &parsed.components {
-                if !store.has_supported_rules(&component.package_type, &component.package_name) {
-                    skipped.insert(component.bom_ref.clone());
+                if let Some(reason) = skip_reason(&store, component) {
+                    skipped.insert(component.bom_ref.clone(), reason);
                 }
                 for index in store.matching_advisories(
                     &component.package_type,
@@ -1625,28 +1792,39 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
                     .collect(),
                 sbom_digest: digest.clone(),
             });
-            (scan_id, received_at, findings, skipped)
+            (
+                scan_id,
+                received_at,
+                findings,
+                skipped,
+                store.scanner_build().version(),
+            )
         };
 
         let timestamp = rfc3339(received_at);
         let component_count = parsed.components.len();
         let summary = ScanSummary::of(&findings);
-        // One message per component the scan held no rule for, naming it by the
-        // purl the submitted document states for it — a component the document
-        // gives no purl for has no coordinate to name it by, so the entry
-        // carries the reason alone.
+        // One message per component the scan drew no conclusion about, carrying
+        // the condition that fired for THAT component and naming it by the purl
+        // the submitted document states for it — a component the document gives
+        // no purl for has no coordinate to name it by, so the entry carries the
+        // reason alone.
         let messages: Vec<Value> = parsed
             .components
             .iter()
-            .filter(|component| skipped.contains(&component.bom_ref))
-            .map(|component| {
+            .filter_map(|component| {
+                skipped
+                    .get(&component.bom_ref)
+                    .map(|reason| (component, *reason))
+            })
+            .map(|(component, reason)| {
                 let mut message = Map::new();
                 if let Some(purl) = &component.purl {
                     message.insert("purl".to_string(), Value::String(purl.clone()));
                 }
                 message.insert(
                     "info_message".to_string(),
-                    Value::String(SKIPPED_COMPONENT_MESSAGE.to_string()),
+                    Value::String(reason.info_message().to_string()),
                 );
                 Value::Object(message)
             })
@@ -1661,8 +1839,11 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
                 &findings,
                 &skipped,
                 &summary,
-                &serial_number_from_digest(&digest),
-                &timestamp,
+                ReportStamp {
+                    serial_number: &serial_number_from_digest(&digest),
+                    timestamp: &timestamp,
+                    scanner_version: &scanner_version,
+                },
             ),
             OutputFormat::Inspector => inspector_report(
                 &scan_id,

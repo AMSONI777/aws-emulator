@@ -19,5 +19,9 @@ mod scan_report_annotations;
 mod scan_sbom;
 #[path = "all/scan_sbom_refusals.rs"]
 mod scan_sbom_refusals;
+#[path = "all/scan_skip_reasons.rs"]
+mod scan_skip_reasons;
+#[path = "all/scanner_build_identity.rs"]
+mod scanner_build_identity;
 #[path = "all/state_roundtrip.rs"]
 mod state_roundtrip;
