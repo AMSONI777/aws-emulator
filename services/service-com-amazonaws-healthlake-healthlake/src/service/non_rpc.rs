@@ -33,9 +33,20 @@ const MAX_ECHOED: usize = 256;
 /// `datatransformation.` host prefix the client injects addresses the ENDPOINT and
 /// leaves the path alone, so nothing here reads the host.
 pub(crate) fn addresses_validate_source(path: &str) -> bool {
+    addresses_segment(path, super::validate_source::VALIDATE_SOURCE_PATH_SEGMENT)
+}
+
+/// Whether `path` addresses the surface the data-transformation endpoint publishes
+/// at the single segment `segment`.
+///
+/// The ONE place such a path is recognised — `/validate-source` and
+/// `/transform-data` are both addressed this way — so no surface reads the path
+/// space differently from another. The rules are those of
+/// [`addresses_validate_source`]: segments rather than string equality, and nothing
+/// about the host, which addresses the endpoint and not the path.
+pub(crate) fn addresses_segment(path: &str, segment: &str) -> bool {
     let mut segments = path.split('/').filter(|segment| !segment.is_empty());
-    segments.next() == Some(super::validate_source::VALIDATE_SOURCE_PATH_SEGMENT)
-        && segments.next().is_none()
+    segments.next() == Some(segment) && segments.next().is_none()
 }
 
 /// The path component of a request URI, with any scheme, authority and query removed.
@@ -132,6 +143,76 @@ pub(crate) fn modelled_error(status: u16, shape: &str, message: &str) -> RtRespo
         .headers_mut()
         .insert("content-type", AWS_JSON_CONTENT_TYPE);
     response
+}
+
+/// The members a request body carries.
+///
+/// An empty body carries no member at all, which is what a required-member rule
+/// then states. A body that is not a JSON object carries no members either, but it
+/// is not a statement about one member, so it is refused as a whole.
+///
+/// Shared by the non-RPC surfaces that read a JSON request body
+/// ([`super::rest_tagging`], [`super::transform_data`]), so none of them reads a
+/// body differently from another.
+pub(crate) fn request_members(
+    body: &[u8],
+) -> Result<::serde_json::Map<String, ::serde_json::Value>, String> {
+    if body.iter().all(u8::is_ascii_whitespace) {
+        return Ok(::serde_json::Map::new());
+    }
+    match ::serde_json::from_slice::<::serde_json::Value>(body) {
+        Ok(::serde_json::Value::Object(members)) => Ok(members),
+        Ok(_) | Err(_) => Err("The request body must be a JSON object".to_string()),
+    }
+}
+
+/// How a required member left out of the request is stated: the envelope the
+/// framework's own constraint walk words an absent `@required` member with.
+pub(crate) fn missing_member(member: &str) -> String {
+    super::validation_envelope(&[::smithy_server_runtime::Violation {
+        path: member_path(member),
+        kind: ::smithy_server_runtime::ViolationKind::MissingRequiredMember,
+        // An absent member has no value to echo.
+        value: None,
+        sensitive: false,
+    }])
+}
+
+/// How a member whose JSON type is not the modelled shape's is stated.
+///
+/// This is not a constraint violation — the value never became a value of the
+/// modelled type at all — so it states what the member must be instead of claiming a
+/// constraint the model does not declare. It is still the modelled
+/// `ValidationException` that carries it: that shape is what this service declares
+/// for an invalid user input parameter, and a member of the wrong type is one.
+pub(crate) fn not_of_modelled_type(path: &str, expected: &str) -> String {
+    format!("Value at '{path}' must be {expected}")
+}
+
+/// A `@length` bound as a violation carries it.
+pub(crate) fn bound(bound: usize) -> i64 {
+    i64::try_from(bound).unwrap_or(i64::MAX)
+}
+
+/// The violation path of the member `member`: its model name in the lowerCamel
+/// spelling a path takes.
+pub(crate) fn member_path(member: &str) -> String {
+    ::aws_smithy_schema_server::constraints::path::member(member)
+}
+
+/// The violation path of the map entry `key` of the member `member`.
+///
+/// The key is bounded in the path for the reason every echoed value is: the key's own
+/// bound is checked first, so a key past it is stated by that violation rather than
+/// spread through this one.
+pub(crate) fn entry_path(member: &str, key: &str) -> String {
+    entry_at(&member_path(member), key)
+}
+
+/// The same, for a member already spelled as a violation PATH — one reached through
+/// another member, say — which is not a member name to be re-spelled.
+pub(crate) fn entry_at(path: &str, key: &str) -> String {
+    format!("{path}.{}", bounded(key))
 }
 
 #[cfg(test)]

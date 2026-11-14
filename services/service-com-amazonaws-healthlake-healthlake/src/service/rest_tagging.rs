@@ -58,7 +58,10 @@ use smithy_server_runtime::{
     BoxFuture, ErasedOperation, OperationContext, Service, Violation, ViolationKind,
 };
 
-use super::non_rpc::{bounded, modelled_error, request_path};
+use super::non_rpc::{
+    bound, bounded, entry_path, member_path, missing_member, modelled_error, not_of_modelled_type,
+    request_members, request_path,
+};
 
 /// The first path segment of the reporting and tagging operations, from their
 /// modelled `@http(uri: "/tags/{ResourceArn}")`.
@@ -399,44 +402,6 @@ fn requested_tag_keys(body: &[u8]) -> Result<Vec<String>, String> {
     }
 }
 
-/// The members a request body carries.
-///
-/// An empty body carries no member at all, which is what the required-member rule
-/// above then states. A body that is not a JSON object carries no members either, but
-/// it is not a statement about one member, so it is refused as a whole.
-fn request_members(body: &[u8]) -> Result<::serde_json::Map<String, ::serde_json::Value>, String> {
-    if body.iter().all(u8::is_ascii_whitespace) {
-        return Ok(::serde_json::Map::new());
-    }
-    match ::serde_json::from_slice::<::serde_json::Value>(body) {
-        Ok(::serde_json::Value::Object(members)) => Ok(members),
-        Ok(_) | Err(_) => Err("The request body must be a JSON object".to_string()),
-    }
-}
-
-/// How a required member left out of the request is stated: the envelope the
-/// framework's own constraint walk words an absent `@required` member with.
-fn missing_member(member: &str) -> String {
-    super::validation_envelope(&[Violation {
-        path: member_path(member),
-        kind: ViolationKind::MissingRequiredMember,
-        // An absent member has no value to echo.
-        value: None,
-        sensitive: false,
-    }])
-}
-
-/// How a member whose JSON type is not the modelled shape's is stated.
-///
-/// This is not a constraint violation — the value never became a value of the
-/// modelled type at all — so it states what the member must be instead of claiming a
-/// constraint the model does not declare. It is still the modelled
-/// `ValidationException` that carries it: that shape is what this service declares
-/// for an invalid user input parameter, and a member of the wrong type is one.
-fn not_of_modelled_type(path: &str, expected: &str) -> String {
-    format!("Value at '{path}' must be {expected}")
-}
-
 /// A collection longer than its modelled `@length` maximum.
 fn collection_too_long(member: &str, max: usize) -> Violation {
     Violation {
@@ -474,26 +439,6 @@ fn key_length_violations(path: &str, key: &str) -> Vec<Violation> {
         value: Some(bounded(key)),
         sensitive: false,
     }]
-}
-
-/// A `@length` bound as a violation carries it.
-fn bound(bound: usize) -> i64 {
-    i64::try_from(bound).unwrap_or(i64::MAX)
-}
-
-/// The violation path of the member `member`: its model name in the lowerCamel
-/// spelling a path takes.
-fn member_path(member: &str) -> String {
-    ::aws_smithy_schema_server::constraints::path::member(member)
-}
-
-/// The violation path of the map entry `key` of the member `member`.
-///
-/// The key is bounded in the path for the reason every echoed value is: the key's own
-/// bound is checked first, so a key past it is stated by that violation rather than
-/// spread through this one.
-fn entry_path(member: &str, key: &str) -> String {
-    format!("{}.{}", member_path(member), bounded(key))
 }
 
 /// The violation path of the element at the zero-based `index` of the list member

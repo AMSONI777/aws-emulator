@@ -20,7 +20,10 @@ emulator-server = { workspace = true }
 emulator-telemetry = { workspace = true }
 aws-smithy-runtime-api = { workspace = true }
 aws-smithy-types = { workspace = true }
-tokio = { workspace = true }
+# `time` beside the workspace features: the synchronous transform
+# (`src/service/transform_data.rs`) runs its CPU work on the blocking pool under a
+# server-side deadline, so the shipped crate needs the timer and not only the tests.
+tokio = { workspace = true, features = ["time"] }
 bytes = { workspace = true }
 http = { workspace = true }
 serde_json = { workspace = true }
@@ -41,6 +44,17 @@ aws-sdk-s3 = { version = "1", default-features = false, features = ["rt-tokio", 
 # profile mapping from (`src/state/sample_data.rs`): the columns and the values the
 # mapping is inferred from come from a real CSV reader, not from matching on text.
 csv = "1.4"
+# Reads the mapping config a data transformation profile's content is written in
+# (`src/state/profile_transform.rs`): a YAML document, and — since YAML 1.2 is a
+# superset of JSON — the JSON rule files this service itself computes for a profile.
+# yaml-rust2 is the pure-Rust YAML 1.2 implementation the other services that read
+# caller-supplied YAML in this workspace use.
+yaml-rust2 = { version = "0.10", default-features = false }
+# Writes a mapped value into the FHIR resource element a mapping rule names
+# (`name[0].family`): `dot_set` walks a dotted path over a `serde_json::Value`,
+# creating the objects and arrays the path passes through, so this crate does not
+# hand-roll that traversal.
+json_dotpath = "1.1"
 
 [build-dependencies]
 emulator-core-build-support = { workspace = true }

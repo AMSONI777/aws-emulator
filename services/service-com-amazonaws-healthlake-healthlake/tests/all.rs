@@ -101,6 +101,8 @@ mod store_wide_byte_ceiling_holders;
 mod tag_mutation_requires_a_live_resource;
 #[path = "all/timestamp_cutoff_filters.rs"]
 mod timestamp_cutoff_filters;
+#[path = "all/transform_data.rs"]
+mod transform_data;
 #[path = "all/update_data_transformation_profile.rs"]
 mod update_data_transformation_profile;
 #[path = "all/update_fhir_datastore.rs"]

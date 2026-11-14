@@ -25,8 +25,9 @@
 //!   surfaces that are not awsJson1_0 RPC calls and carry no `X-Amz-Target` at all —
 //!   a data store's FHIR REST data plane ([`fhir_rest`], on the path a
 //!   `DatastoreEndpoint` publishes), the data-transformation endpoint's
-//!   `/validate-source` check ([`validate_source`]) and that endpoint's REST tagging
-//!   surface ([`rest_tagging`], `/tags` and `/untag`); the first is not a modelled
+//!   `/validate-source` check ([`validate_source`]), that endpoint's REST tagging
+//!   surface ([`rest_tagging`], `/tags` and `/untag`) and its synchronous transform
+//!   ([`transform_data`], `/transform-data`); the first is not a modelled
 //!   operation at all and the others are modelled outside the closure of the service
 //!   shape this crate serves, so the generated routing table cannot name any of them,
 //!   and this seam routes them by
@@ -96,6 +97,7 @@ pub mod fhir_rest;
 pub mod non_rpc;
 pub mod rest_tagging;
 pub mod synthea;
+pub mod transform_data;
 pub mod validate_source;
 
 use std::collections::HashMap;
@@ -363,6 +365,12 @@ pub struct EmulatedService<Eng: Send + Sync + 'static> {
     fhir_rest: fhir_rest::FhirRestDataPlane<Eng>,
     /// Serves `POST /validate-source`, which is stateless.
     validate_source: validate_source::ValidateSource,
+    /// Serves the data-transformation endpoint's synchronous transform —
+    /// `POST /transform-data`, and the same operation named by its RPC target.
+    /// Held on the service for the reason [`fhir_rest`] is, and owns the shared
+    /// engine so the profile it transforms with is the one the control plane's
+    /// handlers wrote.
+    transform_data: transform_data::TransformData<Eng>,
     /// Serves the data-transformation endpoint's REST tagging surface — `GET`/`POST
     /// /tags/{ResourceArn}` and `POST /untag/{ResourceArn}`. Held on the service for
     /// the reason [`fhir_rest`] is, and owns the shared engine so the tags it writes
@@ -389,6 +397,7 @@ impl<Eng: Send + Sync + 'static> EmulatedService<Eng> {
         Self {
             fhir_rest: fhir_rest::FhirRestDataPlane::new(Arc::clone(&engine)),
             validate_source: validate_source::ValidateSource::new(),
+            transform_data: transform_data::TransformData::new(Arc::clone(&engine)),
             rest_tagging: rest_tagging::RestTagging::new(Arc::clone(&engine)),
             update_profile_with_agent: EventStreamRoute(UpdateProfileWithAgent::new(Arc::clone(
                 &engine,
@@ -651,6 +660,9 @@ impl<Eng: Send + Sync + 'static> Service for EmulatedService<Eng> {
             if req.method() == "POST" && non_rpc::addresses_validate_source(path) {
                 return Some(&self.validate_source);
             }
+            if req.method() == "POST" && transform_data::addresses_transform_data(path) {
+                return Some(&self.transform_data);
+            }
             if rest_tagging::addressed_tagging(req.method(), req.uri()).is_some() {
                 return Some(&self.rest_tagging);
             }
@@ -671,6 +683,13 @@ impl<Eng: Send + Sync + 'static> Service for EmulatedService<Eng> {
         let key = self.entry.protocol().routing_key(req).ok()?;
         if key == crate::ops::update_profile_with_agent::UPDATE_PROFILE_WITH_AGENT {
             return Some(&self.update_profile_with_agent);
+        }
+        // `TransformData` is modelled OUTSIDE this service shape's closure, so the
+        // generated routing table cannot name it even though an SDK built from the
+        // full model addresses it by target. Its path-addressed form is routed
+        // above; this is the same operation reached the other way.
+        if key == transform_data::TRANSFORM_DATA {
+            return Some(&self.transform_data);
         }
         let gate = self.input_validation.get(key)?;
         Some(gate.as_ref())

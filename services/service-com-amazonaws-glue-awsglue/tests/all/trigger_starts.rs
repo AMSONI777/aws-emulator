@@ -299,6 +299,12 @@ pub(crate) fn set_due_instant(
             .job_mut(REGION, &job_name)
             .and_then(|job| job.run_mut(&run_id))
         {
+            // BOTH instants a job run is owed a state at, exactly as the job-run
+            // suite's own helper moves them (`job_runs::set_due_instants`): the state
+            // the clock owes it NEXT, and the state its script execution decided it
+            // comes to REST in. Moving only the first leaves the rest in the future,
+            // so the run would settle into running and stop there and the workflow run
+            // would never come to rest.
             if job_run.settles_at.is_some() {
                 job_run.settles_at = Some(at);
             }
