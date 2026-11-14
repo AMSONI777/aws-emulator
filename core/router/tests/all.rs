@@ -3167,3 +3167,24 @@ mod cloudformation_alb_fargate_service_converges;
 // fails every suite in this target. `all/all_rs_declares_each_suite_once.rs` checks that for
 // this file and for every service crate's `tests/all.rs`, so check there rather than leaving a
 // note here.)
+// (`cloudformation_metric_stream_filter_update` is declared ONCE further up this file: two
+// landings each appended a copy here, and a module declared twice compiles neither.)
+// (`cloudformation_kms_encrypted_sns_sqs_pipeline` is declared ONCE, in the sorted span at
+// the head of this file: a landing appended a second copy here, which compiled neither.)
+// (`pricing_plan_subscription_resource_eligibility` is declared ONCE further up this tail: a
+// landing appended a second copy here, and a module declared twice compiles neither.)
+// Appended here, as every concurrently landing suite appends its line: the handle a stack
+// publishes for each S3 bucket variant drives the operations of the service that owns it,
+// which spans CloudFormation, Amazon S3, Amazon S3 Tables and Amazon S3 Vectors at once.
+#[path = "all/cloudformation_bucket_handles_drive_their_owning_services.rs"]
+mod cloudformation_bucket_handles_drive_their_owning_services;
+// (`bedrock_agent_ingestion_populates_its_s3_vectors_index` is declared ONCE further up this
+// tail: a landing appended a second copy here, and a module declared twice compiles neither.)
+// (A fragment of this file's own header that a landing appended HERE, in the tail: an
+// inner doc comment is only legal at the top of the file, so it is left as a plain comment.
+// leaving a note here.)
+// (A fragment of this file's own header that a landing appended HERE, in the tail: an inner
+// doc comment is only legal before any item, so it is left as a plain comment.
+// doc comment (`//!`) is only legal before any item, so it is left as a plain comment.
+// (A fragment of this file's own header that a landing appended HERE, in the tail, as an
+// inner doc comment; `//!` is only legal before any item, so it is an ordinary comment.

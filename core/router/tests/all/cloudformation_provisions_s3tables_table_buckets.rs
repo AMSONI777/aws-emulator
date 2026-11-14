@@ -51,7 +51,11 @@ const ACCOUNT: &str = "000000000000";
 /// as `core/router/src/lib.rs` mounts them. Request authentication is off, as in every other
 /// suite here; the in-process callback CloudFormation makes signs its request either way
 /// (the credential scope is what routes it).
-fn build_router() -> MultiServiceRouter {
+///
+/// Shared with `cloudformation_bucket_handles_drive_their_owning_services.rs`, which drives
+/// the handle a stack publishes through every operation S3 Tables keys by it, so both suites
+/// drive the SAME emulator through the same calls.
+pub(crate) fn build_router() -> MultiServiceRouter {
     let engine: Arc<engine::InMemoryEngine> = Arc::new(engine::InMemoryEngine::new());
     let mut router = MultiServiceRouter::new();
     router.set_request_authentication(false);
@@ -75,7 +79,7 @@ fn build_router() -> MultiServiceRouter {
 /// A SigV4 `Authorization` header whose credential scope names `service` in `region`, which
 /// is what routes the request and what each handler reads its Region from. The signature is
 /// never checked: this router runs with request authentication off.
-fn authorization(service: &str, region: &str) -> String {
+pub(crate) fn authorization(service: &str, region: &str) -> String {
     format!(
         "AWS4-HMAC-SHA256 Credential=AKIAIOSFODNN7EXAMPLE/20260101/{region}/{service}/aws4_request, \
          SignedHeaders=host, Signature=0000000000000000000000000000000000000000000000000000000000000000"
@@ -83,7 +87,7 @@ fn authorization(service: &str, region: &str) -> String {
 }
 
 /// Call one CloudFormation operation over its awsQuery wire, signed for `region`.
-async fn cloudformation(
+pub(crate) async fn cloudformation(
     router: &MultiServiceRouter,
     region: &str,
     action: &str,
@@ -111,7 +115,11 @@ async fn cloudformation(
 
 /// An ARN as a single `@httpLabel` path segment: its `:` and `/` travel percent-encoded, or
 /// the request addresses a different route.
-fn label(value: &str) -> String {
+///
+/// Shared with `cloudformation_bucket_handles_drive_their_owning_services.rs`, which drives
+/// the handle a stack publishes through every operation S3 Tables keys by it, so both suites
+/// write the handle into a URI the same way.
+pub(crate) fn label(value: &str) -> String {
     value
         .replace('%', "%25")
         .replace(':', "%3A")
@@ -119,20 +127,32 @@ fn label(value: &str) -> String {
 }
 
 /// Call one Amazon S3 Tables operation over its restJson1 wire, signed for `region`, on the
-/// method and URI its own `@http` binding declares.
-async fn s3tables(
+/// method and URI its own `@http` binding declares, with the request document for an
+/// operation that takes a body (`None` for the reads, which take none).
+///
+/// Shared with `cloudformation_bucket_handles_drive_their_owning_services.rs`, which drives
+/// the handle a stack publishes through every operation S3 Tables keys by it — creates among
+/// them — so both suites reach that service over one caller.
+pub(crate) async fn s3tables(
     router: &MultiServiceRouter,
     region: &str,
     method: &str,
     uri: &str,
+    body: Option<&Value>,
 ) -> (u16, Value) {
+    let sent = match body {
+        Some(document) => {
+            Bytes::from(serde_json::to_vec(document).expect("the request body serializes"))
+        }
+        None => Bytes::new(),
+    };
     let request = http::Request::builder()
         .method(method)
         .uri(uri)
         .header("host", format!("s3tables.{region}.amazonaws.com"))
         .header("content-type", "application/json")
         .header("authorization", authorization("s3tables", region))
-        .body(Bytes::new())
+        .body(sent)
         .expect("a well-formed request");
     let response = router.dispatch(request).await;
     let status = response.status().as_u16();
@@ -147,12 +167,19 @@ async fn get_table_bucket(
     region: &str,
     arn: &str,
 ) -> (u16, Value) {
-    s3tables(router, region, "GET", &format!("/buckets/{}", label(arn))).await
+    s3tables(
+        router,
+        region,
+        "GET",
+        &format!("/buckets/{}", label(arn)),
+        None,
+    )
+    .await
 }
 
 /// Call one Amazon S3 Vectors operation over its restJson1 wire: a POST to the operation's
 /// own URI, which is how that model binds every one of them.
-async fn s3vectors(
+pub(crate) async fn s3vectors(
     router: &MultiServiceRouter,
     region: &str,
     operation: &str,
@@ -176,7 +203,7 @@ async fn s3vectors(
 
 /// `GET /<bucket>?location` — Amazon S3's `GetBucketLocation`, the read a client holding
 /// only the bucket NAME makes, which is the identifier shape that service takes.
-async fn get_bucket_location(
+pub(crate) async fn get_bucket_location(
     router: &MultiServiceRouter,
     region: &str,
     bucket: &str,
@@ -196,20 +223,20 @@ async fn get_bucket_location(
 
 /// A table bucket's ARN in `region`: the same total function of the Region and the name both
 /// services compute it from (`arn:aws:s3tables:<region>:<account>:bucket/<name>`).
-fn table_bucket_arn(region: &str, name: &str) -> String {
+pub(crate) fn table_bucket_arn(region: &str, name: &str) -> String {
     format!("arn:aws:s3tables:{region}:{ACCOUNT}:bucket/{name}")
 }
 
 /// A vector bucket's ARN in `region`, which differs from the table bucket's only in the ARN
 /// namespace its owning service publishes.
-fn vector_bucket_arn(region: &str, name: &str) -> String {
+pub(crate) fn vector_bucket_arn(region: &str, name: &str) -> String {
     format!("arn:aws:s3vectors:{region}:{ACCOUNT}:bucket/{name}")
 }
 
 /// Whether `name` is inside the name form the S3 Tables model publishes for a table bucket
 /// (`CreateTableBucket.name`: `@length(min: 3, max: 63)`, pattern `^[0-9a-z-]*$`), and
 /// begins and ends with an alphanumeric, which that service holds a name to besides.
-fn is_s3tables_name(name: &str) -> bool {
+pub(crate) fn is_s3tables_name(name: &str) -> bool {
     let bytes = name.as_bytes();
     let alnum = |b: u8| b.is_ascii_lowercase() || b.is_ascii_digit();
     (3..=63).contains(&bytes.len())
@@ -510,6 +537,7 @@ async fn a_stack_publishes_each_bucket_variant_under_its_owning_services_identif
                 region,
                 "GET",
                 &format!("/buckets/{}/encryption", label(&arn)),
+                None,
             )
             .await;
             assert_eq!(
