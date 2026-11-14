@@ -559,30 +559,21 @@ pub fn no_rule_with_identifier(identifier: &str) -> String {
     format!("A notification rule with the Id {identifier} was not found.")
 }
 
-/// Mint a `NotificationRuleId`: a UUID-shaped, 36-character id (inside the modelled
-/// 1..40) derived from the account-wide creation counter and the wall clock, so two
-/// rules created from identical parameters still get distinct ids.
+/// Mint a `NotificationRuleId`: a randomly drawn version-4 UUID in its canonical
+/// hyphenated, lowercase form — 36 characters, inside the modelled 1..40 — which is the
+/// form a notification rule's id is reported in, both on its own and as the resource
+/// segment of the rule's ARN ([`notification_rule_arn`]).
 ///
-/// The id is OPAQUE. Nothing may be parsed back out of it — not the sequence, not the
-/// time — and no handler may derive anything from one: it is only ever compared for
-/// equality or used as the ARN's resource segment.
-pub fn new_rule_id(sequence: u64) -> String {
-    let nanos = SystemTime::now()
-        .duration_since(SystemTime::UNIX_EPOCH)
-        .map_or(0, |d| d.as_nanos());
-    let digest = sha256_hex(&format!("notificationrule/{sequence}/{nanos}"));
-    // Lay the digest out as a version-4 UUID: 8-4-4-4-12 hex digits with the version
-    // nibble set to 4 and the variant nibble to 8, the shape AWS rule ids take.
-    let d = digest.as_bytes();
-    let hex = |range: std::ops::Range<usize>| String::from_utf8_lossy(&d[range]).to_string();
-    format!(
-        "{}-{}-4{}-8{}-{}",
-        hex(0..8),
-        hex(8..12),
-        hex(13..16),
-        hex(17..20),
-        hex(20..32),
-    )
+/// Drawn by `uuid`, so every one of the 122 random bits is random: the id is unique
+/// however two rules were created, and it is not a function of anything this service
+/// knows (not the creation order, not the clock, not the request), so no two ids of one
+/// account are related and nothing about a rule can be inferred from the one it got.
+///
+/// The id is OPAQUE: nothing may be parsed back out of it, and no handler may derive
+/// anything from one — it is only ever compared for equality or used as the ARN's
+/// resource segment.
+pub fn new_rule_id() -> String {
+    ::uuid::Uuid::new_v4().as_hyphenated().to_string()
 }
 
 /// A stable fingerprint of the parameters a request carried, used to tell a genuine
@@ -909,7 +900,7 @@ mod tests {
 
     #[test]
     fn a_rule_id_fits_the_modelled_length() {
-        let id = new_rule_id(1);
+        let id = new_rule_id();
         assert!(
             (1..=40).contains(&id.len()),
             "NotificationRuleId is len 1..40, got {} for {id}",

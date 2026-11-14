@@ -327,7 +327,7 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         }
 
         let sequence = store.take_sequence();
-        let id = st::new_rule_id(sequence);
+        let id = st::new_rule_id();
         let arn = st::notification_rule_arn(&region, &id);
         let created_timestamp = st::now_timestamp();
         let rule = st::NotificationRule {

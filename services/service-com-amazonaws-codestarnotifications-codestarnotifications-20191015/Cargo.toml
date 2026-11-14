@@ -21,9 +21,11 @@ bytes = { workspace = true }
 http = { workspace = true }
 serde_json = { workspace = true }
 tracing = { workspace = true }
-# Hashing (rule ids, idempotency fingerprints) and hex (opaque page tokens, id digests).
+# Hashing (idempotency fingerprints) and hex (opaque page tokens).
 sha2 = { workspace = true }
 hex = { workspace = true }
+# The rule ids this service mints: canonical, randomly drawn version-4 UUIDs.
+uuid = { version = "1", features = ["v4"] }
 
 [build-dependencies]
 emulator-core-build-support = { workspace = true }
