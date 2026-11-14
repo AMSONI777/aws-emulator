@@ -846,6 +846,18 @@ impl EvaluatedTable {
             table_name: table.table_name.clone(),
         }
     }
+
+    /// Whether this address and `other` name the SAME catalog table.
+    ///
+    /// The two names are kept as the request spelled them, so they are compared folded the
+    /// way the catalog stores a name ([`fold_name`]) — another casing of a stored table
+    /// addresses that same table. The catalog is already resolved on both sides
+    /// ([`resolve_catalog_id`]), so it is compared as it stands.
+    pub fn addresses_same_table(&self, other: &Self) -> bool {
+        self.catalog_id == other.catalog_id
+            && fold_name(&self.database_name) == fold_name(&other.database_name)
+            && fold_name(&self.table_name) == fold_name(&other.table_name)
+    }
 }
 
 /// One data quality ruleset evaluation run, as `StartDataQualityRulesetEvaluationRun`
@@ -972,6 +984,73 @@ impl DataQualityRulesetEvaluationRunEntry {
     /// of time (in seconds) that the run consumed resources".
     pub fn execution_time_seconds(&self) -> i32 {
         data_quality_run_execution_time_seconds(self.started_on, self.completed_on)
+    }
+
+    /// Whether this run satisfies every criterion `filter` names.
+    ///
+    /// A `DataQualityRulesetEvaluationRunFilter` is "the filter criteria": a conjunction in
+    /// which each member it carries narrows the listing and a member it leaves out narrows
+    /// nothing. `DataSource` is "a data source (an Glue table) associated with the run", so
+    /// it is matched on the table the run's OWN `DataSource` addresses — with the names folded
+    /// the way the catalog stores them, so another casing of the same table still matches, and
+    /// whichever of the two members of a `DataSource` carries the table, since both address
+    /// one the same way.
+    ///
+    /// The run's `DataSource` is the ONLY member either side documents as "the data source (an
+    /// Glue table) associated with the run" — singular, and the one member a listed run
+    /// reports ([`Self::to_run_description`]), so it is what the criteria's own `DataSource`
+    /// names. The tables of its `AdditionalDataSources` are "additional data sources you can
+    /// specify for an evaluation run", which the criteria carry no member for and a listed run
+    /// does not report, so a run is not admitted by a table it reads only as an additional
+    /// source; what it reads in full is reported by the single-run read.
+    ///
+    /// `RulesetName` is "the name of the ruleset", so a run
+    /// qualifies when it evaluates a ruleset under that name; the model documents no matching
+    /// mode, so the name is compared whole, the way this service's other filtered listings
+    /// compare a name. The instant pair bounds the window the criteria describe
+    /// ([`instant_window_admits`], the one reading this service's filtered listings share).
+    ///
+    /// `wanted` is the table the filter's `DataSource` addresses, already resolved into the
+    /// catalog that serves it — the caller resolves it once rather than per run, and a
+    /// `DataSource` addressing no table at all is refused before this is reached.
+    pub fn matches(
+        &self,
+        filter: &DataQualityRulesetEvaluationRunFilter,
+        wanted: &EvaluatedTable,
+    ) -> bool {
+        if !self.primary_table.addresses_same_table(wanted) {
+            return false;
+        }
+        if filter
+            .ruleset_name
+            .as_deref()
+            .is_some_and(|name| !self.ruleset_names.iter().any(|named| named == name))
+        {
+            return false;
+        }
+        instant_window_admits(
+            self.started_on,
+            filter.started_before.as_ref(),
+            filter.started_after.as_ref(),
+        )
+    }
+
+    /// This run's place in a listing of runs, as that listing's continuation token renders
+    /// it: the shared history cursor ([`history_page_cursor`]) over the instant the run
+    /// started and its own id, exactly as this service's other run histories page.
+    pub fn page_cursor(&self) -> String {
+        history_page_cursor(self.started_on, &self.id)
+    }
+
+    /// Rebuild the modelled `DataQualityRulesetEvaluationRunDescription` from what is stored,
+    /// so a listing reports the same run the single-run read does.
+    pub fn to_run_description(&self) -> DataQualityRulesetEvaluationRunDescription {
+        DataQualityRulesetEvaluationRunDescription {
+            run_id: Some(self.id.clone()),
+            status: Some(self.status.clone()),
+            started_on: Some(to_date_time(self.started_on)),
+            data_source: Some(self.data_source.clone()),
+        }
     }
 
     /// Move this run into the status the clock owed it: it was due to leave

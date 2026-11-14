@@ -145,6 +145,8 @@ mod data_quality_rule_recommendation_runs;
 mod data_quality_results;
 #[path = "all/data_quality_ruleset_deletion.rs"]
 mod data_quality_ruleset_deletion;
+#[path = "all/data_quality_ruleset_evaluation_run_listing.rs"]
+mod data_quality_ruleset_evaluation_run_listing;
 #[path = "all/data_quality_ruleset_evaluation_runs.rs"]
 mod data_quality_ruleset_evaluation_runs;
 #[path = "all/data_quality_ruleset_identity.rs"]

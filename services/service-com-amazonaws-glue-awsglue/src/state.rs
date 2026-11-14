@@ -364,6 +364,7 @@ use crate::ops::types::{
     CustomEntityType,
     DataCatalogEncryptionSettings, DataLakeAccessPropertiesOutput, DataLakePrincipal,
     DataQualityRuleRecommendationRunAdditionalRunOptions, DataQualityEvaluationRunAdditionalRunOptions,
+    DataQualityRulesetEvaluationRunDescription, DataQualityRulesetEvaluationRunFilter,
     DataQualityRulesetFilterCriteria,
     DataQualityRulesetListDetails, DataQualityTargetTable,
     DataQualityRuleResult,
