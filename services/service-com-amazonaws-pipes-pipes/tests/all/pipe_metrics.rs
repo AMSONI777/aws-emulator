@@ -19,6 +19,14 @@
 //! explicit deny, policies stating nothing about the action, and a role the account does
 //! not hold at all, which shows nothing and lets the call through).
 //!
+//! Every wait here LOOKS AGAIN until the condition it needs holds, on a generous deadline,
+//! and every step that depends on an earlier one waits for the EVIDENCE of that step rather
+//! than for a span it is assumed to fit in: a counter that moved is the pipe having run, and
+//! a refused poll is a narrowed role having reached it. A counter expected to stay quiet is
+//! an invariant, so it is looked at repeatedly across its span instead of once at the end of
+//! one. Nothing here is asserted about elapsed time, so what a row reports is what the pipe
+//! did and never how fast the host it ran on happened to be.
+//!
 //! A role whose TRUST document withholds the assume is not a row here: such a pipe never
 //! reaches `RUNNING` at all, which is `tests/all/pipe_unassumable_role.rs`. Neither is a
 //! role that may not take the SOURCE's records when the pipe is brought up: such a pipe is
@@ -43,9 +51,14 @@ use crate::pipe_data_plane::{
 use crate::pipe_lifecycle::{call, REGION};
 
 /// How long a wait for something the pipe has to do — a delivery, or a counter moving —
-/// is given before the row is a failure. Well above the poll interval and the state-settle
-/// span, so a row fails only when the pipe did not do the work at all.
-const BUDGET: Duration = Duration::from_secs(20);
+/// is given before the row is a failure.
+///
+/// Every wait below LOOKS AGAIN until the condition it needs holds, so this bounds only how
+/// long a row the pipe never did the work for takes to fail, and a row whose work the pipe
+/// did spends none of it. It is therefore generous rather than tight: a host that runs this
+/// suite beside every other one is slow at everything, and a budget tuned to an idle host is
+/// what makes a test report the host's load as the emulator's defect.
+const BUDGET: Duration = Duration::from_secs(60);
 
 /// An enrichment that hands back exactly what it was given, so a pipe that reaches its
 /// enrichment delivers the records it polled.
@@ -328,9 +341,47 @@ pub(crate) async fn series(router: &MultiServiceRouter, pipe: &str, metric: &str
     (points.len(), sum)
 }
 
+/// Watch every counter of `pipe` the row did not expect to move for the whole of `watch`,
+/// failing the row at the first look that finds one absent or reading anything but 0.
+///
+/// A counter that stays quiet is an invariant rather than something to wait for, so it is
+/// LOOKED AT repeatedly across the span instead of once at the end of a sleep: a counter
+/// that moves at any point in the span fails the row, whatever the host's speed decides
+/// about when in the span that is.
+async fn quiet_counters_hold(
+    router: &MultiServiceRouter,
+    case: &str,
+    moved: &[&str],
+    watch: Duration,
+) {
+    let deadline = Instant::now() + watch;
+    loop {
+        for metric in PIPE_COUNTERS {
+            if moved.contains(metric) {
+                continue;
+            }
+            let (points, held) = series(router, case, metric).await;
+            assert!(
+                points > 0 && held == 0.0,
+                "case {case:?}: expected the quiet counter {metric} to hold at 0, got {held} \
+                 over {points} datapoint(s)"
+            );
+        }
+        if Instant::now() >= deadline {
+            return;
+        }
+        tokio::time::sleep(LOOK_AGAIN).await;
+    }
+}
+
 /// Wait until one pipe's `metric` sums to at least `want`, answering what it summed to
 /// last.
-pub(crate) async fn wait_for_sum(router: &MultiServiceRouter, pipe: &str, metric: &str, want: f64) -> f64 {
+pub(crate) async fn wait_for_sum(
+    router: &MultiServiceRouter,
+    pipe: &str,
+    metric: &str,
+    want: f64,
+) -> f64 {
     let deadline = Instant::now() + BUDGET;
     loop {
         let (_, sum) = series(router, pipe, metric).await;
@@ -573,8 +624,48 @@ async fn a_running_pipe_publishes_its_counters_and_fails_the_stage_its_role_bars
                 allowed,
             )
             .await;
+            // And the record is sent only once the pipe has ALREADY been refused a poll
+            // under the narrowed role, which its own failure counter is the report of. The
+            // poller takes one pass at a time, so a pass that was refused is a pass no
+            // earlier poll of that source outlived: the record cannot then be taken by a
+            // receive the wider role authorized. Waiting for that refusal — rather than
+            // sending straight away and trusting the narrowing to land first — is what
+            // keeps the row from turning on how fast the host runs.
+            let refused =
+                wait_for_sum(&router, row.case, EXECUTION_FAILED_METRIC, 1.0).await;
+            assert!(
+                refused >= 1.0,
+                "case {:?}: expected the pipe to be refused a source poll once its role no \
+                 longer allows one, its {EXECUTION_FAILED_METRIC} reads {refused}",
+                row.case
+            );
+        }
+        // What each counter the row expects to move reads BEFORE the record is sent: 0 for
+        // every row but the one whose role was narrowed above, whose failure counter the
+        // narrowing itself has already driven. The wait below is for the pipe moving each
+        // counter FURTHER than that, so no row's wait is a condition that already held.
+        let mut before: Vec<f64> = Vec::with_capacity(row.moved.len());
+        for metric in row.moved {
+            let (_, sum) = series(&router, row.case, metric).await;
+            before.push(sum);
         }
         send(&router, &source_url, &[format!("{}-record", row.case)]).await;
+
+        // Every counter the row expects to move, read as a client reads it — waited for
+        // before the target is read, because a counter that moved past what it read before
+        // the send is a pass the pipe took AFTER it: it is what makes the reads below about
+        // a pipe that did its work rather than about one the host has not got round to yet.
+        for (metric, read_before) in row.moved.iter().zip(before) {
+            let want = read_before + 1.0;
+            let sum = wait_for_sum(&router, row.case, metric, want).await;
+            assert!(
+                sum >= want,
+                "case {:?}: expected {metric} to read at least {want} once the pipe has taken \
+                 a pass over the record it was sent (it read {read_before} before that), got \
+                 {sum}",
+                row.case
+            );
+        }
 
         // What a client sees at the target: the record, or nothing at all.
         if row.delivered {
@@ -590,16 +681,6 @@ async fn a_running_pipe_publishes_its_counters_and_fails_the_stage_its_role_bars
             assert!(
                 delivered.is_empty(),
                 "case {:?}: expected the target to hold nothing, got {delivered:?}",
-                row.case
-            );
-        }
-
-        // Every counter the row expects to move, read as a client reads it.
-        for metric in row.moved {
-            let sum = wait_for_sum(&router, row.case, metric, 1.0).await;
-            assert!(
-                sum >= 1.0,
-                "case {:?}: expected {metric} to read at least 1, got {sum}",
                 row.case
             );
         }
@@ -637,20 +718,9 @@ async fn a_running_pipe_publishes_its_counters_and_fails_the_stage_its_role_bars
         }
 
         // And each quiet counter HOLDS at 0: nothing of its kind happens later either,
-        // however long the pipe goes on running.
-        tokio::time::sleep(QUIET).await;
-        for metric in PIPE_COUNTERS {
-            if row.moved.contains(metric) {
-                continue;
-            }
-            let (points, held) = series(&router, row.case, metric).await;
-            assert!(
-                points > 0 && held == 0.0,
-                "case {:?}: expected the quiet counter {metric} to hold at 0, got {held} over \
-                 {points} datapoint(s)",
-                row.case
-            );
-        }
+        // however long the pipe goes on running — looked at again and again across the
+        // span, so a counter that moves anywhere in it fails the row.
+        quiet_counters_hold(&router, row.case, row.moved, QUIET).await;
 
         // The catalogue a dashboard builds from names this pipe's dimension set for every
         // counter it publishes.
