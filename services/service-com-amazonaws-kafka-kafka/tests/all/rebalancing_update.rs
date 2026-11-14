@@ -329,12 +329,9 @@ async fn an_update_this_cluster_cannot_take_is_refused_and_changes_nothing() {
     );
 
     // A stale version means the caller has not seen the cluster's latest state.
-    let stale = update(
-        &emulator,
-        &creating,
-        body("K3AFVY5JQAABC-stale", "PAUSED"),
-    )
-    .await;
+    // The quote is a token of the shape the service mints, which is what makes
+    // it stale rather than unusable (`current_version_parameter`'s rule).
+    let stale = update(&emulator, &creating, body("K0000000000000", "PAUSED")).await;
     assert_eq!(
         (stale.status, stale.error_code(), stale.error_message()),
         (
@@ -358,7 +355,7 @@ async fn an_update_this_cluster_cannot_take_is_refused_and_changes_nothing() {
     let absent = format!(
         "arn:aws:kafka:{REGION}:{ACCOUNT}:cluster/absent/11111111-2222-4333-8444-555555555555-1"
     );
-    let missing = update(&emulator, &absent, body("K3AFVY5JQAABC", "PAUSED")).await;
+    let missing = update(&emulator, &absent, body("K0000000000000", "PAUSED")).await;
     assert_eq!(
         (
             missing.status,
@@ -397,7 +394,7 @@ async fn an_update_this_cluster_cannot_take_is_refused_and_changes_nothing() {
         )
         .await;
     sleep_past_activation();
-    let refused = update(&emulator, &serverless, body("K3AFVY5JQAABC", "PAUSED")).await;
+    let refused = update(&emulator, &serverless, body("K0000000000000", "PAUSED")).await;
     assert_eq!(
         (
             refused.status,

@@ -28,13 +28,28 @@ use serde_json::{json, Value};
 // The service's own operation type and refusal wording, so the suite and the
 // handlers cannot drift apart on what the service does or says.
 use service_com_amazonaws_kafka_kafka::state::{
-    CLUSTER_VERSION_NOT_CURRENT_MESSAGE, CURRENT_VERSION_MEMBER, DEFAULT_ENHANCED_MONITORING,
-    OPERATION_TYPE_UPDATE_MONITORING, PROVISIONED_ONLY_MESSAGE, RESOURCE_NOT_FOUND_MESSAGE,
+    is_current_version_token, CLUSTER_VERSION_NOT_CURRENT_MESSAGE, CURRENT_VERSION_MEMBER,
+    DEFAULT_ENHANCED_MONITORING, OPERATION_TYPE_UPDATE_MONITORING, PROVISIONED_ONLY_MESSAGE,
+    RESOURCE_NOT_FOUND_MESSAGE,
 };
 
 use crate::kafka_harness::{
     pct, sleep_past_activation, sleep_past_update, ClusterRequest, Emulator, Reply, ACCOUNT, REGION,
 };
+
+/// The same version token with its last character rotated to another character
+/// of the token alphabet: still a token of the shape the service mints (which
+/// the caller asserts through the service's own
+/// [`is_current_version_token`]), and not the one the cluster is at — which is
+/// what makes a quote of it STALE rather than unusable.
+fn rotate_last_character(version: &str) -> String {
+    let mut rotated: String = version.chars().take(version.chars().count() - 1).collect();
+    rotated.push(match version.chars().next_back() {
+        Some('Z') => 'Y',
+        _ => 'Z',
+    });
+    rotated
+}
 
 /// `UpdateMonitoring`, which the model binds to
 /// `PUT /v1/clusters/{ClusterArn}/monitoring`, as an endpoint for `region` serves
@@ -867,7 +882,10 @@ async fn update_monitoring_refuses_what_it_cannot_apply() {
     );
 
     // A SERVERLESS cluster has no brokers to monitor, so the operation is
-    // refused on its kind, in the service's own wording for that.
+    // refused on its kind, in the service's own wording for that. The quoted
+    // version is a token of the shape the service mints, so the request gets
+    // that far: a value that is not one is the parameter refusal
+    // (`current_version_parameter`'s rule).
     let serverless = emulator
         .create_serverless_ok(
             "serverless-monitoring",
@@ -879,7 +897,7 @@ async fn update_monitoring_refuses_what_it_cannot_apply() {
     let refused = update(
         &emulator,
         &serverless,
-        json!({ "currentVersion": "K3AFVY5JQAABC", "enhancedMonitoring": monitoring }),
+        json!({ "currentVersion": "K0000000000000", "enhancedMonitoring": monitoring }),
     )
     .await;
     assert_eq!(
@@ -961,11 +979,22 @@ async fn a_stale_cluster_version_gets_one_wording_from_every_operation() {
         .to_string();
 
     // Two stale quotes: a well-formed version token of another cluster's
-    // numbering, and the stored one mangled — neither is this cluster's.
+    // numbering, and the stored one with its last character rotated — neither is
+    // this cluster's, and BOTH are tokens of the shape the service mints, which
+    // is what makes them stale rather than unusable (a value that is not a
+    // version token at all is the parameter refusal
+    // `current_version_parameter` asserts).
     let stale_quotes = [
         "K0000000000000".to_string(),
-        format!("{}X", stored.to_lowercase()),
+        rotate_last_character(&stored),
     ];
+    for stale in &stale_quotes {
+        assert!(
+            is_current_version_token(stale) && stale != &stored,
+            "case {stale:?}: a stale quote must be a version token of the service's shape that \
+             this cluster is not at, stored {stored:?}"
+        );
+    }
 
     for stale in &stale_quotes {
         // `(operation, method, URI, body)`. A body carries whatever the

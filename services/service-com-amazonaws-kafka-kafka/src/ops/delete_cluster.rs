@@ -205,6 +205,24 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
             );
         };
 
+        // A supplied `CurrentVersion` is a token the SERVICE mints and the caller
+        // quotes back, so a value outside that shape
+        // ([`crate::state::is_current_version_token`]) names no version of this
+        // cluster or of any other: the PARAMETER is at fault, which is answered
+        // before every refusal about the cluster's own state or version — the
+        // caller has to fix the request rather than read the cluster again and
+        // retry.
+        if input
+            .current_version
+            .as_deref()
+            .is_some_and(|requested| !crate::state::is_current_version_token(requested))
+        {
+            return Err(DeleteClusterErrorModeled::BadRequestException(
+                crate::state::malformed_current_version(),
+            )
+            .into());
+        }
+
         // A delete is accepted only from a state the cluster is not already
         // leaving on its own: while it is being provisioned, updated or repaired
         // the service owns the record, so the destructive call is refused and

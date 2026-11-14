@@ -20,6 +20,12 @@
 //! names; every other case is refused with the modelled error for it and changes
 //! nothing.
 //!
+//! A `CurrentVersion` outside the shape of a version token this service mints
+//! ([`crate::state::is_current_version_token`]) names no version of any cluster,
+//! so it is refused as the parameter fault it is
+//! ([`crate::state::malformed_current_version`]) before any refusal about the
+//! cluster's own kind, state or version.
+//!
 //! Authentication is NOT this handler's business: the emulator verifies every
 //! request signature centrally (see `AGENTS.md`), so the modelled
 //! `UnauthorizedException`/`ForbiddenException` are raised by that path and never
@@ -247,6 +253,21 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         let cluster_state = cluster.state.clone();
         let current_version = cluster.current_version.clone();
         let serverless = cluster.is_serverless();
+
+        // A `CurrentVersion` is a token the SERVICE mints and the caller quotes
+        // back, so a value outside that shape
+        // ([`crate::state::is_current_version_token`]) is not a version of this
+        // cluster or of any other: it is a parameter this service will not read.
+        // Answered BEFORE every refusal about the cluster's own condition below —
+        // its kind, its state and the version it is at — because the two tell the
+        // caller opposite things: a parameter it must fix, against a cluster it
+        // should read again and retry.
+        if !crate::state::is_current_version_token(&input.current_version) {
+            return Err(UpdateRebalancingErrorModeled::BadRequestException(
+                crate::state::malformed_current_version(),
+            )
+            .into());
+        }
 
         // Intelligent rebalancing balances the partitions a cluster's BROKERS
         // hold, and a serverless cluster has none of its own: the model carries no

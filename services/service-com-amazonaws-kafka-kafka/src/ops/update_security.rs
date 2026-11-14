@@ -246,6 +246,20 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
             );
         };
 
+        // A `CurrentVersion` is a token the SERVICE mints and the caller quotes
+        // back, so a value outside that shape
+        // ([`crate::state::is_current_version_token`]) names no version of this
+        // cluster or of any other: the PARAMETER is at fault, which is answered
+        // before every refusal about the cluster's own kind, state or version —
+        // the caller has to fix the request rather than read the cluster again
+        // and retry.
+        if !crate::state::is_current_version_token(&input.current_version) {
+            return Err(UpdateSecurityErrorModeled::BadRequestException(
+                crate::state::malformed_current_version(),
+            )
+            .into());
+        }
+
         if cluster.is_serverless() {
             // What this update changes is the broker encryption and the client
             // authentication of a broker group, and a serverless cluster has

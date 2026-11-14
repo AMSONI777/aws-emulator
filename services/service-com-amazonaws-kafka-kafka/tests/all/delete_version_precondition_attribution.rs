@@ -28,9 +28,11 @@
 //!
 //! The controls hold the rest of the surface fixed: a reference the service CAN
 //! read is answered on the resource (a well-formed ARN holding nothing is the
-//! 404, whichever version the request quotes), a resolved cluster at another
-//! version is the stale-version refusal, and the same delete carrying the
-//! cluster's own version still removes it.
+//! 404, whichever version the request quotes), a resolved cluster is answered on
+//! the version it quotes — the stale-version refusal for a token the cluster is
+//! not at, and the parameter refusal for a value that is not a version token at
+//! all (`current_version_parameter`'s rule), both naming `currentVersion` — and
+//! the same delete carrying the cluster's own version still removes it.
 
 use serde_json::Value;
 
@@ -321,8 +323,10 @@ async fn a_readable_reference_that_holds_nothing_is_still_answered_on_the_resour
 
 /// RULE: once the reference resolves, the version pre-condition is checked
 /// against the resource's own version — a cluster at another version refuses the
-/// delete in the service's stale-version words, still naming `currentVersion`,
-/// and the same delete quoting the cluster's own version removes it.
+/// delete in the service's stale-version words, a value that is not a version
+/// token at all refuses it in the service's parameter words, both still naming
+/// `currentVersion`, and the same delete quoting the cluster's own version
+/// removes it.
 #[tokio::test]
 async fn a_resolved_cluster_checks_the_quoted_version_against_its_own() {
     let emulator = Emulator::new();
@@ -333,11 +337,16 @@ async fn a_resolved_cluster_checks_the_quoted_version_against_its_own() {
     // is `cluster_delete_state_guard`'s rule.
     let current_version = poll_until_active(&emulator, &arn, "version-precondition").await;
 
-    for stale in [
-        "K0000000000000",
-        "not-a-version",
-        &current_version.to_lowercase(),
-    ] {
+    // Each row is a version the cluster is NOT at, with the sentence that quote
+    // earns: a token of the shape the service mints is stale, and a value that
+    // is not one is the parameter refusal.
+    let quotes: Vec<(String, &str)> = vec![
+        ("K0000000000000".to_string(), CLUSTER_VERSION_NOT_CURRENT_MESSAGE),
+        ("K1111111111111".to_string(), CLUSTER_VERSION_NOT_CURRENT_MESSAGE),
+        ("not-a-version".to_string(), BAD_REQUEST_MESSAGE),
+        (current_version.to_lowercase(), BAD_REQUEST_MESSAGE),
+    ];
+    for (stale, message) in &quotes {
         let reply = emulator
             .call(
                 "DELETE",
@@ -359,17 +368,17 @@ async fn a_resolved_cluster_checks_the_quoted_version_against_its_own() {
             (
                 400,
                 "BadRequestException",
-                CLUSTER_VERSION_NOT_CURRENT_MESSAGE,
+                *message,
                 Some(CURRENT_VERSION_MEMBER),
             ),
-            "case stale={stale:?}: expected the stale-version refusal, got {} {}",
+            "case quoted={stale:?}: expected the refusal that quote earns, got {} {}",
             reply.status,
             reply.body
         );
         assert_eq!(
             emulator.describe(&arn).await.status,
             200,
-            "case stale={stale:?}: a refused delete must leave the cluster in place"
+            "case quoted={stale:?}: a refused delete must leave the cluster in place"
         );
     }
 

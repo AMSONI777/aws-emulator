@@ -263,6 +263,20 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         let current_version = cluster.current_version.clone();
         let serverless = cluster.is_serverless();
 
+        // A `CurrentVersion` is a token the SERVICE mints and the caller quotes
+        // back, so a value outside that shape
+        // ([`crate::state::is_current_version_token`]) names no version of this
+        // cluster or of any other: the PARAMETER is at fault, which is answered
+        // before every refusal about the cluster's own kind, state or version —
+        // the caller has to fix the request rather than read the cluster again
+        // and retry.
+        if !crate::state::is_current_version_token(&input.current_version) {
+            return Err(UpdateMonitoringErrorModeled::BadRequestException(
+                crate::state::malformed_current_version(),
+            )
+            .into());
+        }
+
         // What this update changes is the metrics a broker group gathers and the
         // logs its brokers deliver, and a serverless cluster has no brokers to
         // monitor: the model carries no monitoring member for the serverless

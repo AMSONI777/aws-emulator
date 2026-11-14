@@ -3921,3 +3921,16 @@ mod cloudformation_provisions_redshift_snapshot_copy_grants;
 // rule now stands: concurrently landing branches appended this copy here, and an inner doc
 // comment is legal only before the first item, so as `//!` in this tail it was `E0753` and
 // compiled no suite of this target.)
+// Declared ONCE, further up this tail: this declaration was appended here as well while two
+// branches were landing at once, and a module declared twice is `E0428` and compiles no suite
+// of this target.
+// Declared ONCE in the head region above: this declaration was appended here as well while
+// two branches were landing at once, and a module declared twice is `E0428` and compiles no
+// suite of this target.
+// before the first item of a crate root, so a `//!` line in this appended tail is
+// (A further fragment of this file's own header, appended here as an INNER doc comment by a
+// landing while branches were running at once: it is a line comment, because `//!` after the
+// first item of a crate root is `E0753` and compiles no suite of this target. The rule it
+// repeats stands in the module doc at the HEAD of this file — declare each suite exactly
+// ONCE, since this is one crate root and a second `mod` for the same name is `E0428`, which
+// the neighbouring notes record: `//!` is legal only before the first item of a crate root.)

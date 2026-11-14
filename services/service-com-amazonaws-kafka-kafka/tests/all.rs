@@ -87,6 +87,8 @@ mod connectivity_update;
 mod create_and_update_input_gates;
 #[path = "all/create_cluster_v2.rs"]
 mod create_cluster_v2;
+#[path = "all/current_version_parameter.rs"]
+mod current_version_parameter;
 #[path = "all/delete_version_precondition_attribution.rs"]
 mod delete_version_precondition_attribution;
 #[path = "all/describe_cluster_v2.rs"]

@@ -4120,6 +4120,23 @@ pub fn is_current_version_token(value: &str) -> bool {
         })
 }
 
+/// The refusal every operation that quotes a CLUSTER's `CurrentVersion` answers
+/// a value that is not a version token of this service at all
+/// ([`is_current_version_token`]): a `BadRequestException` (HTTP 400) carrying
+/// the service's generic parameter sentence ([`BAD_REQUEST_MESSAGE`]) and naming
+/// the member at fault ([`CURRENT_VERSION_MEMBER`]).
+///
+/// The PARAMETER class, not a condition of the cluster: the whole sentence is
+/// fixed text — neither the submitted value nor the cluster's own version is part
+/// of it — and it tells the caller to fix the request, where the stale-version
+/// refusal ([`CLUSTER_VERSION_NOT_CURRENT_MESSAGE`]) and the state gate
+/// ([`state_gate::cluster_not_in_accepted_state`]) both tell it to read the
+/// cluster again and retry. Built HERE, like [`malformed_arn`], so the operations
+/// that share the condition share one envelope.
+pub fn malformed_current_version() -> BadRequestException {
+    parameter_refusal(CURRENT_VERSION_MEMBER, BAD_REQUEST_MESSAGE)
+}
+
 /// Encode the registry key a page stopped at as a pagination token, marked with
 /// `prefix` so a token minted for one list cannot be mistaken for another's.
 ///
