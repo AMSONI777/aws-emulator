@@ -844,6 +844,15 @@ fn apply_document(
     // series that is cannot depend on the order the document's attributes are walked in.
     let described = described_series(attributes, document, removing);
     for DocumentAttribute { path: at, value } in attributes_of(document) {
+        // An attribute of a SOP instance the image set HOLDS the DICOM metadata of is
+        // applied there: that store is what the document's instance level is served from
+        // ([`crate::state::ImageSetAttributes::instances`]), so a write landing anywhere
+        // else would not be reported and a removal landing anywhere else would be accepted
+        // and then still reported.
+        let written = if removing { None } else { Some(&value) };
+        if apply_to_held_instance(attributes, &at, written)? {
+            continue;
+        }
         match modelled_attribute(&at, described.as_deref()) {
             Some(modelled) if removing => {
                 modelled.write(&mut attributes.dicom_tags, None);
@@ -863,6 +872,62 @@ fn apply_document(
     }
     settle_modelled_series(attributes, described.as_deref());
     Ok(())
+}
+
+/// Apply one document attribute to the DICOM metadata of the SOP INSTANCE its path names,
+/// and answer whether it was applied there.
+///
+/// `value` is the value to write, or `None` to remove what is held. Only an attribute of
+/// the `DICOM` level of an instance the image set already holds the metadata of is applied
+/// here — those are the attributes `GetImageSetMetadata` serves out of that store, so they
+/// are the ones a write or a removal has to reach. The value representation recorded beside
+/// a written attribute goes with it: what a caller wrote through this operation establishes
+/// no DICOM encoding for it.
+///
+/// A value LARGER than this service keeps of one attribute is refused with the modelled
+/// quota error rather than written ([`crate::state::MAX_IMAGE_SET_ATTRIBUTE_BYTES`]): every
+/// version the image set keeps holds a snapshot of the attributes it holds, so what one
+/// write may add to them is bounded on this axis as it is on the count of them.
+///
+/// Every other path is applied as it was before: an instance the image set holds no metadata
+/// of, and every level above the instance, is held at the path it was written at.
+fn apply_to_held_instance(
+    attributes: &mut ImageSetAttributes,
+    at: &[String],
+    value: Option<&Value>,
+) -> Result<bool, UpdateImageSetMetadataError> {
+    let level: Vec<&str> = at.iter().map(String::as_str).collect();
+    let [STUDY_KEY, SERIES_KEY, _, INSTANCES_KEY, sop_instance_uid, DICOM_KEY, keyword] =
+        level.as_slice()
+    else {
+        return Ok(false);
+    };
+    let Some(instance) = attributes.instances.get_mut(*sop_instance_uid) else {
+        return Ok(false);
+    };
+    match value {
+        Some(value) => {
+            if crate::state::attribute_value_bytes(value)
+                > crate::state::MAX_IMAGE_SET_ATTRIBUTE_BYTES
+            {
+                return Err(
+                    UpdateImageSetMetadataErrorModeled::ServiceQuotaExceededException(
+                        ServiceQuotaExceededException {
+                            message: crate::state::attribute_bytes_quota_message(),
+                        },
+                    )
+                    .into(),
+                );
+            }
+            instance.dicom.insert((*keyword).to_string(), value.clone());
+            instance.dicom_vrs.remove(*keyword);
+        }
+        None => {
+            instance.dicom.remove(*keyword);
+            instance.dicom_vrs.remove(*keyword);
+        }
+    }
+    Ok(true)
 }
 
 /// The attributes `image_set` holds once the documents of `plan` have been applied to it.
@@ -896,6 +961,22 @@ fn updated_attributes(
             UpdateImageSetMetadataErrorModeled::ServiceQuotaExceededException(
                 ServiceQuotaExceededException {
                     message: crate::state::extra_attributes_quota_message(),
+                },
+            )
+            .into(),
+        );
+    }
+    // The OTHER half of the attributes an image set holds is bounded the same way, by its
+    // own counter: an update may write an attribute of a SOP instance the image set holds
+    // the DICOM metadata of, and every version keeps a snapshot of it, so what a caller may
+    // accumulate there is capped too
+    // (`crate::state::MAX_IMAGE_SET_INSTANCE_ATTRIBUTES`). Counted over what the image set
+    // WOULD hold once this update had landed, and before anything is persisted.
+    if attributes.instance_attributes() > crate::state::MAX_IMAGE_SET_INSTANCE_ATTRIBUTES {
+        return Err(
+            UpdateImageSetMetadataErrorModeled::ServiceQuotaExceededException(
+                ServiceQuotaExceededException {
+                    message: crate::state::instance_attributes_quota_message(),
                 },
             )
             .into(),

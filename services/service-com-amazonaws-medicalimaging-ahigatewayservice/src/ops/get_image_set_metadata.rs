@@ -4,10 +4,12 @@
 //!
 //! Serves the AGGREGATED DICOM metadata document of one image set, built from persisted
 //! state and nothing else: the patient, study and series attributes the version being read
-//! holds ([`crate::state::ImageSet::attributes_of_version`]) and the image frames the image
-//! set holds ([`crate::state::ImageSet::image_frames`]), placed in the patient → study →
-//! series → instance hierarchy DICOM gives them. An attribute nothing has stored is not in
-//! the document at all, so a caller can never read an attribute this emulator invented.
+//! holds ([`crate::state::ImageSet::attributes_of_version`]), the DICOM metadata of each
+//! SOP instance that version holds ([`crate::state::ImageSetInstance`]) and the image
+//! frames the image set holds ([`crate::state::ImageSet::image_frames`]), placed in the
+//! patient → study → series → instance hierarchy DICOM gives them. An attribute nothing has
+//! stored is not in the document at all, so a caller can never read an attribute this
+//! emulator invented.
 //!
 //! The model names sixteen DICOM attributes and DICOM defines thousands, so an image set
 //! also holds the attributes written into it that the model does not name
@@ -21,8 +23,8 @@
 //! the records it was built from.
 //!
 //! The document is JSON, and `contentType` — "the format in which the study metadata is
-//! returned to the customer" — reports the format that member documents this operation
-//! returns it in ([`METADATA_CONTENT_TYPE`]), not a format chosen here. The blob itself is
+//! returned to the customer" — names the media type the document it serves really is in
+//! ([`METADATA_CONTENT_TYPE`]). The blob itself is
 //! COMPRESSED, as AWS HealthImaging returns it, and `contentEncoding` — "the compression
 //! format in which image set metadata attributes are returned" — names the format it is in
 //! ([`METADATA_CONTENT_ENCODING`]). The response never names a compression the blob is not
@@ -39,7 +41,9 @@
 //!
 //! The pixel data is NOT held per version — an image frame is addressed by its own
 //! identifier alone, which is all `GetImageFrame` takes — so the instance level reports the
-//! frames the image set holds, under the SOP instance each one's pixel data came from.
+//! frames the image set holds, under the SOP instance each one's pixel data came from, each
+//! with what was computed from the pixel data that frame holds: how large it is, the range
+//! of its samples and its checksum ([`crate::state::PixelDescription::frame_metadata`]).
 //!
 //! A DELETED image set holds no content: its pixel data went with the deletion
 //! ([`crate::state::ImageSet::advance_to`]), so there is no document to aggregate and
@@ -101,7 +105,7 @@
 #[allow(unused_imports)]
 use super::types::*;
 
-use ::std::collections::BTreeMap;
+use ::std::collections::{BTreeMap, BTreeSet};
 
 use ::serde_json::{Map, Value};
 
@@ -109,20 +113,25 @@ use crate::state::{
     ImageFrame, ImageSet, ImageSetAttributes, METADATA_DATASTORE_ID_KEY, METADATA_DICOM_KEY,
     METADATA_IMAGE_SET_ID_KEY, METADATA_INSTANCES_KEY, METADATA_PATIENT_KEY,
     METADATA_SCHEMA_VERSION_KEY, METADATA_SERIES_KEY, METADATA_STUDY_KEY,
+    PIXEL_DATA_CHECKSUM_TYPE,
 };
 
 /// The `contentType` this operation reports for the study metadata it serves: the format
-/// the response member's own documentation names for it —
-/// `smithy_query(query="doc",shape="GetImageSetMetadataResponse",member="contentType")`,
-/// "The format in which the study metadata is returned to the customer. Default is
-/// `text/plain`."
+/// the document in the blob really is in.
 ///
-/// That documentation distinguishes no case, unlike the `GetImageFrame` member's
-/// per-transfer-syntax catalog ([`crate::state::image_frame_content_type`]), so the
-/// documented default is the format every answer reports — whatever the document it
-/// aggregates holds. The blob's own serialisation is unaffected: the document written into
-/// it is the JSON one `metadata_document` builds.
-pub const METADATA_CONTENT_TYPE: &str = "text/plain";
+/// The member is documented "The format in which the study metadata is returned to the
+/// customer. Default is `text/plain`."
+/// (`smithy_query(query="doc",shape="GetImageSetMetadataResponse",member="contentType")`),
+/// and `text/plain` is the DEFAULT it names rather than the format of an aggregated
+/// metadata document: the document this handler writes is the JSON one `metadata_document`
+/// builds, which is the format the recorded responses of this operation report, so that is
+/// what the member names. `contentType` is bound to the response's `Content-Type` header,
+/// so a client reading the blob is told the media type it can parse it as rather than one
+/// it cannot.
+///
+/// The compression it is carried under is a separate member
+/// ([`METADATA_CONTENT_ENCODING`]), which the media type of the content does not change.
+pub const METADATA_CONTENT_TYPE: &str = "application/json";
 
 /// The `contentEncoding` this operation reports — "the compression format in which image
 /// set metadata attributes are returned"
@@ -214,50 +223,139 @@ fn study_attributes(tags: &DICOMTags) -> Value {
 }
 
 /// The DICOM SOP instances `image_set` holds, keyed by SOP Instance UID, each with the
-/// image frames of that instance.
+/// DICOM metadata of the instance and the image frames of it.
 ///
-/// An image frame carries the instance its pixel data came from
-/// ([`crate::state::ImageFrame::sop_instance_uid`]), so the instances are exactly the
-/// ones the stored pixel data belongs to: a frame stored without an instance belongs to
-/// none and is reported under none. Each frame is reported by the `ImageFrameId`
-/// `GetImageFrame` takes, which is what a client reads the pixel data with.
+/// An instance is reported when the image set holds something of it: the DICOM metadata of
+/// the instance ([`crate::state::ImageSetInstance`], which a DICOM import records per
+/// instance), the pixel data of one of its frames, or both. An image frame carries the
+/// instance its pixel data came from
+/// ([`crate::state::ImageFrame::sop_instance_uid`]), so the frames reported under an
+/// instance are exactly the ones whose pixel data belongs to it: a frame stored without an
+/// instance belongs to none and is reported under none. Each frame is reported by the
+/// `ImageFrameId` `GetImageFrame` takes, which is what a client reads the pixel data with,
+/// beside what was computed from the pixel data that frame holds.
 ///
 /// Ordered: the instances by UID and each instance's frames by identifier, so the one
-/// document is served byte for byte however the map holding the frames is laid out.
-fn instances(image_set: &ImageSet) -> Value {
-    let mut by_instance: BTreeMap<&str, Vec<&ImageFrame>> = BTreeMap::new();
+/// document is served byte for byte however the maps holding them are laid out.
+fn instances(image_set: &ImageSet, attributes: &ImageSetAttributes) -> Value {
+    let mut frames_of_instance: BTreeMap<&str, Vec<&ImageFrame>> = BTreeMap::new();
     for frame in image_set.image_frames.values() {
         if let Some(uid) = frame.sop_instance_uid.as_deref() {
-            by_instance.entry(uid).or_default().push(frame);
+            frames_of_instance.entry(uid).or_default().push(frame);
         }
     }
+    let mut reported_instances: BTreeSet<&str> = frames_of_instance.keys().copied().collect();
+    reported_instances.extend(attributes.instances.keys().map(String::as_str));
+
     let mut instances = Map::new();
-    for (uid, mut frames) in by_instance {
+    for uid in reported_instances {
+        let held = attributes.instances.get(uid);
+        let mut dicom = Map::new();
+        // The instance's own identifier names the record the level was built from, so it
+        // is written first and nothing stored can displace it.
+        dicom.insert("SOPInstanceUID".to_string(), Value::String(uid.to_string()));
+        if let Some(held) = held {
+            for (keyword, value) in &held.dicom {
+                dicom.entry(keyword.clone()).or_insert(value.clone());
+            }
+        }
+        let mut instance = Map::new();
+        instance.insert(METADATA_DICOM_KEY.to_string(), Value::Object(dicom));
+        if let Some(held) = held {
+            // The value representation each attribute above is written in, so a reader of
+            // the document can tell a text attribute from a binary or numeric one without
+            // a dictionary of its own.
+            if !held.dicom_vrs.is_empty() {
+                let vrs: Map<String, Value> = held
+                    .dicom_vrs
+                    .iter()
+                    .map(|(keyword, vr)| (keyword.clone(), Value::String(vr.clone())))
+                    .collect();
+                instance.insert("DICOMVRs".to_string(), Value::Object(vrs));
+            }
+            if let Some(transfer_syntax_uid) = &held.stored_transfer_syntax_uid {
+                instance.insert(
+                    "StoredTransferSyntaxUID".to_string(),
+                    Value::String(transfer_syntax_uid.clone()),
+                );
+            }
+        }
+        let mut frames = frames_of_instance.remove(uid).unwrap_or_default();
         frames.sort_by(|left, right| left.image_frame_id.cmp(&right.image_frame_id));
+        let mut checksummed = false;
         let image_frames: Vec<Value> = frames
             .iter()
-            .map(|frame| ::serde_json::json!({ "ID": frame.image_frame_id }))
+            .map(|frame| {
+                let mut reported_frame = Map::new();
+                reported_frame.insert(
+                    "ID".to_string(),
+                    Value::String(frame.image_frame_id.clone()),
+                );
+                if let Some(metadata) = held.and_then(|held| held.frames.get(&frame.image_frame_id))
+                {
+                    reported_frame.insert(
+                        "FrameSizeInBytes".to_string(),
+                        Value::from(metadata.frame_size_in_bytes),
+                    );
+                    if let Some(min_pixel_value) = metadata.min_pixel_value {
+                        reported_frame
+                            .insert("MinPixelValue".to_string(), Value::from(min_pixel_value));
+                    }
+                    if let Some(max_pixel_value) = metadata.max_pixel_value {
+                        reported_frame
+                            .insert("MaxPixelValue".to_string(), Value::from(max_pixel_value));
+                    }
+                    if !metadata.checksums.is_empty() {
+                        checksummed = true;
+                        reported_frame.insert(
+                            "PixelDataChecksumFromBaseToFullResolution".to_string(),
+                            Value::Array(
+                                metadata
+                                    .checksums
+                                    .iter()
+                                    .map(|checksum| {
+                                        ::serde_json::json!({
+                                            "Width": checksum.width,
+                                            "Height": checksum.height,
+                                            "Checksum": checksum.checksum,
+                                        })
+                                    })
+                                    .collect(),
+                            ),
+                        );
+                    }
+                }
+                Value::Object(reported_frame)
+            })
             .collect();
-        instances.insert(
-            uid.to_string(),
-            ::serde_json::json!({
-                METADATA_DICOM_KEY: { "SOPInstanceUID": uid },
-                "ImageFrames": image_frames,
-            }),
-        );
+        // An instance the image set holds no pixel data of reports no frames, rather than
+        // an empty list of them.
+        if !image_frames.is_empty() {
+            instance.insert("ImageFrames".to_string(), Value::Array(image_frames));
+        }
+        // The algorithm the frame checksums above were computed with, named beside them so
+        // a client can verify one.
+        if checksummed {
+            instance.insert(
+                "ChecksumType".to_string(),
+                Value::String(PIXEL_DATA_CHECKSUM_TYPE.to_string()),
+            );
+        }
+        instances.insert(uid.to_string(), Value::Object(instance));
     }
     Value::Object(instances)
 }
 
 /// The series `tags` describe, keyed by Series Instance UID, holding the SOP instances the
-/// pixel data of `image_set` belongs to.
+/// DICOM content of `image_set` belongs to.
 ///
 /// This service persists the attributes of ONE series per version of an image set (the
 /// model's `DICOMTags` declares one `dicomSeriesInstanceUID`), so a version that has had
 /// DICOM content delivered to it reports that series and one nothing has delivered content
 /// to reports none — rather than a series with no identifier, which no caller could read an
 /// instance out of.
-fn series(tags: &DICOMTags, image_set: &ImageSet) -> Value {
+fn series(image_set: &ImageSet, attributes: &ImageSetAttributes) -> Value {
+    let tags = &attributes.dicom_tags;
     let mut series = Map::new();
     if let Some(series_instance_uid) = tags.dicom_series_instance_uid.as_ref() {
         let mut dicom = Map::new();
@@ -271,14 +369,20 @@ fn series(tags: &DICOMTags, image_set: &ImageSet) -> Value {
             "BodyPartExamined",
             tags.dicom_series_body_part.as_ref(),
         );
-        if let Some(series_number) = tags.dicom_series_number {
-            dicom.insert("SeriesNumber".to_string(), Value::from(series_number));
+        if let Some(series_number) = attributes.reported_series_number() {
+            // DICOM writes Series Number as an Integer String, and this document reports
+            // each attribute as the data set wrote it — as the instance-level attributes
+            // are reported ([`instances`]). The modelled `DICOMSeriesNumber` a search
+            // reports is an integer and stays one: that member is typed by the model, not
+            // by the DICOM encoding
+            // ([`crate::state::ImageSetAttributes::reported_series_number`]).
+            dicom.insert("SeriesNumber".to_string(), series_number);
         }
         series.insert(
             series_instance_uid.clone(),
             ::serde_json::json!({
                 METADATA_DICOM_KEY: Value::Object(dicom),
-                METADATA_INSTANCES_KEY: instances(image_set),
+                METADATA_INSTANCES_KEY: instances(image_set, attributes),
             }),
         );
     }
@@ -371,7 +475,7 @@ fn metadata_document(
         METADATA_PATIENT_KEY: { METADATA_DICOM_KEY: patient_attributes(tags) },
         METADATA_STUDY_KEY: {
             METADATA_DICOM_KEY: study_attributes(tags),
-            METADATA_SERIES_KEY: series(tags, image_set),
+            METADATA_SERIES_KEY: series(image_set, attributes),
         },
     });
     merge_stored_attributes(&mut document, &attributes.extra_attributes);

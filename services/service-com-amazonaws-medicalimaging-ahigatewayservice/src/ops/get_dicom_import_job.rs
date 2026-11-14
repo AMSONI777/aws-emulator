@@ -182,7 +182,11 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
                 ended_at: job.ended_at.map(crate::state::to_date_time),
                 submitted_at: Some(crate::state::to_date_time(job.submitted_at)),
                 input_s3_uri: job.input_s3_uri.clone(),
-                output_s3_uri: job.output_s3_uri.clone(),
+                // THIS job's output prefix — the one its own results are written under,
+                // which is the per-job folder beneath the prefix the request named
+                // (`crate::state::ImportJob::reported_output_s3_uri`), not the request's
+                // value echoed back.
+                output_s3_uri: job.reported_output_s3_uri(),
                 message: job.reported_message(),
                 import_configuration: job.import_configuration.clone(),
             },

@@ -48,6 +48,9 @@ dicom-core = "0.10"
 # The gzip format `GetImageSetMetadata` reports its metadata blob in
 # (`contentEncoding: gzip`), applied with a maintained codec rather than written here.
 flate2 = "1"
+# The CRC32 checksum the aggregated metadata document reports for an image frame's pixel
+# data, from a maintained codec rather than a table written here.
+crc32fast = "1"
 
 [build-dependencies]
 emulator-core-build-support = { workspace = true }

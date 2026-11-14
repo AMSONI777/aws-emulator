@@ -12,9 +12,8 @@
 //! RULE 2: the instances read become ONE image set per DICOM series of a study, holding
 //! that series' attributes and one image frame per instance that carried pixel data; an
 //! instance the file declared no study or series for belongs to no series and describes no
-//! image set. The two study-level counts are of what the import carried FOR THAT STUDY
-//! rather than of what one image set holds, so every image set of a study reports the same
-//! pair.
+//! image set. The two study-level counts are ATTRIBUTES the instances carried, like every
+//! other attribute of an image set — nothing about the import is counted into them.
 //!
 //! These are the two readings themselves, over the crate's own public
 //! `read_part10` / `imported_image_sets`, so the rules are covered where the bytes are.
@@ -31,7 +30,7 @@
 
 use service_com_amazonaws_medicalimaging_ahigatewayservice::ops::types::DICOMTags;
 use service_com_amazonaws_medicalimaging_ahigatewayservice::state::{
-    imported_image_sets, read_part10, ImportedInstance,
+    imported_image_sets, read_part10, ImageSetInstance, ImportedInstance, PixelDescription,
 };
 
 /// The DICOM Part 10 magic code, which a file carries at byte 128 and a stream at byte 0.
@@ -82,11 +81,15 @@ const STUDY: &str = "1.2.826.0.1.3680043.9.7133.8.1";
 
 /// One instance read out of an import, built directly so this suite covers the GROUPING
 /// rule over instances rather than over files.
+///
+/// `study_counts` is the pair of study-level counts the instance's file DECLARED, which is
+/// where an image set's own pair is read from.
 fn instance(
     study: Option<&str>,
     series: Option<&str>,
     sop: &str,
     pixel_data: Option<Vec<u8>>,
+    study_counts: (i32, i32),
 ) -> ImportedInstance {
     ImportedInstance {
         // The key of the object the instance came out of, which the grouping carries into
@@ -99,8 +102,15 @@ fn instance(
             dicom_study_instance_uid: study.map(str::to_string),
             dicom_series_instance_uid: series.map(str::to_string),
             dicom_patient_id: Some("PID-GROUPED".to_string()),
+            dicom_number_of_study_related_series: study_counts.0,
+            dicom_number_of_study_related_instances: study_counts.1,
             ..DICOMTags::default()
         },
+        // No data set wrote this instance: the grouping rule is about the instances, not
+        // about the text a file spelled their attributes with.
+        series_number_text: None,
+        metadata: ImageSetInstance::default(),
+        pixel_description: PixelDescription::default(),
         pixel_data,
     }
 }
@@ -113,60 +123,92 @@ struct GroupingCase {
     series: Vec<&'static str>,
     /// How many frames each of those image sets must hold.
     frames: Vec<usize>,
-    /// The two study-level counts every image set of the study must report.
+    /// The two study-level counts every image set of the study must report — the pair its
+    /// instances declared, and the modelled default of each member when they declared
+    /// none.
     study_series: i32,
     study_instances: i32,
 }
 
 /// RULE 2: the instances read become one image set per series of a study, carrying that
-/// series' frames and the study's own counts; an instance belonging to no series describes
-/// none.
+/// series' frames and the study-level counts its instances declared; an instance belonging
+/// to no series describes none.
 #[test]
 fn instances_become_one_image_set_per_series_of_a_study() {
     let pixels = vec![0x01_u8, 0x02, 0x03, 0x04];
     let other_pixels = vec![0x10_u8, 0x20, 0x30, 0x40];
+    // The pair of study-level counts a row's files declare, which has nothing to do with
+    // how many series or instances the row itself carries.
+    let declared = (7_i32, 19_i32);
+    let undeclared = (0_i32, 0_i32);
     let rows = vec![
         GroupingCase {
-            case: "one instance of one series",
+            case: "one instance of one series, declaring the study's counts",
             instances: vec![instance(
                 Some(STUDY),
                 Some("1.1"),
                 "1.1.1",
                 Some(pixels.clone()),
+                declared,
             )],
             series: vec!["1.1"],
             frames: vec![1],
-            study_series: 1,
-            study_instances: 1,
+            study_series: declared.0,
+            study_instances: declared.1,
         },
         GroupingCase {
-            case: "two instances of one series, one of them carrying no pixel data",
+            case: "two instances of one series, one of them carrying no pixel data and \
+                   only one of them declaring the counts",
             instances: vec![
-                instance(Some(STUDY), Some("1.1"), "1.1.1", Some(pixels.clone())),
-                instance(Some(STUDY), Some("1.1"), "1.1.2", None),
+                instance(
+                    Some(STUDY),
+                    Some("1.1"),
+                    "1.1.1",
+                    Some(pixels.clone()),
+                    declared,
+                ),
+                instance(Some(STUDY), Some("1.1"), "1.1.2", None, undeclared),
             ],
             series: vec!["1.1"],
             frames: vec![1],
-            study_series: 1,
-            study_instances: 2,
+            // An attribute one instance of the series records and another does not is
+            // still the series'.
+            study_series: declared.0,
+            study_instances: declared.1,
         },
         GroupingCase {
-            case: "two series of one study",
+            case: "two series of one study, whose files declare no counts",
             instances: vec![
-                instance(Some(STUDY), Some("1.1"), "1.1.1", Some(pixels.clone())),
-                instance(Some(STUDY), Some("1.2"), "1.2.1", Some(other_pixels.clone())),
+                instance(
+                    Some(STUDY),
+                    Some("1.1"),
+                    "1.1.1",
+                    Some(pixels.clone()),
+                    undeclared,
+                ),
+                instance(
+                    Some(STUDY),
+                    Some("1.2"),
+                    "1.2.1",
+                    Some(other_pixels.clone()),
+                    undeclared,
+                ),
             ],
             series: vec!["1.1", "1.2"],
             frames: vec![1, 1],
-            study_series: 2,
+            // Two series were indexed, and neither image set reports two: the series
+            // count is a study attribute, so the modelled default of its member stands
+            // when the files declare none. The instance count the service can state from
+            // what it indexed — one instance per series here, two for the study.
+            study_series: 0,
             study_instances: 2,
         },
         GroupingCase {
             case: "instances with no series and with no study describe nothing",
             instances: vec![
-                instance(Some(STUDY), None, "1.1.1", Some(pixels.clone())),
-                instance(None, Some("1.1"), "1.1.2", Some(pixels.clone())),
-                instance(None, None, "1.1.3", None),
+                instance(Some(STUDY), None, "1.1.1", Some(pixels.clone()), declared),
+                instance(None, Some("1.1"), "1.1.2", Some(pixels.clone()), declared),
+                instance(None, None, "1.1.3", None, declared),
             ],
             series: vec![],
             frames: vec![],
@@ -176,15 +218,21 @@ fn instances_become_one_image_set_per_series_of_a_study() {
         GroupingCase {
             case: "one placed series beside instances that belong to none",
             instances: vec![
-                instance(Some(STUDY), None, "1.1.1", Some(pixels.clone())),
-                instance(Some(STUDY), Some("1.3"), "1.3.1", Some(pixels.clone())),
-                instance(Some(STUDY), Some("1.3"), "1.3.2", Some(other_pixels)),
-                instance(None, Some("1.4"), "1.4.1", Some(pixels)),
+                instance(Some(STUDY), None, "1.1.1", Some(pixels.clone()), declared),
+                instance(
+                    Some(STUDY),
+                    Some("1.3"),
+                    "1.3.1",
+                    Some(pixels.clone()),
+                    declared,
+                ),
+                instance(Some(STUDY), Some("1.3"), "1.3.2", Some(other_pixels), declared),
+                instance(None, Some("1.4"), "1.4.1", Some(pixels), declared),
             ],
             series: vec!["1.3"],
             frames: vec![2],
-            study_series: 1,
-            study_instances: 2,
+            study_series: declared.0,
+            study_instances: declared.1,
         },
     ];
 

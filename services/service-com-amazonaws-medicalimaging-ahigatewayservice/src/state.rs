@@ -48,6 +48,14 @@
 //! [`ComAmazonawsMedicalimagingAhigatewayserviceState::reported_datastore_in`] and
 //! [`ComAmazonawsMedicalimagingAhigatewayserviceState::datastore_in`].
 //!
+//! An IMAGE SET's finished deletion is reported the same way, one level down: `DELETED` is
+//! a state the model declares on the image set shapes and `deletedAt` is a member
+//! `GetImageSet` reports, so the record survives as a tombstone for
+//! [`IMAGE_SET_DELETED_RETENTION`] and the clock then reaps it ([`ImageSet::reap_due_at`]).
+//! Past the reaping the data store holds no such image set, so every call naming it — the
+//! read a client polls a deletion to its end with among them — is answered exactly as it is
+//! for an id nothing ever minted.
+//!
 //! # Pixel data belongs to the image set
 //!
 //! An image set owns the image frames it holds ([`ImageFrame`]), keyed by image frame
@@ -73,6 +81,10 @@ use crate::ops::types::{DICOMTags, ImportConfiguration};
 /// What a DICOM import READS, and the image sets it materialises from what it read.
 mod dicom_import;
 pub use dicom_import::*;
+
+/// The DICOM metadata of one SOP INSTANCE an image set holds, below the series level.
+mod dicom_instance;
+pub use dicom_instance::*;
 
 /// What a DICOM import job's completion WRITES, and what its outcome is decided from.
 pub mod import_job_output;
@@ -129,6 +141,19 @@ pub const IMAGE_SET_COPY_DELAY: Duration = Duration::from_millis(400);
 /// — AWS publishes no duration for a delete, and a caller reading the image set straight
 /// after the call still observes the deletion in flight.
 pub const IMAGE_SET_DELETION_DELAY: Duration = Duration::from_millis(500);
+
+/// How long a finished image set deletion stays OBSERVABLE in `DELETED` before the
+/// record is reaped and the image set is gone for good.
+///
+/// `DELETED` is a state the model declares on the image set shapes, and `deletedAt` ("the
+/// timestamp when the image set properties were deleted") is a member `GetImageSet`
+/// reports, so a deletion that has landed is reportable in it rather than vanishing the
+/// instant it lands — and then the record is gone, which is what a caller polling a
+/// deletion to its end sees. AWS publishes no duration for how long it stays reportable,
+/// so this is a chosen span, for the same reason as [`DATASTORE_ACTIVATION_DELAY`]: long
+/// enough that a caller that observed the tombstone can read it again, short enough that
+/// a poll for the end of the deletion terminates promptly.
+pub const IMAGE_SET_DELETED_RETENTION: Duration = Duration::from_secs(5);
 
 /// How long after `UpdateImageSetMetadata` the update completes: the image set leaves
 /// the `LOCKED` / `UPDATING` pair the update put it in for `ACTIVE` / `UPDATED`. A
@@ -232,8 +257,83 @@ pub const MAX_IMAGE_SET_VERSIONS: usize = 128;
 /// EVERY writer of these attributes is bounded by it, counted over what the image set would
 /// hold once the write had landed ([`ImageSetAttributes::written_attributes`]) and refused
 /// before anything is written: the metadata update that writes them, and the COPY that
-/// delivers them into a destination that already holds some of its own.
+/// delivers them into a destination that already holds some of its own. The DICOM metadata
+/// of the SOP instances an image set holds is the OTHER half of its attributes, bounded by
+/// its own cap ([`MAX_IMAGE_SET_INSTANCE_ATTRIBUTES`]).
 pub const MAX_IMAGE_SET_EXTRA_ATTRIBUTES: usize = 512;
+
+/// How many DICOM attributes of ONE SOP instance an image set will hold
+/// ([`ImageSetAttributes::instances`]).
+///
+/// A memory bound, not an AWS quota, and the per-instance companion of
+/// [`MAX_IMAGE_SET_EXTRA_ATTRIBUTES`]: the instance level is the other half of the
+/// attributes an image set holds, so it is bounded the same way. A metadata update may
+/// write an attribute of an instance the image set holds, and every version the image set
+/// keeps holds a snapshot of it, so without a cap repeated updates could grow one image set
+/// without limit. Past the cap such a write is refused with the same
+/// `ServiceQuotaExceededException` (HTTP 402).
+///
+/// EVERY writer of the instance level is bounded by it: the import that reads an instance's
+/// attributes out of a DICOM file stops there, the metadata update that writes one is
+/// refused past it, and the copy that delivers an instance into a destination is refused
+/// past it too — each counted over what the image set would hold once the write had landed
+/// ([`ImageSetAttributes::instance_attributes`]). How many INSTANCES an image set holds
+/// needs no cap of its own: only an import brings one into existence, and one import reads
+/// at most [`MAX_IMPORTED_OBJECTS`] objects, so what an image set holds here is bounded by
+/// the product of the two.
+pub const MAX_IMAGE_SET_INSTANCE_ATTRIBUTES: usize = 512;
+
+/// How many BYTES of one DICOM attribute's value an image set keeps of a SOP instance.
+///
+/// The companion of [`MAX_IMAGE_SET_INSTANCE_ATTRIBUTES`] on the other axis: that one
+/// bounds how MANY attributes of an instance are held, this one how LARGE each of them is,
+/// so what one instance contributes is bounded by the product of the two — and what the
+/// image set holds by that product and the versions it keeps. A DICOM data set may carry a
+/// single element of megabytes (a long text, an overlay, a private block), and a metadata
+/// update may write one, so without it one write could grow an image set by most of the
+/// object it came from.
+///
+/// An attribute whose value is larger than this is NOT kept in the instance level: an
+/// import leaves it out, and a metadata update that writes one is refused with the same
+/// `ServiceQuotaExceededException` (HTTP 402). Nothing is ever cut short — a reader of the
+/// aggregated metadata document is never handed part of a DICOM value as if it were the
+/// whole of it.
+pub const MAX_IMAGE_SET_ATTRIBUTE_BYTES: usize = 4096;
+
+/// How many bytes one attribute's value takes as the aggregated metadata document carries
+/// it — what [`MAX_IMAGE_SET_ATTRIBUTE_BYTES`] bounds.
+///
+/// A number, a boolean and the null value are of a size this service fixes, so only the
+/// values a caller or a data set chooses the length of are measured.
+pub fn attribute_value_bytes(value: &::serde_json::Value) -> usize {
+    match value {
+        ::serde_json::Value::String(text) => text.len(),
+        ::serde_json::Value::Null
+        | ::serde_json::Value::Bool(_)
+        | ::serde_json::Value::Number(_) => 0,
+        nested => nested.to_string().len(),
+    }
+}
+
+/// The `ServiceQuotaExceededException` message a writer of an attribute larger than
+/// [`MAX_IMAGE_SET_ATTRIBUTE_BYTES`] is refused with — one wording, because it reports one
+/// bound.
+pub fn attribute_bytes_quota_message() -> String {
+    format!(
+        "this emulator holds at most {MAX_IMAGE_SET_ATTRIBUTE_BYTES} bytes of one DICOM \
+         attribute of an image set"
+    )
+}
+
+/// The `ServiceQuotaExceededException` message every writer of the DICOM attributes of one
+/// SOP instance is refused past [`MAX_IMAGE_SET_INSTANCE_ATTRIBUTES`] with — one wording,
+/// because it reports one bound.
+pub fn instance_attributes_quota_message() -> String {
+    format!(
+        "this emulator holds at most {MAX_IMAGE_SET_INSTANCE_ATTRIBUTES} attributes per DICOM \
+         instance of an image set"
+    )
+}
 
 /// The `ServiceQuotaExceededException` message every writer of the attributes outside the
 /// modelled ones is refused past [`MAX_IMAGE_SET_EXTRA_ATTRIBUTES`] with — one wording,
@@ -1041,6 +1141,27 @@ pub struct ImportJob {
 }
 
 impl ImportJob {
+    /// The output prefix `DICOMImportJobProperties$outputS3Uri` reports — "the output
+    /// prefix of the S3 bucket to upload the results of the DICOM import job"
+    /// (`smithy_query(query="shape",shape="DICOMImportJobProperties")`).
+    ///
+    /// THIS JOB's own prefix, not the one the request named: the results of one job are the
+    /// manifests it writes, and they go under the per-job folder beneath the prefix the
+    /// request named ([`import_job_output::output_location`]), so what is reported is where
+    /// this job's results really are. Two jobs pointed at one prefix therefore report two
+    /// prefixes, and a client reading the reported one finds that job's manifests.
+    ///
+    /// A value that is not an S3 URI at all names no bucket to place a folder under — which
+    /// the member's `@pattern` has already ruled out by the time a job holds one — so it is
+    /// reported as it was recorded.
+    pub fn reported_output_s3_uri(&self) -> String {
+        import_job_output::output_location(&self.output_s3_uri, &self.datastore_id, &self.job_id)
+            .map_or_else(
+                || self.output_s3_uri.clone(),
+                |(bucket, key_prefix)| format!("s3://{bucket}/{key_prefix}"),
+            )
+    }
+
     /// The job name `DICOMImportJobProperties` reports. The properties shape makes
     /// `jobName` `@required` while the start request leaves it optional, so a job
     /// submitted without one reports its own identifier — which satisfies the member's
@@ -1308,6 +1429,21 @@ pub struct ImageSetVersion {
 #[derive(Debug, Clone, Default)]
 pub struct ImageSetAttributes {
     pub dicom_tags: DICOMTags,
+    /// The text a DICOM data set wrote the SERIES NUMBER as, when one was read from a data
+    /// set.
+    ///
+    /// DICOM writes Series Number as an Integer String — text, padded to an even length —
+    /// while the modelled `DICOMSeriesNumber` member a search reports is an integer. Both
+    /// describe one attribute: the member carries the number the text spells, and the
+    /// aggregated metadata document reports the attribute as the data set wrote it. It is
+    /// reported only while it still spells the number the image set holds
+    /// ([`ImageSetAttributes::reported_series_number`]), so a later writer of the number is
+    /// never reported through a form it did not write.
+    pub series_number_text: Option<String>,
+    /// The DICOM metadata of each SOP instance the image set holds, keyed by SOP Instance
+    /// UID — the level of the aggregated metadata document BELOW the series, which the
+    /// modelled attributes stop at ([`ImageSetInstance`]).
+    pub instances: ::std::collections::BTreeMap<String, ImageSetInstance>,
     /// Every attribute the model does not name, nested exactly as the aggregated
     /// metadata document nests it (`Patient` → `DICOM` → keyword, `Study` → `Series` →
     /// series UID → …), so what is reported is what was written and nothing besides.
@@ -1328,7 +1464,30 @@ impl ImageSetAttributes {
     /// freshly minted copy destination reports.
     pub fn merge(&mut self, delivered: ImageSetAttributes) {
         merge_dicom_tags(&mut self.dicom_tags, delivered.dicom_tags);
+        if delivered.series_number_text.is_some() {
+            self.series_number_text = delivered.series_number_text;
+        }
+        merge_instances(&mut self.instances, delivered.instances);
         merge_written_attributes(&mut self.extra_attributes, delivered.extra_attributes);
+    }
+
+    /// The Series Number the aggregated metadata document reports, or `None` when the image
+    /// set holds none.
+    ///
+    /// The TEXT a data set wrote it as when that text still spells the number the image set
+    /// holds ([`ImageSetAttributes::series_number_text`]) — the document reports a DICOM
+    /// attribute as the data set wrote it — and otherwise the number itself, which is what a
+    /// caller that wrote the number through `UpdateImageSetMetadata` wrote.
+    pub fn reported_series_number(&self) -> Option<::serde_json::Value> {
+        let number = self.dicom_tags.dicom_series_number?;
+        let written_as = self
+            .series_number_text
+            .as_ref()
+            .filter(|text| text.trim().parse::<i32>() == Ok(number));
+        Some(match written_as {
+            Some(text) => ::serde_json::Value::String(text.clone()),
+            None => ::serde_json::Value::from(number),
+        })
     }
 
     /// How many attributes outside the modelled ones these attributes hold — what
@@ -1339,6 +1498,21 @@ impl ImageSetAttributes {
     /// frames of one SOP instance) counts as the one attribute it is.
     pub fn written_attributes(&self) -> usize {
         count_written_attributes(&self.extra_attributes)
+    }
+
+    /// The most DICOM attributes any ONE of the SOP instances these attributes describe
+    /// holds — what [`MAX_IMAGE_SET_INSTANCE_ATTRIBUTES`] bounds, for every writer of them.
+    ///
+    /// The attributes themselves are counted and not the value representation recorded
+    /// beside each: a VR is not an attribute of the instance, it is how the one beside it is
+    /// written. Nor are the image frames, which no caller writes: a frame is delivered by an
+    /// import or a copy, bounded by what that import read.
+    pub fn instance_attributes(&self) -> usize {
+        self.instances
+            .values()
+            .map(|instance| instance.dicom.len())
+            .max()
+            .unwrap_or_default()
     }
 }
 
@@ -1552,6 +1726,14 @@ pub struct ImageSet {
     /// zero) for an image set nothing has delivered DICOM content to yet, exactly as it
     /// holds no pixel data: an attribute is searchable only once something stored it.
     pub dicom_tags: DICOMTags,
+    /// The text a DICOM data set wrote this image set's Series Number as, held beside the
+    /// modelled integer member it spells ([`ImageSetAttributes::series_number_text`]).
+    pub series_number_text: Option<String>,
+    /// The DICOM metadata of each SOP instance this image set holds, keyed by SOP
+    /// Instance UID — the other half of the DICOM content the modelled attributes stop
+    /// above ([`ImageSetAttributes::instances`]), held beside them for the same reason:
+    /// every reader of `dicom_tags` keeps reading what it did.
+    pub instances: ::std::collections::BTreeMap<String, ImageSetInstance>,
     /// The attributes of this image set the model does NOT name, which a metadata update
     /// may write and `GetImageSetMetadata` reports from where they were written — the
     /// other half of [`ImageSetAttributes`], held beside the modelled attributes rather
@@ -1568,6 +1750,15 @@ pub struct ImageSet {
     pub last_accessed_at: SystemTime,
     /// What the clock owes the latest version, if anything.
     pub pending: Option<PendingImageSetTransition>,
+    /// When the clock is due to REAP this record, set once a deletion has landed on it
+    /// ([`IMAGE_SET_DELETED_RETENTION`]) and `None` for every image set that is not a
+    /// tombstone of a finished deletion.
+    ///
+    /// A deletion is reported before it is forgotten: the record answers `GetImageSet`
+    /// with its `DELETED` state and its `deletedAt` until this instant, and from then on
+    /// the data store holds no such image set at all — which is the answer a caller
+    /// polling a deletion to its end is waiting for.
+    pub reap_due_at: Option<SystemTime>,
 }
 
 impl ImageSet {
@@ -1607,6 +1798,10 @@ impl ImageSet {
             is_primary,
             // No DICOM content either, for the same reason the frame map is empty.
             dicom_tags: DICOMTags::default(),
+            // Nothing has written a Series Number, so no data set wrote its text either.
+            series_number_text: None,
+            // Nor the DICOM metadata of any SOP instance: nothing has delivered one.
+            instances: ::std::collections::BTreeMap::new(),
             // Nor any attribute outside the modelled ones: nothing has written one.
             extra_attributes: ::serde_json::Map::new(),
             created_at: now,
@@ -1615,6 +1810,8 @@ impl ImageSet {
             // into existence, so the instant it appeared is the last access of it.
             last_accessed_at: now,
             pending: None,
+            // Nothing has deleted this image set, so nothing is owed its reaping.
+            reap_due_at: None,
         }
     }
 
@@ -1718,6 +1915,8 @@ impl ImageSet {
     pub fn attributes(&self) -> ImageSetAttributes {
         ImageSetAttributes {
             dicom_tags: self.dicom_tags.clone(),
+            series_number_text: self.series_number_text.clone(),
+            instances: self.instances.clone(),
             extra_attributes: self.extra_attributes.clone(),
         }
     }
@@ -1731,6 +1930,8 @@ impl ImageSet {
     /// it lands through [`ImageSet::merge_attributes`] instead.
     pub fn set_attributes(&mut self, attributes: ImageSetAttributes) {
         self.dicom_tags = attributes.dicom_tags;
+        self.series_number_text = attributes.series_number_text;
+        self.instances = attributes.instances;
         self.extra_attributes = attributes.extra_attributes;
     }
 
@@ -1792,12 +1993,21 @@ impl ImageSet {
     }
 
     /// Materialise the transition the clock owed this image set by `now`.
-    fn advance_to(&mut self, now: SystemTime) {
+    ///
+    /// Returns `false` once the record's `DELETED` retention has run out, i.e. the record
+    /// must be dropped from the data store — the same split the data store's own tombstone
+    /// follows ([`Datastore::advance_to`]).
+    fn advance_to(&mut self, now: SystemTime) -> bool {
+        if let Some(reap_due_at) = self.reap_due_at {
+            if now >= reap_due_at {
+                return false;
+            }
+        }
         let Some(pending) = self.pending.clone() else {
-            return;
+            return true;
         };
         if now < pending.due_at {
-            return;
+            return true;
         }
         // The state the transition lands reaches EVERY version, by the rule every other
         // writer of it follows ([`ImageSet::set_state_on_every_version`]): it is the state
@@ -1838,8 +2048,18 @@ impl ImageSet {
         if pending.retires_image_set {
             self.deleted_at = Some(pending.due_at);
             self.release_content();
+            // The finished deletion is reportable from the instant it landed, and the
+            // reaping that ends that window is the next change the clock owes — dated from
+            // the DUE instant, so neither the window nor `deletedAt` moves with when
+            // somebody happened to read.
+            self.reap_due_at = Some(pending.due_at + IMAGE_SET_DELETED_RETENTION);
         }
         self.pending = None;
+        // The reaping this landing may have owed is not due at the same instant it was
+        // recorded at, so the record stands — and a request arriving long after the
+        // deletion finds it due on the next pass of the clock, which is the pass the
+        // retain below makes.
+        self.reap_due_at.is_none_or(|reap_due_at| now < reap_due_at)
     }
 }
 
@@ -1994,9 +2214,11 @@ impl Datastore {
         for job in self.import_jobs.values_mut() {
             job.advance_to(now);
         }
-        for image_set in self.image_sets.values_mut() {
-            image_set.advance_to(now);
-        }
+        // An image set whose deletion has landed is reported in `DELETED` until the clock
+        // reaps its record, and is then gone from the data store for good — the rule this
+        // data store's own tombstone follows one level up.
+        self.image_sets
+            .retain(|_, image_set| image_set.advance_to(now));
         true
     }
 }
@@ -2379,14 +2601,27 @@ fn is_minted_id(value: &str) -> bool {
             .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase())
 }
 
-/// A modelled timestamp for `instant`, kept to full nanosecond precision rather than
-/// routed through an `f64` number of seconds.
+/// A modelled timestamp for `instant`, at the precision this service's `Date` members
+/// carry: MILLISECONDS.
+///
+/// The ONE place a `Date` member of this service is built, so every operation that reports
+/// an instant — a job's `submittedAt` and `endedAt`, an image set's `createdAt`,
+/// `updatedAt`, `deletedAt` and `lastAccessedAt`, in a response body or in a search summary
+/// — serves it in the same form. The model documents that form on the summary member:
+/// "The time an image set is created. Sample creation date is provided in
+/// `1985-04-12T23:20:50.52Z` format"
+/// (`smithy_query(query="doc",shape="ImageSetsMetadataSummary",member="createdAt")`) — an
+/// instant carrying at most milliseconds. So the sub-millisecond part of the system clock's
+/// reading is DROPPED here rather than serialized: a client that round-trips one of these
+/// timestamps reads back an instant of the documented precision, whatever the clock this
+/// emulator read it from resolves to.
 pub fn to_date_time(instant: SystemTime) -> ::aws_smithy_types::DateTime {
     let since_epoch = instant
         .duration_since(SystemTime::UNIX_EPOCH)
         .unwrap_or_default();
     let seconds = i64::try_from(since_epoch.as_secs()).unwrap_or(i64::MAX);
-    ::aws_smithy_types::DateTime::from_secs_and_nanos(seconds, since_epoch.subsec_nanos())
+    let nanos_in_whole_millis = since_epoch.subsec_millis() * 1_000_000;
+    ::aws_smithy_types::DateTime::from_secs_and_nanos(seconds, nanos_in_whole_millis)
 }
 
 // ---------------------------------------------------------------------------

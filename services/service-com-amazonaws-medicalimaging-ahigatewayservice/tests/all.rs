@@ -25,6 +25,8 @@ mod datastore_lifecycle;
 mod datastore_listing_page_tokens;
 #[path = "all/datastore_status_guard.rs"]
 mod datastore_status_guard;
+#[path = "all/deleted_image_set_reaping.rs"]
+mod deleted_image_set_reaping;
 #[path = "all/dicom_part10_reading.rs"]
 mod dicom_part10_reading;
 #[path = "all/error_message_texts.rs"]
@@ -75,6 +77,8 @@ mod import_job_image_set_delivery;
 mod import_job_listing;
 #[path = "all/import_job_output_manifest.rs"]
 mod import_job_output_manifest;
+#[path = "all/imported_instance_metadata.rs"]
+mod imported_instance_metadata;
 #[path = "all/list_element_refusal_paths.rs"]
 mod list_element_refusal_paths;
 #[path = "all/listing_filter_page_tokens.rs"]
@@ -95,6 +99,8 @@ mod page_token_payload_forgery;
 mod regional_isolation;
 #[path = "all/relational_refusal_values.rs"]
 mod relational_refusal_values;
+#[path = "all/reported_instants_and_output_prefix.rs"]
+mod reported_instants_and_output_prefix;
 #[path = "all/resource_tagging.rs"]
 mod resource_tagging;
 #[path = "all/search_sort_key_page_token.rs"]

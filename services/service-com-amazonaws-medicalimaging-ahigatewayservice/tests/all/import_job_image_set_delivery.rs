@@ -36,8 +36,8 @@ use serde_json::json;
 
 use service_com_amazonaws_medicalimaging_ahigatewayservice::ops::types::DICOMTags;
 use service_com_amazonaws_medicalimaging_ahigatewayservice::state::{
-    image_set_arn, imported_image_sets, service_state, ImageSet, ImageSetState,
-    ImageSetWorkflowStatus, ImportedInstance, PendingImageSetTransition,
+    image_set_arn, imported_image_sets, service_state, ImageSet, ImageSetInstance, ImageSetState,
+    ImageSetWorkflowStatus, ImportedInstance, PendingImageSetTransition, PixelDescription,
     IMAGE_FRAME_NOT_FOUND_MESSAGE, MISSING_TRANSFER_SYNTAX_CONTENT_TYPE,
 };
 
@@ -90,8 +90,15 @@ impl Instance {
                 dicom_study_instance_uid: Some(self.study_instance_uid.to_string()),
                 dicom_series_instance_uid: Some(self.series_instance_uid.to_string()),
                 dicom_series_modality: Some(self.modality.to_string()),
+                // The two study-level counts the FILE declares, which is where an image
+                // set's are read from.
+                dicom_number_of_study_related_series: DECLARED_STUDY_RELATED_SERIES as i32,
+                dicom_number_of_study_related_instances: DECLARED_STUDY_RELATED_INSTANCES as i32,
                 ..DICOMTags::default()
             },
+            metadata: ImageSetInstance::default(),
+            pixel_description: PixelDescription::default(),
+            series_number_text: None,
             pixel_data: self.pixel_data.clone(),
         }
     }
@@ -125,16 +132,20 @@ fn instance(
     }
 }
 
+/// The two STUDY-LEVEL counts every instance in this suite declares: DICOM attributes of
+/// the study, which the file carries and the import reports as it read them. They are
+/// deliberately unrelated to how many series or instances any row indexes, because they
+/// count the whole study rather than the files one import was pointed at.
+const DECLARED_STUDY_RELATED_SERIES: i64 = 4;
+const DECLARED_STUDY_RELATED_INSTANCES: i64 = 9;
+
 /// What one image set the import is to leave behind must report: the series it describes,
-/// the two study-level counts of the study it belongs to, and the SOP instances of it that
-/// carry pixel data.
+/// and the SOP instances of it that carry pixel data.
 struct ExpectedImageSet {
     study_instance_uid: &'static str,
     series_instance_uid: &'static str,
     patient_name: &'static str,
     modality: &'static str,
-    study_related_series: i64,
-    study_related_instances: i64,
     /// The SOP Instance UIDs that carry pixel data, each of which serves one image frame.
     frame_instances: Vec<&'static str>,
 }
@@ -169,8 +180,6 @@ fn import_cases() -> Vec<ImportCase> {
                 series_instance_uid: "1.2.840.113619.2.1.1",
                 patient_name: "DOE^JANE",
                 modality: "CT",
-                study_related_series: 1,
-                study_related_instances: 1,
                 frame_instances: vec!["1.2.840.113619.2.1.1.1"],
             }],
         },
@@ -207,9 +216,6 @@ fn import_cases() -> Vec<ImportCase> {
                 series_instance_uid: "1.2.840.113619.2.2.1",
                 patient_name: "ROE^RICHARD",
                 modality: "MR",
-                study_related_series: 1,
-                // Every instance of the study the import carried counts, pixel data or not.
-                study_related_instances: 3,
                 frame_instances: vec!["1.2.840.113619.2.2.1.1", "1.2.840.113619.2.2.1.2"],
             }],
         },
@@ -239,8 +245,6 @@ fn import_cases() -> Vec<ImportCase> {
                     series_instance_uid: "1.2.840.113619.2.3.1",
                     patient_name: "NOE^NORA",
                     modality: "CT",
-                    study_related_series: 2,
-                    study_related_instances: 2,
                     frame_instances: vec!["1.2.840.113619.2.3.1.1"],
                 },
                 ExpectedImageSet {
@@ -248,8 +252,6 @@ fn import_cases() -> Vec<ImportCase> {
                     series_instance_uid: "1.2.840.113619.2.3.2",
                     patient_name: "NOE^NORA",
                     modality: "US",
-                    study_related_series: 2,
-                    study_related_instances: 2,
                     frame_instances: vec!["1.2.840.113619.2.3.2.1"],
                 },
             ],
@@ -288,9 +290,6 @@ fn import_cases() -> Vec<ImportCase> {
                     series_instance_uid: "1.2.840.113619.2.4.1",
                     patient_name: "POE^PAUL",
                     modality: "DX",
-                    // Each study's counts are its OWN, not the import's.
-                    study_related_series: 1,
-                    study_related_instances: 1,
                     frame_instances: vec!["1.2.840.113619.2.4.1.1"],
                 },
                 ExpectedImageSet {
@@ -298,8 +297,6 @@ fn import_cases() -> Vec<ImportCase> {
                     series_instance_uid: "1.2.840.113619.2.5.1",
                     patient_name: "POE^PAUL",
                     modality: "NM",
-                    study_related_series: 1,
-                    study_related_instances: 2,
                     frame_instances: vec![
                         "1.2.840.113619.2.5.1.1",
                         "1.2.840.113619.2.5.1.2",
@@ -322,8 +319,6 @@ fn import_cases() -> Vec<ImportCase> {
                 series_instance_uid: "1.2.840.113619.2.6.1",
                 patient_name: "VOE^VERA",
                 modality: "SR",
-                study_related_series: 1,
-                study_related_instances: 1,
                 frame_instances: vec![],
             }],
         },
@@ -666,11 +661,11 @@ async fn a_completed_import_delivers_image_sets_that_are_active_and_searchable()
                 ),
                 (
                     vec!["Study", "DICOM", "NumberOfStudyRelatedSeries"],
-                    json!(expected.study_related_series),
+                    json!(DECLARED_STUDY_RELATED_SERIES),
                 ),
                 (
                     vec!["Study", "DICOM", "NumberOfStudyRelatedInstances"],
-                    json!(expected.study_related_instances),
+                    json!(DECLARED_STUDY_RELATED_INSTANCES),
                 ),
                 (
                     vec!["Study", "Series", series, "DICOM", "SeriesInstanceUID"],
@@ -696,15 +691,20 @@ async fn a_completed_import_delivers_image_sets_that_are_active_and_searchable()
                 .as_object()
                 .map(|instances| instances.keys().cloned().collect())
                 .unwrap_or_default();
+            // EVERY instance of the series the import read is reported, whether or not it
+            // carried pixel data: the document reports the DICOM metadata of each instance
+            // and the frames of the ones that have any.
+            let mut read_instances: Vec<String> = case
+                .instances
+                .iter()
+                .filter(|instance| instance.series_instance_uid == series)
+                .map(|instance| instance.sop_instance_uid.to_string())
+                .collect();
+            read_instances.sort();
             assert_eq!(
-                listed,
-                expected
-                    .frame_instances
-                    .iter()
-                    .map(|uid| (*uid).to_string())
-                    .collect::<Vec<String>>(),
-                "case {name:?} series {series:?}: expected the instances carrying pixel data, \
-                 got {reported_instances}"
+                listed, read_instances,
+                "case {name:?} series {series:?}: expected every instance of the series the \
+                 import read, got {reported_instances}"
             );
             for sop_instance_uid in &expected.frame_instances {
                 let (image_frame_id, pixel_data) = one
@@ -727,7 +727,14 @@ async fn a_completed_import_delivers_image_sets_that_are_active_and_searchable()
                             "ImageFrames",
                         ],
                     ),
-                    json!([{ "ID": image_frame_id }]),
+                    // The frame is reported by its identifier, beside what was computed
+                    // from the pixel data it holds — here the size of it, the only one of
+                    // those a frame whose instance declares no image pixel description
+                    // can state.
+                    json!([{
+                        "ID": image_frame_id,
+                        "FrameSizeInBytes": pixel_data.len(),
+                    }]),
                     "case {name:?} series {series:?}: expected the frame of \
                      {sop_instance_uid:?} reported under its instance, got {after}"
                 );

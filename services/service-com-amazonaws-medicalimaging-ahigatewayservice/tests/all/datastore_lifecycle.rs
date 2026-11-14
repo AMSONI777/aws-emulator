@@ -1186,11 +1186,20 @@ async fn an_import_job_reads_back_whole_and_runs_to_completion() {
             "case {:?}: expected jobName {expected_job_name:?}, got {final_read:?}",
             case.case
         );
+        // `jobProperties.outputS3Uri` is THIS job's own output prefix: the prefix the
+        // submit named with the per-job folder appended, which is where the job's results
+        // are written. `crate::import_job_output_manifest` is that rule's own suite.
+        let job_folder = format!("{datastore_id}-DicomImport-{job_id}/");
+        let expected_output_s3_uri = if case.output_s3_uri.ends_with('/') {
+            format!("{}{job_folder}", case.output_s3_uri)
+        } else {
+            format!("{}/{job_folder}", case.output_s3_uri)
+        };
         for (member, expected) in [
             ("datastoreId", datastore_id.as_str()),
             ("dataAccessRoleArn", case.data_access_role_arn),
             ("inputS3Uri", case.input_s3_uri),
-            ("outputS3Uri", case.output_s3_uri),
+            ("outputS3Uri", expected_output_s3_uri.as_str()),
         ] {
             assert_eq!(
                 final_read.string(&[properties, member]),

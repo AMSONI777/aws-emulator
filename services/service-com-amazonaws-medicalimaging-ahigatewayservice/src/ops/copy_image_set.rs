@@ -234,6 +234,12 @@ fn attributes_of_instances(
     mut attributes: ImageSetAttributes,
     selected: &BTreeSet<String>,
 ) -> ImageSetAttributes {
+    // Both halves of the instance level are filtered by the one selection: the DICOM
+    // metadata of each instance ([`crate::state::ImageSetAttributes::instances`]) and the
+    // attributes held at the path they were written at.
+    attributes
+        .instances
+        .retain(|sop_instance_uid, _| selected.contains(sop_instance_uid));
     retain_selected_instances(&mut attributes.extra_attributes, selected);
     attributes
 }
@@ -709,6 +715,20 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
                     return Err(CopyImageSetErrorModeled::ServiceQuotaExceededException(
                         ServiceQuotaExceededException {
                             message: crate::state::extra_attributes_quota_message(),
+                        },
+                    )
+                    .into());
+                }
+                // And by the cap on the OTHER half of what it delivers: the DICOM metadata
+                // of the SOP instances it carries into the destination
+                // (`crate::state::MAX_IMAGE_SET_INSTANCE_ATTRIBUTES`), counted the same way
+                // over what the destination would hold.
+                if delivered_into.instance_attributes()
+                    > crate::state::MAX_IMAGE_SET_INSTANCE_ATTRIBUTES
+                {
+                    return Err(CopyImageSetErrorModeled::ServiceQuotaExceededException(
+                        ServiceQuotaExceededException {
+                            message: crate::state::instance_attributes_quota_message(),
                         },
                     )
                     .into());

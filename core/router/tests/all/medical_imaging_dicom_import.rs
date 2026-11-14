@@ -955,10 +955,13 @@ async fn a_completed_dicom_import_materialises_the_image_sets_it_read() {
                 assert_eq!(
                     tags["DICOMNumberOfStudyRelatedSeries"]
                         .as_u64()
-                        .unwrap_or_default() as usize,
-                    series.len(),
-                    "case {case:?}: expected the study's series count on {image_set_id}, got \
-                     {tags:?}"
+                        .unwrap_or_default(),
+                    // The study's series count is a DICOM attribute of the study, and no
+                    // file above declares one, so the modelled default of the member
+                    // stands however many series this import indexed.
+                    0,
+                    "case {case:?}: expected the modelled default series count on \
+                     {image_set_id}, got {tags:?}"
                 );
                 assert_eq!(
                     tags["DICOMNumberOfStudyRelatedInstances"]
@@ -1022,9 +1025,21 @@ async fn a_completed_dicom_import_materialises_the_image_sets_it_read() {
                 let series_level = &document["Study"]["Series"][series_uid.as_str()];
                 for instance in &source {
                     let placed = &series_level["Instances"][instance.sop_uid];
+                    // Every instance the import read is placed, with the DICOM metadata of
+                    // the instance itself; only the ones that carried pixel data name a
+                    // frame.
+                    assert_eq!(
+                        placed["DICOM"]["SOPInstanceUID"]
+                            .as_str()
+                            .unwrap_or_default(),
+                        instance.sop_uid,
+                        "case {case:?}: expected instance {} placed in the hierarchy, got \
+                         {placed}",
+                        instance.sop_uid
+                    );
                     if instance.pixel_data.is_none() {
                         assert!(
-                            placed.is_null(),
+                            placed["ImageFrames"].is_null(),
                             "case {case:?}: an instance carrying no pixel data must place no \
                              frames, got {placed}"
                         );

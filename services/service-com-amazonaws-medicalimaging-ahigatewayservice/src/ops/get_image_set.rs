@@ -212,9 +212,17 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
             deleted_at: image_set.deleted_at.map(crate::state::to_date_time),
             message: version.message.clone(),
             image_set_arn: Some(image_set.image_set_arn.clone()),
-            // "If an image set was copied or updated using the force flag, this object
-            // will contain the forced flag" — so it is present only when it was.
-            overrides: version.forced.then_some(Overrides { forced: Some(true) }),
+            // "Specifies the overrides used in image set modification calls to
+            // `CopyImageSet` and `UpdateImageSetMetadata`"
+            // (`smithy_query(query="shape",shape="Overrides")`), whose one member is the
+            // `force` flag such a call may have been made with. It describes the version
+            // being reported whether or not an override was used, so the structure is
+            // REPORTED either way, carrying the flag that version was created with — a
+            // caller reading `overrides.forced` to decide whether an image set was
+            // force-completed reads false rather than an absent structure.
+            overrides: Some(Overrides {
+                forced: Some(version.forced),
+            }),
             is_primary: Some(image_set.is_primary),
             // The image SET's last access, like `createdAt`: content belongs to the
             // image set rather than to one version of it, so every version reports the

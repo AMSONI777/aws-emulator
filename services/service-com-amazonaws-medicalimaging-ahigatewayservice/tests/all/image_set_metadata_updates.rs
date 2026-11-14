@@ -64,11 +64,10 @@ pub(crate) const SOP_UID: &str = "1.2.840.113619.2.1.1.4";
 /// this one's.
 pub(crate) const STUDY_UID: &str = "1.2.840.113619.2.1.9.1";
 
-/// The `contentType` `GetImageSetMetadata` serves the document with: the format its
-/// response member documents
-/// (`smithy_query(query="doc",shape="GetImageSetMetadataResponse",member="contentType")`
-/// — "Default is `text/plain`"), which nothing an update writes can move.
-const METADATA_CONTENT_TYPE: &str = "text/plain";
+/// The `contentType` `GetImageSetMetadata` serves the document with: the media type the
+/// aggregated metadata document really is (JSON), which nothing an update writes can move.
+/// `crate::content_type_reporting` is that rule's suite.
+const METADATA_CONTENT_TYPE: &str = "application/json";
 
 /// The DICOM attributes a seeded image set starts from: every modelled member filled, so
 /// a case can write one, remove one, and still tell what it did not touch.
@@ -549,10 +548,12 @@ async fn an_update_writes_the_attributes_it_names_and_the_document_reports_them(
         let forced_reported = settled.field(&["overrides", "forced"]).as_bool();
         assert_eq!(
             forced_reported,
-            case.force.then_some(true),
+            // `overrides` describes the version either way, carrying the force flag the
+            // update that created it used.
+            Some(case.force),
             "case {:?}: expected the forced override {:?}, got {settled:?}",
             case.case,
-            case.force.then_some(true)
+            case.force
         );
         // The version the update superseded is still readable, and still reports what it
         // reported before.

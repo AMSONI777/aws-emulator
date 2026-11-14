@@ -14,13 +14,19 @@
 //! EVERY version of the image set, because
 //! the state is whether the image set can be read and written rather than a property of
 //! one snapshot of it, while the workflow status — what last happened — is recorded on
-//! the latest version. The record itself stays readable through `GetImageSet` as a
-//! tombstone, because `deletedAt` ("the timestamp when the image set properties were
-//! deleted") is a member that operation reports.
+//! the latest version.
 //!
 //! `@idempotent`: a repeat delete reports the same pair as the first without moving the
 //! instant the deletion falls due, and a delete of an image set the clock has already
 //! retired reports its terminal pair rather than failing.
+//!
+//! A finished deletion is REPORTED BEFORE IT IS FORGOTTEN: the record stays readable
+//! through `GetImageSet` as a tombstone — `deletedAt` ("the timestamp when the image set
+//! properties were deleted") is a member that operation reports — and the clock then reaps
+//! it ([`crate::state::IMAGE_SET_DELETED_RETENTION`]), after which the data store holds no
+//! such image set and every call naming it is answered as it is for an id nothing ever
+//! minted. So a client that waits for a deletion by polling until the image set is gone
+//! does reach that answer.
 //!
 //! ---
 //!

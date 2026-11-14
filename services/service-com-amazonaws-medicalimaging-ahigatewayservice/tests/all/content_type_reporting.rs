@@ -2,13 +2,12 @@
 
 //! End-to-end cover for the `contentType` each content read of an image set reports.
 //!
-//! RULE: a read that serves content reports in `contentType` the format its OWN response
-//! member documents that content is returned in — nothing the emulator prefers decides it,
-//! and in particular not the bytes the blob happens to carry.
-//! `GetImageSetMetadata`'s member documents one format for the study metadata and
-//! distinguishes no case ("The format in which the study metadata is returned to the
-//! customer. Default is `text/plain`."), so every answer it serves reports that documented
-//! default, whatever the aggregated document holds and whichever version it was built from;
+//! RULE: a read that serves content reports in `contentType` the media type the content it
+//! serves really is — nothing the emulator prefers decides it.
+//! `GetImageSetMetadata` serves the aggregated metadata document as JSON, so every answer
+//! it serves reports that media type, whatever the document holds and whichever version it
+//! was built from (the member's own documentation names `text/plain` as a DEFAULT rather
+//! than as the format of an aggregated document);
 //! `GetImageFrame`'s member documents a per-transfer-syntax catalog with a default of its
 //! own, so its answers report the entry documented for the syntax the pixel data is stored
 //! in. Neither read names a compression its blob is not in: the metadata blob is served
@@ -47,15 +46,18 @@ use crate::image_frames::{get_image_frame, pixel_data, seed_image_set_with_frame
 use crate::image_set_metadata::get_image_set_metadata;
 use crate::image_set_metadata_updates::{seeded_tags, STUDY_UID};
 
-/// The `contentType` `GetImageSetMetadata` must report, taken from the response member's
-/// own documentation —
-/// `smithy_query(query="doc",shape="GetImageSetMetadataResponse",member="contentType")`:
-/// "The format in which the study metadata is returned to the customer. Default is
-/// `text/plain`." That documentation names no case, so this is the format of every answer.
+/// The `contentType` `GetImageSetMetadata` must report: the media type of the aggregated
+/// metadata document it serves, which is the JSON document this service builds. The
+/// response member is documented "The format in which the study metadata is returned to the
+/// customer. Default is `text/plain`."
+/// (`smithy_query(query="doc",shape="GetImageSetMetadataResponse",member="contentType")`),
+/// where `text/plain` is the default the member names rather than the format of an
+/// aggregated document, and the recorded responses of this operation report the document's
+/// own media type.
 ///
-/// Spelled as the literal the member documents rather than read off the handler's own
-/// constant, so a case here fails if that constant moves away from the documentation.
-const DOCUMENTED_METADATA_CONTENT_TYPE: &str = "text/plain";
+/// Spelled as a literal here rather than read off the handler's own constant, so a case
+/// here fails if that constant moves away from the media type the blob is in.
+const DOCUMENTED_METADATA_CONTENT_TYPE: &str = "application/json";
 
 /// The compression format AWS HealthImaging returns the aggregated metadata blob in, which
 /// is what `contentEncoding` ("the compression format in which image set metadata

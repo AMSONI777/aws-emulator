@@ -222,10 +222,14 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
                 updated_at: Some(crate::state::to_date_time(version.updated_at)),
                 deleted_at: image_set.deleted_at.map(crate::state::to_date_time),
                 message: version.message.clone(),
-                // "if `forced` exists, the `forced` flag was used when creating the
-                // image set" — so it is present only on a version that was created with
-                // it.
-                overrides: version.forced.then_some(Overrides { forced: Some(true) }),
+                // The overrides used when the reported version was created, by the rule
+                // `GetImageSet` reports the same structure by: it describes the version
+                // whether or not an override was used, so the structure is reported either
+                // way and carries the flag that version was created with. The two readers
+                // of one version therefore report the same `overrides`.
+                overrides: Some(Overrides {
+                    forced: Some(version.forced),
+                }),
                 is_primary: Some(image_set.is_primary),
             })
             .collect();

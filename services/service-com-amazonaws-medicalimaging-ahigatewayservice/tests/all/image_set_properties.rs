@@ -398,20 +398,15 @@ async fn get_image_set_reports_the_persisted_properties_of_the_version_asked_for
                     case.case
                 ),
             }
-            if version.forced {
-                assert_eq!(
-                    read.field(&["overrides", "forced"]),
-                    &Value::Bool(true),
-                    "case {:?} version={version_id}: a forced version reports overrides.forced, got {read:?}",
-                    case.case
-                );
-            } else {
-                assert!(
-                    read.field(&["overrides"]).is_null(),
-                    "case {:?} version={version_id}: overrides is present only for a forced version, got {read:?}",
-                    case.case
-                );
-            }
+            // `overrides` describes the version whether or not an override was used, so it
+            // is reported either way and carries the flag that version was created with.
+            assert_eq!(
+                read.field(&["overrides", "forced"]),
+                &Value::Bool(version.forced),
+                "case {:?} version={version_id}: expected overrides.forced {}, got {read:?}",
+                case.case,
+                version.forced
+            );
             assert!(
                 STORAGE_TIERS.contains(&read.string(&["storageTier"]).as_str()),
                 "case {:?} version={version_id}: expected a modelled storageTier, got {read:?}",

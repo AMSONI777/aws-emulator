@@ -4,9 +4,8 @@
 //!
 //! RULE: `GetImageSetMetadata` answers HTTP 200 with the AGGREGATED DICOM metadata
 //! document of the image set the request names — a JSON document written into the blob
-//! as it stands, with `contentType` stating the format its own response member documents
-//! this operation returns the study metadata in and
-//! `contentEncoding` absent because nothing compressed it — and every value in that
+//! as it stands, with `contentType` stating the media type that document really is and
+//! `contentEncoding` naming the compression it is carried under — and every value in that
 //! document comes from persisted state: the patient, study and series attributes the
 //! image set holds, under the DICOM keyword of each, and the image frames it holds,
 //! placed under the SOP instance each one's pixel data came from. An attribute nothing
@@ -57,11 +56,9 @@ use crate::datastore_lifecycle::{Answer, Emulator, SETTLE_MULTIPLE};
 use crate::image_frames::pixel_data;
 use crate::image_set_copy::{copy_image_set, get_image_set, information};
 
-/// The `contentType` the document is served with: the format the response member's own
-/// documentation names
-/// (`smithy_query(query="doc",shape="GetImageSetMetadataResponse",member="contentType")` —
-/// "Default is `text/plain`"). `crate::content_type_reporting` is that rule's suite.
-const EXPECTED_CONTENT_TYPE: &str = "text/plain";
+/// The `contentType` the document is served with: the media type the aggregated metadata
+/// document really is, which is JSON. `crate::content_type_reporting` is that rule's suite.
+const EXPECTED_CONTENT_TYPE: &str = "application/json";
 
 /// The `contentEncoding` the document is served with: the compression format AWS
 /// HealthImaging returns the aggregated metadata blob in, which is why the response

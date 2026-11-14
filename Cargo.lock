@@ -16364,6 +16364,7 @@ dependencies = [
  "aws-smithy-schema 0.2.1",
  "aws-smithy-types",
  "bytes",
+ "crc32fast",
  "dicom-core",
  "dicom-dictionary-std",
  "dicom-object",

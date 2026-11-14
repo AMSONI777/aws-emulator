@@ -470,12 +470,9 @@ async fn a_copy_lands_a_new_version_and_the_clock_releases_both_image_sets() {
         );
         assert_eq!(
             destination.field(&["overrides", "forced"]),
-            &match case.force {
-                // "If an image set was copied using the force flag, this object will
-                // contain the forced flag" — present only when it was used.
-                Some(true) => json!(true),
-                _ => Value::Null,
-            },
+            // `overrides` describes the version either way: the flag it carries is the
+            // force flag the copy that created the version used.
+            &json!(case.force == Some(true)),
             "case {:?}: overrides must report the force flag the copy used, got {destination:?}",
             case.case
         );

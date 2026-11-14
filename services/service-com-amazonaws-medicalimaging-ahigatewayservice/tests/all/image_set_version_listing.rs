@@ -31,14 +31,24 @@
 //! other way, over HTTP through `CopyImageSet`, so the listing is also proved against
 //! versions a handler minted.
 
+use std::time::{Duration, Instant};
+
 use serde_json::Value;
 
 use service_com_amazonaws_medicalimaging_ahigatewayservice::state::{
     FIRST_IMAGE_SET_VERSION_ID, IMAGE_SET_COPY_DELAY, MAX_LIST_PAGE_SIZE, MIN_LIST_PAGE_SIZE,
 };
 
-use crate::datastore_lifecycle::{Answer, Emulator, SETTLE_MULTIPLE};
+use crate::datastore_lifecycle::{Answer, Emulator};
 use crate::image_set_copy::{copy_image_set, information, seed_image_set};
+
+/// How long a poll waits for a change the CLOCK owes before giving up. Generous on
+/// purpose: it bounds a hung emulator rather than the span this service promises, so a
+/// loaded host cannot fail a case that is only slow.
+const POLL_DEADLINE: Duration = Duration::from_secs(120);
+
+/// How long a poll waits between looks.
+const POLL_INTERVAL: Duration = Duration::from_millis(25);
 
 /// A `RoleArn` the import-job submits below use (len 20..2048,
 /// `^arn:aws(-[^:]+)?:iam::[0-9]{12}:role/.+$`).
@@ -468,11 +478,41 @@ async fn listing_versions_changes_nothing_a_later_caller_sees() {
     }
 }
 
+/// Poll `GetImageSet` until the copy the CLOCK owed has landed: the image set back in
+/// `ACTIVE`, at the version the copy was to leave it on.
+///
+/// Waits for the CONDITION rather than for the span the copy is promised in
+/// ([`IMAGE_SET_COPY_DELAY`]), so a loaded host only makes a case slower, never red.
+/// Panics past [`POLL_DEADLINE`], which bounds a hung emulator.
+async fn poll_until_landed(
+    emulator: &Emulator,
+    case: &str,
+    datastore_id: &str,
+    image_set_id: &str,
+    version_id: &str,
+) {
+    let deadline = Instant::now() + POLL_DEADLINE;
+    loop {
+        let read = get_image_set(emulator, datastore_id, image_set_id, version_id).await;
+        if read.status == 200
+            && read.string(&["imageSetState"]) == "ACTIVE"
+            && read.string(&["versionId"]) == version_id
+        {
+            return;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "case {case:?}: the copy never landed ACTIVE at version {version_id} (the copy span \
+             is {IMAGE_SET_COPY_DELAY:?}), last answer {read:?}"
+        );
+        tokio::time::sleep(POLL_INTERVAL).await;
+    }
+}
+
 /// RULE: the versions a handler mints are the versions the listing reports — a copy that
 /// lands on an image set appears as the next version, carrying the overrides that copy
 /// asked for and no others.
-#[tokio::test]
-async fn versions_a_copy_lands_appear_in_the_listing_with_that_version_s_overrides() {
+#[tokio::test]async fn versions_a_copy_lands_appear_in_the_listing_with_that_version_s_overrides() {
     let emulator = Emulator::new();
     let datastore_id = emulator
         .active_datastore("copy.listing.store", "copy-listing-1")
@@ -494,7 +534,14 @@ async fn versions_a_copy_lands_appear_in_the_listing_with_that_version_s_overrid
         "case \"mint the destination\": expected HTTP 200 from CopyImageSet, got {minted:?}"
     );
     let destination_id = minted.string(&["destinationImageSetProperties", "imageSetId"]);
-    tokio::time::sleep(SETTLE_MULTIPLE * IMAGE_SET_COPY_DELAY).await;
+    poll_until_landed(
+        &emulator,
+        "mint the destination",
+        &datastore_id,
+        &destination_id,
+        "1",
+    )
+    .await;
 
     // A forced copy into that image set lands its second version, which is the one that
     // carries the override.
@@ -510,7 +557,14 @@ async fn versions_a_copy_lands_appear_in_the_listing_with_that_version_s_overrid
         versioned.status, 200,
         "case \"version the destination\": expected HTTP 200 from CopyImageSet, got {versioned:?}"
     );
-    tokio::time::sleep(SETTLE_MULTIPLE * IMAGE_SET_COPY_DELAY).await;
+    poll_until_landed(
+        &emulator,
+        "version the destination",
+        &datastore_id,
+        &destination_id,
+        "2",
+    )
+    .await;
 
     let listed = list_versions(&emulator, &datastore_id, &destination_id, "").await;
     assert_eq!(
@@ -524,9 +578,11 @@ async fn versions_a_copy_lands_appear_in_the_listing_with_that_version_s_overrid
     );
 
     let entries = properties(&listed);
-    assert!(
-        entries[0]["overrides"].is_null(),
-        "case \"version 1\": expected no overrides on a version copied without force, got {:?}",
+    assert_eq!(
+        entries[0]["overrides"]["forced"].as_bool(),
+        Some(false),
+        "case \"version 1\": expected overrides.forced false on a version copied without \
+         force, got {:?}",
         entries[0]
     );
     assert_eq!(

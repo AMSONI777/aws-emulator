@@ -28,8 +28,8 @@ use serde_json::Value;
 
 use service_com_amazonaws_medicalimaging_ahigatewayservice::ops::types::DICOMTags;
 use service_com_amazonaws_medicalimaging_ahigatewayservice::state::{
-    import_job_output, imported_image_sets, ImportPrefixRead, ImportedInstance, PrefixAnswer,
-    ScannedObject, IMPORT_JOB_COMPLETION_DELAY, NO_STUDY_OR_SERIES,
+    import_job_output, imported_image_sets, ImageSetInstance, ImportPrefixRead, ImportedInstance,
+    PixelDescription, PrefixAnswer, ScannedObject, IMPORT_JOB_COMPLETION_DELAY, NO_STUDY_OR_SERIES,
 };
 
 use crate::datastore_lifecycle::{Emulator, ACCOUNT};
@@ -56,6 +56,9 @@ fn carried(key: &str, study: &str, series: &str, sop: &str) -> ScannedObject {
                 dicom_series_instance_uid: Some(series.to_string()),
                 ..DICOMTags::default()
             },
+            metadata: ImageSetInstance::default(),
+            pixel_description: PixelDescription::default(),
+            series_number_text: None,
             pixel_data: Some(vec![1, 2, 3, 4]),
         }),
         skipped: None,
@@ -73,6 +76,9 @@ fn unplaceable(key: &str) -> ScannedObject {
             series_instance_uid: None,
             sop_instance_uid: Some("1.2.3.4".to_string()),
             tags: DICOMTags::default(),
+            metadata: ImageSetInstance::default(),
+            pixel_description: PixelDescription::default(),
+            series_number_text: None,
             pixel_data: None,
         }),
         skipped: None,
