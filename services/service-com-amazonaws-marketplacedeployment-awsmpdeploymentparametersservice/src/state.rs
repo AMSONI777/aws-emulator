@@ -668,19 +668,31 @@ impl ComAmazonawsMarketplacedeploymentAwsmpdeploymentparametersserviceState {
             .is_some_and(|agreement| agreement.covers(product_id))
     }
 
+    /// Whether this account holds `product_id` in `catalog` at all: some
+    /// agreement of the account covers it, whichever one.
+    ///
+    /// This is the PATH-addressed resource of a deployment-parameter write
+    /// (`productId` is the operation's `@httpLabel`), resolved on its own —
+    /// independently of the `agreementId` a particular request happens to name.
+    pub fn holds_product(&self, catalog: &str, product_id: &str) -> bool {
+        self.agreements.iter().any(|((held_catalog, _), agreement)| {
+            held_catalog == catalog && agreement.covers(product_id)
+        })
+    }
+
     /// Which segment of the target `(catalog, productId, agreementId)` this
     /// account does not hold, or `None` when the whole target resolves.
     ///
-    /// The AGREEMENT is judged FIRST and the product second, because that is the
-    /// order the operation targets by: `PutDeploymentParameter` "creates or
-    /// updates a deployment parameter and is targeted by `catalog` and
-    /// `agreementId`" for the product the URI addresses, so the agreement is the
-    /// target a write resolves and the product is what a resolved agreement has
-    /// to cover. `agreementId` is therefore the unresolved segment whenever this
-    /// account holds no agreement of that id in the catalog — which is the case a
-    /// request naming neither a held agreement nor a held product falls in;
-    /// `productId` is the unresolved segment only once the agreement itself
-    /// resolves and does not cover the product the request addresses.
+    /// The resource the URI PATH addresses is judged FIRST and the one a body
+    /// member names second: a targeted write resolves the resource its path
+    /// addresses before the resource its payload refers to, so `productId` —
+    /// this operation's `@httpLabel`
+    /// (`smithy_query(query="operation",operation="PutDeploymentParameter")`) —
+    /// is the unresolved segment whenever no agreement of this account in the
+    /// catalog covers that product, which is the case a request naming neither a
+    /// held product nor a held agreement falls in. `agreementId`, the body
+    /// member, is the unresolved segment only once the product itself resolves
+    /// and the named agreement does not cover it.
     ///
     /// The returned name is the member as [`target_not_found`] states it.
     pub fn unresolved_target(
@@ -689,14 +701,13 @@ impl ComAmazonawsMarketplacedeploymentAwsmpdeploymentparametersserviceState {
         product_id: &str,
         agreement_id: &str,
     ) -> Option<&'static str> {
-        match self
-            .agreements
-            .get(&(catalog.to_string(), agreement_id.to_string()))
-        {
-            None => Some("AgreementId"),
-            Some(agreement) if !agreement.covers(product_id) => Some("ProductId"),
-            Some(_) => None,
+        if !self.holds_product(catalog, product_id) {
+            return Some("ProductId");
         }
+        if !self.holds_target(catalog, product_id, agreement_id) {
+            return Some("AgreementId");
+        }
+        None
     }
 
     /// Materialise the expiry the clock has already made due at `now`: drop every

@@ -56,6 +56,7 @@
 //! RESOLVES and never one the write establishes: a request whose
 //! (catalog, productId, agreementId) the store does not hold is the modelled
 //! `ResourceNotFoundException` (HTTP 404) naming the segment that did not resolve
+//! — the resource the URI path addresses before the one the body names
 //! ([`crate::state::ComAmazonawsMarketplacedeploymentAwsmpdeploymentparametersserviceState::unresolved_target`]),
 //! with nothing written. The targets themselves get into the store out of band of
 //! any request, from the fixture set a fresh store holds
@@ -303,13 +304,14 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         // The write's TARGET, resolved before anything is minted or updated:
         // `PutDeploymentParameter` "creates or updates a deployment parameter and
         // is targeted by catalog and agreementId" for the product the URI
-        // addresses, and the agreement that target names is created out of band of
-        // this API — nothing this model declares creates a product or an
-        // agreement. So the target is a precondition this operation RESOLVES: a
-        // request whose triple the store does not hold is the modelled
+        // addresses, and both the product and the agreement that target names are
+        // created out of band of this API — nothing this model declares creates a
+        // product or an agreement. So the target is a precondition this operation
+        // RESOLVES: a request whose triple the store does not hold is the modelled
         // `ResourceNotFoundException` (HTTP 404), blamed on the segment that did
-        // not resolve (the agreement first, then the product it has to cover), and
-        // nothing is written for it.
+        // not resolve — the resource the URI PATH addresses (`productId`) first,
+        // then the agreement the body names, which has to cover it — and nothing
+        // is written for it.
         //
         // The modelled input constraints (every `@pattern`, every `@length`) are
         // already refused with `ValidationException` (HTTP 400) by the centralized

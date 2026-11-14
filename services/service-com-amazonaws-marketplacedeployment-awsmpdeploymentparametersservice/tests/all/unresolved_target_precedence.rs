@@ -3,17 +3,17 @@
 //! WHICH segment of a deployment-parameter write's target is blamed when the
 //! target does not resolve.
 //!
-//! The rule under test: a targeted write resolves its target in the order the
-//! operation is targeted by — `PutDeploymentParameter` "creates or updates a
-//! deployment parameter and is targeted by `catalog` and `agreementId`" for the
-//! product its URI addresses — so the blamed member is the FIRST segment that
-//! does not resolve in that order: `AgreementId` whenever the account holds no
-//! such agreement in the catalog (which is the case for a request naming neither
-//! a held agreement nor a held product), and `ProductId` only once the agreement
-//! itself resolves and does not cover the product the request addresses.
+//! The rule under test: a targeted write resolves the resource its URI PATH
+//! addresses before the resource a body member refers to, so the blamed member is
+//! `ProductId` — `PutDeploymentParameter`'s `@httpLabel`
+//! (`smithy_query(query="operation",operation="PutDeploymentParameter")` shows
+//! `catalog` and `productId` bound to the path and `agreementId` in the payload) —
+//! whenever no agreement this account holds in the catalog covers that product,
+//! which is the case for a request naming neither a held product nor a held
+//! agreement; `AgreementId` is blamed only once the product itself resolves and
+//! the agreement the body names does not cover it.
 //!
-//! The refusal is the modelled `ResourceNotFoundException` (HTTP 404,
-//! `smithy_query(query="operation",operation="PutDeploymentParameter")`), and its
+//! The refusal is the modelled `ResourceNotFoundException` (HTTP 404), and its
 //! message is one template: the fixed sentence
 //! `"<Member>: Request references a resource which does not exist."`, whose only
 //! variable part is the PascalCase name of that segment. No value from the
@@ -25,7 +25,8 @@
 use serde_json::{json, Value};
 
 use crate::deployment_parameters::{
-    emulator, error_code, holds_target, message, provision, put, stored_parameters, CATALOG,
+    emulator, error_code, holds_product, holds_target, message, provision, put, stored_parameters,
+    CATALOG,
 };
 
 /// The modelled error and status an unresolved target carries.
@@ -62,12 +63,17 @@ fn held_agreements() -> Vec<(String, Vec<String>)> {
             vec!["prod/shared/7".to_string()],
         ),
         ("a".to_string(), vec!["p".to_string()]),
-        (
-            "g".repeat(64),
-            vec!["0".to_string(), "d".repeat(64)],
-        ),
+        ("g".repeat(64), vec!["0".to_string(), "d".repeat(64)]),
     ]
 }
+
+/// A catalog OTHER than the one every request below names, holding one agreement
+/// of its own: the product it covers is held in that catalog and in no other, so a
+/// request inside [`CATALOG`] addresses a product nothing there covers.
+const OTHER_CATALOG: &str = "AWSMarketplace-elsewhere";
+/// The agreement that other catalog holds, and the product it covers.
+const ELSEWHERE_AGREEMENT: &str = "agmt-elsewhere";
+const ELSEWHERE_PRODUCT: &str = "prod-elsewhere-only";
 
 /// The table. Each row differs from a resolving target in exactly one way, so what
 /// it observes is the precedence rule: which segment fails to resolve, and in which
@@ -76,16 +82,47 @@ fn table() -> Vec<Row> {
     let long_agreement = "g".repeat(64);
     let long_product = "d".repeat(64);
     vec![
-        // Nothing the account holds: the agreement is the segment resolved first,
-        // so it is the one blamed.
+        // The product the path addresses resolves against nothing the account
+        // holds, so it is the segment blamed — whatever the agreement is.
         Row {
             case: "neither the product nor the agreement is held",
             product_id: "prod-unknown".to_string(),
             agreement_id: "agmt-unknown".to_string(),
-            blamed: Some("AgreementId"),
+            blamed: Some("ProductId"),
         },
         Row {
-            case: "a product a held agreement covers, under an unknown agreement",
+            case: "a product nothing covers, under a held agreement",
+            product_id: "prod-unknown".to_string(),
+            agreement_id: "agmt-held-1".to_string(),
+            blamed: Some("ProductId"),
+        },
+        Row {
+            case: "a product differing from a covered one only in case",
+            product_id: "PROD-HELD-1".to_string(),
+            agreement_id: "agmt-held-1".to_string(),
+            blamed: Some("ProductId"),
+        },
+        Row {
+            case: "a product held only in another catalog",
+            product_id: ELSEWHERE_PRODUCT.to_string(),
+            agreement_id: ELSEWHERE_AGREEMENT.to_string(),
+            blamed: Some("ProductId"),
+        },
+        Row {
+            case: "a one-character held agreement, a product it does not cover",
+            product_id: "q".to_string(),
+            agreement_id: "a".to_string(),
+            blamed: Some("ProductId"),
+        },
+        Row {
+            case: "a 64-character held agreement, a product nothing covers",
+            product_id: "prod-unknown".to_string(),
+            agreement_id: long_agreement.clone(),
+            blamed: Some("ProductId"),
+        },
+        // The product resolves: now the agreement the body names is what does not.
+        Row {
+            case: "a held product, under an agreement the account does not hold",
             product_id: "prod-held-1".to_string(),
             agreement_id: "agmt-unknown".to_string(),
             blamed: Some("AgreementId"),
@@ -97,53 +134,28 @@ fn table() -> Vec<Row> {
             blamed: Some("AgreementId"),
         },
         Row {
-            case: "an agreement differing from a held one only in case",
+            case: "a held product, under an agreement differing from its holder only in case",
             product_id: "prod-held-1".to_string(),
             agreement_id: "AGMT-HELD-1".to_string(),
             blamed: Some("AgreementId"),
         },
         Row {
-            case: "a one-character agreement id the account does not hold",
+            case: "a held product, under a held agreement that covers another product",
+            product_id: "prod-held-1".to_string(),
+            agreement_id: "agmt_held/2-x".to_string(),
+            blamed: Some("AgreementId"),
+        },
+        Row {
+            case: "a one-character held product, under an agreement nothing holds",
             product_id: "p".to_string(),
             agreement_id: "b".to_string(),
             blamed: Some("AgreementId"),
         },
         Row {
-            case: "a 64-character agreement id the account does not hold",
+            case: "a 64-character held product, under a 64-character agreement nothing holds",
             product_id: long_product.clone(),
             agreement_id: "h".repeat(64),
             blamed: Some("AgreementId"),
-        },
-        // The agreement resolves: now the product is the segment that does not.
-        Row {
-            case: "a held agreement, a product nothing covers",
-            product_id: "prod-unknown".to_string(),
-            agreement_id: "agmt-held-1".to_string(),
-            blamed: Some("ProductId"),
-        },
-        Row {
-            case: "a held agreement, a product only another agreement covers",
-            product_id: "prod-held-1".to_string(),
-            agreement_id: "agmt_held/2-x".to_string(),
-            blamed: Some("ProductId"),
-        },
-        Row {
-            case: "a held agreement, a product differing from a covered one only in case",
-            product_id: "PROD-HELD-1".to_string(),
-            agreement_id: "agmt-held-1".to_string(),
-            blamed: Some("ProductId"),
-        },
-        Row {
-            case: "a one-character held agreement, a product it does not cover",
-            product_id: "q".to_string(),
-            agreement_id: "a".to_string(),
-            blamed: Some("ProductId"),
-        },
-        Row {
-            case: "a 64-character held agreement, a product it does not cover",
-            product_id: "prod-unknown".to_string(),
-            agreement_id: long_agreement.clone(),
-            blamed: Some("ProductId"),
         },
         // The controls: every segment resolves, so the write is served.
         Row {
@@ -174,12 +186,20 @@ fn table() -> Vec<Row> {
 }
 
 #[tokio::test]
-async fn the_refusal_blames_the_first_target_segment_that_does_not_resolve() {
+async fn the_refusal_blames_the_path_resource_before_the_agreement_the_body_names() {
     let (router, engine) = emulator();
     for (agreement_id, product_ids) in held_agreements() {
         let products: Vec<&str> = product_ids.iter().map(String::as_str).collect();
         provision(&engine, CATALOG, &agreement_id, &products);
     }
+    // Held in a catalog of its own, so the product it covers is NOT covered in the
+    // catalog every request below names.
+    provision(
+        &engine,
+        OTHER_CATALOG,
+        ELSEWHERE_AGREEMENT,
+        &[ELSEWHERE_PRODUCT],
+    );
 
     let mut served = 0usize;
     for row in table() {
@@ -190,6 +210,16 @@ async fn the_refusal_blames_the_first_target_segment_that_does_not_resolve() {
             "case {case:?}: the row must name a target the account holds exactly when it \
              expects to be served, got holds_target {}",
             holds_target(&engine, CATALOG, &row.product_id, &row.agreement_id)
+        );
+        // The row's own precondition: a row that expects `ProductId` names a
+        // product no agreement of the catalog covers, and every other row names
+        // one that resolves.
+        assert_eq!(
+            holds_product(&engine, CATALOG, &row.product_id),
+            row.blamed != Some("ProductId"),
+            "case {case:?}: the row must name a product the catalog covers exactly when it \
+             expects another segment to be blamed, got holds_product {}",
+            holds_product(&engine, CATALOG, &row.product_id)
         );
         let (status, answer) = put(
             &router,
@@ -256,10 +286,10 @@ async fn the_refusal_blames_the_first_target_segment_that_does_not_resolve() {
 
 #[tokio::test]
 async fn the_blamed_segment_follows_what_the_account_holds_and_nothing_else() {
-    // The same request, answered three ways as the store gains the segments it
-    // names: the agreement first, then the product it covers. Nothing about the
-    // request changes between the calls, so the blamed segment is a fact of what
-    // the account holds.
+    // The same request, answered four ways as the store gains the segments it
+    // names: the product the path addresses first, then the agreement that has to
+    // cover it. Nothing about the request changes between the calls, so the blamed
+    // segment is a fact of what the account holds.
     let (router, engine) = emulator();
     let body = json!({
         "agreementId": "agmt-staged",
@@ -273,26 +303,44 @@ async fn the_blamed_segment_follows_what_the_account_holds_and_nothing_else() {
     );
     assert_eq!(
         message(&answer),
-        not_found_sentence("AgreementId"),
-        "with no agreement held the refusal must blame the agreement, got {answer:?}"
+        not_found_sentence("ProductId"),
+        "with the product covered by nothing the refusal must blame the product, got {answer:?}"
     );
 
-    // The agreement exists now, covering ANOTHER product: the agreement resolves,
-    // so the product addressed is what does not.
+    // The agreement the body names exists now, but it covers ANOTHER product: the
+    // product the path addresses still resolves against nothing, so it stays the
+    // blamed segment.
     provision(&engine, CATALOG, "agmt-staged", &["prod-elsewhere"]);
     let (status, answer) = put(&router, CATALOG, "prod-staged", &body).await;
     assert_eq!(
         status, NOT_FOUND_STATUS,
-        "the agreement covers another product, so the write must be refused, \
+        "the product is still covered by nothing, so the write must be refused, \
          got {status} {answer:?}"
     );
     assert_eq!(
         message(&answer),
         not_found_sentence("ProductId"),
-        "with the agreement held the refusal must blame the product, got {answer:?}"
+        "an agreement covering another product does not resolve the product addressed, \
+         got {answer:?}"
     );
 
-    // And once that agreement covers the product too, the write is served.
+    // Another agreement covers the product now: the product resolves, so the
+    // agreement the body names — which does not cover it — is what does not.
+    provision(&engine, CATALOG, "agmt-other", &["prod-staged"]);
+    let (status, answer) = put(&router, CATALOG, "prod-staged", &body).await;
+    assert_eq!(
+        status, NOT_FOUND_STATUS,
+        "the named agreement does not cover the product, so the write must be refused, \
+         got {status} {answer:?}"
+    );
+    assert_eq!(
+        message(&answer),
+        not_found_sentence("AgreementId"),
+        "with the product held the refusal must blame the agreement, got {answer:?}"
+    );
+
+    // And once the agreement the body names covers the product too, the write is
+    // served.
     provision(&engine, CATALOG, "agmt-staged", &["prod-staged"]);
     let (status, answer) = put(&router, CATALOG, "prod-staged", &body).await;
     assert_eq!(

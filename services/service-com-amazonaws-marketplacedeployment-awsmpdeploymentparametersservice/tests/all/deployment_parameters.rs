@@ -112,6 +112,19 @@ pub(crate) fn holds_target(
         .holds_target(catalog, product_id, agreement_id)
 }
 
+/// Whether this service's store holds `product_id` in `catalog` at all: some
+/// agreement of the account covers it, whichever one.
+pub(crate) fn holds_product(
+    engine: &engine::InMemoryEngine,
+    catalog: &str,
+    product_id: &str,
+) -> bool {
+    service_state(engine)
+        .expect("the shared engine holds this service's store")
+        .lock()
+        .holds_product(catalog, product_id)
+}
+
 /// How many deployment parameters the store holds.
 pub(crate) fn stored_parameters(engine: &engine::InMemoryEngine) -> usize {
     service_state(engine)

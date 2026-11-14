@@ -3487,3 +3487,5 @@ mod chime_deleted_meeting_tagging;
 // fragment of the file's own header, which a merge of two appended tails landed down here,
 // is an ordinary comment.)
 // (A stray line of that same repeated rule, an ordinary comment for the same reason:)
+// leaving a note here. (Ordinary line comments: an inner doc comment `//!` is only legal
+// before the first item of a crate root, so one in this appended tail is `E0753`.)
