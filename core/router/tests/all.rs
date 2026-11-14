@@ -3886,3 +3886,9 @@ mod cloudformation_provisions_redshift_snapshot_copy_grants;
 // (Four more orphaned lines of that header fragment, as ordinary comments for the same
 // reason: `//!` is only legal before the first item of a crate root.)
 // (And two last orphaned lines of it, as ordinary comments for the same reason.)
+// declared only once, and two landings each appended a copy of it here.)
+// merge landed down here; they are ordinary comments because an inner doc comment may only
+// appear before an item, so a `//!` line in this appended tail is `E0753`.)
+// (An appended fragment of the module doc: it stands as an ordinary comment because an
+// inner doc comment is only legal before the first item.) This file and every service
+// crate's `tests/all.rs` are checked by `all/all_rs_declares_each_suite_once.rs`.

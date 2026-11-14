@@ -20,7 +20,9 @@
 //!   parameters are read back out of the `model.tar.gz` a training or AutoML run wrote
 //!   ([`super::model_from_archive`]), so the model served is the model trained;
 //! * the payload is read as the caller's own records and the prediction is COMPUTED from
-//!   those parameters.
+//!   those parameters, one prediction per record in the order the payload carried them —
+//!   rendered as one comma-separated record for a `text/csv` answer and as the `predictions`
+//!   list of scores for a JSON one.
 //!
 //! Nothing here runs a container image. An artifact this emulator's own runs did not produce
 //! holds no parameters to compute from, so there is nothing to serve for it and the caller
@@ -50,6 +52,11 @@ pub const CSV_MEDIA_TYPE: &str = "text/csv";
 
 /// The media type an answer is rendered as JSON for, when the request's `Accept` asks for it.
 pub const JSON_MEDIA_TYPE: &str = "application/json";
+
+/// What separates the predictions of a `text/csv` answer: one answer is a SINGLE record of
+/// comma-separated values, one per input record, so a client reads a batched answer by
+/// splitting it on commas.
+pub const CSV_FIELD_SEPARATOR: &str = ",";
 
 /// What serves an invocation behind one of an endpoint's production variants.
 #[derive(Debug, Clone)]
@@ -242,13 +249,16 @@ pub fn serve_inference(
             content_type: JSON_MEDIA_TYPE.to_string(),
         });
     }
-    // One record in, one prediction out, in the order the payload carried them — the form
-    // SageMaker's built-in algorithms answer a `text/csv` payload in.
+    // One record in, one prediction out, in the order the payload carried them, rendered as
+    // ONE comma-separated record with no line terminator — the framing SageMaker's inference
+    // containers answer a `text/csv` invocation in, which is why a client reads a batched
+    // answer by splitting it on commas. A line per prediction would be a different framing:
+    // a caller that splits on commas would read one value where it asked for several.
     let rendered = predictions
         .iter()
         .map(f64::to_string)
         .collect::<Vec<_>>()
-        .join("\n");
+        .join(CSV_FIELD_SEPARATOR);
     Ok(ServedInference {
         body: rendered.into_bytes(),
         content_type: CSV_MEDIA_TYPE.to_string(),

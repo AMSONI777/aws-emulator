@@ -247,6 +247,8 @@ mod resource_tagging;
 mod search_resources;
 #[path = "all/search_suggestions.rs"]
 mod search_suggestions;
+#[path = "all/served_answer_framing.rs"]
+mod served_answer_framing;
 #[path = "all/servicecatalog_portfolio_status.rs"]
 mod servicecatalog_portfolio_status;
 #[path = "all/service_resolved_members.rs"]

@@ -14,6 +14,10 @@
 //! * RULE TWO — where there is nothing to compute from, nothing is synthesised: a variant
 //!   whose model names no model artifact, and a payload the model cannot be applied to, are
 //!   both answered with the operation's modelled 424 `ModelError` naming the condition.
+//! * RULE THREE — a `text/csv` inference answer is ONE record of comma-separated predictions
+//!   with no line terminator, one value per input record in the order the payload carried
+//!   them, so the value at a position is the same one the record at that position is answered
+//!   with on its own.
 //!
 //! Only a cross-service suite can ask this: the flow spans four services over ONE engine
 //! exactly as `core/router/src/lib.rs` mounts them — IAM for the role the training run reads
@@ -501,13 +505,17 @@ struct Row {
 /// row's values offset by its index so no two rows are the same record.
 fn csv_payload(records: usize, features: usize) -> String {
     (0..records)
-        .map(|record| {
-            let values: Vec<String> = (0..features)
-                .map(|column| format!("{}", (record * 10 + column + 1) as f64))
-                .collect();
-            format!("{}\n", values.join(","))
-        })
+        .map(|record| format!("{}\n", csv_record(record, features)))
         .collect()
+}
+
+/// The record at `index` of [`csv_payload`], alone and with no line terminator — so one
+/// record of a batch can be invoked on its own and compared with the batched answer.
+fn csv_record(index: usize, features: usize) -> String {
+    (0..features)
+        .map(|column| format!("{}", (index * 10 + column + 1) as f64))
+        .collect::<Vec<_>>()
+        .join(",")
 }
 
 /// The same records as a JSON list of lists.
@@ -601,13 +609,16 @@ fn predictions(answer: &Answer, case: &str) -> Vec<f64> {
             })
             .collect();
     }
+    // A `text/csv` answer is ONE record of comma-separated predictions, so a client reads it
+    // by splitting on commas.
     answer
         .text()
-        .lines()
-        .map(|line| {
-            line.trim()
+        .split(',')
+        .map(|field| {
+            field
+                .trim()
                 .parse::<f64>()
-                .unwrap_or_else(|error| panic!("case {case:?}: {line:?} is no number: {error}"))
+                .unwrap_or_else(|error| panic!("case {case:?}: {field:?} is no number: {error}"))
         })
         .collect()
 }
@@ -784,5 +795,138 @@ async fn an_invocation_nothing_can_compute_is_refused_with_model_error() {
             expected,
             "case {case:?}: the refusal must name the condition that stopped the inference"
         );
+    }
+}
+
+/// One row of the answer-framing table: how the payload is written and how many records it
+/// carries.
+struct FramingRow {
+    case: &'static str,
+    headers: Vec<(&'static str, &'static str)>,
+    payload: String,
+    records: usize,
+}
+
+/// The framing table. Rows differ along how many records one invocation carries — one, where
+/// a single prediction is the whole answer, two, and a batch wider than the model's own
+/// feature count so a field count cannot be confused with a feature count — and along the
+/// shape of the payload (comma-separated records, a JSON list, a JSON `instances` list), each
+/// asked for as `text/csv` either explicitly or by carrying no `Accept` at all.
+fn framing_rows() -> Vec<FramingRow> {
+    vec![
+        FramingRow {
+            case: "one comma-separated record, no Accept",
+            headers: vec![("content-type", "text/csv")],
+            payload: csv_payload(1, TABLE_FEATURES),
+            records: 1,
+        },
+        FramingRow {
+            case: "two comma-separated records, text/csv asked for",
+            headers: vec![("content-type", "text/csv"), ("accept", "text/csv")],
+            payload: csv_payload(2, TABLE_FEATURES),
+            records: 2,
+        },
+        FramingRow {
+            case: "a batch of more records than the model has features",
+            headers: vec![("content-type", "text/csv"), ("accept", "text/csv")],
+            payload: csv_payload(TABLE_FEATURES + 5, TABLE_FEATURES),
+            records: TABLE_FEATURES + 5,
+        },
+        FramingRow {
+            case: "a JSON list of records, no Accept",
+            headers: vec![("content-type", "application/json")],
+            payload: json!(json_rows(3, TABLE_FEATURES)).to_string(),
+            records: 3,
+        },
+        FramingRow {
+            case: "a JSON instances list, text/csv asked for",
+            headers: vec![
+                ("content-type", "application/json"),
+                ("accept", "text/csv"),
+            ],
+            payload: json!({ "instances": json_rows(4, TABLE_FEATURES) }).to_string(),
+            records: 4,
+        },
+    ]
+}
+
+/// RULE THREE: a `text/csv` answer is one comma-separated record of predictions, in the order
+/// the payload carried its records.
+#[tokio::test]
+async fn a_csv_answer_is_one_comma_separated_record_in_payload_order() {
+    // One model, trained and deployed once, serves every row: the rows vary the payload, not
+    // the deployment.
+    let router = emulator();
+    given_bucket(&router).await;
+    let endpoint = "framing-endpoint";
+    trained_and_deployed(
+        &router,
+        "the framing model",
+        "framing-job",
+        endpoint,
+        "AllTraffic",
+        TABLE_FEATURES,
+    )
+    .await;
+
+    for row in framing_rows() {
+        let case = row.case;
+        let answer = invoke(&router, endpoint, &row.headers, row.payload.as_bytes()).await;
+        assert_eq!(
+            answer.status,
+            200,
+            "case {case:?}: the invocation must be served, got {} with {}",
+            answer.status,
+            answer.text()
+        );
+        assert_eq!(
+            answer.header("content-type"),
+            "text/csv",
+            "case {case:?}: the answer's media type, got {}",
+            answer.text()
+        );
+        let text = answer.text();
+        assert!(
+            !text.contains('\n') && !text.contains('\r'),
+            "case {case:?}: a comma-separated answer carries no line terminator, got {text:?}"
+        );
+        let fields: Vec<&str> = text.split(',').collect();
+        assert_eq!(
+            fields.len(),
+            row.records,
+            "case {case:?}: one comma-separated field per record, got {text:?}"
+        );
+
+        // Position by position, the batched answer carries what the record at that position is
+        // answered with on its own: the batch is ordered in its input and batching changes no
+        // value.
+        let batched = predictions(&answer, case);
+        for (index, value) in batched.iter().enumerate() {
+            let record = csv_record(index, TABLE_FEATURES);
+            let alone = invoke(
+                &router,
+                endpoint,
+                &[("content-type", "text/csv")],
+                record.as_bytes(),
+            )
+            .await;
+            let alone_text = alone.text();
+            assert!(
+                !alone_text.contains('\n') && !alone_text.contains('\r'),
+                "case {case:?}: a one-record answer is a bare value, got {alone_text:?}"
+            );
+            let served = predictions(&alone, case);
+            assert_eq!(
+                served.len(),
+                1,
+                "case {case:?}: one record is answered with one prediction, got {served:?}"
+            );
+            assert_eq!(
+                *value, served[0],
+                "case {case:?}: field {index} must be the prediction record {index} \
+                 ({record}) is answered with, got {value} against {}",
+                served[0]
+            );
+        }
     }
 }
