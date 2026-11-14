@@ -15,6 +15,8 @@
 mod azure_blob_credentials;
 #[path = "all/azure_blob_location.rs"]
 mod azure_blob_location;
+#[path = "all/boundary_refusal_wording.rs"]
+mod boundary_refusal_wording;
 #[path = "all/bounded_stores.rs"]
 mod bounded_stores;
 #[path = "all/bucket_access_role_assume.rs"]
@@ -27,6 +29,8 @@ mod location_bucket_preflight;
 mod location_deletion;
 #[path = "all/location_listing.rs"]
 mod location_listing;
+#[path = "all/not_found_refusal_wording.rs"]
+mod not_found_refusal_wording;
 #[path = "all/object_storage_location.rs"]
 mod object_storage_location;
 #[path = "all/s3_transfer_execution.rs"]

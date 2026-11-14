@@ -3209,3 +3209,6 @@ mod cloudformation_bucket_handles_drive_their_owning_services;
 // (The note the lines above belong to lives at the head of this file: a suite left at the top
 // level of `tests/` fails the build, and each one is declared exactly ONCE here, since this is
 // one crate root and a second `mod` for a name is `E0428`.
+// leaving a note here. (These five lines reached this point of the file as INNER doc
+// comments, which only a crate root's head may carry: `E0753` failed every suite in this
+// target until they were made ordinary comments.)

@@ -1043,6 +1043,48 @@ pub const INVALID_PARAMETER_CODE: &str = "InvalidParameter";
 /// class of this service.
 pub const DEST_LOC_SAME_AS_SRC_LOC_CODE: &str = "DestLocSameAsSrcLoc";
 
+/// The class discriminator DataSync reports for a task the account does not hold.
+///
+/// It is not the resource name the caller used: the surface that holds transfer tasks calls
+/// one a sync set, and the discriminator is that surface's own name for the thing it could
+/// not resolve. A caller branching on "the task is gone" reads this value, so it cannot be
+/// derived from anything else in the response.
+pub const SYNC_SET_NOT_FOUND_CODE: &str = "SyncSetNotFound";
+
+/// The refusal a `TaskArn` that names no task this account holds earns, wherever an
+/// operation of the task surface resolves one.
+///
+/// The message identifies the task by its bare resource id, and both code members carry the
+/// one class discriminator, like every other refusal class of this service.
+pub fn task_not_found(task_arn: &str) -> InvalidRequestException {
+    let code = Some(SYNC_SET_NOT_FOUND_CODE.to_string());
+    InvalidRequestException {
+        message: Some(format!("Task {} is not found.", resource_id(task_arn))),
+        error_code: code.clone(),
+        datasync_error_code: code,
+    }
+}
+
+/// The refusal a `LocationArn` a TASK references that names no location this account holds
+/// earns.
+///
+/// The same class as a location operation's own not-found refusal
+/// ([`LocationRefusal::not_found`]), stated by the task surface: that surface identifies the
+/// location it could not resolve by its bare resource id, and names no request member — the
+/// rule the pair of `LocationArn` members a task carries breaks is the same one whichever of
+/// them held the unresolvable value.
+pub fn referenced_location_not_found(location_arn: &str) -> InvalidRequestException {
+    let code = Some(LOCATION_NOT_FOUND_CODE.to_string());
+    InvalidRequestException {
+        message: Some(format!(
+            "Location {} is not found.",
+            resource_id(location_arn)
+        )),
+        error_code: code.clone(),
+        datasync_error_code: code,
+    }
+}
+
 /// Why resolving a `LocationArn` against this service's state refused the request.
 ///
 /// Carries what the modelled client error reports: the message, and the class
@@ -1058,7 +1100,14 @@ pub struct LocationRefusal {
 }
 
 impl LocationRefusal {
-    /// The refusal an ARN that names no location this account holds earns.
+    /// The refusal an ARN that names no location this account holds earns, reported by an
+    /// operation of the LOCATION surface — one whose own addressed resource is that
+    /// location.
+    ///
+    /// That surface identifies the location by the ARN the request carried, where the task
+    /// surface identifies a location it references by its bare resource id
+    /// ([`referenced_location_not_found`]): each names the resource the way the surface that
+    /// raised the refusal addresses one.
     pub fn not_found(location_arn: &str) -> Self {
         Self {
             message: format!("Location {location_arn} is not found."),

@@ -225,21 +225,17 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         let mut store = state.lock();
         store.advance_clock(now);
 
-        for (member, arn) in [
-            ("SourceLocationArn", &input.source_location_arn),
-            ("DestinationLocationArn", &input.destination_location_arn),
+        for arn in [
+            &input.source_location_arn,
+            &input.destination_location_arn,
         ] {
             if !store.locations.contains_key(arn) {
-                // The class discriminator for a missing location is the same wherever a
-                // `LocationArn` fails to resolve; only this operation's own wording of
-                // which member carried it is local.
-                let code = Some(crate::state::LOCATION_NOT_FOUND_CODE.to_string());
+                // One refusal for an unresolvable location reference, worded in
+                // `crate::state`: the task surface identifies the location by its bare
+                // resource id and names no request member, so both `LocationArn` members
+                // earn the same refusal.
                 return Err(CreateTaskErrorModeled::InvalidRequestException(
-                    InvalidRequestException {
-                        message: Some(format!("{member} {arn} is not found.")),
-                        error_code: code.clone(),
-                        datasync_error_code: code,
-                    },
+                    crate::state::referenced_location_not_found(arn),
                 )
                 .into());
             }

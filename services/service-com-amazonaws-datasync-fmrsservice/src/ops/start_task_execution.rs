@@ -210,11 +210,7 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
 
         let Some(task) = store.tasks.get(&input.task_arn) else {
             return Err(StartTaskExecutionErrorModeled::InvalidRequestException(
-                InvalidRequestException {
-                    message: Some(format!("Task {} is not found.", input.task_arn)),
-                    error_code: None,
-                    datasync_error_code: None,
-                },
+                crate::state::task_not_found(&input.task_arn),
             )
             .into());
         };

@@ -176,11 +176,7 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         if let Some(task_arn) = input.task_arn.as_deref() {
             if !store.tasks.contains_key(task_arn) {
                 return Err(ListTaskExecutionsErrorModeled::InvalidRequestException(
-                    InvalidRequestException {
-                        message: Some(format!("Task {task_arn} is not found.")),
-                        error_code: None,
-                        datasync_error_code: None,
-                    },
+                    crate::state::task_not_found(task_arn),
                 )
                 .into());
             }
