@@ -2974,3 +2974,12 @@ mod cloudformation_cognito_identity_role_attachment_refusal;
 // name is `E0428` and fails every suite in this target. `all/all_rs_declares_each_suite_once.rs`
 // checks that for this file and for every service crate's `tests/all.rs`, so check there
 // rather than leaving a note here.
+// Declared here, in this same head region, for the reason the entry above records: whether the
+// task-definition handle a stack publishes is one an ECS `CreateService` resolves spans
+// CloudFormation, Amazon ECS, Amazon EC2, Elastic Load Balancing and IAM at once, so no single
+// crate's test target can deploy the stack and then make the call against what it handed back.
+#[path = "all/cloudformation_task_definition_runs_an_ecs_service.rs"]
+mod cloudformation_task_definition_runs_an_ecs_service;
+// leaving a note here. (These five lines are a fragment of this file's own header that a
+// merge of two appended tails landed down here; they are ordinary comments because an
+// inner doc comment may only appear before an item.)
