@@ -11,8 +11,9 @@ use std::collections::{BTreeMap, HashMap};
 use std::time::{Duration, SystemTime};
 
 use crate::ops::types::{
-    DataLakeDataset, DataLakeDatasetPartitionSpec, DataLakeDatasetSchema, DataLakeNamespace,
-    Instance,
+    DataIntegrationFlow, DataIntegrationFlowSource, DataIntegrationFlowTarget,
+    DataIntegrationFlowTransformation, DataLakeDataset, DataLakeDatasetPartitionSpec,
+    DataLakeDatasetSchema, DataLakeNamespace, Instance,
 };
 
 /// The sentence AWS Supply Chain refuses the Product Bill Of Materials (BOM) import API
@@ -458,6 +459,178 @@ pub fn namespace_key(instance_id: &str, name: &str) -> (String, String) {
     (instance_id.to_string(), name.to_string())
 }
 
+/// How a data-integration flow is addressed: `(instanceId, name)` — the two `@httpLabel`
+/// members every flow operation's URI carries, in that order.
+///
+/// A `BTreeMap` keyed by it therefore groups one instance's flows contiguously and in
+/// name order, the order `ListDataIntegrationFlows` pages through.
+pub type FlowKey = (String, String);
+
+/// The [`FlowKey`] for one flow, so every handler builds the key the same way.
+pub fn flow_key(instance_id: &str, name: &str) -> FlowKey {
+    (instance_id.to_string(), name.to_string())
+}
+
+/// The `S3` value of both `DataIntegrationFlowSourceType` and
+/// `DataIntegrationFlowTargetType` (see
+/// [`crate::ops::types::DATA_INTEGRATION_FLOW_SOURCE_TYPE_VALUES`]): the end of a flow
+/// that reads or writes S3 objects, and so the one that is configured by `s3Source` /
+/// `s3Target`.
+pub const FLOW_ENDPOINT_TYPE_S3: &str = "S3";
+
+/// The `DATASET` value of both of those enums: the end of a flow that reads or writes a
+/// data-lake dataset, configured by `datasetSource` / `datasetTarget`.
+pub const FLOW_ENDPOINT_TYPE_DATASET: &str = "DATASET";
+
+/// The `SQL` value of `DataIntegrationFlowTransformationType` (see
+/// [`crate::ops::types::DATA_INTEGRATION_FLOW_TRANSFORMATION_TYPE_VALUES`]): the
+/// transformation that is configured by `sqlTransformation`. Its sibling `NONE` carries
+/// no configuration at all.
+pub const FLOW_TRANSFORMATION_TYPE_SQL: &str = "SQL";
+
+/// How a flow write refuses a request that declares a source, target or transformation
+/// type but carries none of the configuration that type is configured by.
+///
+/// SOURCE: the configuration members themselves — each `…Type` member is the
+/// discriminator for the sibling that configures it (`s3Source` is "The S3
+/// DataIntegrationFlow source", `datasetTarget` "The dataset DataIntegrationFlow
+/// target", `sqlTransformation` "The SQL DataIntegrationFlow transformation
+/// configuration"), so a declared type with its configuration absent describes no source,
+/// target or transformation at all and cannot be stored as one. The model cannot express
+/// the dependency, so it is refused here with the modelled 400. No recording fixes AWS's
+/// own wording for this refusal, so a later reader re-verifies the sentence against one.
+pub fn missing_flow_configuration_message(member: &str, discriminator: &str, value: &str) -> String {
+    format!("{member} is required when {discriminator} is {value}")
+}
+
+/// The first declared flow type whose configuration the request omitted, as the sentence
+/// `ValidationException` reports it — `None` when every declared type carries its
+/// configuration.
+///
+/// Shared by the flow writes so the create and the update refuse the same request the
+/// same way. A type this build does not know (the enums are open on the wire) constrains
+/// nothing, so it is left to the modelled enum constraint rather than guessed at here.
+pub fn flow_configuration_problem(
+    sources: &[DataIntegrationFlowSource],
+    transformation: &DataIntegrationFlowTransformation,
+    target: &DataIntegrationFlowTarget,
+) -> Option<String> {
+    for source in sources {
+        let missing = match source.source_type.as_str() {
+            FLOW_ENDPOINT_TYPE_S3 => source.s3_source.is_none().then_some("s3Source"),
+            FLOW_ENDPOINT_TYPE_DATASET => {
+                source.dataset_source.is_none().then_some("datasetSource")
+            }
+            _ => None,
+        };
+        if let Some(member) = missing {
+            return Some(missing_flow_configuration_message(
+                member,
+                "sourceType",
+                &source.source_type,
+            ));
+        }
+    }
+
+    let missing_target = match target.target_type.as_str() {
+        FLOW_ENDPOINT_TYPE_S3 => target.s3_target.is_none().then_some("s3Target"),
+        FLOW_ENDPOINT_TYPE_DATASET => target.dataset_target.is_none().then_some("datasetTarget"),
+        _ => None,
+    };
+    if let Some(member) = missing_target {
+        return Some(missing_flow_configuration_message(
+            member,
+            "targetType",
+            &target.target_type,
+        ));
+    }
+
+    if transformation.transformation_type == FLOW_TRANSFORMATION_TYPE_SQL
+        && transformation.sql_transformation.is_none()
+    {
+        return Some(missing_flow_configuration_message(
+            "sqlTransformation",
+            "transformationType",
+            &transformation.transformation_type,
+        ));
+    }
+
+    None
+}
+
+/// How a flow read refuses a name this instance holds no flow under
+/// (`ResourceNotFoundException`, HTTP 404).
+///
+/// No recording fixes this sentence, so its FORM is this service's recorded not-found
+/// family — one fixed sentence naming the resource and echoing nothing from the request,
+/// as the recorded instance read ("Instance not found.") and the namespace read
+/// ([`NAMESPACE_NOT_FOUND_MESSAGE`]) both answer; the flow CONFLICT sentence
+/// ([`flow_conflict_message`]) is worded by its own class, which is why it is not the
+/// model for this one. Stated once, here, so the flow operations cannot drift into
+/// several sentences for one refusal, and re-verified against a recording when one
+/// covers this read.
+pub const FLOW_NOT_FOUND_MESSAGE: &str = "Flow not found.";
+
+/// How a flow create refuses a `(instanceId, name)` pair that already holds one
+/// (`ConflictException`, HTTP 409).
+///
+/// Its SOURCE is the recorded wire response of a second create for a name an instance
+/// already holds: that call is answered `ConflictException` rather than overwriting the
+/// flow, and the sentence is fixed except for the flow name, which comes from the
+/// request's `name` — the service spells the resource "Flow", labels the name
+/// "with flow name:", and ends with the inflected "already exists". The `instanceId`,
+/// though part of the resource identity, is NOT part of the sentence. Stated once, here,
+/// so the flow operations cannot drift into several sentences for one refusal.
+pub fn flow_conflict_message(name: &str) -> String {
+    format!("Flow with flow name: {name} already exists")
+}
+
+/// The number of data-integration flows one instance holds in this store.
+///
+/// Same reasoning as [`MAX_INSTANCES`]: the store keeps its records for the life of the
+/// process, each record's size is already bounded by the modelled `@length` constraints
+/// on its members, so the entry COUNT is the remaining growth term and it is capped at the
+/// one site that adds a flow — refused with the modelled `ServiceQuotaExceededException`
+/// (HTTP 402) that `CreateDataIntegrationFlow` declares and no read does. The number is
+/// the emulator's own bound, not a published AWS value: AWS quotas flows per instance as
+/// an adjustable limit, so no single number is the contract, and this one is far above any
+/// ordinary workflow.
+pub const MAX_FLOWS_PER_INSTANCE: usize = 100;
+
+/// One persisted data-integration flow — the whole record, not the wire shape.
+/// [`DataIntegrationFlowRecord::to_wire`] projects it onto the modelled
+/// `DataIntegrationFlow` structure, so every handler answers from exactly these stored
+/// values.
+#[derive(Debug, Clone)]
+pub struct DataIntegrationFlowRecord {
+    pub instance_id: String,
+    pub name: String,
+    pub sources: Vec<DataIntegrationFlowSource>,
+    pub transformation: DataIntegrationFlowTransformation,
+    pub target: DataIntegrationFlowTarget,
+    pub created_time: SystemTime,
+    pub last_modified_time: SystemTime,
+    /// The flow's tags. `tags` is `notProperty` on the create request and absent from the
+    /// `DataIntegrationFlow` shape, so they are stored for the tagging operations to
+    /// report rather than projected onto the wire shape here.
+    pub tags: BTreeMap<String, String>,
+}
+
+impl DataIntegrationFlowRecord {
+    /// This record as the modelled `DataIntegrationFlow` shape every flow read returns.
+    pub fn to_wire(&self) -> DataIntegrationFlow {
+        DataIntegrationFlow {
+            instance_id: self.instance_id.clone(),
+            name: self.name.clone(),
+            sources: self.sources.clone(),
+            transformation: self.transformation.clone(),
+            target: self.target.clone(),
+            created_time: as_date_time(self.created_time),
+            last_modified_time: as_date_time(self.last_modified_time),
+        }
+    }
+}
+
 /// Per-service state for com-amazonaws-supplychain-galaxypublicapigateway. A handler reaches it through [`service_state`].
 #[derive(Debug, Default)]
 pub struct ComAmazonawsSupplychainGalaxypublicapigatewayState {
@@ -475,6 +648,10 @@ pub struct ComAmazonawsSupplychainGalaxypublicapigatewayState {
     /// Every live data-lake dataset, keyed by [`DatasetKey`]. A `BTreeMap` so an
     /// instance's datasets are contiguous and in namespace-then-name order.
     pub datasets: BTreeMap<DatasetKey, DataLakeDatasetRecord>,
+    /// Every live data-integration flow, keyed by [`FlowKey`] (`instanceId` then `name`)
+    /// — the pair that identifies one flow, as every flow operation's two `@httpLabel`
+    /// members do.
+    pub flows: BTreeMap<FlowKey, DataIntegrationFlowRecord>,
 }
 
 impl ComAmazonawsSupplychainGalaxypublicapigatewayState {
@@ -566,6 +743,35 @@ impl ComAmazonawsSupplychainGalaxypublicapigatewayState {
     pub fn drop_instance_namespaces(&mut self, instance_id: &str) {
         self.namespaces
             .retain(|(instance, _), _| instance != instance_id);
+    }
+
+    /// The stored flow `name` of instance `instance_id`, or `None` when that instance
+    /// holds no flow under that name.
+    pub fn flow(&self, instance_id: &str, name: &str) -> Option<&DataIntegrationFlowRecord> {
+        self.flows.get(&flow_key(instance_id, name))
+    }
+
+    /// How many flows `instance_id` holds — one range scan over the keys that instance's
+    /// flows occupy, which is what [`MAX_FLOWS_PER_INSTANCE`] caps.
+    pub fn flow_count(&self, instance_id: &str) -> usize {
+        self.flows
+            .range(flow_key(instance_id, "")..)
+            .take_while(|((stored, _), _)| stored == instance_id)
+            .count()
+    }
+
+    /// Whether a further flow create for `instance_id` would push it past
+    /// [`MAX_FLOWS_PER_INSTANCE`]. Checked at that one growth site, before anything is
+    /// inserted.
+    pub fn flows_at_capacity(&self, instance_id: &str) -> bool {
+        self.flow_count(instance_id) >= MAX_FLOWS_PER_INSTANCE
+    }
+
+    /// Drop every flow of `instance_id`, for the same reason as
+    /// [`Self::drop_instance_datasets`]: a flow is addressed by its instance, so it does
+    /// not outlive the instance whose deletion removed it.
+    pub fn drop_instance_flows(&mut self, instance_id: &str) {
+        self.flows.retain(|(instance, _), _| instance != instance_id);
     }
 }
 
