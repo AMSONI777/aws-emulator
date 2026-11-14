@@ -166,6 +166,10 @@ mod tagged_resources;
 /// page it hands out.
 mod data_source_listing;
 
+/// Which of one data source's ingestion jobs `ListIngestionJobs` reports, the order it
+/// reports them in, and the page it hands out.
+mod ingestion_job_listing;
+
 /// A knowledge base's name as the account's own namespace: who holds one, and the
 /// refusal a second knowledge base under it gets.
 mod knowledge_base_names;
@@ -173,6 +177,7 @@ mod knowledge_base_names;
 pub use data_source_listing::*;
 pub use flow_aliases::*;
 pub use ingestion::*;
+pub use ingestion_job_listing::*;
 pub use ingestion_record::*;
 pub use knowledge_base_names::*;
 pub use opensearch_serverless_store::*;

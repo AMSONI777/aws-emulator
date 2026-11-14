@@ -1,15 +1,12 @@
 // SPDX-License-Identifier: CC0-1.0
 
 //! @op ListIngestionJobs
-//! SCAFFOLDED, NOT IMPLEMENTED: this operation answers HTTP 501 `NotImplemented` and
-//! asserts NOTHING about `ListIngestionJobs`'s real behaviour. Implement it here — this is
-//! the ONLY file to touch for this operation.
-//!
-//! A 501 from this operation means "nobody has written it yet", never "the emulator is
-//! broken". Replace the `Err(..)` in [`ListIngestionJobs::handle`] with real behaviour and
-//! delete the SCAFFOLDED marker line above; that line is the machine-readable record of
-//! which operations are still stubs (`grep -rl '^//! SCAFFOLDED, NOT IMPLEMENTED:' */src/ops/`),
-//! so leaving it on an implemented operation under-reports progress.
+//! Enumerates the data ingestion jobs of one data source: the stored
+//! [`crate::state::IngestionJobRecord`] entries the knowledge base and data source name,
+//! each with whatever status the CLOCK has made due by the time of the read, filtered and
+//! ordered as the request asks and paged by `maxResults`/`nextToken`
+//! (see [`crate::state::ComAmazonawsBedrockagentAmazonbedrockagentbuildtimelambdaState::page_of_ingestion_jobs`]).
+//! `StartIngestionJob` is what persists those records.
 //!
 //! ## Shape of an operation
 //!
@@ -165,18 +162,96 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         input: Self::Input,
         ctx: &smithy_server_runtime::OperationContext<'_>,
     ) -> Result<Self::Output, Self::Error> {
-        // The engine is reachable from `&self` (constructor-injected); `ctx` carries
-        // request metadata. Both are bound here so an implementer has them in scope.
-        let _ = (&input, ctx, &self.engine);
-        // Implement `ListIngestionJobs` here, then delete the SCAFFOLDED marker at the top of
-        // this file. Return modeled failures as
-        // `Err(ListIngestionJobsErrorModeled::Variant(..).into())` — the `From` impl above lifts it.
-        //
-        // To refuse a bad request this operation models no error for, return
-        // `Err(crate::scaffolded::Scaffolded::validation("..."))` — a 400
-        // `ValidationException`. Do NOT answer 501 for it: 501 means "not written yet",
-        // not "bad request". Modeled constraints are already refused BEFORE this
-        // handler runs, so reaching here means the input satisfies every one of them.
-        Err(crate::scaffolded::Scaffolded::not_implemented("ListIngestionJobs"))
+        let _ = ctx;
+        let Some(state) = crate::state::service_state(&*self.engine) else {
+            return Err(ListIngestionJobsErrorModeled::InternalServerException(
+                InternalServerException {
+                    message: Some("the bedrock-agent store is unavailable".to_string()),
+                },
+            )
+            .into());
+        };
+
+        // A token this service did not hand out names no position in the listing, which
+        // is a bad request rather than an empty page.
+        let cursor = match input.next_token.as_deref() {
+            None => None,
+            Some(token) => match crate::state::IngestionJobPageCursor::parse(token) {
+                Some(cursor) => Some(cursor),
+                None => {
+                    return Err(ListIngestionJobsErrorModeled::ValidationException(
+                        ValidationException {
+                            message: Some(
+                                "nextToken is not a pagination token this service issued"
+                                    .to_string(),
+                            ),
+                            field_list: Some(vec![ValidationExceptionField {
+                                name: "nextToken".to_string(),
+                                message: "not a pagination token this service issued".to_string(),
+                            }]),
+                        },
+                    )
+                    .into())
+                }
+            },
+        };
+
+        // `maxResults` is "the maximum number of results to return in the response", so
+        // it shortens the page and nothing lengthens it past the default.
+        let page_size = input
+            .max_results
+            .map_or(crate::state::MAX_INGESTION_JOBS_PER_PAGE, |requested| {
+                usize::try_from(requested).unwrap_or(crate::state::MAX_INGESTION_JOBS_PER_PAGE)
+            })
+            .clamp(1, crate::state::MAX_INGESTION_JOBS_PER_PAGE);
+
+        let now = ::std::time::SystemTime::now();
+        let mut state = state.lock();
+        // The ONE write a report may perform: the status transitions the clock had
+        // already made due, which were owed at this instant even if nobody had called —
+        // so a job is listed with exactly the status every other reader reports for it.
+        state.materialise_due_transitions(now);
+
+        // The jobs ran for one data source of one knowledge base, so both have to exist
+        // and neither may be on its way out of the store: a resource a delete has
+        // already been accepted for serves no read it would not serve after its removal,
+        // and an id nothing holds has no ingestion jobs to enumerate.
+        if state.live_knowledge_base(&input.knowledge_base_id).is_none() {
+            return Err(ListIngestionJobsErrorModeled::ResourceNotFoundException(
+                ResourceNotFoundException {
+                    message: Some(crate::state::knowledge_base_not_found_message(
+                        &input.knowledge_base_id,
+                    )),
+                },
+            )
+            .into());
+        }
+        if state
+            .live_data_source_of(&input.knowledge_base_id, &input.data_source_id)
+            .is_none()
+        {
+            return Err(ListIngestionJobsErrorModeled::ResourceNotFoundException(
+                ResourceNotFoundException {
+                    message: Some(crate::state::data_source_not_found_message(
+                        &input.data_source_id,
+                    )),
+                },
+            )
+            .into());
+        }
+
+        let (ingestion_job_summaries, next_token) = state.page_of_ingestion_jobs(
+            &input.knowledge_base_id,
+            &input.data_source_id,
+            input.filters.as_deref().unwrap_or_default(),
+            input.sort_by.as_ref(),
+            cursor,
+            page_size,
+        );
+
+        Ok(ListIngestionJobsOutput {
+            ingestion_job_summaries,
+            next_token,
+        })
     }
 }

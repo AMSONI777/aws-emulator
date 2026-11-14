@@ -493,10 +493,10 @@ async fn a_value_inside_the_set_is_not_refused_at_the_boundary() {
             404,
         ),
         (
-            // `ListIngestionJobs` is still scaffolded, so values INSIDE their sets are
-            // answered 501 rather than 404 — which is itself the positive control for its
-            // rows above: a declared value reaches the (unimplemented) handler, and only a
-            // value outside the set is refused at the boundary.
+            // The knowledge base this listing would enumerate is not there, so a value
+            // INSIDE its set reaches the handler and is answered for the missing resource
+            // rather than at the boundary — which is itself the positive control for its
+            // rows above: only a value outside the set is refused at the boundary.
             "ListIngestionJobs with a declared sortBy and filter",
             "POST",
             ingestion_jobs(),
@@ -504,7 +504,7 @@ async fn a_value_inside_the_set_is_not_refused_at_the_boundary() {
                 "sortBy": { "attribute": "STATUS", "order": "ASCENDING" },
                 "filters": [{ "attribute": "STATUS", "operator": "EQ", "values": ["COMPLETE"] }],
             })),
-            501,
+            404,
         ),
     ] {
         let answer = emulator.call(method, &uri, body).await;

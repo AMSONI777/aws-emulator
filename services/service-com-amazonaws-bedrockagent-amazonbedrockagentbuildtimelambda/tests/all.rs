@@ -57,6 +57,8 @@ mod ingestion_index;
 mod ingestion_crawl;
 #[path = "all/ingestion_job_lifecycle.rs"]
 mod ingestion_job_lifecycle;
+#[path = "all/ingestion_job_listing.rs"]
+mod ingestion_job_listing;
 #[path = "all/ingestion_statistics_measure_their_own_run.rs"]
 mod ingestion_statistics_measure_their_own_run;
 #[path = "all/knowledge_base_document_kinds_and_deletion.rs"]

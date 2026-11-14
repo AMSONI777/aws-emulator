@@ -3551,3 +3551,6 @@ mod cloudformation_provisions_appsync_resources;
 // same reason as the block above: `//!` is only legal before the first item.)
 // first item of this crate root, so a `//!` line in this appended tail is `E0753`.)
 // reason the notes around it record: `//!` mid-file annotates nothing and is `E0753`.)
+// leaving a note here. (Ordinary comments: an inner doc comment `//!` is only legal
+// before the first item of a crate root, so landing these lines here as `//!` is `E0753`
+// and compiles no suite of this target.)
