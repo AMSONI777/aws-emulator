@@ -254,10 +254,11 @@ impl DbClusterParameterGroupRecord {
                     .then(|| minimum_engine_version_in_family(&self.family, spec))
             }),
             apply_method: setting.map(|setting| setting.apply_method.clone()),
+            // The engine modes the PARAMETER is published as valid in, which is a column of
+            // its own published record and not a fact about this group's family
+            // ([`crate::ops::describe_engine_default_cluster_parameters::cluster_parameter_engine_modes`]).
             supported_engine_modes: Some(
-                crate::ops::describe_engine_default_cluster_parameters::family_engine_modes(
-                    &self.family,
-                ),
+                crate::ops::describe_engine_default_cluster_parameters::cluster_parameter_engine_modes(),
             ),
         }
     }
@@ -648,7 +649,7 @@ pub fn cluster_engine_default_parameter_to_wire(
 ) -> Parameter {
     Parameter {
         supported_engine_modes: Some(
-            crate::ops::describe_engine_default_cluster_parameters::family_engine_modes(family),
+            crate::ops::describe_engine_default_cluster_parameters::cluster_parameter_engine_modes(),
         ),
         minimum_engine_version: (!spec.minimum_engine_version.is_empty())
             .then(|| minimum_engine_version_in_family(family, spec)),

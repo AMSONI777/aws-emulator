@@ -3212,3 +3212,5 @@ mod cloudformation_bucket_handles_drive_their_owning_services;
 // leaving a note here. (These five lines reached this point of the file as INNER doc
 // comments, which only a crate root's head may carry: `E0753` failed every suite in this
 // target until they were made ordinary comments.)
+// in `all/s3_notification_invokes_its_lambda_target.rs` and carries no test now. It is
+// declared ONCE, further up this tail, for that reason.

@@ -26,51 +26,9 @@ use std::collections::BTreeSet;
 use service_com_amazonaws_rds_amazonrdsv19::state::MIN_DB_SUBNET_GROUP_AVAILABILITY_ZONES;
 
 use crate::db_instances::{expect_error, expect_ok, subtrees, text};
-use crate::db_subnet_group_ec2_zones::{assert_reported_zones, coverage_message, Account};
-
-/// The `DescribeSubnets` filter that selects the default subnet of each Availability Zone:
-/// "default-for-az - Indicates whether this is the default subnet for the Availability Zone"
-/// (`DescribeSubnets$Filters`, the `com.amazonaws.ec2#AmazonEC2` model).
-const DEFAULT_FOR_AZ_FILTER: &str = "default-for-az";
-
-/// One default subnet per Availability Zone, as EC2 reports them: `(zone, subnet id)`, in
-/// zone order.
-///
-/// Nothing here is created by this suite — the identifiers are the ones the account's own
-/// network already carries, which is what a client discovers before it asks RDS for a group.
-async fn default_subnets(account: &Account) -> Vec<(String, String)> {
-    let filter = ::aws_sdk_ec2::types::Filter::builder()
-        .name(DEFAULT_FOR_AZ_FILTER)
-        .values("true")
-        .build();
-    let reported = account
-        .ec2
-        .describe_subnets()
-        .filters(filter)
-        .send()
-        .await
-        .unwrap_or_else(|error| panic!("EC2 must report the account's subnets: {error:?}"));
-    let mut by_zone: Vec<(String, String)> = Vec::new();
-    for subnet in reported.subnets() {
-        // The discovery leg itself: what the filter selected is a DEFAULT subnet of its zone,
-        // so a filter the owner ignored would be seen here rather than hidden by the
-        // deduplication below.
-        assert_eq!(
-            subnet.default_for_az(),
-            Some(true),
-            "the {DEFAULT_FOR_AZ_FILTER} filter must select only default subnets, got \
-             {subnet:?}"
-        );
-        let (Some(zone), Some(subnet_id)) = (subnet.availability_zone(), subnet.subnet_id())
-        else {
-            continue;
-        };
-        by_zone.push((zone.to_string(), subnet_id.to_string()));
-    }
-    by_zone.sort();
-    by_zone.dedup_by(|left, right| left.0 == right.0);
-    by_zone
-}
+use crate::db_subnet_group_ec2_zones::{
+    assert_reported_zones, coverage_message, default_subnets, Account,
+};
 
 /// The zones one `DBSubnetGroup` envelope COVERS: the distinct `SubnetAvailabilityZone` names
 /// over its `Subnets`, which is the set a client branches its Multi-AZ decisions on.

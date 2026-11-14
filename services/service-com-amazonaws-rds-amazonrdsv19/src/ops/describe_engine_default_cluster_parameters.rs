@@ -336,8 +336,10 @@ pub(crate) const MYSQL_CLUSTER_PARAMETERS: &[crate::state::ClusterParameterSpec]
         "5242880",
         true,
         "5.7.mysql_aurora.2.04.5",
-        "The size in bytes of the buffer a binary log dump thread reads binary log events \
-         into before sending them to a replica.",
+        // The engine's OWN catalog text for the parameter, which is what the API reports
+        // byte for byte, rather than a paraphrase of what the buffer does.
+        "Read buffer size used by master dump thread when the switch \
+         aurora_binlog_use_large_read_buffer is ON.",
     ),
     parameter(
         "binlog_format",
@@ -497,29 +499,32 @@ pub(crate) fn cluster_parameter_spec(
     crate::state::spec_in_catalog(cluster_parameter_catalog(family), name)
 }
 
-/// The DB engine modes a cluster parameter of `family` is valid in —
-/// `Parameter$SupportedEngineModes`, "the valid DB engine modes".
+/// The DB engine modes a CLUSTER PARAMETER is published as valid in —
+/// `Parameter$SupportedEngineModes`, "The valid DB engine modes".
 ///
-/// A cluster parameter belongs to an engine, and which modes that engine's clusters can run
-/// in is published per engine VERSION by the engine-version catalogue
-/// (`DescribeDBEngineVersions`' `SupportedEngineModes`), so the modes a parameter is valid
-/// in are the ones the versions of its family publish — read from that catalogue rather
-/// than listed again here, so the two reports cannot disagree. A family the catalogue
-/// carries no version of publishes the one mode every DB cluster runs in.
-pub(crate) fn family_engine_modes(family: &str) -> Vec<String> {
-    let mut modes: Vec<String> = Vec::new();
-    for entry in super::describe_db_engine_versions::CATALOG
+/// The member is answered about the PARAMETER, which is why it takes no family: it is one of
+/// that parameter's published columns, like its apply type or its allowed values, and it names
+/// the engine mode a DB cluster has to run in for the parameter to apply to anything. It is
+/// NOT the set of modes the family's engine VERSIONS can run in — that is
+/// `DBEngineVersion$SupportedEngineModes`, which the engine-version report publishes per
+/// version (`crate::ops::describe_db_engine_versions`) and which says nothing about any one
+/// parameter: read from there, a family with a single Aurora Serverless v1 release would
+/// publish `serverless` on every parameter of every one of its releases.
+///
+/// Every cluster parameter these catalogs publish configures the DB instances a cluster runs
+/// itself, so each one publishes [`crate::state::DEFAULT_DB_CLUSTER_ENGINE_MODE`] — "the DB
+/// engine mode of the DB cluster" a cluster runs instances in. An Aurora Serverless v1 cluster
+/// (`EngineMode` `serverless`) has its configuration managed by the service rather than by
+/// these parameters, so no entry of these catalogs publishes that mode; one that is valid in
+/// another mode publishes that mode here, beside its other published columns.
+pub(crate) fn cluster_parameter_engine_modes() -> Vec<String> {
+    CLUSTER_PARAMETER_ENGINE_MODES
         .iter()
-        .filter(|entry| entry.parameter_group_family.eq_ignore_ascii_case(family))
-    {
-        for mode in entry.profile.engine_modes {
-            if !modes.iter().any(|known| known == mode) {
-                modes.push((*mode).to_string());
-            }
-        }
-    }
-    if modes.is_empty() {
-        modes.push(crate::state::DEFAULT_DB_CLUSTER_ENGINE_MODE.to_string());
-    }
-    modes
+        .map(|mode| (*mode).to_string())
+        .collect()
 }
+
+/// The engine modes the cluster parameters of these catalogs are published as valid in; see
+/// [`cluster_parameter_engine_modes`] for why it is one mode and which one.
+pub(crate) const CLUSTER_PARAMETER_ENGINE_MODES: [&str; 1] =
+    [crate::state::DEFAULT_DB_CLUSTER_ENGINE_MODE];

@@ -31,6 +31,8 @@ mod cluster_create_refusal_wording;
 mod cluster_lifecycle_operations;
 #[path = "all/cluster_member_deletion.rs"]
 mod cluster_member_deletion;
+#[path = "all/cluster_parameter_engine_modes.rs"]
+mod cluster_parameter_engine_modes;
 #[path = "all/cluster_parameter_groups.rs"]
 mod cluster_parameter_groups;
 #[path = "all/cluster_parameter_value_range.rs"]
@@ -151,6 +153,8 @@ mod db_subnet_group_ec2_zones;
 mod db_subnet_group_in_use_wording;
 #[path = "all/db_subnet_group_not_found_wording.rs"]
 mod db_subnet_group_not_found_wording;
+#[path = "all/db_subnet_group_owning_vpc.rs"]
+mod db_subnet_group_owning_vpc;
 #[path = "all/db_subnet_group_resolution.rs"]
 mod db_subnet_group_resolution;
 #[path = "all/db_subnet_group_subnet_existence.rs"]
