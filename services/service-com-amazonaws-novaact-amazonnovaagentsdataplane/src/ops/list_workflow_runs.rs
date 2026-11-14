@@ -1,15 +1,30 @@
 // SPDX-License-Identifier: CC0-1.0
 
 //! @op ListWorkflowRuns
-//! SCAFFOLDED, NOT IMPLEMENTED: this operation answers HTTP 501 `NotImplemented` and
-//! asserts NOTHING about `ListWorkflowRuns`'s real behaviour. Implement it here — this is
-//! the ONLY file to touch for this operation.
 //!
-//! A 501 from this operation means "nobody has written it yet", never "the emulator is
-//! broken". Replace the `Err(..)` in [`ListWorkflowRuns::handle`] with real behaviour and
-//! delete the SCAFFOLDED marker line above; that line is the machine-readable record of
-//! which operations are still stubs (`grep -rl '^//! SCAFFOLDED, NOT IMPLEMENTED:' */src/ops/`),
-//! so leaving it on an implemented operation under-reports progress.
+//! Reports the workflow runs STORED under one workflow definition, oldest-first by
+//! default, in pages.
+//!
+//! WHAT IS LISTED. `workflowDefinitionName` is this operation's only `@httpLabel`, so the
+//! definition is the resource being read and one the store does not hold is refused with
+//! `ResourceNotFoundException` (404) rather than answered with an empty page. Every run
+//! held under that definition is listed, whatever status it is in, and no run of any other
+//! definition is.
+//!
+//! WHAT IS COMPUTED FROM STATE. Every summary member is read off the stored run — the ARN
+//! written at create time, its minted id, the status it currently holds, the instant it
+//! started, the instant it ended (which only a finished run has) and the location of its
+//! trace — so a run that was never created cannot appear, one whose definition's deletion
+//! the clock has made due cannot either (the same
+//! [`crate::state::ComAmazonawsNovaactAmazonnovaagentsdataplaneState::complete_due_deletions`]
+//! every other read of this service runs first), and the status this listing reports is the
+//! one `GetWorkflowRun` reports for that run at the same instant.
+//!
+//! ORDER AND PAGING. `sortOrder`, `maxResults` and `nextToken` are
+//! [`crate::state::paging`]'s, shared with every other listing of this service: the runs
+//! are ordered by the one instant this operation reports (`startedAt`) with the run id as
+//! the tie-break, split into pages of at most `maxResults`, and each page resumes strictly
+//! after the run the previous one ended on.
 //!
 //! ## Shape of an operation
 //!
@@ -86,6 +101,7 @@
 
 #[allow(unused_imports)]
 use super::types::*;
+use crate::state::paging;
 
 // `#[operation_error]` below expands to an invocation of the LOCAL declarative
 // `smithy!` macro, which this line is what emits into the module. Without it the
@@ -160,18 +176,78 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         input: Self::Input,
         ctx: &smithy_server_runtime::OperationContext<'_>,
     ) -> Result<Self::Output, Self::Error> {
-        // The engine is reachable from `&self` (constructor-injected); `ctx` carries
-        // request metadata. Both are bound here so an implementer has them in scope.
-        let _ = (&input, ctx, &self.engine);
-        // Implement `ListWorkflowRuns` here, then delete the SCAFFOLDED marker at the top of
-        // this file. Return modeled failures as
-        // `Err(ListWorkflowRunsErrorModeled::Variant(..).into())` — the `From` impl above lifts it.
-        //
-        // To refuse a bad request this operation models no error for, return
-        // `Err(crate::scaffolded::Scaffolded::validation("..."))` — a 400
-        // `ValidationException`. Do NOT answer 501 for it: 501 means "not written yet",
-        // not "bad request". Modeled constraints are already refused BEFORE this
-        // handler runs, so reaching here means the input satisfies every one of them.
-        Err(crate::scaffolded::Scaffolded::not_implemented("ListWorkflowRuns"))
+        let state = crate::state::service_state(&*self.engine).ok_or_else(|| {
+            ListWorkflowRunsErrorModeled::InternalServerException(InternalServerException {
+                message: "the com-amazonaws-novaact-amazonnovaagentsdataplane store is unavailable"
+                    .to_string(),
+                retry_after_seconds: None,
+                reason: None,
+            })
+        })?;
+        // The region is read for the identifier a refusal reports: the missing definition's
+        // ARN in the requesting credential scope's region. Each summary reports the ARN
+        // stored on the run itself rather than one rebuilt from the reading request.
+        let region = crate::state::request_region(ctx.parts());
+        let now = ::std::time::SystemTime::now();
+        let not_found = |missing: crate::state::MissingResource| -> Self::Error {
+            ListWorkflowRunsErrorModeled::ResourceNotFoundException(missing.not_found(&region))
+                .into()
+        };
+
+        let order = paging::PageOrder::from_input(input.sort_order.as_deref()).map_err(refused)?;
+        let page_size = paging::page_size(input.max_results);
+        let cursor = match input.next_token.as_deref() {
+            None => None,
+            Some(token) => Some(
+                paging::decode_next_token(token, order, Self::NAME, paging::is_uuid_string)
+                    .map_err(refused)?,
+            ),
+        };
+
+        let mut state = state.lock();
+        // A deletion the clock has already made due is completed first, exactly as every
+        // other read of this service does: it materialises a change that was owed at this
+        // instant whether or not anybody called, so this listing cannot report a run under
+        // a definition a `GetWorkflowDefinition` at the same instant would refuse.
+        state.complete_due_deletions(now);
+
+        let definition = state
+            .definition(&input.workflow_definition_name)
+            .map_err(not_found)?;
+
+        // The walk is bounded by `crate::state::MAX_RUNS_PER_DEFINITION`, so neither it nor
+        // the sort grows with request volume. A run is placed by the instant this operation
+        // reports and its id, which is the key a resumption token can name it by.
+        let listed: Vec<&crate::state::WorkflowRun> = definition.runs.values().collect();
+        let (page, next_token) = paging::page(listed, order, page_size, cursor.as_ref(), |run| {
+            paging::Position::new(run.started_at, run.run_id.clone())
+        });
+
+        Ok(ListWorkflowRunsOutput {
+            workflow_run_summaries: page
+                .into_iter()
+                .map(|run| WorkflowRunSummary {
+                    workflow_run_arn: run.arn.clone(),
+                    workflow_run_id: run.run_id.clone(),
+                    status: run.status.as_wire().to_string(),
+                    started_at: ::aws_smithy_types::DateTime::from(run.started_at),
+                    // Only a finished run has an `endedAt`, which is the reading
+                    // `GetWorkflowRun` reports for the same run.
+                    ended_at: run
+                        .ended_at
+                        .filter(|_| run.status.is_terminal())
+                        .map(::aws_smithy_types::DateTime::from),
+                    trace_location: run.trace_location.clone(),
+                })
+                .collect(),
+            next_token,
+        })
     }
+}
+
+/// A member this operation cannot use, on its own modelled error channel: HTTP 400
+/// `ValidationException`, filled in by [`paging`] so every listing of this service refuses
+/// a bad `sortOrder` or `nextToken` the same way.
+fn refused(invalid: ValidationException) -> ListWorkflowRunsError {
+    ListWorkflowRunsErrorModeled::ValidationException(invalid).into()
 }

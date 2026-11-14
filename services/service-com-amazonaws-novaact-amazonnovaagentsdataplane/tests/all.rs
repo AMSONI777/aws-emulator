@@ -37,3 +37,5 @@ mod validation_message_wording;
 mod workflow_definition_listing;
 #[path = "all/workflow_lifecycle.rs"]
 mod workflow_lifecycle;
+#[path = "all/workflow_run_listing.rs"]
+mod workflow_run_listing;

@@ -381,6 +381,10 @@ pub struct WorkflowRun {
     pub log_group_name: Option<String>,
     pub client_info: ClientInfo,
     pub create_fingerprint: String,
+    /// Where this run's trace is stored, as `WorkflowRunSummary`'s `traceLocation` reports
+    /// it. `None` until something records a trace for the run, exactly as an act's own
+    /// [`Act::trace_location`] is.
+    pub trace_location: Option<TraceLocation>,
     pub sessions: BTreeMap<String, Session>,
     pub insertion_seq: u64,
 }

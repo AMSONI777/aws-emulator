@@ -275,6 +275,9 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
             log_group_name: input.log_group_name.clone(),
             client_info: input.client_info.clone(),
             create_fingerprint: fingerprint.clone(),
+            // Nothing has recorded a trace for a run this call has just started, and no
+            // location is invented for one.
+            trace_location: None,
             sessions: ::std::collections::BTreeMap::new(),
             insertion_seq,
         };
