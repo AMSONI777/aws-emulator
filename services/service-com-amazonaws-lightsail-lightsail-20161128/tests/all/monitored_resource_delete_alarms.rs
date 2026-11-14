@@ -366,7 +366,7 @@ async fn deleting_a_monitored_resource_releases_every_alarm_watching_it() {
                     Some("Succeeded"),
                     Some(true),
                     Some(row.region),
-                    None,
+                    Some("all"),
                 ),
                 "case {case}: expected a succeeded DeleteAlarm entry located where the alarm \
                  was, got {entry:?}"

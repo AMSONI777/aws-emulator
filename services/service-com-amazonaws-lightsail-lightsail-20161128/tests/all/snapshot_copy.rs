@@ -670,7 +670,8 @@ async fn a_copied_snapshot_holds_what_the_snapshot_it_was_copied_from_holds() {
             copy["location"]
         );
         // Within one Region the copy holds the same volume in the same zone; a
-        // copy into another Region names no zone of the Region it came from.
+        // copy into another Region names no zone of the Region it came from, so
+        // it is reported in every zone of the Region it was made in.
         if row.source_region == row.target_region {
             assert_eq!(
                 copy["location"]["availabilityZone"].as_str(),
@@ -679,10 +680,11 @@ async fn a_copied_snapshot_holds_what_the_snapshot_it_was_copied_from_holds() {
                 copy["location"]
             );
         } else {
-            assert!(
-                copy["location"]["availabilityZone"].is_null(),
-                "case {case}: a copy into another Region names no zone of the source's, got \
-                 {:?}",
+            assert_eq!(
+                copy["location"]["availabilityZone"].as_str(),
+                Some("all"),
+                "case {case}: a copy into another Region names no zone of the source's, so \
+                 it is reported in every zone of its own, got {:?}",
                 copy["location"]
             );
         }

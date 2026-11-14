@@ -49,6 +49,57 @@ impl StoredOperation {
     }
 }
 
+/// The `operationDetails` an entry whose call took the resource it names AWAY
+/// reports: the empty string.
+///
+/// `Operation$operationDetails` is "details about the operation", a member
+/// BESIDE the `resourceName` that already names what the call acted on — so it
+/// never repeats that name. A removal has no further detail to give: the record
+/// the entry would describe is the one the call just took away, so the detail is
+/// reported as empty rather than naming a resource the account no longer holds.
+pub const OPERATION_DETAILS_REMOVED: &str = "";
+
+/// Whether an entry of `operation_type` records the removal of the resource the
+/// entry NAMES — the entry's `resourceName` addresses no resource once the call
+/// returns.
+///
+/// The members below are this log's own `operationType` values (see
+/// [`OPERATION_TYPE_CREATE_INSTANCE`] and [`OPERATION_TYPE_COPY_SNAPSHOT`]) for
+/// the calls whose whole work is to take that resource away. Lightsail's other
+/// removals are NOT among them, because each names a resource that outlives the
+/// call: deleting a recordset or an automatic snapshot, forgetting an instance's
+/// recorded host keys, deleting a bucket's access key and deleting a container
+/// image all name the zone, the source resource, the instance, the bucket or the
+/// container service they belong to, and every one of those is still held
+/// afterwards.
+///
+/// A call that joins two resources — an attach, a detach — has a counterpart to
+/// detail, the other resource it acted with; the day one of those entries is
+/// required to report it, that detail comes from the call that knows it rather
+/// than from this predicate.
+pub fn operation_removes_its_resource(operation_type: &str) -> bool {
+    matches!(
+        operation_type,
+        OPERATION_TYPE_DELETE_INSTANCE
+            | OPERATION_TYPE_DELETE_DISK
+            | OPERATION_TYPE_DELETE_DISK_SNAPSHOT
+            | OPERATION_TYPE_DELETE_INSTANCE_SNAPSHOT
+            | OPERATION_TYPE_DELETE_KEY_PAIR
+            | OPERATION_TYPE_DELETE_DOMAIN
+            | OPERATION_TYPE_DELETE_BUCKET
+            | OPERATION_TYPE_DELETE_CERTIFICATE
+            | OPERATION_TYPE_DELETE_ALARM
+            | OPERATION_TYPE_DELETE_CONTACT_METHOD
+            | OPERATION_TYPE_DELETE_DISTRIBUTION
+            | OPERATION_TYPE_DELETE_LOAD_BALANCER
+            | OPERATION_TYPE_DELETE_LOAD_BALANCER_TLS_CERTIFICATE
+            | OPERATION_TYPE_DELETE_RELATIONAL_DATABASE
+            | OPERATION_TYPE_DELETE_RELATIONAL_DATABASE_SNAPSHOT
+            | OPERATION_TYPE_DELETE_CONTAINER_SERVICE
+            | OPERATION_TYPE_RELEASE_STATIC_IP
+    )
+}
+
 /// `Operation$status` values this slice uses, from the modelled `OperationStatus`
 /// enum: a mutating call is answered `Started` and settles into `Succeeded` when
 /// the work it began is done.

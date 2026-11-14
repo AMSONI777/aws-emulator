@@ -285,9 +285,11 @@ fn assert_held_record(case: &str, row: &Row, key_pair: &Value, body: &Value, fin
         "case {case}: expected the Region the call was made in, got {:?}",
         key_pair["location"]
     );
-    assert!(
-        key_pair["location"]["availabilityZone"].is_null(),
-        "case {case}: a key pair is not zonal, so no availability zone may be reported, got {:?}",
+    assert_eq!(
+        key_pair["location"]["availabilityZone"].as_str(),
+        Some("all"),
+        "case {case}: a key pair is not zonal, so it is reported in every zone of its \
+         region, got {:?}",
         key_pair["location"]
     );
     assert_eq!(

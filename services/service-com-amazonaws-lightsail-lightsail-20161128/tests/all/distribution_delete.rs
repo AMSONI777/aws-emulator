@@ -556,8 +556,9 @@ async fn deleting_a_distribution_removes_it_and_everything_it_held() {
         );
         assert_eq!(
             operation["location"]["availabilityZone"].as_str(),
-            None,
-            "case {case}: expected no availabilityZone on a global resource, got {operation:?}"
+            Some("all"),
+            "case {case}: a global resource sits in no one zone, so the entry is reported \
+             in every zone of its region, got {operation:?}"
         );
         let id = operation["id"].as_str().unwrap_or_default().to_string();
         assert!(

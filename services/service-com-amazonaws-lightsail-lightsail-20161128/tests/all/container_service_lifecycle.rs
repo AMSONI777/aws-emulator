@@ -571,10 +571,11 @@ fn assert_static_members(case: &str, row: &Row, service: &Value) -> String {
         "case {case}: expected the region of the request, got {:?}",
         service["location"]
     );
-    assert!(
-        service["location"]["availabilityZone"].is_null(),
-        "case {case}: a container service is regional, so it must report no availability zone, \
-         got {:?}",
+    assert_eq!(
+        service["location"]["availabilityZone"].as_str(),
+        Some("all"),
+        "case {case}: a container service is regional, so it is reported in every zone of \
+         its region, got {:?}",
         service["location"]
     );
     assert_eq!(

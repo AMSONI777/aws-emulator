@@ -336,10 +336,11 @@ async fn a_contact_method_reads_back_as_it_was_created() {
             "case {case}: expected the region of the request, got {:?}",
             method["location"]
         );
-        assert!(
-            method["location"]["availabilityZone"].is_null(),
-            "case {case}: a contact method is held by the region, so it must report no \
-             availability zone, got {:?}",
+        assert_eq!(
+            method["location"]["availabilityZone"].as_str(),
+            Some("all"),
+            "case {case}: a contact method is held by the region, so it is reported in \
+             every zone of it, got {:?}",
             method["location"]
         );
         assert_eq!(

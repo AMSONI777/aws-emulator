@@ -469,18 +469,19 @@ fn assert_identity(
     );
 
     // A load balancer is regional, and so is the certificate it holds: Lightsail
-    // spreads the load balancer across the Region's Availability Zones, so
-    // neither names one.
+    // spreads the load balancer across the Region's Availability Zones, so each
+    // names every one of them (`all`).
     assert_eq!(
         reported["location"]["regionName"].as_str(),
         Some(row.region),
         "case {case}: expected the Region the load balancer lives in, got {:?}",
         reported["location"]
     );
-    assert!(
-        reported["location"]["availabilityZone"].is_null(),
-        "case {case}: a load balancer certificate is regional, so it must report no \
-         availability zone, got {:?}",
+    assert_eq!(
+        reported["location"]["availabilityZone"].as_str(),
+        Some("all"),
+        "case {case}: a load balancer certificate is regional, so it is reported in every \
+         zone of its region, got {:?}",
         reported["location"]
     );
 

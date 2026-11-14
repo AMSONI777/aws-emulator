@@ -142,10 +142,11 @@ fn assert_started_entry(case: &str, entry: &Value, operation_type: &str, served_
         Some(served_region),
         "case {case}: expected the entry in the Region of the request, got {entry:?}"
     );
-    assert!(
-        entry["location"]["availabilityZone"].is_null(),
-        "case {case}: a Lightsail VPC spans the Region, so it names no availability \
-         zone, got {:?}",
+    assert_eq!(
+        entry["location"]["availabilityZone"].as_str(),
+        Some("all"),
+        "case {case}: a Lightsail VPC spans the Region, so its entry is reported in every \
+         zone of it, got {:?}",
         entry["location"]
     );
     assert_eq!(

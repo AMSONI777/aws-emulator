@@ -302,7 +302,7 @@ async fn deleting_an_instance_releases_every_bucket_grant_it_held() {
                     Some("Succeeded"),
                     Some(true),
                     Some(row.region.unwrap_or("us-east-1")),
-                    None,
+                    Some("all"),
                 ),
                 "case {case}: expected a succeeded SetResourceAccessForBucket entry located \
                  where the bucket is, got {entry:?}"

@@ -2630,6 +2630,15 @@ impl ComAmazonawsLightsailLightsail20161128State {
     /// `settles_at_ms` is the instant the clock owes the operation its terminal
     /// status — `None` for work that was already finished when the call
     /// returned, in which case the operation is answered terminal.
+    ///
+    /// `operationDetails` is "details about the operation": a member BESIDE the
+    /// `resourceName` the entry already carries, so it never repeats that name.
+    /// Every one of this service's calls acts on the resource the entry names
+    /// and has nothing further to detail, so an entry reports NO detail —
+    /// except the entry of a call that took that resource away
+    /// ([`operation_removes_its_resource`]), whose detail is empty
+    /// ([`OPERATION_DETAILS_REMOVED`]) because the record it would describe is
+    /// the one the call just removed.
     pub fn start_operation(
         &mut self,
         now_ms: i64,
@@ -2648,7 +2657,8 @@ impl ComAmazonawsLightsailLightsail20161128State {
             created_at_ms: now_ms,
             location: location.clone(),
             is_terminal: terminal,
-            operation_details: Some(resource_name.to_string()),
+            operation_details: operation_removes_its_resource(operation_type)
+                .then(|| OPERATION_DETAILS_REMOVED.to_string()),
             operation_type: operation_type.to_string(),
             status: if terminal {
                 OPERATION_STATUS_SUCCEEDED.to_string()

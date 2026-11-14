@@ -342,10 +342,11 @@ async fn deleting_a_zone_removes_it_and_all_of_its_records() {
             "case {case}: expected the zone's own region on the log entry, got {:?}",
             operation["location"]
         );
-        assert!(
-            operation["location"]["availabilityZone"].is_null(),
-            "case {case}: a DNS zone is not zonal, so no availability zone may be \
-             reported, got {:?}",
+        assert_eq!(
+            operation["location"]["availabilityZone"].as_str(),
+            Some("all"),
+            "case {case}: a DNS zone is not zonal, so the entry is reported in every zone \
+             of its region, got {:?}",
             operation["location"]
         );
         assert_eq!(

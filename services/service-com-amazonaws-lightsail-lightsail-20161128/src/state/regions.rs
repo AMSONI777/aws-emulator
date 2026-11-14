@@ -436,12 +436,23 @@ pub fn continent_code_of_region(name: &str) -> Option<&'static str> {
 /// for a zone that is operating normally.
 pub const AVAILABILITY_ZONE_STATE_AVAILABLE: &str = "available";
 
+/// The `availabilityZone` a resource that is not pinned to ONE Availability
+/// Zone reports: every zone of its Region, which Lightsail names `all`.
+///
+/// `ResourceLocation$availabilityZone` is reported for every resource and every
+/// operation record, zonal or not — a caller reads the pair of members as "the
+/// Amazon Web Services Region and Availability Zone" of the resource — so a
+/// resource the whole Region holds names the Region's zones collectively rather
+/// than leaving the member out, which would read as "no zone is known".
+pub const AVAILABILITY_ZONE_ALL: &str = "all";
+
 /// Where a stored record lives.
 ///
-/// `availability_zone` is absent for a resource that is not zonal: the member
-/// documents the `us-east-2a` form, which addresses one zone of one region, and
-/// a DNS zone is held by the region as a whole — as is a container service — so
-/// there is no zone to name.
+/// `availability_zone` is [`AVAILABILITY_ZONE_ALL`] for a resource that is not
+/// zonal: the member documents the `us-east-2a` form, which addresses one zone
+/// of one region, and a DNS zone is held by the region as a whole — as is a
+/// container service — so there is no ONE zone to name and the resource is
+/// reported in every zone of its Region.
 #[derive(Debug, Clone)]
 pub struct StoredLocation {
     pub availability_zone: Option<String>,
@@ -457,19 +468,20 @@ impl StoredLocation {
         }
     }
 
-    /// The location of a resource that lives in `region` as a whole.
+    /// The location of a resource that lives in `region` as a whole: every zone
+    /// of it, [`AVAILABILITY_ZONE_ALL`].
     pub fn regional(region: &str) -> Self {
         Self {
-            availability_zone: None,
+            availability_zone: Some(AVAILABILITY_ZONE_ALL.to_string()),
             region_name: region.to_string(),
         }
     }
 
-    /// The location of a domain recordset: [`DOMAIN_REGION_NAME`], and no
-    /// availability zone at all.
+    /// The location of a domain recordset: [`DOMAIN_REGION_NAME`], which no one
+    /// Availability Zone of holds it ([`AVAILABILITY_ZONE_ALL`]).
     pub fn domain() -> Self {
         Self {
-            availability_zone: None,
+            availability_zone: Some(AVAILABILITY_ZONE_ALL.to_string()),
             region_name: DOMAIN_REGION_NAME.to_string(),
         }
     }

@@ -349,9 +349,11 @@ async fn a_created_bucket_reports_the_request_and_the_members_the_service_assign
             "case {case}: expected the region of the request, got {:?}",
             bucket["location"]
         );
-        assert!(
-            bucket["location"]["availabilityZone"].is_null(),
-            "case {case}: a bucket is regional, so it must report no availability zone, got {:?}",
+        assert_eq!(
+            bucket["location"]["availabilityZone"].as_str(),
+            Some("all"),
+            "case {case}: a bucket is regional, so it is reported in every zone of its \
+             region, got {:?}",
             bucket["location"]
         );
         let arn_prefix = format!("arn:aws:lightsail:{}:{ACCOUNT}:Bucket/", row.reported_region);

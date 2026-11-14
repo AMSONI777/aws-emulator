@@ -218,10 +218,11 @@ async fn a_static_ip_reads_back_as_it_was_allocated() {
             "case {case}: expected the region of the request, got {:?}",
             static_ip["location"]
         );
-        assert!(
-            static_ip["location"]["availabilityZone"].is_null(),
-            "case {case}: a static IP is reserved by the region, so it must report no \
-             availability zone, got {:?}",
+        assert_eq!(
+            static_ip["location"]["availabilityZone"].as_str(),
+            Some("all"),
+            "case {case}: a static IP is reserved by the region, so it is reported in every \
+             zone of it, got {:?}",
             static_ip["location"]
         );
 

@@ -258,10 +258,11 @@ fn assert_reported(case: &str, index: usize, key_pair: &Value) {
         "case {case}: expected the key pair's OWN region, got {:?}",
         key_pair["location"]
     );
-    assert!(
-        key_pair["location"]["availabilityZone"].is_null(),
-        "case {case}: a key pair is held by the Region as a whole, so no availability zone may \
-         be reported, got {:?}",
+    assert_eq!(
+        key_pair["location"]["availabilityZone"].as_str(),
+        Some("all"),
+        "case {case}: a key pair is held by the Region as a whole, so it is reported in \
+         every zone of it, got {:?}",
         key_pair["location"]
     );
     assert_eq!(

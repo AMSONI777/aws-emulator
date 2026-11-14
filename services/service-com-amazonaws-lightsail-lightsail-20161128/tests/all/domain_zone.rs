@@ -282,10 +282,11 @@ async fn a_domain_reads_back_as_it_was_created() {
             "case {case}: expected the domain region, got {:?}",
             domain["location"]
         );
-        assert!(
-            domain["location"]["availabilityZone"].is_null(),
-            "case {case}: a DNS zone is not zonal, so no availability zone may be \
-             reported, got {:?}",
+        assert_eq!(
+            domain["location"]["availabilityZone"].as_str(),
+            Some("all"),
+            "case {case}: a DNS zone is not zonal, so it is reported in every zone of its \
+             region, got {:?}",
             domain["location"]
         );
         assert_eq!(

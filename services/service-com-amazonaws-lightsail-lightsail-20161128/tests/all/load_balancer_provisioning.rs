@@ -371,17 +371,18 @@ fn assert_record(row: &Row, balancer: &Value) {
     );
 
     // A load balancer is regional: Lightsail spreads it across the Region's
-    // Availability Zones, so it names none of them.
+    // Availability Zones, so it names every one of them (`all`).
     assert_eq!(
         balancer["location"]["regionName"].as_str(),
         Some(row.region),
         "case {case}: expected the Region of the request, got {:?}",
         balancer["location"]
     );
-    assert!(
-        balancer["location"]["availabilityZone"].is_null(),
-        "case {case}: a load balancer is regional, so it must report no availability zone, \
-         got {:?}",
+    assert_eq!(
+        balancer["location"]["availabilityZone"].as_str(),
+        Some("all"),
+        "case {case}: a load balancer is regional, so it is reported in every zone of its \
+         region, got {:?}",
         balancer["location"]
     );
 

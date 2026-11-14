@@ -305,6 +305,8 @@ mod load_balancer_tls_policies;
 mod monitored_resource_delete_alarms;
 #[path = "all/operation_log_naming.rs"]
 mod operation_log_naming;
+#[path = "all/operation_record_location_and_details.rs"]
+mod operation_record_location_and_details;
 #[path = "all/operations_for_resource.rs"]
 mod operations_for_resource;
 #[path = "all/operations_log.rs"]

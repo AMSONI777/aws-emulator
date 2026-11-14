@@ -305,9 +305,11 @@ async fn every_load_balancer_metric_is_watched_against_the_load_balancer_of_the_
             Some(region),
             "case {case}: expected the alarm in the load balancer's Region, got {stored:?}"
         );
-        assert!(
-            stored["location"]["availabilityZone"].is_null(),
-            "case {case}: an alarm is not zonal, got {stored:?}"
+        assert_eq!(
+            stored["location"]["availabilityZone"].as_str(),
+            Some("all"),
+            "case {case}: an alarm is not zonal, so it is reported in every zone of its \
+             region, got {stored:?}"
         );
         let prefix = format!("arn:aws:lightsail:{region}:{ACCOUNT}:Alarm/");
         let arn = stored["arn"].as_str().unwrap_or_default();

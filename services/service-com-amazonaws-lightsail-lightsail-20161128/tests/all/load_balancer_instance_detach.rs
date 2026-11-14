@@ -344,18 +344,22 @@ async fn detaching_instances_releases_their_registrations() {
                      {operation:?}"
                 );
                 // Each entry is located where its OWN resource is: the load
-                // balancer across the Region's zones (so it names none of them),
-                // each instance in the zone it runs in.
+                // balancer across the Region's zones (so it names every one of
+                // them, `all`), each instance in the zone it runs in.
                 assert_eq!(
                     operation["location"]["regionName"].as_str(),
                     Some(row.region),
                     "case {case}: expected the entry at {position} in {}, got {operation:?}",
                     row.region
                 );
-                let want_zone = (position > 0).then_some(row.availability_zone);
+                let want_zone = if position > 0 {
+                    row.availability_zone
+                } else {
+                    "all"
+                };
                 assert_eq!(
                     operation["location"]["availabilityZone"].as_str(),
-                    want_zone,
+                    Some(want_zone),
                     "case {case}: expected availabilityZone {want_zone:?} at {position}, got \
                      {operation:?}"
                 );

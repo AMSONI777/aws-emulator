@@ -237,10 +237,11 @@ fn assert_peering_entries(case: &str, entries: &[Value], served_region: &str) {
             Some(served_region),
             "case {case}: expected the entry located in {served_region}, got {entry:?}"
         );
-        assert!(
-            entry["location"]["availabilityZone"].is_null(),
-            "case {case}: a Lightsail VPC spans the Region, so its entries name no \
-             availability zone, got {entry:?}"
+        assert_eq!(
+            entry["location"]["availabilityZone"].as_str(),
+            Some("all"),
+            "case {case}: a Lightsail VPC spans the Region, so its entries are reported in \
+             every zone of it, got {entry:?}"
         );
     }
     // The log is append-only, so it is reported oldest first.

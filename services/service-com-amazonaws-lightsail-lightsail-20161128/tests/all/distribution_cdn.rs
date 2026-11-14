@@ -731,9 +731,11 @@ fn assert_record(row: &Row, distribution: &Value, balancer_dns: &str, created_af
         "case {case}: every distribution is located in {DISTRIBUTION_REGION}, got {:?}",
         distribution["location"]
     );
-    assert!(
-        distribution["location"]["availabilityZone"].is_null(),
-        "case {case}: a distribution is global, so it reports no availability zone, got {:?}",
+    assert_eq!(
+        distribution["location"]["availabilityZone"].as_str(),
+        Some("all"),
+        "case {case}: a distribution is global, so no one zone holds it and it is reported \
+         in every zone of its region, got {:?}",
         distribution["location"]
     );
     let arn_prefix = format!("arn:aws:lightsail:{DISTRIBUTION_REGION}:{ACCOUNT}:Distribution/");

@@ -596,9 +596,11 @@ async fn an_alarm_reads_back_as_it_was_put() {
             Some(row.region),
             "case {case}: expected the monitored resource's region, got {stored:?}"
         );
-        assert!(
-            stored["location"]["availabilityZone"].is_null(),
-            "case {case}: an alarm is not zonal, got {stored:?}"
+        assert_eq!(
+            stored["location"]["availabilityZone"].as_str(),
+            Some("all"),
+            "case {case}: an alarm is not zonal, so it is reported in every zone of its \
+             region, got {stored:?}"
         );
         assert_eq!(
             stored["monitoredResourceInfo"]["name"].as_str(),

@@ -278,10 +278,11 @@ fn assert_delete_operation(case: &str, name: &str, body: &Value) -> String {
         "case {case}: expected the key pair's own region on the log entry, got {:?}",
         operation["location"]
     );
-    assert!(
-        operation["location"]["availabilityZone"].is_null(),
-        "case {case}: a key pair is not zonal here, so no availability zone may be \
-         reported, got {:?}",
+    assert_eq!(
+        operation["location"]["availabilityZone"].as_str(),
+        Some("all"),
+        "case {case}: a key pair is not zonal, so the entry is reported in every zone of \
+         its region, got {:?}",
         operation["location"]
     );
     assert_eq!(
