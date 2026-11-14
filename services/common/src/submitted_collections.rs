@@ -765,21 +765,59 @@ pub fn submitted_map_entries(body: &[u8], member: &str) -> Option<Vec<(String, S
 /// without being built.
 #[must_use]
 pub fn submitted_map_entries_at(body: &[u8], path: &[&str]) -> Option<Vec<(String, String)>> {
+    read_member_entries(body, path, AdmittedValues::StringsOnly)
+}
+
+/// [`submitted_map_entries_at`] over a map whose values are SCALARS of any kind: a string as
+/// sent, and a number or a boolean as the document wrote it.
+///
+/// For a clause about a map whose VALUE SHAPE is not a string — a map of doubles under a
+/// `@range`, say — which the reader above answers `None` for, because a clause quoting a map
+/// may never quote one it read only part of. Everything else is that reader's: the same
+/// parser seam keeping the document's order, the same case-insensitive matching of a member,
+/// the same single parse per question, and the same `None` for a member the body carries no
+/// map of scalars at. How a value is RENDERED into a clause belongs to the service that
+/// states it, because the form a value is written in is that value's own shape's.
+#[must_use]
+pub fn submitted_scalar_map_entries_at(
+    body: &[u8],
+    path: &[&str],
+) -> Option<Vec<(String, String)>> {
+    read_member_entries(body, path, AdmittedValues::Scalars)
+}
+
+/// The one reading both entry points above go through: `path`'s member, read as the map of
+/// `admitted` values it holds.
+fn read_member_entries(
+    body: &[u8],
+    path: &[&str],
+    admitted: AdmittedValues,
+) -> Option<Vec<(String, String)>> {
     if path.is_empty() {
         return None;
     }
     let mut deserializer = ::serde_json::Deserializer::from_slice(body);
-    ::serde::de::DeserializeSeed::deserialize(MemberEntries { path }, &mut deserializer)
+    ::serde::de::DeserializeSeed::deserialize(MemberEntries { path, admitted }, &mut deserializer)
         .ok()
         .flatten()
 }
 
-/// Reads the member a PATH names as the string map it holds, keeping the order the
-/// document wrote the entries in. Every member off the path is skipped without being
+/// Which values a map read back from a request body may hold.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum AdmittedValues {
+    /// Strings alone: a map holding anything else is read as no map at all.
+    StringsOnly,
+    /// Any scalar — a string, a number or a boolean — each as the document wrote it.
+    Scalars,
+}
+
+/// Reads the member a PATH names as the map of [`AdmittedValues`] it holds, keeping the order
+/// the document wrote the entries in. Every member off the path is skipped without being
 /// built, and a path of more than one step descends through the structure members ahead of
 /// the map by reading each of them with this same seed.
 struct MemberEntries<'a> {
     path: &'a [&'a str],
+    admitted: AdmittedValues,
 }
 
 impl<'de> ::serde::de::DeserializeSeed<'de> for MemberEntries<'_> {
@@ -815,11 +853,21 @@ impl<'de> ::serde::de::Visitor<'de> for MemberEntries<'_> {
         while let Some(name) = members.next_key::<String>()? {
             if found.is_none() && name.eq_ignore_ascii_case(step) {
                 found = if rest.is_empty() {
-                    Some(members.next_value::<OrderedStringMap>()?.0)
+                    match self.admitted {
+                        AdmittedValues::StringsOnly => {
+                            Some(members.next_value::<OrderedStringMap>()?.0)
+                        }
+                        AdmittedValues::Scalars => {
+                            Some(members.next_value::<OrderedScalarMap>()?.0)
+                        }
+                    }
                 } else {
                     // The map is deeper: the member on the path is itself read with this
                     // same seed, over the rest of the path.
-                    members.next_value_seed(MemberEntries { path: rest })?
+                    members.next_value_seed(MemberEntries {
+                        path: rest,
+                        admitted: self.admitted,
+                    })?
                 };
             } else {
                 members.next_value::<::serde::de::IgnoredAny>()?;
@@ -856,6 +904,56 @@ impl<'de> ::serde::Deserialize<'de> for OrderedStringMap {
         }
 
         deserializer.deserialize_map(Entries)
+    }
+}
+
+/// A JSON object of SCALARS as the entries it holds, in document order, each value as the
+/// document wrote it: a string as sent, and a number or a boolean in the text `serde_json`
+/// read it as.
+struct OrderedScalarMap(Vec<(String, String)>);
+
+impl<'de> ::serde::Deserialize<'de> for OrderedScalarMap {
+    fn deserialize<D: ::serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        struct Entries;
+
+        impl<'de> ::serde::de::Visitor<'de> for Entries {
+            type Value = OrderedScalarMap;
+
+            fn expecting(&self, formatter: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
+                formatter.write_str("a JSON object of scalars")
+            }
+
+            fn visit_map<A: ::serde::de::MapAccess<'de>>(
+                self,
+                mut entries: A,
+            ) -> Result<Self::Value, A::Error> {
+                let mut held: Vec<(String, String)> = Vec::new();
+                while let Some((key, value)) = entries.next_entry::<String, Scalar>()? {
+                    held.push((key, value.0));
+                }
+                Ok(OrderedScalarMap(held))
+            }
+        }
+
+        deserializer.deserialize_map(Entries)
+    }
+}
+
+/// One scalar of a JSON document as the text it was written with. A value of any other kind
+/// fails the read, which is what makes a map carrying one "no map of scalars".
+struct Scalar(String);
+
+impl<'de> ::serde::Deserialize<'de> for Scalar {
+    fn deserialize<D: ::serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let held = ::serde_json::Value::deserialize(deserializer)?;
+        match held {
+            ::serde_json::Value::String(text) => Ok(Self(text)),
+            ::serde_json::Value::Number(number) => Ok(Self(number.to_string())),
+            ::serde_json::Value::Bool(held) => Ok(Self(held.to_string())),
+            other => Err(::serde::de::Error::custom(format!(
+                "a map entry carrying no scalar value: {other}"
+            ))),
+        }
     }
 }
 
@@ -967,6 +1065,57 @@ mod tests {
         ] {
             assert!(
                 submitted_map_entries_at(body, path).is_none(),
+                "case {case:?}: expected nothing to be read"
+            );
+        }
+    }
+
+    /// RULE: a map of SCALARS is read back with each value as the document wrote it — a
+    /// string as sent, a number and a boolean in their own text — while the reader of a map
+    /// of STRINGS answers nothing for the same body; and a map carrying a value that is no
+    /// scalar is read by neither.
+    ///
+    /// The rows span the value kinds a JSON document writes: a string, an integral and a
+    /// fractional number, a negative one, an exponent form, a boolean, and the two composites
+    /// that are no scalar at all.
+    #[test]
+    fn a_map_of_scalars_is_read_back_with_each_value_as_written() {
+        let body = br#"{"RoutingConfig":{"AdditionalVersionWeights":{"2":1.5,"3":2,"4":-0.25,"5":1e3,"6":"x","7":true}}}"#;
+        let path = &["routingConfig", "additionalVersionWeights"][..];
+        let entries = submitted_scalar_map_entries_at(body, path)
+            .expect("the nested member is a map of scalars");
+        let read: Vec<(&str, &str)> = entries
+            .iter()
+            .map(|(key, value)| (key.as_str(), value.as_str()))
+            .collect();
+        assert_eq!(
+            read,
+            vec![
+                ("2", "1.5"),
+                ("3", "2"),
+                ("4", "-0.25"),
+                ("5", "1000.0"),
+                ("6", "x"),
+                ("7", "true"),
+            ],
+            "expected every scalar in document order as the document wrote it, got {read:?}"
+        );
+        assert!(
+            submitted_map_entries_at(body, path).is_none(),
+            "a map of numbers is no map of STRINGS, so the string reader must read nothing"
+        );
+
+        // (case, body) — a value that is no scalar is read by neither.
+        for (case, body) in [
+            (
+                "an entry carrying an object",
+                &br#"{"Tags":{"a":{"b":"c"}}}"#[..],
+            ),
+            ("an entry carrying a list", &br#"{"Tags":{"a":[1]}}"#[..]),
+            ("an entry carrying null", &br#"{"Tags":{"a":null}}"#[..]),
+        ] {
+            assert!(
+                submitted_scalar_map_entries_at(body, &["tags"]).is_none(),
                 "case {case:?}: expected nothing to be read"
             );
         }

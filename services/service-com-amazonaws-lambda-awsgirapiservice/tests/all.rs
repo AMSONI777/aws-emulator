@@ -233,6 +233,8 @@ mod function_scaling_config_default;
 mod function_update_window_conflict;
 #[path = "all/function_url_announced_endpoint.rs"]
 mod function_url_announced_endpoint;
+#[path = "all/function_url_caller_admission.rs"]
+mod function_url_caller_admission;
 #[path = "all/function_url_config.rs"]
 mod function_url_config;
 #[path = "all/function_url_cors.rs"]
@@ -399,6 +401,8 @@ mod layer_version_permissions;
 mod layer_versions;
 #[path = "all/log_level_requires_json_format.rs"]
 mod log_level_requires_json_format;
+#[path = "all/map_value_refusals.rs"]
+mod map_value_refusals;
 #[path = "all/missing_policy_refusal.rs"]
 mod missing_policy_refusal;
 #[path = "all/node_error_trace_lines.rs"]

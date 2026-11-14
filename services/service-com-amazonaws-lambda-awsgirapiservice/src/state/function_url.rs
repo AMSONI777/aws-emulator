@@ -297,6 +297,15 @@ pub struct FunctionUrlTarget {
     /// The qualifier the URL was created on: [`VERSION_LATEST`] for the unpublished
     /// version, or an alias name.
     pub qualifier: String,
+    /// The ARN of the function AT that qualifier — the unqualified function ARN for a URL on
+    /// the unpublished version and the `:<qualifier>`-suffixed one otherwise
+    /// ([`FunctionRecord::versioned_arn`]), read off the record that HOLDS the URL.
+    ///
+    /// It is the resource an invocation through this endpoint is authorized on, and the ARN a
+    /// permission granted on that qualifier names, so it is carried here rather than rebuilt
+    /// from the address: a client reaching the emulator's own endpoint names no Region at all,
+    /// while the function it reaches has one.
+    pub resource_arn: String,
     /// The `AuthType` the URL enforces, as stored.
     pub auth_type: String,
     /// The `InvokeMode` the URL SERVES IN, which is the one configured on it or the
@@ -333,6 +342,7 @@ pub fn held_function_url(
                 url_id: config.url_id.clone(),
                 function_name: function.config.name.clone(),
                 qualifier: qualifier.clone(),
+                resource_arn: function.versioned_arn(qualifier),
                 auth_type: config.auth_type.clone(),
                 invoke_mode: config.served_invoke_mode(),
                 cors: config.cors.clone(),

@@ -35,12 +35,18 @@
 //! and the caller that signature speaks for is reported in the event's
 //! `requestContext.authorizer.iam`.
 //!
-//! A `NONE` URL bypasses that authentication, and what makes such an endpoint PUBLIC is the
-//! function's own resource-based policy: a grant of the function-URL invocation to everyone.
-//! That is the one admission decision this plane makes itself ([`admits_the_public`]),
-//! because it is a property of the stored POLICY rather than of the request's signature — a
-//! policy whose grants all name a principal, and a function with no policy at all, admit no
-//! anonymous caller and are refused `403 {"Message":"Forbidden"}`.
+//! A `NONE` URL bypasses that authentication, so the request reaches this plane carrying
+//! whatever credential it came with, and WHO it is admitted as is then the one decision this
+//! plane makes itself ([`FunctionUrlPlane::admits_the_caller`]): the IAM decision every
+//! invocation of this service goes through
+//! (`crate::state::invoke_authorization::admits_function_url_request`), under the endpoint's
+//! own action `lambda:InvokeFunctionUrl`. A request presenting a credential speaks for that
+//! principal and is decided on its policies and the function's own; a request presenting NONE
+//! speaks for nobody, so the only `Principal` element that can name it is the wildcard — which
+//! is what makes such an endpoint PUBLIC exactly while the function's resource-based policy
+//! grants the invocation to everyone. A policy whose grants all name a principal, and a
+//! function with no policy at all, admit no anonymous caller and refuse it
+//! `403 {"Message":"Forbidden"}`.
 
 //! ## What this plane reads of the configuration, and what it does not
 //!
@@ -151,19 +157,42 @@ pub(super) fn target_of<Eng: Send + Sync + 'static>(
 /// Which callers a mounted plane serves, which is what its declared auth schemes say.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Admits {
-    /// `AuthType=NONE`: "Bypass IAM authentication to create a public endpoint", so the
-    /// request is served however it arrived — while the function's resource-based policy
-    /// grants the invocation to everyone ([`admits_the_public`]).
-    Everyone,
+    /// `AuthType=NONE`, reached by a request presenting NO credential: "Bypass IAM
+    /// authentication to create a public endpoint", so nothing authenticates it and it
+    /// speaks for nobody — served while the function's resource-based policy grants the
+    /// invocation to everyone ([`FunctionUrlPlane::admits_the_caller`]).
+    Anonymous,
+    /// `AuthType=NONE`, reached by a request that PRESENTS a SigV4 credential: the caller
+    /// offered an identity, so this mounting declares the SigV4 scheme and the emulator
+    /// verifies that credential before the plane runs, exactly as it does for an `AWS_IAM`
+    /// URL. What the verified principal may do is then the function's own policy's to say.
+    SignedPublic,
     /// `AuthType=AWS_IAM`: "Restrict access to authenticated users only", so the request is
     /// served only once the emulator has verified its SigV4 signature.
-    SignedCallers,
+    SignedRestricted,
+}
+
+impl Admits {
+    /// Whether a request this mounting serves speaks for nobody — the one mounting the
+    /// emulator authenticates no caller of, which is what makes the wildcard principal the
+    /// only one that can name it.
+    fn is_anonymous(self) -> bool {
+        self == Self::Anonymous
+    }
+
+    /// Whether this mounting serves a URL whose `AuthType` is `NONE`, whichever credential
+    /// the request arrived with — the two mountings whose callers the function's own
+    /// resource-based policy admits.
+    fn serves_a_public_url(self) -> bool {
+        matches!(self, Self::Anonymous | Self::SignedPublic)
+    }
 }
 
 /// The function URL data plane: one invocation of the function a URL is attached to.
 ///
-/// Mounted once per `AuthType` ([`Admits`]), because which callers a URL admits is carried
-/// by the auth schemes the serving operation declares.
+/// Mounted once per kind of caller ([`Admits`]), because which callers a request is admitted
+/// as is carried by the auth schemes the serving operation declares — the emulator verifies
+/// every request signature and a service never verifies one itself.
 pub struct FunctionUrlPlane<Eng> {
     /// The ONE shared engine this service's operations read and write, so a request served
     /// here sees exactly the functions the control plane persisted.
@@ -173,11 +202,20 @@ pub struct FunctionUrlPlane<Eng> {
 }
 
 impl<Eng: Send + Sync + 'static> FunctionUrlPlane<Eng> {
-    /// The plane serving the URLs whose `AuthType` is `NONE`.
+    /// The plane serving a `NONE` URL to a request that presents no credential.
     pub fn anonymous(engine: Arc<Eng>) -> Self {
         Self {
             engine,
-            admits: Admits::Everyone,
+            admits: Admits::Anonymous,
+        }
+    }
+
+    /// The plane serving a `NONE` URL to a request that presents a SigV4 credential, which
+    /// the emulator verifies because this mounting declares that scheme.
+    pub fn signed_public(engine: Arc<Eng>) -> Self {
+        Self {
+            engine,
+            admits: Admits::SignedPublic,
         }
     }
 
@@ -185,7 +223,7 @@ impl<Eng: Send + Sync + 'static> FunctionUrlPlane<Eng> {
     pub fn aws_iam(engine: Arc<Eng>) -> Self {
         Self {
             engine,
-            admits: Admits::SignedCallers,
+            admits: Admits::SignedRestricted,
         }
     }
 
@@ -212,11 +250,22 @@ impl<Eng: Send + Sync + 'static> FunctionUrlPlane<Eng> {
         )
     }
 
-    /// Whether this mounting is the one that serves `auth_type`.
-    pub fn serves_auth_type(&self, auth_type: &str) -> bool {
+    /// Whether this mounting is the one that serves a request to a URL whose `AuthType` is
+    /// `auth_type`, presenting `credential` or none.
+    ///
+    /// A `NONE` URL is served by one of two mountings, because what the emulator
+    /// authenticates is decided per REQUEST and not per URL: a request that presents a SigV4
+    /// credential is served by the mounting that declares that scheme, so the emulator
+    /// verifies it, and one that presents none by the mounting that declares no scheme at
+    /// all. Which of the two a request is, is read through this emulator's ONE reader of a
+    /// request's credential ([`crate::state::invoke_authorization::presented_credential`]) —
+    /// a ROUTING choice, not a decision about what that credential may do, which stays with
+    /// the schemes the chosen mounting declares and the policy the plane reads.
+    pub fn serves(&self, auth_type: &str, credential: Option<&str>) -> bool {
         match self.admits {
-            Admits::SignedCallers => auth_type == AUTH_TYPE_AWS_IAM,
-            Admits::Everyone => auth_type != AUTH_TYPE_AWS_IAM,
+            Admits::SignedRestricted => auth_type == AUTH_TYPE_AWS_IAM,
+            Admits::SignedPublic => auth_type != AUTH_TYPE_AWS_IAM && credential.is_some(),
+            Admits::Anonymous => auth_type != AUTH_TYPE_AWS_IAM && credential.is_none(),
         }
     }
 
@@ -260,6 +309,22 @@ impl<Eng: Send + Sync + 'static> FunctionUrlPlane<Eng> {
         ctx: &OperationContext<'_>,
     ) -> RtResponse {
         let request_id = crate::state::mint_request_id();
+        // WHO is admitted is decided first, at the endpoint's own front door: before the
+        // request is read as an invocation at all, and with no guard of this service's store
+        // held, because the decision reads the function's resource-based policy under that
+        // store's own lock (see [`FunctionUrlPlane::admits_the_caller`]).
+        if self.admits.serves_a_public_url() {
+            if let Err(reason) = self.admits_the_caller(target, ctx) {
+                ::tracing::info!(
+                    request_id = %request_id,
+                    function = %target.function_name,
+                    reason = %reason,
+                    "a function URL request was not admitted by the function's resource-based \
+                     policy"
+                );
+                return forbidden(Some(&request_id));
+            }
+        }
         // The request's own bytes, read ONCE: the event the function is invoked with carries
         // them, so a body this plane cannot read is a request it cannot turn into an
         // invocation at all — reported as the one it could not make rather than invoked with
@@ -434,22 +499,6 @@ impl<Eng: Send + Sync + 'static> FunctionUrlPlane<Eng> {
         let now = incoming.received;
         let request_id = incoming.request_id;
         let mut store = state.lock();
-        // A URL whose `AuthType` is `NONE` is "a public endpoint", and what makes it public
-        // is the function's own resource-based policy: a grant of the function-URL
-        // invocation to everyone. A policy that grants it to a NAMED principal — or no
-        // policy at all — admits no anonymous caller, which is the one refusal this plane
-        // makes itself, because it is a property of the stored POLICY and not of the
-        // request's signature (see [`admits_the_public`]).
-        if self.admits == Admits::Everyone
-            && !admits_the_public(&store, &target.function_name, &target.qualifier)
-        {
-            ::tracing::info!(
-                function = %target.function_name,
-                "a function URL whose AuthType is NONE is addressed, and its function's \
-                 resource-based policy grants the invocation to nobody public"
-            );
-            return Err(Box::new(forbidden()));
-        }
         // A function URL is attached to the unpublished version or to an ALIAS, and the
         // alias names the version it invokes AT THE TIME OF THE CALL, so the version is
         // resolved here, on every request, by the one resolution every invoking path shares.
@@ -619,16 +668,58 @@ impl<Eng: Send + Sync + 'static> FunctionUrlPlane<Eng> {
         url_event(&request)
     }
 
+    /// Whether this endpoint admits the caller this request speaks for, and the REASON IAM
+    /// withheld the permission when it does not.
+    ///
+    /// The decision is IAM's, taken by the one gate every invocation of this service goes
+    /// through ([`crate::state::invoke_authorization::admits_function_url_request`]) under the
+    /// endpoint's own action. WHO asks is the mounting's to say rather than this gate's, and
+    /// it is the same fact the framework decided the request's authentication by ([`Admits`]):
+    /// the mounting serving an ANONYMOUS caller declares no auth scheme, so nothing
+    /// authenticated it and it speaks for nobody — only a grant to the wildcard principal can
+    /// name it, which is what makes a `NONE` URL public exactly while its function's policy
+    /// grants the invocation to everyone ("`NONE` – Bypass IAM authentication to create a
+    /// public endpoint"). The mounting serving a credentialled caller declares the SigV4
+    /// scheme, so the emulator VERIFIED that credential before this plane ran, and what the
+    /// principal it speaks for may do is the union of its own policies and the function's.
+    ///
+    /// A URL whose `AuthType` is `AWS_IAM` carries its admission in that same verification
+    /// ([`Admits::SignedRestricted`]), so this gate is asked for the two `NONE` mountings
+    /// ([`Admits::serves_a_public_url`]).
+    ///
+    /// Taken with NO guard of this service's store held: the policy is read under that store's
+    /// own lock.
+    fn admits_the_caller(
+        &self,
+        target: &crate::state::FunctionUrlTarget,
+        ctx: &OperationContext<'_>,
+    ) -> Result<(), String> {
+        crate::state::invoke_authorization::admits_function_url_request(
+            &*self.engine,
+            ctx,
+            // The resource the decision is about is the ARN of the function AT the qualifier
+            // this endpoint is attached to, read off the record that holds the URL: the
+            // address a request arrived at names no Region of its own for a client reaching
+            // the emulator's own endpoint, while the function it reaches has one.
+            &target.resource_arn,
+            &target.function_name,
+            &target.qualifier,
+            &target.auth_type,
+            self.admits.is_anonymous(),
+        )
+    }
+
     /// The caller a request was signed by, for the mounting that serves `AWS_IAM` URLs.
     ///
     /// The signature itself was verified by the emulator before this plane ran, so what is
     /// reported here is the identity THAT credential speaks for: the access key id the
     /// request presented (the public half, never a secret) and the account's own principal,
     /// which is the one long-term credential this emulator publishes
-    /// ([`service_common::caller_principal`]). The `NONE` mounting reports no caller at
-    /// all, because an anonymous endpoint authorizes none.
+    /// ([`service_common::caller_principal`]). A `NONE` URL reports no caller at all,
+    /// whichever of its two mountings served the request, because the member the event
+    /// carries it in is the `AWS_IAM` authorizer's.
     fn caller(&self, ctx: &OperationContext<'_>) -> Option<CallerIdentity> {
-        if self.admits != Admits::SignedCallers {
+        if self.admits != Admits::SignedRestricted {
             return None;
         }
         Some(CallerIdentity {
@@ -697,13 +788,15 @@ impl<Eng: Send + Sync + 'static> ErasedOperation for FunctionUrlPlane<Eng> {
         })
     }
 
-    /// The schemes this mounting's callers sign with: a URL whose `AuthType` is `AWS_IAM`
-    /// is served only to a request the emulator verified a SigV4 signature for, and a URL
-    /// whose `AuthType` is `NONE` is "a public endpoint", served however it arrived.
+    /// The schemes this mounting's callers sign with: a URL whose `AuthType` is `AWS_IAM` is
+    /// served only to a request the emulator verified a SigV4 signature for, and so is a
+    /// request that PRESENTS a credential to a URL whose `AuthType` is `NONE` — the caller
+    /// offered an identity, so the emulator holds it to it. A `NONE` URL reached with no
+    /// credential at all is "a public endpoint", served however it arrived.
     fn auth_schemes(&self) -> Option<&'static [&'static str]> {
         match self.admits {
-            Admits::SignedCallers => Some(&[SIGV4_SCHEME]),
-            Admits::Everyone => Some(&[]),
+            Admits::SignedRestricted | Admits::SignedPublic => Some(&[SIGV4_SCHEME]),
+            Admits::Anonymous => Some(&[]),
         }
     }
 }
@@ -781,55 +874,70 @@ fn plane_error(status: u16, message: &str) -> RtResponse {
     response
 }
 
-/// The refusal an endpoint gives a caller it does not admit: `403 {"Message":"Forbidden"}`.
+/// The refusal an endpoint gives a caller it does not admit: `403 {"Message":"Forbidden"}`,
+/// naming the class of the refusal and the request it refused.
 ///
 /// The member is spelled `Message` here and `message` on the failures above because that is
 /// how the two are answered — the authorization refusal of a Lambda front door carries the
-/// capitalised member, and nothing of the request or the policy is named in it.
+/// capitalised member and the fixed sentence [`FORBIDDEN_MESSAGE`], with nothing of the
+/// request or the policy named in it.
 ///
-/// It is the ONE wording of that refusal, shared with the seam that words the refusal of a
-/// request the emulator's authentication layer turned away before this plane could run
-/// ([`super::function_url_refusal`]), so an endpoint cannot refuse the same caller two ways.
-pub(super) fn forbidden() -> RtResponse {
-    let body = ::serde_json::json!({ "Message": FORBIDDEN_MESSAGE }).to_string();
+/// Two headers name the refusal, exactly as a served answer names the request it answered
+/// ([`served`]): the CLASS of the failure, which for a caller no policy admits is the common
+/// AWS access error ([`FORBIDDEN_ERROR_TYPE`]) — the same header this crate's download plane
+/// names a refusal's class in — and the id of the request it refused, so a client correlating
+/// on it has an id for a refused call as much as for a served one. `request_id` is the id the
+/// plane minted for the request; a refusal taken before a request reached the plane names a
+/// fresh one, because a front door assigns one to every request it answers.
+///
+/// It is the ONE wording of that refusal, whichever of the endpoint's two decisions turned
+/// the caller away — the AUTHENTICATION the emulator performs for a URL whose callers sign,
+/// through the seam that words the refusal of a request turned away before this plane could
+/// run ([`super::function_url_refusal`]), and the AUTHORIZATION this plane takes on the
+/// function's own policy ([`FunctionUrlPlane::admits_the_caller`]) — so an endpoint cannot
+/// refuse the same caller two ways.
+pub(super) fn forbidden(request_id: Option<&str>) -> RtResponse {
+    let mut response = refused(request_id);
+    response
+        .headers_mut()
+        .insert(ERROR_TYPE_HEADER, FORBIDDEN_ERROR_TYPE);
+    response
+}
+
+/// The refusal the endpoint gives a PREFLIGHT whose origin or method the URL's own `Cors`
+/// settings do not admit ([`cors`]): the same `403` sentence, naming the request it refused
+/// and NOT the access error above — a preflight the configuration does not cover is the CORS
+/// layer's own answer rather than a decision about who the caller is.
+pub(super) fn refused_preflight() -> RtResponse {
+    refused(None)
+}
+
+/// The `403 {"Message":"Forbidden"}` body and the request id both refusals carry.
+fn refused(request_id: Option<&str>) -> RtResponse {
+    let body = ::serde_json::json!({ FORBIDDEN_MEMBER: FORBIDDEN_MESSAGE }).to_string();
     let mut response = RtResponse::new(plane_status(FORBIDDEN_STATUS), SdkBody::from(body));
+    let named = request_id.map_or_else(crate::state::mint_request_id, str::to_string);
     response
         .headers_mut()
         .insert("content-type", event::DEFAULT_CONTENT_TYPE);
+    response.headers_mut().insert(REQUEST_ID_HEADER, named);
     response
 }
+
+/// The member that refusal carries its sentence in.
+const FORBIDDEN_MEMBER: &str = "Message";
+
+/// The header a refusal of this endpoint names the class of its failure in.
+const ERROR_TYPE_HEADER: &str = "x-amzn-errortype";
+
+/// The class a caller the endpoint does not admit is refused under: the common AWS access
+/// error, which is the failure an authorization decision that admitted nobody is.
+const FORBIDDEN_ERROR_TYPE: &str = "AccessDeniedException";
 
 /// The status and the sentence a caller the endpoint does not admit is refused with.
 const FORBIDDEN_STATUS: u16 = 403;
 /// See [`FORBIDDEN_STATUS`].
 const FORBIDDEN_MESSAGE: &str = "Forbidden";
-
-/// Whether the function's resource-based policy makes the function URL of `qualifier` a
-/// PUBLIC endpoint — the condition `AuthType=NONE` serves an anonymous caller under.
-///
-/// `FunctionUrlAuthType=NONE` means "Bypass IAM authentication to create a public
-/// endpoint", and what grants the public that invocation is a statement of the function's
-/// resource-based policy allowing everyone: a policy whose grants all name a principal, and
-/// a function carrying no policy for that qualifier at all, admit nobody anonymous. The
-/// reading of "allows everyone" is this service's ONE definition of it
-/// ([`super::public_access::grants_public_access`]), the same one `GetPolicy` reports
-/// `PublicAccessAllowed` from, so a caller cannot be told the policy is public and then
-/// refused by it.
-///
-/// A policy is attached to the ARN the permission named, so the policy read is the one of
-/// the qualifier the URL is attached to — the function-level policy for a URL on the
-/// unpublished version, and the alias's own for a URL on an alias.
-fn admits_the_public(
-    store: &crate::state::ComAmazonawsLambdaAwsgirapiserviceState,
-    function_name: &str,
-    qualifier: &str,
-) -> bool {
-    store
-        .functions
-        .get(function_name)
-        .and_then(|function| function.policies.get(qualifier))
-        .is_some_and(|policy| super::public_access::grants_public_access(&policy.to_json()))
-}
 
 /// A status this plane answers with. Every call site passes a constant or a status
 /// [`mapped_result`] already held to the HTTP range, so the conversion cannot fail.

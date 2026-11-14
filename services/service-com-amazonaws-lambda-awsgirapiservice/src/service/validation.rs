@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: CC0-1.0
 
-//! WHERE this service states a constraint one of a COLLECTION's ELEMENTS broke, and WHAT
-//! that clause says an element has to satisfy.
+//! WHERE this service states a constraint one of a COLLECTION's ELEMENTS or one of a MAP's
+//! VALUES broke, and WHAT that clause says such an element or value has to satisfy.
 //!
 //! # The rule
 //!
@@ -13,9 +13,17 @@
 //! has: the constraints the element shape declares, and — because no list this model
 //! declares is `@sparse` — that an element must be present at all.
 //!
-//! So one request sending a list whose elements are not all admissible is ONE validation
-//! error about one member, whatever an element got wrong and however many elements got it
-//! wrong.
+//! A constraint declared on a MAP's VALUE shape is the same rule over the other collection:
+//! the walk reports it at the offending ENTRY (`<map member>.<key>`, the key being the
+//! caller's own text) with the one constraint that value broke, while AWS reports it once at
+//! the MAP MEMBER, quoting the map the caller sent and nesting the value shape's whole
+//! declared set inside `Map value must satisfy constraint: [ … ]` — the sibling of the
+//! `Map keys must satisfy constraint: [ … ]` a clause about a key states
+//! ([`crate::state::tag_key_shape`]).
+//!
+//! So one request sending a collection whose elements or values are not all admissible is
+//! ONE validation error about one member, whatever an element or value got wrong and however
+//! many of them got it wrong.
 //!
 //! # What is this service's and what is not
 //!
@@ -41,13 +49,20 @@
 //! inside the brackets reads exactly like one a reported member gets: a `@pattern` without
 //! the anchors a whole-value pattern wraps it in, and an enum's value set in the order this
 //! service reports that enum in.
+//!
+//! The one half a MAP's clause needs beyond that is the VALUE it quotes — the map the request
+//! carried, which no violation carries and which the shared walk reads back only for a map of
+//! STRINGS. A `Weight` map's values are DOUBLES, so the map is read out of the request here
+//! ([`submitted_maps`]), rendered through the shared renderer of that form, and handed to the
+//! grouping as the collection it quotes.
 
 use ::aws_smithy_schema::Schema;
 use ::service_common::validation::unanchored;
 use ::service_common::validation_message::{
-    element_constraint_set, element_set_requirement, requirement,
+    element_constraint_set, element_set_requirement, float_value_text, map_value_set_requirement,
+    requirement,
 };
-use smithy_server_runtime::ViolationKind;
+use smithy_server_runtime::{Violation, ViolationKind};
 
 /// The shapes a refused COLLECTION member is looked up in, to state the whole set of
 /// requirements that member's ELEMENTS have.
@@ -96,15 +111,19 @@ const LIST_MEMBER_SHAPES: &[&Schema] = {
 };
 
 /// The requirement a clause states at the collection member `collection` for a constraint
-/// one of its ELEMENTS broke — the element shape's whole declared set plus the element's own
-/// presence requirement, nested — or `None` when no shape of this model declares a single
-/// element constraint set for that member, which leaves the framework's own per-element
+/// one of its ELEMENTS or VALUES broke — the element or value shape's whole declared set plus
+/// that element's own presence requirement, nested — or `None` when no shape of this model
+/// declares a single such set for that member, which leaves the framework's own per-element
 /// clause standing.
 ///
-/// `collection` is the member path the clause is stated at, as a violation path spells it;
-/// the member is declared in the shape it is nested in, so it is looked up under the last
-/// segment of that path ([`LIST_MEMBER_SHAPES`]).
+/// `collection` is the member path the clause is stated at, as a violation path spells it.
+/// A MAP of this model's input surface is matched by that whole path
+/// ([`VALUE_CONSTRAINED_MAPS`]); a list member is declared in the shape it is nested in, so
+/// it is looked up under the last segment of the path ([`LIST_MEMBER_SHAPES`]).
 pub(crate) fn element_set(collection: &str) -> Option<String> {
+    if let Some(set) = map_value_set(collection) {
+        return Some(set);
+    }
     let member = collection
         .rsplit_once('.')
         .map_or(collection, |(_, member)| member);
@@ -131,6 +150,219 @@ fn stated_requirement(declared: ViolationKind) -> String {
         }
         other => other,
     })
+}
+
+/// One MAP member of this model's INPUT surface whose VALUE shape declares constraints: the
+/// member path a clause about one of its values is stated at, the shapes that member is
+/// looked up in, and whether its values are FLOATING POINT.
+struct ValueConstrainedMap {
+    /// The member path a violation at one of this map's values is grouped onto, as a
+    /// violation path spells it — the whole path, so a map nested in a structure member is
+    /// matched there and nowhere else.
+    path: &'static str,
+    /// The shapes the member is looked up in to read the value shape's declared constraints.
+    /// A member schema carries its own traits and not the members of the shape it targets, so
+    /// a nested map's declaring structure is handed over itself; a member two of them declare
+    /// over DIFFERENT value shapes is not stated at all
+    /// (`service_common::validation_message::element_constraint_set`).
+    declared_in: &'static [&'static Schema],
+    /// Whether the values are floating point, which decides how a `@range` bound in the set
+    /// is written ([`stated_value_requirement`]) and how an entry of the quoted map is
+    /// ([`rendered_entry`]).
+    ///
+    /// STATED rather than read, and the one fact of this row that is: codegen attaches a
+    /// collection member's ELEMENT CONSTRAINTS to the member schema and not the element's own
+    /// TYPE (`vendor/smithy-macros/src/codegen.rs`, `extract_element_constraints`), and the
+    /// member's own `shape_type` is the MAP's — so the value shape's numeric kind is reachable
+    /// from the model text alone, which is where the row above cites it from. The set each row
+    /// produces is pinned in this module's own tests, so a row that comes to disagree with the
+    /// model fails there rather than silently writing an integral bound where AWS writes a
+    /// decimal one.
+    floating_point: bool,
+}
+
+/// Every MAP member of this model's input surface whose VALUE shape declares a constraint, so
+/// that every map a request can carry a refused value in is reached.
+///
+/// Source: `smithy_query(query="shape", shape="AdditionalVersionWeights,Weight,Tags,\
+/// TagValue,EnvironmentVariables")`. `AdditionalVersionWeights` targets the `Weight` double
+/// under `@range(0.0, 1.0)` and is declared by the routing configuration both alias requests
+/// nest; `Tags` targets the `TagValue` string under a `@length` and a `@pattern` and is
+/// declared at the top level of the two requests that take one. `EnvironmentVariables` is the
+/// third map this surface declares and its value shape declares NO constraint, so no value of
+/// it can be refused and it states no set.
+const VALUE_CONSTRAINED_MAPS: &[ValueConstrainedMap] = {
+    use crate::ops::types;
+
+    &[
+        ValueConstrainedMap {
+            path: "routingConfig.additionalVersionWeights",
+            declared_in: &[types::ALIAS_ROUTING_CONFIGURATION_SCHEMA],
+            floating_point: true,
+        },
+        ValueConstrainedMap {
+            path: "tags",
+            declared_in: &[
+                types::CREATE_FUNCTION_INPUT_SCHEMA,
+                types::TAG_RESOURCE_INPUT_SCHEMA,
+            ],
+            floating_point: false,
+        },
+    ]
+};
+
+/// The map of this model `path` names, or `None` for every other member path.
+fn value_constrained_map(path: &str) -> Option<&'static ValueConstrainedMap> {
+    VALUE_CONSTRAINED_MAPS
+        .iter()
+        .find(|declared| declared.path == path)
+}
+
+/// The requirement a clause states at the MAP member `map` for a constraint one of its VALUES
+/// broke — the value shape's whole declared set plus the value's own presence requirement,
+/// nested in `Map value must satisfy constraint: [ … ]` — or `None` when `map` names no map
+/// of this model whose values are constrained.
+fn map_value_set(map: &str) -> Option<String> {
+    let declared = value_constrained_map(map)?;
+    let member = map.rsplit_once('.').map_or(map, |(_, member)| member);
+    let constraints = element_constraint_set(declared.declared_in, member)?;
+    let mut requirements: Vec<String> = constraints
+        .into_iter()
+        .map(|constraint| stated_value_requirement(constraint, declared.floating_point))
+        .collect();
+    // No map this model declares is `@sparse`, so an entry's value has to be there at all,
+    // exactly as a list's element has to be: the set states that beside the constraints the
+    // value shape declares.
+    requirements.push(requirement(ViolationKind::MissingRequiredMember));
+    Some(map_value_set_requirement(&requirements))
+}
+
+/// One requirement of a map's VALUE shape, as this service states it: [`stated_requirement`]
+/// over the same sentences, with a `@range` bound of a FLOATING-POINT value shape written as
+/// the decimal a floating-point value is written with.
+///
+/// The framework renders a bound read off the model without a fractional part (`1`, not
+/// `1.0`), which is what an INTEGRAL value shape's bound reads as; a floating-point shape's
+/// bound is a floating-point value and is written as one, through the one function that
+/// writes a floating-point value into a clause
+/// (`service_common::validation_message::float_value_text`, which this module also renders a
+/// quoted entry with).
+fn stated_value_requirement(declared: ViolationKind, floating_point: bool) -> String {
+    if !floating_point {
+        return stated_requirement(declared);
+    }
+    stated_requirement(match declared {
+        ViolationKind::MinValue(bound) => ViolationKind::MinValue(decimal_bound(&bound)),
+        ViolationKind::MaxValue(bound) => ViolationKind::MaxValue(decimal_bound(&bound)),
+        other => other,
+    })
+}
+
+/// `bound` as a floating-point value is written, or unchanged when it is no number at all.
+fn decimal_bound(bound: &str) -> String {
+    match bound.parse::<f64>() {
+        Ok(value) => float_value_text(value),
+        Err(_) => bound.to_string(),
+    }
+}
+
+/// The MAP member of this model a violation at `path` belongs to, or `None` when `path` is
+/// not one of a map value's.
+///
+/// The framework reports a map entry's VALUE at `<map member>.<key>`, where the key is the
+/// caller's own text and may itself carry a `.`, so the member is matched as the PREFIX of
+/// the path rather than by splitting it: a key that looks like a member name, and a nested
+/// structure member whose name collides with a key, both stay with the member they came from.
+///
+/// The remainder has to be a key and nothing deeper. Every map named here is a map of
+/// SCALARS, so the walk reports its entries at the entry itself and never below one; a map
+/// of STRUCTURES would be reported at `<map member>.<key>.member.<field>`
+/// (`vendor/smithy-schema-server/src/constraints.rs`), which is a violation about a member
+/// INSIDE an entry rather than about the entry's value, so the collection step a nested
+/// report carries excludes it.
+pub(crate) fn map_of_entry(path: &str) -> Option<&'static str> {
+    VALUE_CONSTRAINED_MAPS
+        .iter()
+        .find(|declared| {
+            path.strip_prefix(declared.path)
+                .and_then(|entry| entry.strip_prefix('.'))
+                .is_some_and(|key| !key.is_empty() && !key.contains(ENTRY_MEMBER_STEP))
+        })
+        .map(|declared| declared.path)
+}
+
+/// The step the framework's constraint walk names a collection's child by, which a report
+/// about a member INSIDE a map's entry carries and a report about the entry's own value does
+/// not (`aws_smithy_schema_server::constraints::path`).
+const ENTRY_MEMBER_STEP: &str = ".member.";
+
+/// The MAPS a clause of this refusal quotes: the map the REQUEST carried at each member one
+/// of `violations` is about, keyed by the member path that clause is stated at, in the form
+/// the shared renderer of a map writes (`{<key>=<value>, …}`, in key order).
+///
+/// Only a map a violation names is read, and each is read by the shared reader of a map a
+/// request body carries (`service_common::submitted_collections`) rather than by a second
+/// traversal of this crate's own: the map is read at the dotted member path the clause is
+/// stated at, matching each step without regard to case, because a violation path spells a
+/// member in lowerCamel while a body carries the wire name the model declares. The SCALAR
+/// reader is the one taken, because this model's weights map holds doubles rather than
+/// strings. So a refusal reads the body for at most as many members as this model declares
+/// constrained maps ([`VALUE_CONSTRAINED_MAPS`]) — a bound from the MODEL and not from the
+/// request, whatever member paths a caller's own keys shape. A map whose rendering is past
+/// the largest value one clause quotes, and one carrying a value that is no scalar at all,
+/// are not offered: the clause then states the member and the set with no value, exactly as
+/// it does for a collection whose own `@length` was broken.
+///
+/// Key order because that is the one order one request's map is stated in twice: the shared
+/// walk reads the BUILT input, where a map keeps no wire order, so the order its entries were
+/// written in is not recoverable from it — and a clause this service states about a map's
+/// KEYS already states one in key order (`crate::state::tag_key_shape`).
+pub(crate) fn submitted_maps(
+    req: &::aws_smithy_runtime_api::http::Request,
+    violations: &[Violation],
+) -> ::std::collections::HashMap<String, String> {
+    let refused: ::std::collections::BTreeSet<&str> = violations
+        .iter()
+        .filter_map(|violation| map_of_entry(&violation.path))
+        .collect();
+    if refused.is_empty() {
+        return ::std::collections::HashMap::new();
+    }
+    let Some(body) = req.body().bytes() else {
+        return ::std::collections::HashMap::new();
+    };
+    refused
+        .into_iter()
+        .filter_map(|map| Some((map.to_string(), rendered_submitted_map(body, map)?)))
+        .collect()
+}
+
+/// The map the request body `body` carries at the member path `map`, rendered as a clause
+/// quotes one, or `None` when the body carries no map of scalars there.
+fn rendered_submitted_map(body: &[u8], map: &str) -> Option<String> {
+    let floating_point = value_constrained_map(map).is_some_and(|declared| declared.floating_point);
+    let steps: Vec<&str> = map.split('.').collect();
+    let held = ::service_common::submitted_collections::submitted_scalar_map_entries_at(
+        body, &steps,
+    )?;
+    let entries: Vec<(&str, String)> = held
+        .iter()
+        .map(|(key, value)| (key.as_str(), rendered_entry(value, floating_point)))
+        .collect();
+    ::service_common::validation::rendered_map_in_key_order(&entries)
+}
+
+/// One entry's value as a clause quotes it: the text the document wrote it with, which is
+/// what the reader above hands over — except for a FLOATING-POINT value shape, whose value a
+/// clause writes as the decimal a floating-point value is written with
+/// (`service_common::validation_message::float_value_text`), so a weight sent as `2` is
+/// quoted `2.0`. A value of that shape the reader did not hand over as a number keeps the
+/// text it was written with, because nothing else is known about it.
+fn rendered_entry(value: &str, floating_point: bool) -> String {
+    match (floating_point, value.parse::<f64>()) {
+        (true, Ok(held)) => float_value_text(held),
+        _ => value.to_string(),
+    }
 }
 
 #[cfg(test)]
@@ -219,6 +451,98 @@ mod tests {
                 stated.as_deref(),
                 expected.as_deref(),
                 "case {collection:?}: expected {expected:?}, got {stated:?}"
+            );
+        }
+    }
+
+    /// RULE: a MAP member's nested set is the value shape's whole declared set, each
+    /// requirement in the framework's words — a `@range` bound of a floating-point value
+    /// shape written as the decimal a floating-point value is written with — followed by the
+    /// value's own presence requirement; and a member this model declares no constrained map
+    /// at is not stated at all.
+    ///
+    /// The rows are every map of [`VALUE_CONSTRAINED_MAPS`], so the set is pinned for the two
+    /// constraint classes a value shape of this model declares (a numeric range on a double,
+    /// a length pair with a pattern on a string) rather than for the one a report cited.
+    #[test]
+    fn a_maps_nested_set_is_every_requirement_its_values_have() {
+        let not_null = requirement(ViolationKind::MissingRequiredMember);
+        let rows: &[(&str, Option<String>)] = &[
+            (
+                // `Weight`, a DOUBLE under `@range(0.0, 1.0)`: both bounds are written as
+                // the decimals a floating-point value is written with.
+                "routingConfig.additionalVersionWeights",
+                Some(format!(
+                    "Map value must satisfy constraint: [Member must have value less than or \
+                     equal to 1.0, Member must have value greater than or equal to 0.0, \
+                     {not_null}]"
+                )),
+            ),
+            (
+                // `TagValue`, a string under a `@length` and a `@pattern`, whose expression
+                // is quoted without the anchors a whole-value pattern wraps it in.
+                "tags",
+                Some(format!(
+                    "Map value must satisfy constraint: [Member must have length less than or \
+                     equal to 256, Member must have length greater than or equal to 0, \
+                     Member must satisfy regular expression pattern: \
+                     ([\\p{{L}}\\p{{Z}}\\p{{N}}_.:/=+\\-@]*), {not_null}]"
+                )),
+            ),
+            // The third map of this input surface declares no value constraint at all, and
+            // neither does a member that is no map.
+            ("environment.variables", None),
+            ("routingConfig", None),
+            ("functionName", None),
+            ("", None),
+        ];
+
+        for (map, expected) in rows {
+            let stated = element_set(map);
+            assert_eq!(
+                stated.as_deref(),
+                expected.as_deref(),
+                "case {map:?}: expected {expected:?}, got {stated:?}"
+            );
+        }
+    }
+
+    /// RULE: a violation is grouped onto a map member only when its path names that member's
+    /// own ENTRY — the member as a prefix, then a key, and nothing deeper — so a key carrying
+    /// a `.`, a member whose name a key collides with, and a report about a member INSIDE an
+    /// entry each stay where they were reported.
+    #[test]
+    fn only_a_violation_about_an_entrys_own_value_is_grouped_onto_its_map() {
+        // (case, the violation path, the map it belongs to)
+        let rows: &[(&str, &str, Option<&str>)] = &[
+            (
+                "an entry of a nested map",
+                "routingConfig.additionalVersionWeights.2",
+                Some("routingConfig.additionalVersionWeights"),
+            ),
+            (
+                "an entry whose key carries a dot",
+                "tags.cost.centre",
+                Some("tags"),
+            ),
+            ("an entry at the top level", "tags.owner", Some("tags")),
+            // The map member itself, a member whose name opens one of theirs, and a report
+            // about a member inside an entry.
+            ("the map member itself", "tags", None),
+            ("an entry with no key at all", "tags.", None),
+            ("another member entirely", "tagKeys.1.member", None),
+            (
+                "a member inside an entry",
+                "tags.owner.member.name",
+                None,
+            ),
+        ];
+
+        for (case, path, expected) in rows {
+            let grouped = map_of_entry(path);
+            assert_eq!(
+                grouped, *expected,
+                "case {case:?}: expected {expected:?}, got {grouped:?}"
             );
         }
     }

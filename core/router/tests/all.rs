@@ -3240,3 +3240,12 @@ mod apigateway_wafv2_waf_log_destination_gate;
 // compiles no suite of this target. The rule they state is in the header at the top of this
 // file, where it belongs.)
 // (Another fragment of that same header, an ordinary comment here for the same reason.)
+// (A note some concurrently landing change appended here as an INNER doc comment, which is
+// `E0753` after the first item of this file: declare each suite exactly ONCE — this is one
+// crate root, so a second `mod` for the same name is `E0428` and fails every suite in this
+// target. `all/all_rs_declares_each_suite_once.rs` checks that for this file and for every
+// service crate's `tests/all.rs`, so check there rather than leaving a note here.)
+// (One more line of that same note, appended here as an INNER doc comment while branches
+// were landing at once: it belongs at the head of this file or nowhere, so it is a line
+// comment — `all/all_rs_declares_each_suite_once.rs` is what checks this file and every
+// service crate's `tests/all.rs`.)

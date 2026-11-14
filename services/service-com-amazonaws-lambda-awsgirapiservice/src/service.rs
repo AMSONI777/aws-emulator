@@ -305,10 +305,15 @@ pub struct EmulatedService<Eng: Send + Sync + 'static> {
     >,
     /// Serves the FUNCTION URL endpoints `CreateFunctionUrlConfig` hands out, from the same
     /// shared engine, for the same reason as [`Downloads`]: a request to one names no
-    /// modelled operation at all. Mounted once per `AuthType`, because which callers a URL
-    /// admits is carried by the auth schemes the serving operation declares (see
-    /// [`function_url`]).
+    /// modelled operation at all. Mounted once per KIND OF CALLER, because which callers a
+    /// request is admitted as is carried by the auth schemes the serving operation declares
+    /// (see [`function_url`]): this one serves a `NONE` URL to a request presenting no
+    /// credential, which the emulator therefore authenticates nobody of.
     function_urls_anonymous: function_url::FunctionUrlPlane<Eng>,
+    /// See [`Self::function_urls_anonymous`]: the mounting that serves a `NONE` URL to a
+    /// request that PRESENTS a credential, which the emulator verifies because this mounting
+    /// declares the SigV4 scheme.
+    function_urls_signed_public: function_url::FunctionUrlPlane<Eng>,
     /// See [`Self::function_urls_anonymous`]: the mounting that serves the URLs whose
     /// `AuthType` is `AWS_IAM`.
     function_urls_aws_iam: function_url::FunctionUrlPlane<Eng>,
@@ -437,6 +442,9 @@ impl<Eng: Send + Sync + 'static> EmulatedService<Eng> {
                 engine: Arc::clone(&engine),
             },
             function_urls_anonymous: function_url::FunctionUrlPlane::anonymous(Arc::clone(&engine)),
+            function_urls_signed_public: function_url::FunctionUrlPlane::signed_public(
+                Arc::clone(&engine),
+            ),
             function_urls_aws_iam: function_url::FunctionUrlPlane::aws_iam(Arc::clone(&engine)),
             stated,
         }
@@ -510,18 +518,22 @@ impl<O> StatedPerOperation<O> {
 ///
 /// The same ONE read also yields the request's own LISTS, which a clause stated at a list
 /// member quotes and no violation carries (see [`validation`]): both halves come out of the
-/// walk that already built the input, so the request is not read a third time for them.
+/// walk that already built the input, so the request is not read a third time for them. The
+/// MAP a clause stated at a map member quotes is read beside them
+/// ([`validation::submitted_maps`]), out of the request itself, because the shared walk reads
+/// a map back only for a map of strings and this model declares one of doubles.
 fn stated_refusal<O: Operation>(
     protocol: &dyn ServerHttpProtocol,
     req: &RtRequest,
 ) -> Option<(Vec<Violation>, Refused)> {
-    let (violations, lists) =
+    let (violations, mut collections) =
         service_common::validation::refusing_violations_with_lists_quoting_up_to::<O>(
             protocol,
             req,
             LARGEST_QUOTED_VALUE_BYTES,
         );
-    let stated = stated_violations(&violations, &lists)?;
+    collections.extend(validation::submitted_maps(req, &violations));
+    let stated = stated_violations(&violations, &collections)?;
     Some((violations, stated))
 }
 
@@ -540,13 +552,17 @@ fn stated_refusal<O: Operation>(
 ///
 /// A constraint one of a COLLECTION's elements broke is stated at the COLLECTION member,
 /// over the whole set of requirements an element of it has ([`validation`]) and quoting what
-/// that member held — which is `lists`, keyed by the member path the clause is stated at.
-/// The refusal path that is handed the violations ALONE passes no lists, so such a clause
+/// that member held — which is `collections`, keyed by the member path the clause is stated
+/// at. The refusal path that is handed the violations ALONE passes none, so such a clause
 /// states the member and the set with no value, exactly as it does for a collection whose
 /// own `@length` was broken.
+///
+/// A constraint one of a MAP's VALUES broke is the same clause about the other collection, so
+/// it is stated through the same grouping ([`grouped_onto_its_collection`]) rather than beside
+/// it: one member, one value, one nested set, deduped however many entries broke it.
 fn stated_violations(
     violations: &[Violation],
-    lists: &std::collections::HashMap<String, String>,
+    collections: &std::collections::HashMap<String, String>,
 ) -> Option<Refused> {
     if violations.is_empty() {
         return None;
@@ -556,22 +572,51 @@ fn stated_violations(
     }
     let restated: Vec<Violation> = violations
         .iter()
-        .map(|violation| match &violation.kind {
+        .enumerate()
+        .map(|(position, violation)| match &violation.kind {
             ViolationKind::EnumValue(allowed) => Violation {
-                path: violation.path.clone(),
+                path: grouped_onto_its_collection(&violation.path, position),
                 kind: ViolationKind::EnumValue(reported_enum_order(allowed)),
                 value: violation.value.clone(),
                 sensitive: violation.sensitive,
             },
-            _ => violation.clone(),
+            _ => Violation {
+                path: grouped_onto_its_collection(&violation.path, position),
+                ..violation.clone()
+            },
         })
         .collect();
     service_common::validation_message::aws_validation_refusal_over_elements_stating(
         &Refusal::Invalid(restated),
         service_common::validation::unanchored,
-        |collection| lists.get(collection).cloned(),
+        |collection| collections.get(collection).cloned(),
         validation::element_set,
     )
+}
+
+/// `path` as the grouping above reads a violation inside a COLLECTION: unchanged for every
+/// violation but one of a MAP's values, which is re-stated as the collection step that
+/// grouping names a collection's child by.
+///
+/// A map entry's value is reported at `<map member>.<key>` and a list element's at
+/// `<collection>.<position>.member`, and AWS states the two in the same clause — the
+/// collection member, the collection as the value, the element shape's whole set — so the one
+/// grouping states both, and the path a map's violation arrives under is the only difference
+/// between them. `position` is this violation's own place among the refusal's violations,
+/// which keeps two values of one map on two paths: the clause each produces is identical, and
+/// the grouping states an identical clause once.
+fn grouped_onto_its_collection(path: &str, position: usize) -> String {
+    match validation::map_of_entry(path) {
+        // The step a collection's child is named by is the framework's own spelling
+        // (`aws_smithy_schema_server::constraints::path::element`), over a position that is
+        // this violation's place among the refusal's own violations rather than the entry's
+        // place in the map, which the walk does not report.
+        Some(map) => format!(
+            "{map}.{}",
+            ::aws_smithy_schema_server::constraints::path::element(position + 1)
+        ),
+        None => path.to_string(),
+    }
 }
 
 impl<O> ErasedOperation for StatedPerOperation<O>
@@ -847,23 +892,30 @@ impl<Eng: Send + Sync + 'static> Service for EmulatedService<Eng> {
         }
         // And a request to a FUNCTION URL this service holds, which names no modelled
         // operation either: the url id is read off the request's address and the serving
-        // mounting is the one the stored `AuthType` names, so a URL restricted to
-        // authenticated callers is served only to a request the emulator verified a
-        // signature for (see [`function_url`]).
+        // mounting is the one the stored `AuthType` and the request's own credential name, so
+        // a URL restricted to authenticated callers is served only to a request the emulator
+        // verified a signature for — and so is a request that PRESENTS a credential to a
+        // public URL, because the caller offered an identity and the emulator holds it to it
+        // (see [`function_url`]).
         //
         // Every such request is NAMED, including a CORS preflight the addressed URL's own
         // configuration answers: naming it is what keeps the front door's own checks in
         // front of this plane — the refusal of a request whose browser-set headers say a
-        // browser sent it from another site, and the signature verification of an `AWS_IAM`
-        // URL — so nothing this service serves steps around them.
+        // browser sent it from another site, and the signature verification of every mounting
+        // that declares a scheme — so nothing this service serves steps around them.
         if let Some(target) = self.function_urls_anonymous.target(req) {
-            return Some(
-                if self.function_urls_aws_iam.serves_auth_type(&target.auth_type) {
-                    &self.function_urls_aws_iam as &dyn ErasedOperation
-                } else {
-                    &self.function_urls_anonymous as &dyn ErasedOperation
-                },
+            let credential = crate::state::invoke_authorization::presented_credential(
+                req.headers().get(http::header::AUTHORIZATION.as_str()),
             );
+            for mounting in [
+                &self.function_urls_aws_iam,
+                &self.function_urls_signed_public,
+                &self.function_urls_anonymous,
+            ] {
+                if mounting.serves(&target.auth_type, credential.as_deref()) {
+                    return Some(mounting as &dyn ErasedOperation);
+                }
+            }
         }
         // And `InvokeWithResponseStream`: its output binds a `@streaming` union, which
         // the generated routing-table entry declines (that entry is still what the router

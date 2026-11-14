@@ -126,10 +126,10 @@ pub(super) fn preflight_of(req: &RtRequest) -> Option<Preflight<'_>> {
 /// and nothing of the function.
 pub(super) fn answered_preflight(cors: &Cors, asked: &Preflight<'_>) -> RtResponse {
     let Some(origin) = admitted(cors.allow_origins.as_deref(), asked.origin) else {
-        return super::forbidden();
+        return super::refused_preflight();
     };
     if admitted(cors.allow_methods.as_deref(), asked.method).is_none() {
-        return super::forbidden();
+        return super::refused_preflight();
     }
     let mut permitted: Vec<(&'static str, String)> = vec![(ALLOW_ORIGIN_HEADER, origin)];
     if let Some(methods) = joined(cors.allow_methods.as_deref()) {

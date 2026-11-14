@@ -108,7 +108,7 @@ impl<Eng: Send + Sync + 'static> ErasedServiceDefinition for FunctionUrlRefusals
             && !sent_cross_site_by_a_browser(req)
             && self.addresses_function_url(req)
         {
-            return super::function_url::forbidden();
+            return super::function_url::forbidden(None);
         }
         self.inner.refusal_response(error, chosen, req)
     }

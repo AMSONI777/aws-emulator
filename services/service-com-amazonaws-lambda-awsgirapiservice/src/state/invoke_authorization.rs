@@ -80,6 +80,19 @@
 //! An expired session credential speaks for nobody: it carries no documents and no principal
 //! spelling, so every invocation it asks for is refused.
 //!
+//! ## A FUNCTION URL's own authorization
+//!
+//! A request that arrives at the endpoint `CreateFunctionUrlConfig` published is an invocation
+//! of the function too, so it is decided HERE, on the same documents, under the endpoint's own
+//! action ([`INVOKE_FUNCTION_URL_ACTION`]) and publishing the two condition keys such a
+//! request carries a value for — the `AuthType` of the URL it arrived at, and that it came
+//! through a URL at all. The one thing that differs is who asks: an `AuthType=NONE` endpoint
+//! is reached with no credential presented, and a request presenting none speaks for nobody —
+//! no identity-based policy is in force on it and the only `Principal` element that can name
+//! it is the wildcard — which is what makes such an endpoint public exactly while the
+//! function's own policy grants the invocation to everyone
+//! ([`admits_function_url_request`]).
+//!
 //! ## What one decision costs, and what it reads
 //!
 //! The work is bounded by what the two stores hold for ONE principal and ONE function, and
@@ -113,6 +126,55 @@ pub const INVOKE_FUNCTION_ACTION: &str = "lambda:InvokeFunction";
 /// Authorization Reference publishes `lambda:InvokeAsync` as its own (deprecated) action,
 /// distinct from [`INVOKE_FUNCTION_ACTION`], so a grant of one is not a grant of the other.
 pub const INVOKE_ASYNC_ACTION: &str = "lambda:InvokeAsync";
+
+/// The action a request that arrives through a FUNCTION URL is performed under: the IAM
+/// Service Authorization Reference publishes `lambda:InvokeFunctionUrl` as its own action,
+/// distinct from [`INVOKE_FUNCTION_ACTION`] — "to grant access to your function URL, you
+/// grant the `lambda:InvokeFunctionUrl` permission" — so a grant of the API action is not a
+/// grant of the endpoint, and the other way round.
+pub const INVOKE_FUNCTION_URL_ACTION: &str = "lambda:InvokeFunctionUrl";
+
+/// The condition key a grant scoped to one kind of function-URL endpoint is written with,
+/// which `AddPermission`'s `FunctionUrlAuthType` becomes
+/// ([`crate::state::PolicyStatement`]): a request through a URL publishes the `AuthType` of
+/// the URL it arrived at, so a grant scoped to the other kind does not cover it.
+const FUNCTION_URL_AUTH_TYPE_KEY: &str = "lambda:FunctionUrlAuthType";
+
+/// The condition key a grant restricted to invocations that come through a function URL is
+/// written with, which `AddPermission`'s `InvokedViaFunctionUrl` becomes: a request this gate
+/// is asked about DID come through one.
+const INVOKED_VIA_FUNCTION_URL_KEY: &str = "lambda:InvokedViaFunctionUrl";
+
+/// What this emulator's one reader of a request's access key id
+/// (`emulator_server::extract_akid`) answers for a request presenting NO SigV4 credential at
+/// all.
+const NO_CREDENTIAL_PRESENTED: &str = "default";
+
+/// The access key id the request carrying the `Authorization` header `authorization`
+/// presented, or `None` for a request presenting none.
+///
+/// Read through this emulator's ONE reader of a request's credential
+/// (`emulator_server::extract_akid`, which this hands that one header to), so the question
+/// "does this request present a credential" — which decides WHICH mounting of the
+/// function-URL plane serves it, and therefore whether the emulator AUTHENTICATES it
+/// (`crate::service::function_url::FunctionUrlPlane::serves`) — and the question "which
+/// principal does it speak for" ([`caller`]) cannot be answered off two different readings.
+/// That reader has no `Option` of its own: it answers [`NO_CREDENTIAL_PRESENTED`] for a
+/// request carrying no SigV4 credential, which is restored to the absence it stands for here.
+#[must_use]
+pub fn presented_credential(authorization: Option<&str>) -> Option<String> {
+    let mut carried = ::http::HeaderMap::new();
+    carried.insert(
+        ::http::header::AUTHORIZATION,
+        ::http::HeaderValue::from_str(authorization?).ok()?,
+    );
+    let presented = ::emulator_server::extract_akid(&carried);
+    (presented != NO_CREDENTIAL_PRESENTED).then_some(presented)
+}
+
+/// What a refusal names as the principal of a request nothing authenticated: it speaks for
+/// nobody, which is the principal an anonymous caller of a public endpoint is.
+const ANONYMOUS_PRINCIPAL: &str = "anonymous";
 
 /// The resource a request that names no single function is judged against, as IAM writes it
 /// for such a request.
@@ -214,30 +276,144 @@ pub fn authorize_invocation<Eng: Send + Sync + 'static>(
     qualifier: Option<&str>,
 ) -> Result<(), AccessDeniedException> {
     let resource = addressed_resource(region, function_name, qualifier);
+    let function_policy = addressed_resource_policy(engine, function_name, qualifier);
+    permits(
+        engine,
+        ctx,
+        action,
+        &resource,
+        function_policy.as_deref(),
+        &[],
+        &[],
+    )
+    .map_err(AccessDeniedException::new)
+}
+
+/// Whether the request a FUNCTION URL was addressed by may invoke it, the URL being attached
+/// to `qualifier` of `function_name` with the ARN `resource` and configured with the
+/// `AuthType` `auth_type` — `Ok(())` for a request IAM admits, and the REASON it withheld the
+/// permission otherwise.
+///
+/// `resource` is the ARN of the function AT that qualifier, read off the record that holds the
+/// URL ([`crate::state::FunctionUrlTarget::resource_arn`]) rather than rebuilt from the
+/// address the request arrived at: a client reaching the emulator's own endpoint names no
+/// Region, while the function it reaches has one, and the resource a grant names is the
+/// function's own ARN.
+///
+/// A function URL is an invocation of the function, decided at the SAME IAM layer as an
+/// `Invoke` and on the same documents, under the endpoint's own action
+/// ([`INVOKE_FUNCTION_URL_ACTION`]) and with the two condition keys such a request publishes
+/// a value for. What differs is WHO asks, which the CALLER states (`anonymous`) because it is
+/// the same fact the emulator decided the request's AUTHENTICATION by — the auth schemes the
+/// mounting serving it declares (`crate::service::function_url`) — and never a credential this
+/// gate reads off an unverified request itself:
+///
+/// * an ANONYMOUS request speaks for nobody: nothing authenticated it, so no identity-based
+///   policy is in force and the only principal element that can name it is the wildcard — a
+///   function's policy whose grants all name a principal, and a function carrying no policy at
+///   all, admit it nowhere. "Bypass IAM authentication to create a public endpoint"
+///   (`FunctionUrlConfig$AuthType`) is what makes that the whole decision for such a request:
+///   the endpoint is reached unauthenticated, and the resource-based policy is what says
+///   whether the public may invoke it.
+/// * every other request presented a credential the emulator VERIFIED, so it speaks for the
+///   principal that credential speaks for and is decided exactly as an `Invoke` of the same
+///   function is — the union of that principal's identity-based policies and the function's
+///   own resource-based policy.
+///
+/// A pure READ of both stores, so asking changes nothing a later caller sees. Call it with no
+/// guard of this service's store held: the policy is read under that store's own lock.
+pub fn admits_function_url_request<Eng: Send + Sync + 'static>(
+    engine: &Eng,
+    ctx: &::smithy_server_runtime::OperationContext<'_>,
+    resource: &str,
+    function_name: &str,
+    qualifier: &str,
+    auth_type: &str,
+    anonymous: bool,
+) -> Result<(), String> {
+    let function_policy = addressed_resource_policy(engine, function_name, Some(qualifier));
+    let context = [
+        (
+            FUNCTION_URL_AUTH_TYPE_KEY.to_string(),
+            auth_type.to_string(),
+        ),
+        (INVOKED_VIA_FUNCTION_URL_KEY.to_string(), true.to_string()),
+    ];
+    let published = [FUNCTION_URL_AUTH_TYPE_KEY, INVOKED_VIA_FUNCTION_URL_KEY];
+    if !anonymous {
+        return permits(
+            engine,
+            ctx,
+            INVOKE_FUNCTION_URL_ACTION,
+            resource,
+            function_policy.as_deref(),
+            &context,
+            &published,
+        );
+    }
+    // Nobody: no principal to read policies for, so the decision rests on the function's own
+    // policy naming everyone.
+    let anonymous = iam::Request::new(INVOKE_FUNCTION_URL_ACTION, resource, &[])
+        .with_context(&context)
+        .with_published_keys(&published);
+    if function_policy.as_deref().is_some_and(|document| {
+        iam::resource_decision(document, &anonymous) == Decision::Allowed
+    }) {
+        return Ok(());
+    }
+    Err(not_authorized(
+        ANONYMOUS_PRINCIPAL,
+        INVOKE_FUNCTION_URL_ACTION,
+        resource,
+        &format!(
+            "because no resource-based policy allows the {INVOKE_FUNCTION_URL_ACTION} action"
+        ),
+    ))
+}
+
+/// The decision itself, over the documents in force: `Ok(())` for a request IAM permits, and
+/// the REASON it withheld the permission otherwise, which the caller words its own refusal
+/// with.
+///
+/// The ONE evaluation both gates above go through, so the API action and the function-URL
+/// action are decided on the same documents in the same order: a `Deny` in either kind of
+/// document refuses, a grant in either suffices, and a permissions boundary caps what an
+/// identity-based grant gives. `context`/`published` are the condition keys the asking
+/// request publishes a value for, empty for an operation that publishes none.
+fn permits<Eng: Send + Sync + 'static>(
+    engine: &Eng,
+    ctx: &::smithy_server_runtime::OperationContext<'_>,
+    action: &str,
+    resource: &str,
+    function_policy: Option<&str>,
+    context: &[(String, String)],
+    published: &[&str],
+) -> Result<(), String> {
     let caller = caller(engine, ctx);
-    let refusal = |reason: &str| {
-        AccessDeniedException::new(not_authorized(&caller.arn, action, &resource, reason))
-    };
+    let refusal =
+        |reason: &str| Err(not_authorized(&caller.arn, action, resource, reason));
     // The principal spellings travel with the request because that is what a statement's
     // `Principal` element is matched against; an identity-based document states no such
     // element, so for those the decision rests on the action and the resource. The caller's
     // OWN spellings are what a GRANT is decided under, because a statement naming the account
     // delegates rather than grants.
-    let granting = iam::Request::new(action, &resource, &caller.principals);
+    let granting = iam::Request::new(action, resource, &caller.principals)
+        .with_context(context)
+        .with_published_keys(published);
     // Every spelling, the account's included: a statement that DENIES the account denies each
     // of its principals.
     let mut named = caller.principals.clone();
     named.extend(iam::account_principals(&caller.arn));
-    let denying = iam::Request::new(action, &resource, &named);
+    let denying = iam::Request::new(action, resource, &named)
+        .with_context(context)
+        .with_published_keys(published);
 
-    let function_policy = addressed_resource_policy(engine, function_name, qualifier);
     // An explicit `Deny` in the FUNCTION's own policy refuses whatever any grant says —
     // including the account's own credential, which the rest of this gate does not bound.
     if function_policy
-        .as_deref()
         .is_some_and(|document| iam::resource_decision(document, &denying) == Decision::Denied)
     {
-        return Err(refusal("with an explicit deny in a resource-based policy"));
+        return refusal("with an explicit deny in a resource-based policy");
     }
     let identity_said = iam::identity_decision(&caller.documents, &granting);
     // Taken before any grant is read, so an explicit `Deny` in a document that CAN be read
@@ -245,22 +421,21 @@ pub fn authorize_invocation<Eng: Send + Sync + 'static>(
     // emulator cannot read, which only lifts the DEFAULT deny of a request no readable
     // statement allows (see the module docs).
     if identity_said == Decision::Denied {
-        return Err(refusal("with an explicit deny in an identity-based policy"));
+        return refusal("with an explicit deny in an identity-based policy");
     }
     // A grant in the function's own policy names this principal directly, and "a permissions
     // boundary does not limit the permissions granted to the entity by a resource-based policy
     // that names it as a principal" (IAM, permissions boundaries): such a grant stands on its
     // own, so a principal holding no identity-based policy at all is served.
     if function_policy
-        .as_deref()
         .is_some_and(|document| iam::resource_decision(document, &granting) == Decision::Allowed)
     {
         return Ok(());
     }
     if !(iam::is_allowed(identity_said, Decision::NotStated) || caller.identity_is_unbounded()) {
-        return Err(refusal(&format!(
+        return refusal(&format!(
             "because no identity-based policy allows the {action} action"
-        )));
+        ));
     }
     // "A permissions boundary sets the maximum permissions that an identity-based policy can
     // grant" (IAM, permissions boundaries): a grant the boundary does not also allow is not a
@@ -276,7 +451,7 @@ pub fn authorize_invocation<Eng: Send + Sync + 'static>(
                 format!("because no permissions boundary allows the {action} action")
             }
         };
-        return Err(refusal(&reason));
+        return refusal(&reason);
     }
     Ok(())
 }
