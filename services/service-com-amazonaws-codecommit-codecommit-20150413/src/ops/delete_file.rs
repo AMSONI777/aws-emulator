@@ -300,6 +300,13 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
                 )
             })?;
 
+        // A repository's contents are encrypted under its KMS key, so nothing is
+        // written to it while that key is disabled
+        // (`crate::state::disabled_encryption_key`).
+        if let Some(disabled) = crate::state::disabled_encryption_key(&*self.engine, repository) {
+            return Err(DeleteFileErrorModeled::EncryptionKeyDisabledException(disabled).into());
+        }
+
         // The branch this deletion commits to. A name the repository holds only in
         // its TAG namespace (`refs/tags/<name>`, which a git push writes) is a tag
         // name rather than a branch name, which the model has its own error for;

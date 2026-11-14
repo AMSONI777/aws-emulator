@@ -4,12 +4,15 @@
 //! Implemented: persists a pull request between two branches of one stored
 //! repository in `crate::state` and answers with the stored pull request.
 //!
-//! The two sides have to be a comparison: a request whose references name ONE
-//! branch, and one whose two branches hold the SAME tip, are both refused with
-//! the modelled `SourceAndDestinationAreSameException` — the two conditions its
-//! sentence states — and a reference the repository does not hold with
-//! `ReferenceDoesNotExistException`, naming the specifier that resolved to
-//! nothing.
+//! The two sides have to be two different branches: a request whose references
+//! name ONE branch is refused with the modelled
+//! `SourceAndDestinationAreSameException` — "The source branch and destination
+//! branch for the pull request are the same. You must specify different branches
+//! for the source and destination" — and a reference the repository does not hold
+//! with `ReferenceDoesNotExistException`, naming the specifier that resolved to
+//! nothing. Two DIFFERENT branches are a pull request whatever their tips hold,
+//! including the same commit: a pull request is opened on the references, and what
+//! they differ by is read from it afterwards.
 //!
 //! ## Shape of an operation
 //!
@@ -238,9 +241,9 @@ fn checked_reference(raw: &str) -> Result<&str, CreatePullRequestError> {
 /// `SourceAndDestinationAreSameException` as this operation models it, worded in
 /// the one place this crate words that code.
 ///
-/// Raised for BOTH conditions its sentence states: the two references naming one
-/// branch, and two differently named branches whose tips are the same commit —
-/// neither is a comparison a pull request can be opened over.
+/// Raised for the two references naming ONE branch, whichever spellings they use:
+/// a pull request is opened between two DIFFERENT branches, and two branches that
+/// happen to hold the same commit are still two branches.
 fn source_and_destination_are_same() -> CreatePullRequestError {
     CreatePullRequestErrorModeled::SourceAndDestinationAreSameException(
         SourceAndDestinationAreSameException {
@@ -518,6 +521,16 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
                     )
                 })?;
 
+            // A repository's contents are encrypted under its KMS key, so none of
+            // its references or history is read while that key is disabled
+            // (`crate::state::disabled_encryption_key`).
+            if let Some(disabled) = crate::state::disabled_encryption_key(&*self.engine, repository)
+            {
+                return Err(
+                    CreatePullRequestErrorModeled::EncryptionKeyDisabledException(disabled).into(),
+                );
+            }
+
             // A reference that resolves to no stored branch, named in the
             // refusal where the request named it: `None` is the destination a
             // request left to a repository that has no default branch, which
@@ -550,9 +563,13 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
                     .clone()
                     .ok_or_else(|| reference_does_not_exist(None))?,
             };
-            // The two sides of the comparison must differ. The refusal is worded
-            // in the one place this crate words this code, covering both the
-            // same-name and the identical-tip condition.
+            // The two sides must be two DIFFERENT branches, which is what this
+            // code is raised for: "The source branch and destination branch for the
+            // pull request are the same. You must specify different branches for the
+            // source and destination"
+            // (`smithy_query(query="shape",shape="SourceAndDestinationAreSameException")`).
+            // The comparison is between the branches the two references resolve to,
+            // so one branch named by two spellings is one branch here.
             if source_branch == destination_branch {
                 return Err(source_and_destination_are_same());
             }
@@ -571,13 +588,10 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
                 .ok_or_else(|| reference_does_not_exist(destination_specifier))?
                 .commit_id
                 .clone();
-            // Two differently named branches whose tips are the SAME commit are
-            // the same comparison as one branch against itself: there is nothing
-            // to merge from one into the other, which is the second condition
-            // this code is raised for and the second half of its sentence.
-            if source_commit == destination_commit {
-                return Err(source_and_destination_are_same());
-            }
+            // Two differently named branches are two sides of a pull request even
+            // where they hold the SAME commit: nothing of this call depends on them
+            // differing, and what the pull request compares is read from its stored
+            // references, which keep following their branches.
 
             let source_reference = crate::state::qualified_reference(&source_branch);
             let destination_reference = crate::state::qualified_reference(&destination_branch);

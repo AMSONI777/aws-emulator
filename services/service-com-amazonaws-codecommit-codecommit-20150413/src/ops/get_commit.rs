@@ -205,6 +205,13 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
                     },
                 )
             })?;
+
+        // A repository's contents are encrypted under its KMS key, so no commit of
+        // it is read while that key is disabled
+        // (`crate::state::disabled_encryption_key`).
+        if let Some(disabled) = crate::state::disabled_encryption_key(&*self.engine, repository) {
+            return Err(GetCommitErrorModeled::EncryptionKeyDisabledException(disabled).into());
+        }
         let commit = repository.commits.get(&input.commit_id).ok_or_else(|| {
             GetCommitErrorModeled::CommitIdDoesNotExistException(CommitIdDoesNotExistException {
                 message: Some(format!(

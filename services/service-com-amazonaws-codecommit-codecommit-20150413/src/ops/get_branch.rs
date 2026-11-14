@@ -195,6 +195,13 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
                 },
             )
         })?;
+
+        // A repository's contents are encrypted under its KMS key, so no reference
+        // of it is read while that key is disabled
+        // (`crate::state::disabled_encryption_key`).
+        if let Some(disabled) = crate::state::disabled_encryption_key(&*self.engine, repository) {
+            return Err(GetBranchErrorModeled::EncryptionKeyDisabledException(disabled).into());
+        }
         // Whether an error body carries a message is part of the response shape:
         // this operation's branch-not-found body carries NO message text, so the
         // member is absent rather than filled with the code's constant

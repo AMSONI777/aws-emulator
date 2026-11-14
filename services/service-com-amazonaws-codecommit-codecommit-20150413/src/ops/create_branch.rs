@@ -241,6 +241,13 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
                 )
             })?;
 
+        // A repository's contents are encrypted under its KMS key, so no reference
+        // of it is written while that key is disabled
+        // (`crate::state::disabled_encryption_key`).
+        if let Some(disabled) = crate::state::disabled_encryption_key(&*self.engine, repository) {
+            return Err(CreateBranchErrorModeled::EncryptionKeyDisabledException(disabled).into());
+        }
+
         // A branch is a reference TO a commit, so the commit has to be one this
         // repository holds before any reference can point at it. `commitId` is a raw
         // object name rather than a specifier to resolve, so the refusal is the git

@@ -512,6 +512,16 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
                 )
             })?;
 
+        // A repository's contents are encrypted under its KMS key, so no merge of
+        // its history runs while that key is disabled
+        // (`crate::state::disabled_encryption_key`).
+        if let Some(disabled) = crate::state::disabled_encryption_key(&*self.engine, repository) {
+            return Err(
+                MergeBranchesByThreeWayErrorModeled::EncryptionKeyDisabledException(disabled)
+                    .into(),
+            );
+        }
+
         // Each specifier is "the branch, tag, HEAD, or other fully qualified
         // reference used to identify a commit", resolved the one way this crate
         // resolves a commit specifier.

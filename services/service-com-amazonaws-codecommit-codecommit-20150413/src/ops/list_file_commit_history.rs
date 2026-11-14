@@ -255,6 +255,15 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
             )
         })?;
 
+        // A repository's contents are encrypted under its KMS key, so none of its
+        // history is read while that key is disabled
+        // (`crate::state::disabled_encryption_key`).
+        if let Some(disabled) = crate::state::disabled_encryption_key(&*self.engine, repository) {
+            return Err(
+                ListFileCommitHistoryErrorModeled::EncryptionKeyDisabledException(disabled).into(),
+            );
+        }
+
         // `commitSpecifier` names a commit or a branch; absent, it is `HEAD`,
         // which resolves to the repository's default branch. A specifier that
         // names neither — including `HEAD` in a repository with no default branch

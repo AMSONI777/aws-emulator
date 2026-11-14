@@ -578,6 +578,13 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
                 )
             })?;
 
+        // A repository's contents are encrypted under its KMS key, so nothing is
+        // written to it while that key is disabled
+        // (`crate::state::disabled_encryption_key`).
+        if let Some(disabled) = crate::state::disabled_encryption_key(&*self.engine, repository) {
+            return Err(CreateCommitErrorModeled::EncryptionKeyDisabledException(disabled).into());
+        }
+
         // Resolve the parent commit: the tip of the named branch, which the caller
         // must name, or none for the first commit of an empty repository.
         let parent = resolve_parent(

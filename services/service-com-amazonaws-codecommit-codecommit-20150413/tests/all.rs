@@ -13,6 +13,8 @@
 // points it into `tests/all/`.
 #[path = "all/approval_rule_content_required.rs"]
 mod approval_rule_content_required;
+#[path = "all/approval_rule_name_conflict_message.rs"]
+mod approval_rule_name_conflict_message;
 #[path = "all/approval_rule_template_content_canonicalization.rs"]
 mod approval_rule_template_content_canonicalization;
 #[path = "all/approval_rule_template_content_update.rs"]
@@ -197,6 +199,8 @@ mod repositories_for_approval_rule_template;
 mod repository_description;
 #[path = "all/repository_encryption_key.rs"]
 mod repository_encryption_key;
+#[path = "all/repository_encryption_key_enforcement.rs"]
+mod repository_encryption_key_enforcement;
 #[path = "all/repository_encryption_key_projection.rs"]
 mod repository_encryption_key_projection;
 #[path = "all/repository_encryption_key_resolution.rs"]

@@ -195,6 +195,13 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
             )
         })?;
 
+        // A repository's contents are encrypted under its KMS key, so none of its
+        // references is read while that key is disabled
+        // (`crate::state::disabled_encryption_key`).
+        if let Some(disabled) = crate::state::disabled_encryption_key(&*self.engine, repository) {
+            return Err(ListBranchesErrorModeled::EncryptionKeyDisabledException(disabled).into());
+        }
+
         // The repository's branches are keyed by name in a `BTreeMap`, so this walk is
         // already in name order: paging over it is stable, and a page boundary falls at
         // the same place for the same stored set.

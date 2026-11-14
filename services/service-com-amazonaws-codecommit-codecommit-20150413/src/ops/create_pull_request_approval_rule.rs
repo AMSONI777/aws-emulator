@@ -301,9 +301,9 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
             return Err(
                 CreatePullRequestApprovalRuleErrorModeled::ApprovalRuleNameAlreadyExistsException(
                     ApprovalRuleNameAlreadyExistsException {
-                        message: Some(crate::state::approval_rule_name_already_exists_message(
-                            &input.approval_rule_name,
-                        )),
+                        message: Some(
+                            crate::state::APPROVAL_RULE_NAME_ALREADY_EXISTS_MESSAGE.to_string(),
+                        ),
                     },
                 )
                 .into(),

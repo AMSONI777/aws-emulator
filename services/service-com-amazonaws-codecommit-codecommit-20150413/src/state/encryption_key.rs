@@ -61,25 +61,34 @@ pub(super) fn is_kms_alias(candidate: &str) -> bool {
     })
 }
 
-/// Is this the full ARN of a KMS key or alias
-/// (`arn:<partition>:kms:<region>:<account>:key/<key id>` or `…:alias/<name>`)?
+/// The six fields of a KMS ARN — `arn:<partition>:kms:<region>:<account>:<resource>`
+/// — for a value that IS one, and `None` for anything else.
 ///
-/// Read with the same six-field `splitn` this module's
-/// [`repository_name_of_resource_arn`] uses, so one file has one way of reading an
-/// ARN; this adds only which vendor and resource the value has to name.
-pub(super) fn is_kms_arn(candidate: &str) -> bool {
+/// The one reading of a KMS ARN this module has: [`is_kms_arn`] is this answering
+/// `Some`, and [`encryption_key_region`] takes the Region out of the same fields, so
+/// the two cannot disagree about what an ARN says. Read with the same six-field
+/// `splitn` this module's [`repository_name_of_resource_arn`] uses, and adding only
+/// which vendor and resource the value has to name.
+fn kms_arn_fields(candidate: &str) -> Option<[&str; 6]> {
     let [prefix, partition, vendor, region, account, resource] =
         candidate.splitn(6, ':').collect::<Vec<_>>()[..]
     else {
-        return false;
+        return None;
     };
-    prefix == "arn"
+    let well_formed = prefix == "arn"
         && !partition.is_empty()
         && vendor == "kms"
         && !region.is_empty()
         && account.len() == ACCOUNT_ID_DIGITS
         && account.bytes().all(|byte| byte.is_ascii_digit())
-        && (is_kms_alias(resource) || resource.strip_prefix("key/").is_some_and(is_kms_key_id))
+        && (is_kms_alias(resource) || resource.strip_prefix("key/").is_some_and(is_kms_key_id));
+    well_formed.then_some([prefix, partition, vendor, region, account, resource])
+}
+
+/// Is this the full ARN of a KMS key or alias
+/// (`arn:<partition>:kms:<region>:<account>:key/<key id>` or `…:alias/<name>`)?
+pub(super) fn is_kms_arn(candidate: &str) -> bool {
+    kms_arn_fields(candidate).is_some()
 }
 
 /// Does `key_id` select a KMS key at all?
@@ -175,6 +184,73 @@ pub fn resolve_encryption_key<Eng: Send + Sync + 'static>(
         kms_store::KeyRef::Found(key) => key.arn.clone(),
         _ => canonical_encryption_key(selector, region),
     }
+}
+
+/// How this service words `EncryptionKeyDisabledException`: the fixed words around
+/// the key the repository is encrypted under, which is the refusal's one variable
+/// part — the key is read from the repository's own record, never from the request,
+/// because a call that names no key at all is refused in exactly the same terms.
+pub fn encryption_key_disabled_message(kms_key_id: &str) -> String {
+    format!("KMS key {kms_key_id} is disabled")
+}
+
+/// The Region whose KMS endpoint holds the key `kms_key_id` names.
+///
+/// A repository records its key as the ARN of the key itself
+/// ([`resolve_encryption_key`]), and an ARN says which Region holds it — read out of
+/// the one parse of a KMS ARN this module has ([`kms_arn_fields`]). A selector KMS
+/// resolved no key for is kept in the form the caller set
+/// ([`canonical_encryption_key`]), and a key id or an alias name leaves the Region
+/// unsaid, so it is looked for at the endpoint of the Region the repository lives in.
+fn encryption_key_region<'a>(kms_key_id: &'a str, repository_region: &'a str) -> &'a str {
+    match kms_arn_fields(kms_key_id) {
+        Some([_, _, _, region, _, _]) => region,
+        None => repository_region,
+    }
+}
+
+/// The refusal a call on `repository`'s CONTENTS answers while the KMS key that
+/// repository is encrypted under is disabled, or `None` while that key is usable.
+///
+/// A repository's contents are encrypted under its key, so reaching them needs that
+/// key: "the default aws/codecommit Amazon Web Services managed key" or the
+/// customer-managed one the create resolved
+/// (`smithy_query(query="doc",shape="CreateRepositoryInput",member="kmsKeyId")`).
+/// While the key is disabled it cannot be used, and the modelled
+/// `EncryptionKeyDisabledException` ("The encryption key is disabled", client, 400)
+/// is the refusal every operation that reads or writes those contents declares —
+/// which is why this is asked in ONE place, after the repository is found and before
+/// a single object of it is read or written, rather than worded per operation.
+///
+/// Whether the key is disabled is KMS's own answer, read from the KMS store on the
+/// same shared engine, so disabling a key through `kms:DisableKey` and enabling it
+/// again through `kms:EnableKey` is what moves this gate — nothing is cached here.
+/// A selector KMS holds no key for (a key in an account or a key store this emulator
+/// does not keep) disables nothing: there is no key state to read, and a call AWS
+/// serves is not refused for want of one.
+///
+/// LOCKING: this takes the KMS store's lock and no other, and no KMS operation
+/// reaches into the CodeCommit store, so a handler asking while it holds this
+/// service's own guard can never take the two in the opposite order.
+pub fn disabled_encryption_key<Eng: Send + Sync + 'static>(
+    engine: &Eng,
+    repository: &Repository,
+) -> Option<EncryptionKeyDisabledException> {
+    use ::service_com_amazonaws_kms_trentservice::state as kms_store;
+
+    let keys = kms_store::service_state(engine)?;
+    let region = encryption_key_region(&repository.kms_key_id, &repository.region);
+    let disabled = match keys.lock().resolve(region, &repository.kms_key_id) {
+        // The state a READER of the key reports, which is the state its own
+        // `kms:DescribeKey` answers with.
+        kms_store::KeyRef::Found(key) => {
+            key.reported_key_state() == kms_store::KEY_STATE_DISABLED
+        }
+        _ => false,
+    };
+    disabled.then(|| EncryptionKeyDisabledException {
+        message: Some(encryption_key_disabled_message(&repository.kms_key_id)),
+    })
 }
 
 /// The full form a selector names BY ITSELF, for a selector KMS resolves no key

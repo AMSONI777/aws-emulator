@@ -201,6 +201,15 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
                 )
             })?;
 
+        // A repository's contents are encrypted under its KMS key, so no reference
+        // of it is written while that key is disabled
+        // (`crate::state::disabled_encryption_key`).
+        if let Some(disabled) = crate::state::disabled_encryption_key(&*self.engine, repository) {
+            return Err(
+                UpdateDefaultBranchErrorModeled::EncryptionKeyDisabledException(disabled).into(),
+            );
+        }
+
         // The default branch names a branch OF THIS REPOSITORY, so only a branch the
         // repository holds can become it.
         if !repository.branches.contains_key(&input.default_branch_name) {

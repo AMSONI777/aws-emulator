@@ -253,6 +253,16 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
             )
         })?;
 
+        // A repository's contents are encrypted under its KMS key, so no merge of
+        // its history runs while that key is disabled
+        // (`crate::state::disabled_encryption_key`).
+        if let Some(disabled) = crate::state::disabled_encryption_key(&*self.engine, repository) {
+            return Err(
+                MergeBranchesByFastForwardErrorModeled::EncryptionKeyDisabledException(disabled)
+                    .into(),
+            );
+        }
+
         let commit_does_not_exist = |specifier: &str| {
             MergeBranchesByFastForwardErrorModeled::CommitDoesNotExistException(
                 CommitDoesNotExistException {

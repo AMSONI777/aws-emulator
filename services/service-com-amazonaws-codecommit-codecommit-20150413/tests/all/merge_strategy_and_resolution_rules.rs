@@ -28,11 +28,15 @@
 //!    same refusal rather than one about the entry. Under `AUTOMERGE` the entries
 //!    ARE read, which is the control each row is checked against.
 //!
-//! 3. A PULL REQUEST is between two sides that differ: references naming one branch,
-//!    and two differently named branches holding the SAME tip, are both refused with
-//!    `SourceAndDestinationAreSameException` — the two conditions its sentence
-//!    states — and a reference the repository does not hold with
-//!    `ReferenceDoesNotExistException`, whose message names the specifier that
+//! 3. A PULL REQUEST is between two DIFFERENT branches: references naming one
+//!    branch, whichever spellings they use, are refused with
+//!    `SourceAndDestinationAreSameException` — "The source branch and destination
+//!    branch for the pull request are the same. You must specify different branches
+//!    for the source and destination"
+//!    (`smithy_query(query="shape",shape="SourceAndDestinationAreSameException")`) —
+//!    while two differently named branches are two sides whatever their tips hold,
+//!    the same commit included; a reference the repository does not hold is refused
+//!    with `ReferenceDoesNotExistException`, whose message names the specifier that
 //!    resolved to nothing.
 //!
 //! Every refusal is checked to have written nothing, by reading the branch tips back
@@ -64,8 +68,8 @@ const FAST_FORWARD: &str = "FAST_FORWARD_MERGE";
 const MANUAL_MERGE_MESSAGE: &str =
     "Current branches cannot be merged, please try to merge using a Git client locally.";
 
-/// The one sentence `SourceAndDestinationAreSameException` carries, covering both
-/// conditions it is raised for.
+/// The one sentence `SourceAndDestinationAreSameException` carries, naming nothing
+/// of the request.
 const SOURCE_AND_DESTINATION_ARE_SAME_MESSAGE: &str =
     "The source branch name and the destination branch name are either the same, or the tips of \
      both branches are identical. Make sure that your source branch and destination branch have \
@@ -749,15 +753,13 @@ fn create_body(repository: &str, source: &str, destination: Option<&str>) -> Val
 }
 
 #[tokio::test]
-async fn a_pull_request_needs_two_sides_that_differ() {
+async fn a_pull_request_needs_two_different_branches() {
     // Both branches at the base commit: two references, one commit.
     let history = History::build(0, 0).await;
     let router = &history.router;
 
-    // Rows differ along HOW the two sides fail to be a comparison: the same branch
-    // named twice, the same branch spelled two ways, and two differently named
-    // branches holding the same tip (by name, by fully qualified reference, and
-    // left to the repository's default branch).
+    // Rows differ along HOW the two references name ONE branch: the same name
+    // twice, and the same branch spelled two ways.
     let same: Vec<(&str, Value)> = vec![
         (
             "the same branch on both sides",
@@ -767,6 +769,24 @@ async fn a_pull_request_needs_two_sides_that_differ() {
             "the same branch spelled two ways",
             create_body(REPOSITORY, &format!("refs/heads/{DESTINATION}"), Some(DESTINATION)),
         ),
+    ];
+    for (case, body) in same {
+        let (code, message) =
+            error_with_message(router, "CreatePullRequest", &body, CLIENT_ERROR_STATUS).await;
+        assert_eq!(
+            code, "SourceAndDestinationAreSameException",
+            "case {case:?}: expected the one branch refused, got {code:?} saying {message:?}"
+        );
+        assert_eq!(
+            message, SOURCE_AND_DESTINATION_ARE_SAME_MESSAGE,
+            "case {case:?}: expected the sentence that code carries, got {message:?}"
+        );
+    }
+
+    // Two DIFFERENT branches are two sides of a pull request even where both hold
+    // the same commit — by name, by fully qualified reference, and with the
+    // destination left to the repository's default branch.
+    let served: Vec<(&str, Value)> = vec![
         (
             "two branches whose tips are the same commit",
             create_body(REPOSITORY, SOURCE, Some(DESTINATION)),
@@ -784,17 +804,15 @@ async fn a_pull_request_needs_two_sides_that_differ() {
             create_body(REPOSITORY, SOURCE, None),
         ),
     ];
-    for (case, body) in same {
-        let (code, message) =
-            error_with_message(router, "CreatePullRequest", &body, CLIENT_ERROR_STATUS).await;
+    let mut opened = 0usize;
+    for (case, body) in served {
+        let created = ok(router, "CreatePullRequest", &body).await;
         assert_eq!(
-            code, "SourceAndDestinationAreSameException",
-            "case {case:?}: expected the two sides refused, got {code:?} saying {message:?}"
+            string_at(&created, "/pullRequest/pullRequestStatus"),
+            "OPEN",
+            "case {case:?}: two different branches must open a pull request, got {created}"
         );
-        assert_eq!(
-            message, SOURCE_AND_DESTINATION_ARE_SAME_MESSAGE,
-            "case {case:?}: expected the sentence covering both conditions, got {message:?}"
-        );
+        opened += 1;
     }
     let listed = ok(
         router,
@@ -803,13 +821,16 @@ async fn a_pull_request_needs_two_sides_that_differ() {
     )
     .await;
     assert_eq!(
-        listed.pointer("/pullRequestIds").and_then(Value::as_array),
-        Some(&Vec::new()),
-        "a refused creation must store no pull request, got {listed}"
+        listed
+            .pointer("/pullRequestIds")
+            .and_then(Value::as_array)
+            .map(Vec::len),
+        Some(opened),
+        "only the served creations must be stored, got {listed}"
     );
 
-    // One commit on the source and the same request is a comparison, so it is
-    // served: the refusals above are about the two sides, not about the request.
+    // One commit on the source and the same request is a comparison with something
+    // in it, which is served just as the identical-tip rows above are.
     let moved = History::build(0, 1).await;
     let created = ok(
         &moved.router,

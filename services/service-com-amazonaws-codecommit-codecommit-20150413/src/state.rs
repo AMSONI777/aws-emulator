@@ -42,7 +42,8 @@ use ::service_com_amazonaws_sts_awssecuritytokenservicev20110615::state as sts_s
 
 use crate::ops::types::{
     Approval, ApprovalRule, ApprovalRuleEventMetadata, ApprovalRuleOverriddenEventMetadata,
-    ApprovalRuleTemplate, ApprovalStateChangedEventMetadata, Comment, Location, MergeMetadata,
+    ApprovalRuleTemplate, ApprovalStateChangedEventMetadata, Comment,
+    EncryptionKeyDisabledException, Location, MergeMetadata,
     OriginApprovalRuleTemplate, PullRequest, PullRequestCreatedEventMetadata, PullRequestEvent,
     PullRequestMergedStateChangedEventMetadata, PullRequestSourceReferenceUpdatedEventMetadata,
     PullRequestStatusChangedEventMetadata, PullRequestTarget, ReactionValueFormats,
@@ -2901,14 +2902,17 @@ pub const MAX_APPROVAL_RULES_PER_PULL_REQUEST: usize = 30;
 pub const APPROVAL_RULE_NAME_REQUIRED_MESSAGE: &str =
     "An approval rule name is required, but was not specified.";
 
-/// `ApprovalRuleNameAlreadyExistsException`'s message, built from the name the
-/// request asked for: an approval rule name is unique within one pull request.
-pub fn approval_rule_name_already_exists_message(name: &str) -> String {
-    format!(
-        "An approval rule with the name {name} already exists for this pull request. Approval \
-         rule names must be unique within a pull request."
-    )
-}
+/// `ApprovalRuleNameAlreadyExistsException`'s message: a FIXED sentence with no
+/// variable part at all. The exception's own documentation states the rule it
+/// reports — "An approval rule with that name already exists. Approval rule names
+/// must be unique within the scope of a pull request."
+/// (`smithy_query(query="shape",shape="ApprovalRuleNameAlreadyExistsException")`) —
+/// and names neither the rule nor the pull request: the conflict is between the
+/// name the request asked for and a name the caller already knows it used, so the
+/// sentence carries no value of either.
+pub const APPROVAL_RULE_NAME_ALREADY_EXISTS_MESSAGE: &str =
+    "An approval rule already exists with that name. Approval rule names must be unique within \
+     the scope of a pull request.";
 
 /// `NumberOfRulesExceededException`'s message, stating the bound this emulator
 /// holds ([`MAX_APPROVAL_RULES_PER_PULL_REQUEST`]).
@@ -2982,14 +2986,18 @@ pub const PULL_REQUEST_APPROVAL_OVERRIDE_CANNOT_BE_CHANGED_MESSAGE: &str =
      merged or closed pull request. Modify your request, and then try again.";
 
 /// `SourceAndDestinationAreSameException`'s message: the FIXED sentence pair the
-/// service answers that code with, covering BOTH conditions it is raised for —
-/// the two references naming the same branch, and two differently named branches
-/// whose tips are the same commit — and carrying nothing from the request.
+/// service answers that code with, carrying nothing from the request. Worded here
+/// once for every operation that compares a source against a destination.
 ///
-/// It is not the error shape's documented sentence, which speaks only of the two
-/// branches being the same and so asserts something untrue of a request whose
-/// branches differ in name but not in tip. Worded here once for every operation
-/// that compares a source against a destination.
+/// The sentence states the two conditions the CODE covers across this surface —
+/// the two references naming one branch, and two branches whose tips are the same
+/// commit — which is more than the error shape's own documented sentence says
+/// ("The source branch and destination branch for the pull request are the same.
+/// You must specify different branches for the source and destination"). WHICH of
+/// them an operation is refused for is that operation's own rule rather than this
+/// constant's: `CreatePullRequest` opens a pull request between two DIFFERENT
+/// branches whatever their tips hold, so it raises this only for the same-branch
+/// condition the shape documents.
 pub const SOURCE_AND_DESTINATION_ARE_SAME_MESSAGE: &str =
     "The source branch name and the destination branch name are either the same, or the tips of \
      both branches are identical. Make sure that your source branch and destination branch have \

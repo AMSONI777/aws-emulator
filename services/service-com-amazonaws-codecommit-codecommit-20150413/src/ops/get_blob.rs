@@ -202,6 +202,13 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
                 )
             })?;
 
+        // A repository's contents are encrypted under its KMS key, so no object of
+        // it is read while that key is disabled
+        // (`crate::state::disabled_encryption_key`).
+        if let Some(disabled) = crate::state::disabled_encryption_key(&*self.engine, repository) {
+            return Err(GetBlobErrorModeled::EncryptionKeyDisabledException(disabled).into());
+        }
+
         // A blob belongs to the repository that holds it: an object name this
         // repository has no object for does not exist here, whatever another
         // repository holds under it.

@@ -207,6 +207,13 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
                 )
             })?;
 
+        // A repository's contents are encrypted under its KMS key, so no reference
+        // of it is written while that key is disabled
+        // (`crate::state::disabled_encryption_key`).
+        if let Some(disabled) = crate::state::disabled_encryption_key(&*self.engine, repository) {
+            return Err(DeleteBranchErrorModeled::EncryptionKeyDisabledException(disabled).into());
+        }
+
         // "Deletes a branch from a repository, unless that branch is the default branch
         // for the repository": the repository's default branch is refused, and the
         // refusal is decided BEFORE the reference is touched, so nothing is persisted.

@@ -459,6 +459,19 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
                     )
                 })?;
 
+            // A repository's contents are encrypted under its KMS key, so no history
+            // or content of it is read while that key is disabled
+            // (`crate::state::disabled_encryption_key`).
+            if let Some(disabled) = crate::state::disabled_encryption_key(&*self.engine, repository)
+            {
+                return Err(
+                    BatchDescribeMergeConflictsErrorModeled::EncryptionKeyDisabledException(
+                        disabled,
+                    )
+                    .into(),
+                );
+            }
+
             // The message is `crate::state::commit_does_not_exist_message`, the one
             // place this crate words this code, so every handler that cannot
             // resolve a specifier words it identically.
