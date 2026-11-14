@@ -599,9 +599,10 @@ impl Refusal {
 ///
 /// Every step from 2 on is also METERED on the stage it resolved ([`metrics`]): the connection
 /// request is one message of the stage, the `$connect` route's integration counts the message
-/// it was sent, the integration that served it reports how long it took, a `4xx` refusal is a
-/// client error, and a connection request that was not admitted is a route that did not
-/// execute.
+/// it was sent, the integration that served it reports how long it took, and a connection
+/// request that was not admitted earns the ONE error class its refusal names — a `4xx` the
+/// client was refused with is a client error, a backend that gave no usable answer is an
+/// integration error, and anything else that stopped the route is an execution error.
 ///
 /// Nothing holds the store lock while a backend is awaited: every record the decision needs
 /// is read under one lock and owned from then on.
@@ -633,7 +634,8 @@ async fn admission(
     // `ConnectCount` is published below, where the `$connect` route's integration is sent it.
     metrics.message(route);
     // The refusal that route's own AUTHORIZATION owes by itself, read with the records above
-    // and answered here so it is metered on the stage it was refused at.
+    // and answered here so it is metered on the stage it was refused at — by the status the
+    // client was refused with, as every other refusal of a connection request is.
     if let Some((status, message)) = offered.unauthorized {
         metrics.served(route, refused_connection(status));
         return Decided::refused(
@@ -651,8 +653,9 @@ async fn admission(
                 connection.authorizer_principal = decided.principal_id;
             }
             Err((status, message)) => {
-                // An authorizer that refused, or one this configuration could not run at all,
-                // is a route that did not execute.
+                // Metered by the status the client was refused with: an authorizer that
+                // DENIED the client refused the CLIENT (a `4xx`), while one this
+                // configuration could not run at all is a route that did not execute.
                 metrics.served(route, refused_connection(status));
                 return Decided::refused(
                     Some(connection),
@@ -668,7 +671,7 @@ async fn admission(
     let Some(connect) = offered.connect else {
         // No `$connect` route: there is nothing to refuse the connection, and no integration
         // was sent the connection request.
-        metrics.served(route, CallOutcome::default());
+        metrics.served(route, CallOutcome::Served);
         return Decided::admitted(admitted(connection));
     };
     // The connection request IS sent to the `$connect` route's integration from here.
@@ -679,7 +682,7 @@ async fn admission(
     match performed {
         Ok(answered) if dispatch::is_success_status(answered.status_code.as_deref()) => {
             metrics.integration_latency(route, began.elapsed());
-            metrics.served(route, CallOutcome::default());
+            metrics.served(route, CallOutcome::Served);
             Decided::admitted(admitted(connection))
         }
         Ok(answered) => {
@@ -709,10 +712,10 @@ async fn admission(
                     Refusal::from_backend(status, answered.payload)
                 }
                 None => {
-                    metrics.served(
-                        route,
-                        refused_connection(super::super::data_plane::UNPLACEABLE_STATUS),
-                    );
+                    // The reply named no decision at all, so there was nothing the gateway
+                    // could read it as: the integration answered the invocation and still
+                    // left the call unanswerable.
+                    metrics.served(route, CallOutcome::IntegrationError);
                     internal_server_error()
                 }
             };
@@ -726,15 +729,15 @@ async fn admission(
                 "refusing a WebSocket handshake: the connection request's integration \
                  produced no reply"
             );
-            // The integration itself could not answer, which is the one failure that is the
-            // INTEGRATION's rather than the client's.
-            metrics.served(
-                route,
-                CallOutcome {
-                    integration_error: true,
-                    ..refused_connection(super::super::data_plane::UNPLACEABLE_STATUS)
-                },
-            );
+            // A backend that ANSWERED the invocation — however unusable its answer — took the
+            // time this reports, and one that was never reached has no latency to report.
+            if unserved.answered() {
+                metrics.integration_latency(route, began.elapsed());
+            }
+            // Metered in the ONE class the reason names: an integration that was reached and
+            // gave no usable answer is the integration's own failure, and every other reason
+            // is a route that did not execute.
+            metrics.served(route, unserved.metered_as());
             Decided::refused(Some(connection), internal_server_error())
         }
     }
@@ -773,13 +776,15 @@ impl Decided {
 }
 
 /// What a CONNECTION REQUEST that was not admitted ended in, by the status the client was
-/// refused with: a `4xx` is a client error, and a connection request that was refused at all
-/// is a route whose execution did not reach a successful end.
+/// refused with — ONE class, never two: a `4xx` says the client's own request was refused
+/// (the `$connect` integration that answered one deliberately denied the client, and so did
+/// the authorization in front of it), and a refusal the client reads as a server error says
+/// the route that serves the connection request did not execute to a successful end.
 fn refused_connection(status: u16) -> CallOutcome {
-    CallOutcome {
-        client_error: super::super::data_plane::is_client_error_status(status),
-        execution_error: true,
-        integration_error: false,
+    if super::super::data_plane::is_client_error_status(status) {
+        CallOutcome::ClientError
+    } else {
+        CallOutcome::ExecutionError
     }
 }
 
@@ -1191,7 +1196,7 @@ async fn disconnected(
                 .as_deref()
                 .and_then(|status| status.trim().parse::<u16>().ok());
             metrics.integration_latency(route, began.elapsed());
-            metrics.served(route, CallOutcome::default());
+            metrics.served(route, CallOutcome::Served);
         }
         Err(unserved) => {
             tracing::info!(
@@ -1200,14 +1205,10 @@ async fn disconnected(
                 ?unserved,
                 "the $disconnect route's integration produced no reply"
             );
-            metrics.served(
-                route,
-                CallOutcome {
-                    execution_error: true,
-                    integration_error: true,
-                    ..CallOutcome::default()
-                },
-            );
+            if unserved.answered() {
+                metrics.integration_latency(route, began.elapsed());
+            }
+            metrics.served(route, unserved.metered_as());
         }
     }
     logged.latency = access_logs::latency_since(started);
@@ -1297,9 +1298,11 @@ const MESSAGE_TOO_BIG_REASON: &str = "Message too big";
 ///
 /// Each of the three is METERED on the serving stage: the frame itself is one message, the
 /// integration that served it reports how long it took, a message the api routes nowhere is a
-/// client error, and an integration that produced no reply is an integration error of a route
-/// that did not execute. So is the fourth outcome, which answers the client nothing: a frame
-/// whose stage no longer serves anything is a message of the stage that it could not execute.
+/// client error, and a route whose integration produced no reply earns the ONE class that
+/// reason names — the integration's own where the backend was reached and gave no usable
+/// answer, and the route's execution otherwise. So is the fourth outcome, which answers the
+/// client nothing: a frame whose stage no longer serves anything is a message of the stage
+/// that it could not execute.
 ///
 /// The store is read under one lock and released before the integration is performed — and
 /// before anything is published, so no store of this service is held while the metric store is
@@ -1363,13 +1366,7 @@ async fn served_frame(
             // The frame reached the api, so it is a message of the stage; nothing of the stage
             // could execute it, and the client is answered nothing.
             metrics.message(None);
-            metrics.served(
-                None,
-                CallOutcome {
-                    execution_error: true,
-                    ..CallOutcome::default()
-                },
-            );
+            metrics.served(None, CallOutcome::ExecutionError);
             return answer(None, "", None, None, None);
         }
         Serving::Unrouted => {
@@ -1377,13 +1374,7 @@ async fn served_frame(
             // A message the api routes nowhere belongs to no route, and the frame it is
             // answered with states the client's own error.
             metrics.message(None);
-            metrics.served(
-                None,
-                CallOutcome {
-                    client_error: true,
-                    ..CallOutcome::default()
-                },
-            );
+            metrics.served(None, CallOutcome::ClientError);
             let frame = gateway_frame(
                 super::super::data_plane::FORBIDDEN_MESSAGE,
                 connection_id,
@@ -1414,7 +1405,7 @@ async fn served_frame(
                 "a WebSocket message was served"
             );
             metrics.integration_latency(route, began.elapsed());
-            metrics.served(route, CallOutcome::default());
+            metrics.served(route, CallOutcome::Served);
             let status = answered
                 .status_code
                 .as_deref()
@@ -1429,16 +1420,15 @@ async fn served_frame(
                 ?unserved,
                 "a WebSocket message's route produced no reply"
             );
-            // The integration could not answer: that is the integration's own failure, and
-            // the route it fronts did not execute.
-            metrics.served(
-                route,
-                CallOutcome {
-                    execution_error: true,
-                    integration_error: true,
-                    ..CallOutcome::default()
-                },
-            );
+            // Metered in the ONE class the reason names: a backend that was reached and gave
+            // no usable answer is the integration's own failure, and a route the gateway
+            // could not execute — a function that ended in an unhandled error included — is
+            // the route's. A backend that ANSWERED the invocation took the time this reports,
+            // whatever its answer was.
+            if unserved.answered() {
+                metrics.integration_latency(route, began.elapsed());
+            }
+            metrics.served(route, unserved.metered_as());
             let frame = gateway_frame(INTERNAL_MESSAGE, connection_id, &request_id);
             answer(
                 Some(frame.into_bytes()),

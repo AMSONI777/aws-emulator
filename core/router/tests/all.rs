@@ -3282,3 +3282,7 @@ mod all_rs_inner_doc_comments_precede_the_first_item;
 // and `all/all_rs_inner_doc_comments_precede_the_first_item.rs` check both halves of it for
 // this file and for every service crate's `tests/all.rs`, so the fragment is gone rather
 // than re-typed.)
+// leaving a note here. (Ordinary comments: an inner doc comment is only legal before the
+// first item, so a `//!` line in this appended tail is `E0753` and compiles nothing.)
+// this file and for every service crate's `tests/all.rs`. (An ordinary comment, for the
+// reason the lines above record.)

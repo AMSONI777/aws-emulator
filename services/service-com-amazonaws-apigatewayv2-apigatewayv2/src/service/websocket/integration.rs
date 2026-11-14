@@ -25,7 +25,9 @@
 //! Every answer is the backend's: a function that raised, one that could not be invoked, one
 //! that overran the integration's own `TimeoutInMillis` and one whose answer the structured
 //! response cannot be read as are all "the integration produced no reply", with the reason
-//! logged and never told to the client.
+//! logged and never told to the client — and each says which of them it was
+//! ([`Unserved::metered_as`]), because the serving stage counts a route that did not execute
+//! and an integration that gave no usable answer in different series.
 
 use std::time::Duration;
 
@@ -210,21 +212,27 @@ async fn lambda_proxy(
     let payload = ::serde_json::to_vec(&event).map_err(|error| {
         Unserved::Unperformable(format!("the event for this call could not be stated: {error}"))
     })?;
+    // An invocation the backend never answered is the integration's own failure: it was not
+    // delivered, it was refused before anything ran, or it overran the integration's deadline.
     let ran = lambda::invoke_function(callback, &target, payload, deadline(integration))
         .await
-        .map_err(|unreached| Unserved::Unperformable(unreached.reason()))?;
+        .map_err(|unreached| Unserved::Undelivered(unreached.reason()))?;
     if ran.failed() {
         // "An unhandled error is still HTTP 200" to Lambda's own caller, so the signal is
         // what tells a run that ended in an error from one that answered: the payload is
-        // Lambda's error document, not a reply to read.
-        return Err(Unserved::Unperformable(format!(
+        // Lambda's error document, not a reply to read. The function RAN — the backend was
+        // reached and answered the invocation — so what did not reach a successful end is
+        // this route's own execution.
+        return Err(Unserved::FunctionError(format!(
             "this route's function ended in an unhandled error ({}), so the integration \
              produced no reply",
             ran.function_error.as_deref().unwrap_or_default()
         )));
     }
+    // The function answered something the gateway cannot read as the reply a proxy
+    // integration owes, which is the integration's own failure rather than the route's.
     let (status, body) = proxy_response::websocket_reply(&ran.payload)
-        .map_err(|malformed| Unserved::Unperformable(malformed.reason))?;
+        .map_err(|malformed| Unserved::UnreadableReply(malformed.reason))?;
     Ok(Answered {
         status_code: Some(status.to_string()),
         payload: (!body.is_empty()).then_some(body),

@@ -11,9 +11,9 @@
 //! the close included, and each frame written back to the client, a route's reply, the
 //! gateway's own frame and an out-of-band `PostToConnection` push alike), one
 //! `IntegrationLatency` sample per integration that answered, and `ClientError`,
-//! `ExecutionError` and `IntegrationError` once per CALL — carrying 1 for the class that call
-//! earned and an explicit 0 for the classes it did not — and publishes the same counters
-//! additionally under {ApiId, Stage, Route} for a route whose stage has
+//! `ExecutionError` and `IntegrationError` once per CALL — carrying 1 for the ONE class that
+//! call earned and an explicit 0 for the two classes it did not — and publishes the same
+//! counters additionally under {ApiId, Stage, Route} for a route whose stage has
 //! `DetailedMetricsEnabled`, while a stage without it publishes the stage-wide series
 //! alone.**
 //!
@@ -67,7 +67,7 @@ const PERIOD: i32 = 60;
 
 /// This service, AWS Lambda, the `@connections` management API and CloudWatch on ONE engine,
 /// with request authentication off.
-fn emulator() -> (MultiServiceRouter, Arc<engine::InMemoryEngine>) {
+pub(crate) fn emulator() -> (MultiServiceRouter, Arc<engine::InMemoryEngine>) {
     let engine: Arc<engine::InMemoryEngine> = Arc::new(engine::InMemoryEngine::new());
     let mut router = MultiServiceRouter::new();
     router.set_request_authentication(false);
@@ -178,15 +178,15 @@ const REFUSING_HANDLER: &str = "def lambda_handler(event, context):\n\
      \x20   return {\"statusCode\": 403, \"body\": \"no\"}\n";
 
 /// One api, created with the socket its `ApiEndpoint` announces.
-struct Api {
-    api_id: String,
+pub(crate) struct Api {
+    pub(crate) api_id: String,
     /// The `host:port` of the api's own socket, read off the announced `ApiEndpoint` so a case
     /// dials the address the service reported.
-    authority: String,
+    pub(crate) authority: String,
 }
 
 /// Create a WEBSOCKET api whose frames select a route by their `action` member.
-async fn given_api(emulator: &MultiServiceRouter, case: &str, name: &str) -> Api {
+pub(crate) async fn given_api(emulator: &MultiServiceRouter, case: &str, name: &str) -> Api {
     let created = created(
         emulator,
         case,
@@ -215,7 +215,7 @@ async fn given_api(emulator: &MultiServiceRouter, case: &str, name: &str) -> Api
 /// Bind `function_arn` as an `AWS_PROXY` integration of `api_id` and route `route_key` to it,
 /// with a `RouteResponse` when `two_way` — "to define a two-way route, create a route
 /// response".
-async fn given_route(
+pub(crate) async fn given_route(
     emulator: &MultiServiceRouter,
     case: &str,
     api_id: &str,
@@ -262,7 +262,7 @@ async fn given_route(
 
 /// Create one stage of `api_id` and release a deployment to it, with `DetailedMetricsEnabled`
 /// in its `DefaultRouteSettings` when `detailed`.
-async fn given_stage(
+pub(crate) async fn given_stage(
     emulator: &MultiServiceRouter,
     case: &str,
     api_id: &str,
@@ -328,7 +328,7 @@ async fn pushed(
 /// One expected series of a stage: the metric, the route dimension it is published under (or
 /// none for the stage-wide series), the statistic read and the value the traffic owes it.
 #[derive(Debug, Clone, Copy)]
-struct Expected {
+pub(crate) struct Expected {
     metric: &'static str,
     /// The `Route` dimension for a per-route series; `None` for the stage-wide one.
     route: Option<&'static str>,
@@ -339,7 +339,7 @@ struct Expected {
 }
 
 /// A stage-wide counter, read by its `Sum`.
-fn counter(metric: &'static str, value: f64) -> Expected {
+pub(crate) fn counter(metric: &'static str, value: f64) -> Expected {
     Expected {
         metric,
         route: None,
@@ -350,7 +350,7 @@ fn counter(metric: &'static str, value: f64) -> Expected {
 
 /// A stage-wide series read by its `SampleCount`: how many OBSERVATIONS it holds, which is
 /// what tells an error counter standing at an explicit zero from one no call ever published.
-fn samples(metric: &'static str, value: f64) -> Expected {
+pub(crate) fn samples(metric: &'static str, value: f64) -> Expected {
     Expected {
         metric,
         route: None,
@@ -361,7 +361,7 @@ fn samples(metric: &'static str, value: f64) -> Expected {
 
 /// The stage-wide latency series, read by its `SampleCount`: one sample per integration that
 /// answered.
-fn latency_samples(value: f64) -> Expected {
+pub(crate) fn latency_samples(value: f64) -> Expected {
     Expected {
         metric: "IntegrationLatency",
         route: None,
@@ -371,7 +371,7 @@ fn latency_samples(value: f64) -> Expected {
 }
 
 /// The per-route series of `route`, read the same way its stage-wide counterpart is.
-fn per_route(metric: &'static str, route: &'static str, value: f64) -> Expected {
+pub(crate) fn per_route(metric: &'static str, route: &'static str, value: f64) -> Expected {
     Expected {
         metric,
         route: Some(route),
@@ -455,7 +455,7 @@ async fn observed(
 ///
 /// A counted datapoint is owed by a call that has already been made, so this looks again for
 /// the condition rather than waiting a fixed time for it.
-async fn reached(
+pub(crate) async fn reached(
     emulator: &MultiServiceRouter,
     case: &str,
     api_id: &str,
@@ -494,7 +494,7 @@ async fn reached(
 }
 
 /// Close the client's end of a connection, which is what makes the `$disconnect` call due.
-async fn closed(case: &str, socket: ClientSocket) {
+pub(crate) async fn closed(case: &str, socket: ClientSocket) {
     let mut socket = socket;
     futures_util::SinkExt::close(&mut socket)
         .await
@@ -622,10 +622,17 @@ async fn each_stage_publishes_the_counters_its_own_traffic_produced() {
         &[
             counter("ConnectCount", 1.0),
             counter("MessageCount", 7.0),
-            latency_samples(3.0),
+            // One sample per invocation the backend ANSWERED: the three routes that returned
+            // and the one whose function raised, which answered the invocation with the error
+            // document Lambda reports for it.
+            latency_samples(4.0),
             counter("ClientError", 0.0),
+            // The route whose function raised is counted ONCE, in the class that names whose
+            // failure it was: the function RAN and ended in an unhandled error, so the
+            // route's execution is what did not reach a successful end and the integration's
+            // own series stays at nought.
             counter("ExecutionError", 1.0),
-            counter("IntegrationError", 1.0),
+            counter("IntegrationError", 0.0),
             // The same four calls, so the one failure stands in a series of four
             // observations rather than alone.
             samples("ClientError", 4.0),
@@ -637,9 +644,11 @@ async fn each_stage_publishes_the_counters_its_own_traffic_produced() {
             per_route("MessageCount", "reply", 2.0),
             per_route("IntegrationLatency", "reply", 1.0),
             per_route("MessageCount", "boom", 2.0),
+            per_route("IntegrationLatency", "boom", 1.0),
             per_route("ExecutionError", "boom", 1.0),
-            per_route("IntegrationError", "boom", 1.0),
-            per_route("IntegrationLatency", "boom", 0.0),
+            // The per-route series split the same ONE class the stage-wide ones carry.
+            per_route("ClientError", "boom", 0.0),
+            per_route("IntegrationError", "boom", 0.0),
             per_route("MessageCount", "$disconnect", 1.0),
             per_route("IntegrationLatency", "$disconnect", 1.0),
         ],
@@ -721,8 +730,10 @@ async fn a_refused_call_is_metered_as_the_class_it_was_refused_with() {
             counter("MessageCount", 1.0),
             latency_samples(1.0),
             counter("ClientError", 1.0),
-            counter("ExecutionError", 1.0),
-            // The integration ANSWERED — it refused the client rather than failing.
+            // The integration ANSWERED — it refused the client rather than failing — and a
+            // client the backend refused with a client-error status is that one class and no
+            // other: neither the route's execution nor the integration earned a count.
+            counter("ExecutionError", 0.0),
             counter("IntegrationError", 0.0),
             // One call: the connection request the handshake was refused for.
             samples("IntegrationError", 1.0),

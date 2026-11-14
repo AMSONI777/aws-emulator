@@ -42,6 +42,7 @@
 
 use std::collections::BTreeMap;
 
+use crate::service::metrics::CallOutcome;
 use crate::state::integration_response_key::{key_matches_status, DEFAULT_SELECTION_KEY};
 use crate::state::{Api, DeployedConfiguration, Integration, IntegrationResponse, Route};
 
@@ -82,6 +83,11 @@ pub struct Reply {
 }
 
 /// Why a route's integration produced no reply at all.
+///
+/// Each variant answers the two questions the serving stage's own series ask about a call that
+/// failed: WHOSE failure it was ([`Unserved::metered_as`]), and whether the backend ANSWERED
+/// the invocation at all ([`Unserved::answered`]), which is what there is a latency to report
+/// for.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Unserved {
     /// The route names no integration of this api, or names none at all, so there is
@@ -90,10 +96,54 @@ pub enum Unserved {
     /// No `IntegrationResponse` of the integration is selected by the status the call
     /// produced, so API Gateway has no mapping to answer from.
     NoSelectableResponse,
-    /// The integration is of a type this emulator does not perform here, or carries a
-    /// template it does not render; the string says which, for the log and for the
-    /// developer.
+    /// The integration is of a type this emulator does not perform here, carries a template
+    /// it does not render, or names no backend to address, so NO invocation was made; the
+    /// string says which, for the log and for the developer.
     Unperformable(String),
+    /// The invocation was made and the backend never answered it: it was not delivered, it
+    /// was refused before anything ran, or it had not answered when the integration's own
+    /// timeout elapsed.
+    Undelivered(String),
+    /// The function the integration fronts RAN and ended in an unhandled error, so its answer
+    /// is an error document rather than a reply to map.
+    FunctionError(String),
+    /// The backend ANSWERED and its answer is one the gateway cannot read as the reply a
+    /// proxy integration owes.
+    UnreadableReply(String),
+}
+
+impl Unserved {
+    /// Which of the serving stage's error series a call this did not serve increments — the
+    /// ONE class that names whose failure it was.
+    ///
+    /// The ROUTE's execution is what did not reach a successful end when the gateway had
+    /// nothing to call, could not perform what the route names, or ran a function that ended
+    /// in an unhandled error; the INTEGRATION's own class is for a backend that answered the
+    /// gateway nothing it could use — one that never answered the invocation, and one whose
+    /// answer cannot be read.
+    ///
+    /// Exactly one class per failing call, which is what [`CallOutcome`] carries.
+    pub fn metered_as(&self) -> CallOutcome {
+        match self {
+            Self::Undelivered(_) | Self::UnreadableReply(_) => CallOutcome::IntegrationError,
+            Self::NoIntegration
+            | Self::NoSelectableResponse
+            | Self::Unperformable(_)
+            | Self::FunctionError(_) => CallOutcome::ExecutionError,
+        }
+    }
+
+    /// Whether the backend ANSWERED the invocation the gateway made, however unusable that
+    /// answer was: a function that ran and raised answered it (with the error document Lambda
+    /// reports for an unhandled error), and so did one whose reply the gateway cannot read.
+    ///
+    /// It is what decides whether the call has a latency to report: `IntegrationLatency` is
+    /// the time between the gateway relaying the call to the backend and the backend's answer
+    /// reaching it, so a call the backend answered has one and a call that reached no backend —
+    /// or whose backend never answered — has none.
+    pub fn answered(&self) -> bool {
+        matches!(self, Self::FunctionError(_) | Self::UnreadableReply(_))
+    }
 }
 
 /// The route of the deployed configuration whose `RouteKey` is `route_key`, or `None` when

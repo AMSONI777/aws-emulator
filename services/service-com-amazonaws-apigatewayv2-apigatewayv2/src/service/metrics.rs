@@ -80,19 +80,28 @@ pub const CONNECT_COUNT_METRIC: &str = "ConnectCount";
 /// frame it sent a client.
 pub const MESSAGE_COUNT_METRIC: &str = "MessageCount";
 
-/// How long one integration took to answer, in milliseconds — one sample per integration
-/// performed, so the number of backend calls is the series' `SampleCount`.
+/// How long one integration took to ANSWER the gateway's invocation, in milliseconds — one
+/// sample per invocation the backend answered, so the number of backend calls that got an
+/// answer is the series' `SampleCount`.
+///
+/// It is the time between the gateway relaying the call to the backend and the backend's
+/// answer reaching it, so an answer the gateway could not use is measured like any other (a
+/// function that ended in an unhandled error answered the invocation with Lambda's error
+/// document), while a call that reached no backend, or whose backend never answered, has no
+/// latency to report at all.
 pub const INTEGRATION_LATENCY_METRIC: &str = "IntegrationLatency";
 
 /// The calls the stage answered the client with a client-error status: a handshake refused
 /// `4xx`, or a frame the api routed nowhere.
 pub const CLIENT_ERROR_METRIC: &str = "ClientError";
 
-/// The calls whose route could not be executed to a successful end: an authorizer or
-/// integration that failed, and a connection request an integration refused.
+/// The calls whose route could not be executed to a successful end: an authorizer that could
+/// not decide, a route the gateway has nothing to call for, and a function that ran and ended
+/// in an unhandled error.
 pub const EXECUTION_ERROR_METRIC: &str = "ExecutionError";
 
-/// The calls whose integration produced no reply the gateway could use.
+/// The calls whose integration gave the gateway no answer it could use: an invocation that
+/// never reached the backend, and a reply the gateway cannot read.
 pub const INTEGRATION_ERROR_METRIC: &str = "IntegrationError";
 
 /// The `StandardUnit` a bare count of things carries: `Count`.
@@ -127,20 +136,44 @@ pub fn publishes_per_route(stage: &Stage, route_key: &str) -> bool {
         .unwrap_or(false)
 }
 
-/// What ONE call of a stage ended in, as the three error counters report it: a call that
-/// failed none of these ways carries `false` for each, which is published as an explicit zero
-/// ([`StageMetrics::served`]).
+/// What ONE call of a stage ended in, as the three error counters report it.
 ///
-/// * `client_error` — the call was answered with a client-error status: a handshake refused
-///   `4xx`, or a frame the api routes nowhere.
-/// * `execution_error` — the route's execution did not reach a successful end: an authorizer
-///   or an integration that failed, and a connection request an integration refused.
-/// * `integration_error` — the integration produced no reply the gateway could use.
-#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
-pub struct CallOutcome {
-    pub client_error: bool,
-    pub execution_error: bool,
-    pub integration_error: bool,
+/// A call that failed earns EXACTLY ONE of the three classes — the one that names whose
+/// failure it was — and the other two carry an explicit zero for that call
+/// ([`StageMetrics::served`]), so a single failure can never be counted twice over: a client
+/// reading `ExecutionError` beside `ClientError` reads two different failures, never one
+/// failure twice.
+///
+/// There is no default: every call states the class it earned, including the call that failed
+/// nothing ([`CallOutcome::Served`]), so no site can publish an outcome it did not decide.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CallOutcome {
+    /// The call failed none of the three ways: every counter carries a zero for it.
+    Served,
+    /// The CLIENT was answered a client-error status: a handshake refused `4xx`, or a frame
+    /// the api routes nowhere.
+    ClientError,
+    /// The ROUTE's execution did not reach a successful end: the gateway had nothing to call
+    /// or could not call what the route names, an authorizer could not decide, or the
+    /// function the integration fronts ran and ended in an unhandled error.
+    ExecutionError,
+    /// The INTEGRATION was reached and gave the gateway no answer it could use: an
+    /// invocation that was never delivered to the backend, or a reply the gateway cannot
+    /// read as the one a proxy integration owes.
+    IntegrationError,
+}
+
+impl CallOutcome {
+    /// The ONE error series this outcome increments, or `None` for a call that failed none of
+    /// the three ways — the reading that makes the classes mutually exclusive.
+    pub fn counted_series(self) -> Option<&'static str> {
+        match self {
+            Self::Served => None,
+            Self::ClientError => Some(CLIENT_ERROR_METRIC),
+            Self::ExecutionError => Some(EXECUTION_ERROR_METRIC),
+            Self::IntegrationError => Some(INTEGRATION_ERROR_METRIC),
+        }
+    }
 }
 
 /// The publisher of one STAGE's own metrics: the store the datapoints go to, and the api and
@@ -216,7 +249,7 @@ impl StageMetrics {
     }
 
     /// Publish what ONE call of the stage ended in: an observation of EACH error counter,
-    /// carrying 1 for the class that call earned and 0 for the classes it did not.
+    /// carrying 1 for the one class that call earned and 0 for the two classes it did not.
     ///
     /// A zero is as much an observation as a one, and the reason the counters are published
     /// per call rather than only when something fails: a client reading `ClientError` over a
@@ -224,12 +257,18 @@ impl StageMetrics {
     /// from "this stage is publishing nothing at all" — a gap no dashboard and no alarm can
     /// act on. It is also what makes the error counters' `SampleCount` the number of calls the
     /// stage served.
+    ///
+    /// The classes are MUTUALLY EXCLUSIVE: one failing call increments one series
+    /// ([`CallOutcome`]), so an alarm on a class breaches at the rate of the failures that
+    /// class names and no other.
     pub fn served(&self, per_route: Option<&str>, outcome: CallOutcome) {
-        for (metric, occurred) in [
-            (CLIENT_ERROR_METRIC, outcome.client_error),
-            (EXECUTION_ERROR_METRIC, outcome.execution_error),
-            (INTEGRATION_ERROR_METRIC, outcome.integration_error),
+        let counted = outcome.counted_series();
+        for metric in [
+            CLIENT_ERROR_METRIC,
+            EXECUTION_ERROR_METRIC,
+            INTEGRATION_ERROR_METRIC,
         ] {
+            let occurred = counted == Some(metric);
             self.publish(metric, per_route, f64::from(u8::from(occurred)), COUNT_UNIT);
         }
     }

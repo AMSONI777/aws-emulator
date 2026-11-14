@@ -313,6 +313,8 @@ mod websocket_connect_authorization;
 mod websocket_connect_backend;
 #[path = "all/websocket_endpoint_connections.rs"]
 mod websocket_endpoint_connections;
+#[path = "all/websocket_error_class_exclusivity.rs"]
+mod websocket_error_class_exclusivity;
 #[path = "all/websocket_handshake_data_plane.rs"]
 mod websocket_handshake_data_plane;
 #[path = "all/websocket_lambda_routes.rs"]
