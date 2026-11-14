@@ -50,8 +50,11 @@ const UNGRANTED_ROLE: &str = "apigateway-dynamodb-ungranted";
 
 /// Call one Amazon DynamoDB operation on the same router, as a client's SDK sends it.
 ///
-/// `pub(crate)` for the sibling `stage_cache_hit_mapping` suite, which changes a table out of
-/// band to show that a cache hit does not read it again.
+/// `pub(crate)` for the sibling suites that observe the same table through the owning service:
+/// `stage_cache_hit_mapping`, which changes a table out of band to show that a cache hit does
+/// not read it again, and `dynamodb_integration_template_written_item`, which reads back what
+/// a template-driven write stored — so each observes that service through one reader rather
+/// than a second one of its own.
 pub(crate) async fn dynamodb(gateway: &Gateway, operation: &str, body: Value) -> (u16, Value) {
     let host = format!("dynamodb.{REGION}.amazonaws.com");
     let request = http::Request::builder()
@@ -77,8 +80,8 @@ pub(crate) async fn dynamodb(gateway: &Gateway, operation: &str, body: Value) ->
 
 /// Create one IAM role API Gateway may assume, carrying `document` as its inline policy.
 ///
-/// `pub(crate)` for the sibling `stage_cache_hit_mapping` suite, whose `AWS` integration is
-/// made under the same kind of role.
+/// `pub(crate)` for the sibling suites named above, whose `AWS` integrations are made under the
+/// same kind of role.
 pub(crate) async fn given_role(gateway: &Gateway, name: &str, document: Value) -> String {
     let trust = json!({
         "Version": "2012-10-17",
@@ -265,16 +268,17 @@ async fn invoke(gateway: &Gateway, api: &str, row: &Row) -> (u16, String) {
     (status, body)
 }
 
-#[tokio::test]
-async fn an_aws_integration_naming_a_table_action_makes_that_call_against_the_owning_service() {
-    let gateway = gateway_with_dynamodb_and_iam();
-
-    // The table and the item it holds, created through the owning service's own API.
+/// Create one table through the owning service's own API and wait for it to be writable.
+///
+/// `pub(crate)` for the sibling `dynamodb_integration_template_written_item` suite, which
+/// stands its table up the same way: the create and the wait for the status that service's own
+/// clock owes are one setup, not one per suite.
+pub(crate) async fn given_table(gateway: &Gateway, table: &str) {
     let (status, created) = dynamodb(
-        &gateway,
+        gateway,
         "CreateTable",
         json!({
-            "TableName": TABLE,
+            "TableName": table,
             "KeySchema": [{"AttributeName": "id", "KeyType": "HASH"}],
             "AttributeDefinitions": [{"AttributeName": "id", "AttributeType": "S"}],
             "BillingMode": "PAY_PER_REQUEST",
@@ -283,13 +287,13 @@ async fn an_aws_integration_naming_a_table_action_makes_that_call_against_the_ow
     .await;
     assert_eq!(
         status, 200,
-        "setup CreateTable: expected 200, got {status} {created:?}"
+        "setup CreateTable({table}): expected 200, got {status} {created:?}"
     );
     // A table is writable once the owning service has made it ACTIVE, which its own clock
     // owes: polled for the condition rather than waited out for a fixed span.
     let deadline = std::time::SystemTime::now() + std::time::Duration::from_secs(30);
     loop {
-        let (_, described) = dynamodb(&gateway, "DescribeTable", json!({"TableName": TABLE})).await;
+        let (_, described) = dynamodb(gateway, "DescribeTable", json!({"TableName": table})).await;
         if described["Table"]["TableStatus"] == json!("ACTIVE") {
             break;
         }
@@ -299,6 +303,14 @@ async fn an_aws_integration_naming_a_table_action_makes_that_call_against_the_ow
         );
         tokio::time::sleep(std::time::Duration::from_millis(100)).await;
     }
+}
+
+#[tokio::test]
+async fn an_aws_integration_naming_a_table_action_makes_that_call_against_the_owning_service() {
+    let gateway = gateway_with_dynamodb_and_iam();
+
+    // The table and the item it holds, created through the owning service's own API.
+    given_table(&gateway, TABLE).await;
     let (status, written) = dynamodb(
         &gateway,
         "PutItem",

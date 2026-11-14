@@ -3960,3 +3960,6 @@ mod cloudformation_provisions_redshift_snapshot_copy_grants;
 // repeated stands in the module doc at the HEAD of this file.)
 // this file and for every service crate's `tests/all.rs`. (Appended with `//!` by a
 // landing, and an ordinary comment for the reason the lines above record.)
+// reason the lines above record: an inner doc comment belongs at the head of this file or
+// nowhere.)
+// comment is only legal before the first item, so a `//!` line in this appended tail is
