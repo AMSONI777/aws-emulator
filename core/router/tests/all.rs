@@ -3071,6 +3071,10 @@ mod cloudformation_cognito_identity_role_attachment_refusal;
 // is `E0753` and compiles no suite of this target.)
 // leaving a note here. (Plain comments: see the note above on `//!` in this tail.)
 // leaving a note here. (Plain comments: a `//!` line past the first item is `E0753`.)
+// leaving a note here. (Ordinary comments: appended after items, `//!` is `E0753`.)
+// leaving a note here. (These five lines are another fragment of this file's own header
+// that a merge of two appended tails landed down here; they are ordinary comments
+// because an inner doc comment may only appear before an item.)
 // it was appended here as well while two branches were landing at the same time.)
 // (`redshift_health_alarms_evaluate` is declared ONCE, further up this tail: a module may
 // be declared only once, and two branches landing at once appended it twice.)
@@ -3342,6 +3346,10 @@ mod apigateway_wafv2_waf_log_destination_gate;
 // were landing at once: it belongs at the head of this file or nowhere, so it is a line
 // comment — `all/all_rs_declares_each_suite_once.rs` is what checks this file and every
 // service crate's `tests/all.rs`.)
+// suite left at the top level of `tests/` fails the build. (An ordinary comment: an inner
+// doc comment past the first item is `E0753` and compiles no suite in this target, so this
+// fragment of the header stands as a line comment; the rule it states is at the head of
+// this file.)
 // (One more line of that same header fragment, appended here as an INNER doc comment: a
 // `//!` line past the first item of this crate root is `E0753`, so it stands as an ordinary
 // comment. The rule it repeats is in the module doc at the HEAD of this file.)
@@ -3394,6 +3402,7 @@ mod all_rs_inner_doc_comments_precede_the_first_item;
 // reason the lines above record.)
 // leaving a note here. (Mid-file, so a plain comment: an inner doc comment is only
 // accepted before the first item of a module.)
+// reason the appended fragments below record.)
 // (Another line of that same header fragment, appended as an INNER doc comment and left
 // here as an ordinary comment for the reason the lines above record.)
 // (One more fragment of that same header, appended here with `//!`: an inner doc comment
@@ -3663,6 +3672,21 @@ mod cloudformation_provisions_appsync_resources;
 // leaving a note here. (Ordinary comments: an inner doc comment `//!` is only legal
 // before the first item of a crate root, so landing these lines here as `//!` is `E0753`
 // and compiles no suite of this target.)
+// leaving a note here. (Another fragment of this file's own header that a merge of two
+// appended tails landed down here: ordinary comments, because an inner doc comment may
+// only appear before an item.)
+// this file and for every service crate's `tests/all.rs`. (The tail end of that same
+// header fragment, as an ordinary comment for the reason the lines above it record.)
+// (The last line of that same header fragment, an ordinary comment here for the same
+// reason: an inner doc comment is legal only before the first item of a crate root, so a
+// `//!` line in this appended tail is `E0753` and compiles no suite of this target.)
+// suite left at the top level of `tests/` fails the build. (A fragment of this file's own
+// header, landed down here: past the first item a `//!` line is `E0753`, so it stands as an
+// ordinary comment.)
+// this file and for every service crate's `tests/all.rs`. (One more line of that same
+// header fragment, an ordinary comment for the reason the lines above record.)
+// this file and for every service crate's `tests/all.rs`. (Same appended header fragment,
+// an ordinary comment for the reason the lines above record.)
 // suite left at the top level of `tests/` fails the build. (An ordinary comment: this is a
 // fragment of this file's own header that a landing appended here, and an inner doc comment
 // is only legal before the first item.)

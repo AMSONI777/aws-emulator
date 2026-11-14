@@ -27,6 +27,11 @@ tracing = { workspace = true }
 # (see `state::new_id`). Same pair the sibling service crates mint ids with.
 sha2 = { workspace = true }
 hex = { workspace = true }
+# `arn`: the ONE reading of a caller-supplied resource ARN — its six fields and the
+# vendor namespace that says whose resource it names — which the tagging operations
+# resolve an `Arn` with, so this service does not disagree with any other about what
+# an ARN is (see `state::tags`).
+service-common = { path = "../common" }
 
 [build-dependencies]
 emulator-core-build-support = { workspace = true }

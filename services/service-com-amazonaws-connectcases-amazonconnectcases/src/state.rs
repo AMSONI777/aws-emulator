@@ -14,7 +14,8 @@
 //! each one carries an explicit ceiling: [`MAX_DOMAINS`],
 //! [`MAX_FIELDS_PER_DOMAIN`], [`MAX_TEMPLATES_PER_DOMAIN`],
 //! [`MAX_LAYOUTS_PER_DOMAIN`], [`MAX_CASES_PER_DOMAIN`],
-//! [`MAX_RELATED_ITEMS_PER_CASE`], [`MAX_AUDIT_EVENTS_PER_CASE`] and
+//! [`MAX_RELATED_ITEMS_PER_CASE`], [`MAX_AUDIT_EVENTS_PER_CASE`],
+//! [`MAX_TAGS_PER_RESOURCE`] and
 //! [`MAX_IDEMPOTENCY_TOKENS`]. Creating past a
 //! ceiling is refused with a modelled error, and the idempotency table evicts
 //! its oldest entry rather than growing, so no caller can grow this store
@@ -43,9 +44,13 @@ mod field_filters;
 // Projecting and narrowing a case's related items: what every related-item
 // reader reports.
 mod related_items;
+// Resolving an `Arn` to the record it addresses, and the tag set that record
+// carries: what every tagging operation reads and writes.
+mod tags;
 
 pub use field_filters::*;
 pub use related_items::*;
+pub use tags::*;
 
 use std::collections::hash_map::RandomState;
 use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
@@ -349,9 +354,9 @@ pub struct Field {
     /// [`FIELD_TYPE_SINGLE_SELECT`] field can carry any.
     pub options: BTreeMap<String, FieldOption>,
     pub deleted: bool,
-    /// Reserved for the tagging slice: `CreateField` takes no tags and
-    /// `TagResource`/`UntagResource` are still 501s, so nothing can populate
-    /// this yet and a read reports no `tags` member for a field.
+    /// The field's tags, as `TagResource` merges them in: `CreateField` takes
+    /// no tags, so a field carries none until it is tagged and a read reports
+    /// no `tags` member for it until then ([`tags_output`]).
     pub tags: HashMap<String, String>,
     pub created_time: SystemTime,
     pub last_modified_time: SystemTime,
@@ -375,7 +380,7 @@ pub struct Template {
     /// refuses `UpdateTemplate`, cannot be used to create a case, and is left
     /// out of `ListTemplates`.
     pub deleted: bool,
-    /// Reserved for the tagging slice, as [`Field::tags`].
+    /// The template's tags, as [`Field::tags`].
     pub tags: HashMap<String, String>,
     pub created_time: SystemTime,
     pub last_modified_time: SystemTime,
@@ -398,7 +403,7 @@ pub struct Layout {
     /// deleted layout is still readable through `GetLayout`, refuses
     /// `UpdateLayout`, and is left out of `ListLayouts`.
     pub deleted: bool,
-    /// Reserved for the tagging slice, as [`Field::tags`].
+    /// The layout's tags, as [`Field::tags`].
     pub tags: HashMap<String, String>,
     pub created_time: SystemTime,
     pub last_modified_time: SystemTime,
@@ -461,7 +466,7 @@ pub struct RelatedItem {
     /// The entity the request named as having performed the association, when it
     /// named one: the item's creator.
     pub performed_by: Option<UserUnion>,
-    /// Reserved for the tagging slice, as [`Field::tags`].
+    /// The related item's tags, as [`Field::tags`].
     pub tags: HashMap<String, String>,
 }
 
@@ -1777,6 +1782,7 @@ pub enum ResourceKind {
     Template,
     Layout,
     Case,
+    RelatedItem,
 }
 
 impl ResourceKind {
@@ -1788,14 +1794,19 @@ impl ResourceKind {
             Self::Template => ("Template", "template"),
             Self::Layout => ("Layout", "layout"),
             Self::Case => ("Case", "case"),
+            // A related item is the one kind whose word is two: the service
+            // writes it as ONE token wherever it names the kind itself — the
+            // `related-item` segment of the item's ARN — so that is the token,
+            // and the leading form is for a sentence.
+            Self::RelatedItem => ("Related item", "related-item"),
         }
     }
 
     /// The `resourceType` a refusal about this kind reports: the service's
     /// lowercase token for the kind, which is the wire vocabulary a client
     /// branches on to tell WHICH identifier of a request could not be resolved
-    /// — the same token the kind reads as inside a sentence, never a
-    /// capitalised type name.
+    /// — one lowercase token, never a capitalised type name and never a
+    /// sentence's spacing.
     pub fn resource_type(self) -> &'static str {
         self.words().1
     }

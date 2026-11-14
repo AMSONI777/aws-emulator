@@ -43,6 +43,8 @@ mod not_found_refusal_wording;
 mod related_item_search;
 #[path = "all/related_items.rs"]
 mod related_items;
+#[path = "all/resource_tagging.rs"]
+mod resource_tagging;
 #[path = "all/response_and_refusal_fidelity.rs"]
 mod response_and_refusal_fidelity;
 #[path = "all/state_roundtrip.rs"]
