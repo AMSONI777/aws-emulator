@@ -6,11 +6,14 @@
 //! is active in. What is stored is what `DescribeScheduledActions` reports back
 //! through one record ([`crate::state::StoredScheduledAction`]).
 //!
-//! Every precondition is checked BEFORE anything is stored, and the SCHEDULE is
-//! checked first: a request whose `Schedule` is written in neither of the two
-//! published expression types names no schedule at all, which is decided on the
-//! request alone (see
-//! [`crate::state::parse_scheduled_action_schedule`]). Then the action it would
+//! Every precondition is checked BEFORE anything is stored, and the ROLE the
+//! action would run as is checked first: a scheduled action runs as the role
+//! `IamRole` names, so a role the Amazon Redshift scheduler cannot assume is
+//! what blocks the create whatever else the request said (see
+//! [`crate::state::scheduler_role_is_invalid`]). Then the request's own values:
+//! a `Schedule` written in neither of the two published expression types names
+//! no schedule at all (see
+//! [`crate::state::parse_scheduled_action_schedule`]), then the action it would
 //! trigger — exactly one of the operations the scheduler supports, against a
 //! cluster this account holds — and only then the name it would be stored under.
 //!
@@ -208,17 +211,31 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
 
     /// Record the scheduled action the request asks for.
     ///
-    /// Nothing is awaited while the store is locked: every dependency this
-    /// operation resolves — the cluster its target action names — is a record of
-    /// THIS service, so the whole write is one lock-held step.
+    /// Nothing is awaited while the store is locked: the one dependency that is
+    /// another service's — the IAM role the action would run as — is resolved
+    /// before the store is reached at all, and every dependency resolved under
+    /// the lock (the cluster its target action names) is a record of THIS
+    /// service, so the whole write is one lock-held step.
     async fn handle(
         &self,
         input: Self::Input,
-        _ctx: &smithy_server_runtime::OperationContext<'_>,
+        ctx: &smithy_server_runtime::OperationContext<'_>,
     ) -> Result<Self::Output, Self::Error> {
         use crate::state as st;
 
-        // The SCHEDULE is judged first, and on the request alone: an expression
+        // The ROLE the action would run as is resolved FIRST: a scheduled action
+        // is run by the Amazon Redshift scheduler assuming it, so a role IAM
+        // says it cannot assume is a create that could never run, whatever the
+        // request's own values say. The question is IAM's and is asked of IAM;
+        // the model words no fault for it, so it carries the code Amazon
+        // Redshift answers a parameter value it cannot honour with.
+        if st::scheduler_role_is_invalid(ctx, &input.iam_role).await {
+            return Err(crate::scaffolded::Scaffolded::invalid_parameter_value(
+                st::invalid_scheduler_role_message(&input.iam_role),
+            ));
+        }
+
+        // The SCHEDULE is judged next, and on the request alone: an expression
         // written in neither published type states no schedule whatever the
         // account holds, so it is refused before the store is read at all.
         // Which refusal it earns is which way it failed — a type this service

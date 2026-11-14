@@ -18,9 +18,10 @@
 //!
 //! The table spans what the rule generalises over: the operation (every family
 //! that dereferences a cluster — a configuration change, a cluster-scoped
-//! create, a namespace registration change, a read and a delete, the partner
-//! integration and custom domain association families, including the two that
-//! name their cluster through a member other than `ClusterIdentifier`)
+//! create, a namespace registration change, a read, a delete, a suspension of
+//! its compute, the partner integration and custom domain association families,
+//! including the two that name their cluster through a member other than
+//! `ClusterIdentifier`)
 //! and the identifier (its spelling, both documented length bounds, its case,
 //! one character off a stored name, and a cluster this account created and then
 //! deleted).
@@ -276,6 +277,11 @@ fn operations() -> Vec<OperationCase> {
             "DescribeClusters",
             cluster_only as Request,
             Wording::IdentifierThenNotFound,
+        ),
+        (
+            "PauseCluster",
+            cluster_only as Request,
+            Wording::IdentifierCannotBeFound,
         ),
         (
             "DeleteCluster",

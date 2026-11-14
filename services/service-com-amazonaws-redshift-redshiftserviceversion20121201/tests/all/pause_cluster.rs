@@ -313,10 +313,10 @@ async fn a_pause_of_a_cluster_this_account_does_not_hold_is_refused_as_not_found
             refused.error_code(),
             refused.body
         );
-        // This operation carries the sentence every cluster-scoped operation
-        // without a recorded one of its own carries, with the identifier taken
-        // verbatim from the request.
-        let expected = format!("Cluster {identifier} not found.");
+        // This operation's OWN recorded sentence — `Cluster `, the identifier
+        // taken verbatim from the request, ` can't be found.` — which is not the
+        // one a read of the same identifier answers.
+        let expected = format!("Cluster {identifier} can't be found.");
         assert_eq!(
             refused.text("Message").as_deref(),
             Some(expected.as_str()),

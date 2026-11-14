@@ -488,6 +488,58 @@ impl Emulator {
         Self { router, engine }
     }
 
+    /// An emulator with the IAM service mounted beside Redshift on the SAME
+    /// engine, exactly as the assembled emulator mounts them.
+    ///
+    /// The role a scheduled action runs as is a resource of THAT service, and
+    /// whether the Amazon Redshift scheduler may assume it is that role's own
+    /// trust policy's answer, so a suite about that precondition has to have one
+    /// to reach; [`Emulator::new`] deliberately leaves it unmounted, which is the
+    /// "IAM said nothing" case.
+    pub(crate) fn with_iam() -> Self {
+        let mut emulator = Self::build(false);
+        emulator.router.register_service(
+            service_com_amazonaws_iam_awsidentitymanagementv20100508::EmulatedService::new(
+                Arc::clone(&emulator.engine),
+            ),
+        );
+        emulator
+    }
+
+    /// POST one IAM awsQuery action with these form parameters and answer it.
+    ///
+    /// The body is built exactly as [`Emulator::call_in_region`] builds one; what
+    /// differs is the service the call is addressed and signed for — which is
+    /// what routes it — and the API version that service publishes. Panics
+    /// nowhere: a call made without [`Emulator::with_iam`] is the "IAM said
+    /// nothing" deployment and answers as such.
+    pub(crate) async fn call_iam(&self, action: &str, params: &[(&str, &str)]) -> Answer {
+        let mut body = format!("Action={action}&Version=2010-05-08");
+        for (name, value) in params {
+            body.push('&');
+            body.push_str(name);
+            body.push('=');
+            body.push_str(&form_encode(value));
+        }
+        let request = http::Request::builder()
+            .method("POST")
+            .uri("https://iam.amazonaws.com/")
+            .header("content-type", "application/x-www-form-urlencoded")
+            .header(
+                "authorization",
+                format!(
+                    "AWS4-HMAC-SHA256 Credential=AKIDEXAMPLE/20260101/{REGION}/iam/aws4_request, SignedHeaders=host, Signature=0"
+                ),
+            )
+            .body(bytes::Bytes::from(body))
+            .expect("the test request is well formed");
+        let response = self.router.dispatch(request).await;
+        Answer {
+            status: response.status().as_u16(),
+            body: String::from_utf8_lossy(response.body()).into_owned(),
+        }
+    }
+
     /// An EC2 client for [`REGION`] over this emulator's own in-process callback —
     /// the very seam the Redshift handlers resolve a subnet through.
     pub(crate) fn ec2(&self) -> ::aws_sdk_ec2::Client {

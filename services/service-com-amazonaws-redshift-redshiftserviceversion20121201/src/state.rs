@@ -1097,7 +1097,8 @@ pub enum ClusterNotFoundWording {
     /// operation carries until a recorded refusal gives it one of its own.
     IdentifierThenNotFound,
     /// `Cluster <ClusterIdentifier> can't be found.` — what the namespace
-    /// registration pair, `RegisterNamespace` and `DeregisterNamespace`, answer.
+    /// registration pair, `RegisterNamespace` and `DeregisterNamespace`, answer,
+    /// and what `PauseCluster` is recorded answering.
     IdentifierCannotBeFound,
     /// `The cluster <ClusterIdentifier> was not found.` — what the reserved-node
     /// exchange operations answer (reached through

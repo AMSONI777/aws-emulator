@@ -159,6 +159,8 @@ mod reserved_nodes;
 mod reset_cluster_parameter_group;
 #[path = "all/restored_cluster_independence.rs"]
 mod restored_cluster_independence;
+#[path = "all/scheduled_action_preconditions.rs"]
+mod scheduled_action_preconditions;
 #[path = "all/scheduled_actions.rs"]
 mod scheduled_actions;
 #[path = "all/snapshot_access.rs"]

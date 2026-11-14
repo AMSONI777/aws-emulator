@@ -5,12 +5,16 @@
 //! the part of the record it names and no other, and the action is reported back
 //! as a read would report it.
 //!
-//! Every precondition is checked BEFORE anything is changed, in the same order
-//! the create checks them: a `Schedule` the request carries has to be a schedule
-//! this service reads ([`crate::state::parse_scheduled_action_schedule`]), a
-//! `TargetAction` it carries has to name exactly one supported operation against
-//! a cluster this account holds, and the action itself has to be one this account
-//! holds.
+//! Every precondition is checked BEFORE anything is changed, and the ones that
+//! are resolved against STATE come first: the action this request names has to
+//! be one this account holds, and a `IamRole` it carries has to be a role the
+//! Amazon Redshift scheduler can assume
+//! ([`crate::state::scheduler_role_is_invalid`]). Only then are the caller's own
+//! values read — a `Schedule` has to be a schedule this service reads
+//! ([`crate::state::parse_scheduled_action_schedule`]) and a `TargetAction` has
+//! to name exactly one supported operation against a cluster this account holds
+//! — so a modify of an action that is not there reports the missing action
+//! rather than a complaint about a value that would never be stored.
 //!
 //! ## Shape of an operation
 //!
@@ -196,20 +200,67 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
 
     /// Change the scheduled action the request names.
     ///
-    /// Nothing is awaited while the store is locked: every dependency this
-    /// operation resolves — the action and the cluster a new target action
-    /// names — is a record of THIS service, so the whole write is one lock-held
-    /// step.
+    /// Nothing is awaited while the store is locked: the one dependency that is
+    /// another service's — the IAM role the action would run as — is resolved
+    /// with no lock held, and every dependency resolved under the lock (the
+    /// action itself and the cluster a new target action names) is a record of
+    /// THIS service.
     async fn handle(
         &self,
         input: Self::Input,
-        _ctx: &smithy_server_runtime::OperationContext<'_>,
+        ctx: &smithy_server_runtime::OperationContext<'_>,
     ) -> Result<Self::Output, Self::Error> {
         use crate::state as st;
 
-        // The SCHEDULE a request carries is judged first, and on the request
-        // alone, exactly as the create judges it: the two paths cannot admit a
-        // different schedule.
+        let Some(state) = st::service_state(&*self.engine) else {
+            return Err(
+                ModifyScheduledActionErrorModeled::DependentServiceUnavailableFault(
+                    DependentServiceUnavailableFault {
+                        message: Some(st::STORE_UNAVAILABLE.to_string()),
+                    },
+                )
+                .into(),
+            );
+        };
+
+        // The ACTION this request changes is resolved first: a modify of an
+        // action this account does not hold changes nothing whatever else the
+        // request carried, so that is the fault it earns. The lock is taken for
+        // the lookup alone, because what follows awaits.
+        {
+            let mut store = state.lock();
+            store.settle(::service_common::clock::now(&*self.engine));
+            if store
+                .scheduled_action_position(&input.scheduled_action_name)
+                .is_none()
+            {
+                return Err(
+                    ModifyScheduledActionErrorModeled::ScheduledActionNotFoundFault(
+                        ScheduledActionNotFoundFault {
+                            message: Some(st::scheduled_action_not_found_message(
+                                &input.scheduled_action_name,
+                            )),
+                        },
+                    )
+                    .into(),
+                );
+            }
+        }
+
+        // A role this request would put the action on has to be one the Amazon
+        // Redshift scheduler can assume, exactly as the create requires of the
+        // role it stores: the same question, asked of IAM.
+        if let Some(iam_role) = input.iam_role.as_deref() {
+            if st::scheduler_role_is_invalid(ctx, iam_role).await {
+                return Err(crate::scaffolded::Scaffolded::invalid_parameter_value(
+                    st::invalid_scheduler_role_message(iam_role),
+                ));
+            }
+        }
+
+        // The SCHEDULE a request carries is judged on the request alone, exactly
+        // as the create judges it: the two paths cannot admit a different
+        // schedule.
         match input
             .schedule
             .as_deref()
@@ -250,16 +301,6 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
             },
         };
 
-        let Some(state) = st::service_state(&*self.engine) else {
-            return Err(
-                ModifyScheduledActionErrorModeled::DependentServiceUnavailableFault(
-                    DependentServiceUnavailableFault {
-                        message: Some(st::STORE_UNAVAILABLE.to_string()),
-                    },
-                )
-                .into(),
-            );
-        };
         let mut store = state.lock();
         store.settle(::service_common::clock::now(&*self.engine));
 
@@ -281,6 +322,9 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
             }
         }
 
+        // Resolved again under THIS lock: the lookup above was taken under a
+        // lock that has been released, so the position the write uses is one
+        // read from the store as it stands now.
         let Some(position) = store.scheduled_action_position(&input.scheduled_action_name) else {
             return Err(
                 ModifyScheduledActionErrorModeled::ScheduledActionNotFoundFault(

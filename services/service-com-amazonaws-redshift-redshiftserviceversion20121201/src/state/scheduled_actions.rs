@@ -16,6 +16,12 @@
 //! is derived here ([`StoredScheduledAction::view`]) from the schedule, the
 //! action's state and the window it is active in, so the create path, the modify
 //! path and the read path cannot report a different action.
+//!
+//! An action also RUNS AS a role the request names, and whether the Amazon
+//! Redshift scheduler can assume that role is an IAM fact, so it is asked of IAM
+//! ([`scheduler_role_is_invalid`]) — a precondition of writing the action, like
+//! the existence of the action a write names, and so resolved BEFORE the
+//! caller's own expression values are parsed.
 
 use super::*;
 
@@ -283,17 +289,69 @@ pub fn scheduled_action_quota_message() -> String {
 /// Why an operation naming a scheduled action this account does not hold is
 /// refused, naming the action the request asked about.
 ///
-/// The sentence follows the family Amazon Redshift words a missing NAMED
-/// resource an operation ACTS on with — the shape's own name, then
-/// `not found: `, then the name the request sent — exactly as a missing cluster
-/// and a missing cluster snapshot are worded
-/// ([`ClusterNotFoundWording::NotFoundThenIdentifier`],
-/// [`ClusterSnapshotNotFoundWording::NotFoundThenIdentifier`]), and says what the
-/// model states the fault is (`smithy_query(query="shape",
-/// shape="ScheduledActionNotFoundFault")` — "The scheduled action cannot be
-/// found") about the name the caller sent.
+/// Amazon Redshift words this fault as a SENTENCE about the action the request
+/// named — `The scheduled action `, the name, ` was not found.` — which is what
+/// the recorded refusals of the operations that name one answer, so the fixed
+/// text is stated once here and the name the caller sent is the only variable
+/// part. The fault itself is the one the model words for exactly this
+/// (`smithy_query(query="shape", shape="ScheduledActionNotFoundFault")` — "The
+/// scheduled action cannot be found"), whose status (400) and awsQuery code
+/// (`ScheduledActionNotFound`) the model fixes.
 pub fn scheduled_action_not_found_message(name: &str) -> String {
-    format!("ScheduledAction not found: {name}")
+    format!("The scheduled action {name} was not found.")
+}
+
+/// The service principal the Amazon Redshift scheduler runs a scheduled action
+/// as.
+///
+/// Source: `smithy_query(query="doc", shape="ScheduledAction",
+/// member="IamRole")` — "This IAM role must allow the Amazon Redshift scheduler
+/// (Principal scheduler.redshift.amazonaws.com) to assume permissions on your
+/// behalf."
+pub const SCHEDULER_SERVICE_PRINCIPAL: &str = "scheduler.redshift.amazonaws.com";
+
+/// Whether IAM ANSWERED that `iam_role` is a role the Amazon Redshift scheduler
+/// cannot run a scheduled action as: this account holds no role under the name
+/// the ARN carries, or the trust policy that role carries does not let the
+/// scheduler assume it.
+///
+/// A scheduled action RUNS AS the role its request names, so whether that role
+/// can be assumed is a precondition of writing the action at all — and it is an
+/// IAM fact, so it is asked of IAM over the in-process hop every service
+/// resolves a caller-supplied role through
+/// (`service_common::iam_role::role_is_unassumable`) rather than decided here.
+///
+/// `false` — do not refuse — for every answer that is not IAM's: a value naming
+/// no role of this account, an answer that could not be read, and an emulator
+/// with no IAM mounted to ask.
+pub async fn scheduler_role_is_invalid(
+    ctx: &smithy_server_runtime::OperationContext<'_>,
+    iam_role: &str,
+) -> bool {
+    ::service_common::iam_role::role_is_unassumable(
+        ctx,
+        &request_region(ctx),
+        iam_role,
+        SCHEDULER_SERVICE_PRINCIPAL,
+    )
+    .await
+}
+
+/// Why a request whose `IamRole` names a role the Amazon Redshift scheduler
+/// cannot assume is refused, naming the role the request sent.
+///
+/// The fixed text states what the member itself requires — "this IAM role must
+/// allow the Amazon Redshift scheduler to assume permissions on your behalf"
+/// (`smithy_query(query="doc", shape="ScheduledAction", member="IamRole")`) — and
+/// the role the request carried is the only variable part. Amazon Redshift
+/// answers it with the code it answers every parameter value it cannot honour
+/// with ([`crate::scaffolded::Scaffolded::invalid_parameter_value`]), since the
+/// model words no fault for an unassumable role.
+pub fn invalid_scheduler_role_message(iam_role: &str) -> String {
+    format!(
+        "The IAM role {iam_role} is not valid. \
+         The IAM role must delegate access to Amazon Redshift scheduler."
+    )
 }
 
 /// A scheduled action as this service stores it: what the create and the modifies

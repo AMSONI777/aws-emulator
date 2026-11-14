@@ -192,12 +192,10 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> PauseCluster<Eng>
         let Some(position) = store.cluster_position(&input.cluster_identifier) else {
             return Err(PauseClusterErrorModeled::ClusterNotFoundFault(
                 ClusterNotFoundFault {
-                    // No recorded refusal gives this operation a sentence of its
-                    // own, so it carries the one every other cluster-scoped
-                    // operation does — see the per-operation catalog
-                    // [`st::ClusterNotFoundWording`].
+                    // This operation's own recorded sentence — see the
+                    // per-operation catalog [`st::ClusterNotFoundWording`].
                     message: Some(st::cluster_not_found_message(
-                        st::ClusterNotFoundWording::IdentifierThenNotFound,
+                        st::ClusterNotFoundWording::IdentifierCannotBeFound,
                         &input.cluster_identifier,
                     )),
                 },

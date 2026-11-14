@@ -14,11 +14,11 @@
 //!
 //! 1. A scheduled action is a RECORD: what a create stores is what a read
 //!    reports and what a modify changes, and a delete leaves nothing to read.
-//! 2. A `Schedule` is judged BEFORE anything else and against the two published
-//!    expression types: an expression of neither type is a parameter value the
-//!    service cannot honour (`InvalidParameterValue`), while one of a published
-//!    type that states no schedule earns the fault the model words for that
-//!    (`InvalidSchedule`).
+//! 2. A `Schedule` is judged against the two published expression types once the
+//!    request's preconditions have been resolved: an expression of neither type
+//!    is a parameter value the service cannot honour (`InvalidParameterValue`),
+//!    while one of a published type that states no schedule earns the fault the
+//!    model words for that (`InvalidSchedule`).
 //! 3. A name this account holds no action under is `ScheduledActionNotFound`
 //!    (400) for every operation that names one.
 
@@ -436,7 +436,9 @@ async fn an_action_this_account_does_not_hold_is_not_found_for_every_operation_n
                 refused.error_code(),
                 refused.body
             );
-            let expected = format!("ScheduledAction not found: {name}");
+            // AWS's own sentence for this fault: `The scheduled action `, the
+            // name the request sent, ` was not found.`
+            let expected = format!("The scheduled action {name} was not found.");
             assert_eq!(
                 refused.text("Message").as_deref(),
                 Some(expected.as_str()),

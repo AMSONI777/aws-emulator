@@ -128,6 +128,11 @@ service-com-amazonaws-dynamodb-dynamodb-20120810 = { workspace = true }
 # and puts the delivery policy on it there, and enables logging here. Another
 # workspace member this repository already locks.
 service-com-amazonaws-s3-amazons3 = { workspace = true }
+# The scheduled-action precondition suite mounts IAM beside Redshift on one
+# engine, because the role a scheduled action runs as is ITS resource: the suite
+# creates the role and its trust policy there, and names it here. Another
+# workspace member this repository already locks.
+service-com-amazonaws-iam-awsidentitymanagementv20100508 = { workspace = true }
 
 [lints]
 workspace = true
