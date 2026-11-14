@@ -1,15 +1,14 @@
 // SPDX-License-Identifier: CC0-1.0
 
 //! @op CreateCustomRoutingListener
-//! SCAFFOLDED, NOT IMPLEMENTED: this operation answers HTTP 501 `NotImplemented` and
-//! asserts NOTHING about `CreateCustomRoutingListener`'s real behaviour. Implement it here — this is
-//! the ONLY file to touch for this operation.
-//!
-//! A 501 from this operation means "nobody has written it yet", never "the emulator is
-//! broken". Replace the `Err(..)` in [`CreateCustomRoutingListener::handle`] with real behaviour and
-//! delete the SCAFFOLDED marker line above; that line is the machine-readable record of
-//! which operations are still stubs (`grep -rl '^//! SCAFFOLDED, NOT IMPLEMENTED:' */src/ops/`),
-//! so leaving it on an implemented operation under-reports progress.
+//! Mints and PERSISTS a listener under its parent CUSTOM ROUTING accelerator in
+//! [`crate::state`]: a `ListenerArn` derived from the parent's ARN and the supplied port
+//! ranges. A `CustomRoutingListener` carries no `Protocol` and no `ClientAffinity` — the
+//! model gives it only those two members. An `AcceleratorArn` that names no custom
+//! routing accelerator is `AcceleratorNotFoundException`; a port range that names no
+//! ports is `InvalidPortRangeException`; a parent already at the documented
+//! per-accelerator listener quota is `LimitExceededException`. Repeating the call with
+//! the same `IdempotencyToken` returns the listener that token already minted.
 //!
 //! ## Shape of an operation
 //!
@@ -156,18 +155,108 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         input: Self::Input,
         ctx: &smithy_server_runtime::OperationContext<'_>,
     ) -> Result<Self::Output, Self::Error> {
-        // The engine is reachable from `&self` (constructor-injected); `ctx` carries
-        // request metadata. Both are bound here so an implementer has them in scope.
-        let _ = (&input, ctx, &self.engine);
-        // Implement `CreateCustomRoutingListener` here, then delete the SCAFFOLDED marker at the top of
-        // this file. Return modeled failures as
-        // `Err(CreateCustomRoutingListenerErrorModeled::Variant(..).into())` — the `From` impl above lifts it.
-        //
-        // To refuse a bad request this operation models no error for, return
-        // `Err(crate::scaffolded::Scaffolded::validation("..."))` — a 400
-        // `ValidationException`. Do NOT answer 501 for it: 501 means "not written yet",
-        // not "bad request". Modeled constraints are already refused BEFORE this
-        // handler runs, so reaching here means the input satisfies every one of them.
-        Err(crate::scaffolded::Scaffolded::not_implemented("CreateCustomRoutingListener"))
+        // `ctx` carries request metadata only; this operation needs none of it.
+        let _ = ctx;
+        let Some(state) = crate::state::service_state(&*self.engine) else {
+            return Err(
+                CreateCustomRoutingListenerErrorModeled::InternalServiceErrorException(
+                    InternalServiceErrorException {
+                        message: Some("the Global Accelerator store is unavailable".to_string()),
+                    },
+                )
+                .into(),
+            );
+        };
+
+        // Every supplied range must name at least one port before anything is written.
+        let mut port_ranges = Vec::with_capacity(input.port_ranges.len());
+        for range in &input.port_ranges {
+            match crate::state::validate_port_range(range) {
+                Ok(pair) => port_ranges.push(pair),
+                Err(message) => {
+                    return Err(
+                        CreateCustomRoutingListenerErrorModeled::InvalidPortRangeException(
+                            InvalidPortRangeException {
+                                message: Some(message),
+                            },
+                        )
+                        .into(),
+                    )
+                }
+            }
+        }
+
+        let mut store = state.lock();
+
+        // A custom routing listener hangs off a custom routing accelerator: a standard
+        // accelerator's ARN names no parent for this create.
+        if !store
+            .custom_routing_accelerators
+            .contains_key(&input.accelerator_arn)
+        {
+            return Err(
+                CreateCustomRoutingListenerErrorModeled::AcceleratorNotFoundException(
+                    AcceleratorNotFoundException {
+                        message: Some(crate::state::create_parent_accelerator_not_found_message()),
+                    },
+                )
+                .into(),
+            );
+        }
+
+        let token_key = crate::state::custom_routing_listener_idempotency_key(
+            &input.accelerator_arn,
+            &input.idempotency_token,
+        );
+        // A replay returns the listener the token already minted, as on `CreateListener`:
+        // the replayed request's other members are not compared with the stored record.
+        if let Some(minted) = store.idempotency.get(&token_key) {
+            if let Some(existing) = store.custom_routing_listeners.get(minted) {
+                return Ok(CreateCustomRoutingListenerOutput {
+                    listener: Some(existing.to_wire()),
+                });
+            }
+        }
+
+        // The per-accelerator quota bounds this store, the same way it bounds the
+        // standard listeners; stale idempotency records are released first.
+        store.prune_idempotency();
+        let attached = store
+            .custom_routing_accelerators
+            .get(&input.accelerator_arn)
+            .map_or(0, |parent| parent.listener_arns.len());
+        if attached >= crate::state::MAX_LISTENERS_PER_ACCELERATOR {
+            return Err(
+                CreateCustomRoutingListenerErrorModeled::LimitExceededException(
+                    LimitExceededException {
+                        message: Some(crate::state::listener_quota_exceeded_message()),
+                    },
+                )
+                .into(),
+            );
+        }
+
+        let uuid = store.mint_uuid();
+        let arn = crate::state::mint_listener_arn(&input.accelerator_arn, &uuid);
+        let record = crate::state::StoredCustomRoutingListener {
+            arn: arn.clone(),
+            accelerator_arn: input.accelerator_arn.clone(),
+            port_ranges,
+            endpoint_group_arns: Vec::new(),
+        };
+        let listener = record.to_wire();
+
+        if let Some(parent) = store
+            .custom_routing_accelerators
+            .get_mut(&input.accelerator_arn)
+        {
+            parent.listener_arns.push(arn.clone());
+        }
+        store.idempotency.insert(token_key, arn.clone());
+        store.custom_routing_listeners.insert(arn, record);
+
+        Ok(CreateCustomRoutingListenerOutput {
+            listener: Some(listener),
+        })
     }
 }

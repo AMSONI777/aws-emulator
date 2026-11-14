@@ -223,10 +223,7 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         if attached >= crate::state::MAX_LISTENERS_PER_ACCELERATOR {
             return Err(CreateListenerErrorModeled::LimitExceededException(
                 LimitExceededException {
-                    message: Some(format!(
-                        "the accelerator already holds the maximum of {} listeners",
-                        crate::state::MAX_LISTENERS_PER_ACCELERATOR
-                    )),
+                    message: Some(crate::state::listener_quota_exceeded_message()),
                 },
             )
             .into());

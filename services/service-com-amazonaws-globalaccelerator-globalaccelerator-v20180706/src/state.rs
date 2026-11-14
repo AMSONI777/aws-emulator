@@ -18,9 +18,9 @@ use std::net::{Ipv4Addr, Ipv6Addr};
 use std::time::{Duration, SystemTime};
 
 use crate::ops::types::{
-    Accelerator, AcceleratorAttributes, CustomRoutingAccelerator, EndpointConfiguration,
-    EndpointDescription, EndpointGroup, IpAddressDetail, IpSet, Listener, PortOverride, PortRange,
-    Tag,
+    Accelerator, AcceleratorAttributes, CustomRoutingAccelerator, CustomRoutingListener,
+    EndpointConfiguration, EndpointDescription, EndpointGroup, IpAddressDetail, IpSet, Listener,
+    PortOverride, PortRange, Tag,
 };
 
 /// `AcceleratorStatus` values, from the model enum of the same name
@@ -387,6 +387,44 @@ impl StoredListener {
     }
 }
 
+/// A custom routing accelerator's listener, as persisted.
+///
+/// Held apart from [`StoredListener`] for the reason [`StoredAccelerator`] gives about
+/// the two accelerator kinds: a `CustomRoutingListener` carries only an ARN and port
+/// ranges — it has no `Protocol` and no `ClientAffinity`, because the protocol and the
+/// routing of a custom routing listener are properties of its endpoints — and it is
+/// reached only through the custom routing operations.
+#[derive(Debug, Clone)]
+pub struct StoredCustomRoutingListener {
+    /// `ListenerArn` — also this record's key in
+    /// [`GlobalAcceleratorState::custom_routing_listeners`].
+    pub arn: String,
+    /// The ARN of the custom routing accelerator this listener belongs to.
+    pub accelerator_arn: String,
+    /// `PortRanges`, as inclusive `(FromPort, ToPort)` pairs.
+    pub port_ranges: Vec<(i32, i32)>,
+    /// The ARNs of this listener's custom routing endpoint groups, in creation order.
+    pub endpoint_group_arns: Vec<String>,
+}
+
+impl StoredCustomRoutingListener {
+    /// This record as the modelled `CustomRoutingListener`.
+    pub fn to_wire(&self) -> CustomRoutingListener {
+        CustomRoutingListener {
+            listener_arn: Some(self.arn.clone()),
+            port_ranges: Some(
+                self.port_ranges
+                    .iter()
+                    .map(|&(from, to)| PortRange {
+                        from_port: Some(from),
+                        to_port: Some(to),
+                    })
+                    .collect(),
+            ),
+        }
+    }
+}
+
 /// One endpoint of an endpoint group, as persisted.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct StoredEndpoint {
@@ -541,6 +579,11 @@ pub struct ComAmazonawsGlobalacceleratorGlobalacceleratorV20180706State {
     /// Listeners by `ListenerArn`; the parent's `listener_arns` holds the
     /// per-accelerator order.
     pub listeners: BTreeMap<String, StoredListener>,
+    /// Custom routing listeners by `ListenerArn`, held apart from the standard ones for
+    /// the reason [`StoredCustomRoutingListener`] gives: each kind is reached only
+    /// through its own operations. The parent custom routing accelerator's
+    /// `listener_arns` holds the per-accelerator order.
+    pub custom_routing_listeners: BTreeMap<String, StoredCustomRoutingListener>,
     /// Endpoint groups by `EndpointGroupArn`; the parent listener's
     /// `endpoint_group_arns` holds the per-listener order.
     pub endpoint_groups: BTreeMap<String, StoredEndpointGroup>,
@@ -630,6 +673,7 @@ impl ComAmazonawsGlobalacceleratorGlobalacceleratorV20180706State {
             accelerators,
             custom_routing_accelerators,
             listeners,
+            custom_routing_listeners,
             endpoint_groups,
             idempotency,
             ..
@@ -638,6 +682,7 @@ impl ComAmazonawsGlobalacceleratorGlobalacceleratorV20180706State {
             accelerators.contains_key(minted)
                 || custom_routing_accelerators.contains_key(minted)
                 || listeners.contains_key(minted)
+                || custom_routing_listeners.contains_key(minted)
                 || endpoint_groups.contains_key(minted)
         });
         debug_assert!(idempotency.len() <= MAX_IDEMPOTENCY_RECORDS);
@@ -694,6 +739,16 @@ pub fn custom_routing_accelerator_idempotency_key(token: &str) -> String {
 /// not replay a listener that hangs off another accelerator.
 pub fn listener_idempotency_key(accelerator_arn: &str, token: &str) -> String {
     format!("listener:{accelerator_arn}:{token}")
+}
+
+/// An `IdempotencyToken` key for `CreateCustomRoutingListener`.
+///
+/// Scoped by the PARENT accelerator like [`listener_idempotency_key`], but under its OWN
+/// kind, for the reason [`custom_routing_accelerator_idempotency_key`] gives: the same
+/// token sent to the standard listener create is a different request against a different
+/// resource kind, so neither may replay the other's listener.
+pub fn custom_routing_listener_idempotency_key(accelerator_arn: &str, token: &str) -> String {
+    format!("custom-routing-listener:{accelerator_arn}:{token}")
 }
 
 /// An `IdempotencyToken` key for `CreateEndpointGroup`.
@@ -1058,6 +1113,19 @@ pub fn validate_static_ipv4_addresses(addresses: &[String]) -> Result<(), String
 /// into the sentence.
 pub fn accelerator_quota_exceeded_message() -> String {
     format!("the account already holds the maximum of {MAX_ACCELERATORS_PER_ACCOUNT} accelerators")
+}
+
+/// The message a listener create states when its parent accelerator already holds the
+/// documented per-accelerator quota.
+///
+/// One place for the wording so both listener creates state the quota they refused
+/// against alike, with the limit interpolated from the constant rather than written into
+/// the sentence — the same rule as [`accelerator_quota_exceeded_message`], one level
+/// down.
+pub fn listener_quota_exceeded_message() -> String {
+    format!(
+        "the accelerator already holds the maximum of {MAX_LISTENERS_PER_ACCELERATOR} listeners"
+    )
 }
 
 /// The message for a refusal that names an accelerator the store does not hold.
