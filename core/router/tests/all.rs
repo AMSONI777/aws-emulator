@@ -2778,3 +2778,11 @@ mod iam_session_tag_authorization;
 // Declared here, in this head region, for the reason those entries record: the appended tail
 // at the end of this file and the `e…` span are where every suite landing in the same window
 // `c…`/`s…` spans are regions concurrently landing suites add their line to.
+// Declared here, beside the other CloudFormation/Lambda suites, rather than in the appended
+// tail every concurrently landing router suite adds its line to.
+#[path = "all/cloudformation_provisions_lambda_event_invoke_configs.rs"]
+mod cloudformation_provisions_lambda_event_invoke_configs;
+// (The suite below is declared ONCE, at the head of this file beside the other API Gateway
+// suites: which app client's token a COGNITO_USER_POOLS authorizer admits spans Amazon
+// Cognito user pools and API Gateway's execute-api data plane. It was appended here as well
+// while two branches were landing at once, which declared it twice and compiled neither.)
