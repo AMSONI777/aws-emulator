@@ -137,6 +137,8 @@ mod participant_replication_stop;
 mod participant_token_form;
 #[path = "all/participants.rs"]
 mod participants;
+#[path = "all/pattern_requirement_quoting.rs"]
+mod pattern_requirement_quoting;
 #[path = "all/public_keys.rs"]
 mod public_keys;
 #[path = "all/redundant_ingest_toggle.rs"]

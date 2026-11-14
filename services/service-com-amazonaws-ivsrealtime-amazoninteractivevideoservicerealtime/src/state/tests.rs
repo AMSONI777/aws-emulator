@@ -51,7 +51,31 @@ fn a_violation_clause_names_the_operation_and_the_member() {
                  found 0.0",
         ),
         (
-            "a pattern",
+            "a pattern pinning both of its ends, as this model's ARN shapes do",
+            Violation {
+                path: "stageArn".to_string(),
+                kind: ViolationKind::Pattern(
+                    "^arn:aws:ivs:[a-z0-9-]+:[0-9]+:stage/[a-zA-Z0-9-]+$".to_string(),
+                ),
+                value: Some("nope".to_string()),
+                sensitive: false,
+            },
+            "CreateParticipantToken.stageArn does not match the required pattern \
+                 ^arn:aws:ivs:[a-z0-9-]+:[0-9]+:stage/[a-zA-Z0-9-]+$",
+        ),
+        (
+            "a pattern pinning neither end",
+            Violation {
+                path: "publicKeyMaterial".to_string(),
+                kind: ViolationKind::Pattern("-----BEGIN PUBLIC KEY-----".to_string()),
+                value: Some("nope".to_string()),
+                sensitive: false,
+            },
+            "CreateParticipantToken.publicKeyMaterial does not match the required \
+                 pattern ^.*-----BEGIN PUBLIC KEY-----.*$",
+        ),
+        (
+            "a pattern pinning only the end it opens with",
             Violation {
                 path: "stageArn".to_string(),
                 kind: ViolationKind::Pattern("^arn:aws:ivs:".to_string()),
@@ -59,7 +83,7 @@ fn a_violation_clause_names_the_operation_and_the_member() {
                 sensitive: false,
             },
             "CreateParticipantToken.stageArn does not match the required pattern \
-                 ^arn:aws:ivs:",
+                 ^arn:aws:ivs:.*$",
         ),
         (
             "a minimum length",
@@ -80,6 +104,79 @@ fn a_violation_clause_names_the_operation_and_the_member() {
     ];
     for (case, violation, expected) in cases {
         let actual = violation_clause("CreateParticipantToken", &violation);
+        assert_eq!(
+            actual, expected,
+            "case {case:?}: expected {expected:?}, got {actual:?}"
+        );
+    }
+}
+
+/// A `@pattern` clause quotes the expression the WHOLE value has to match: an expression
+/// that pins an end keeps that anchor and nothing is added at it, and an end the
+/// expression leaves open is spelled with the run it admits and then anchored.
+///
+/// The rows differ along what the rule generalises over: which ends the declared
+/// expression pins, whether an open end already carries the run, whether a trailing `$`
+/// is an anchor or an escaped dollar, and whether the expression anchors its own branches
+/// instead of its ends. Each model expression named below comes from
+/// `smithy_query(query="shape", shape="<shape>")`.
+#[test]
+fn a_pattern_requirement_is_quoted_as_the_whole_value_expression() {
+    // (case, the modelled expression, the expression the clause quotes)
+    let cases = [
+        (
+            "PublicKeyMaterial, which pins neither end",
+            r"-----BEGIN PUBLIC KEY-----\r?\n([a-zA-Z0-9+/=\r\n]+)\r?\n-----END PUBLIC KEY-----(\r?\n)?",
+            r"^.*-----BEGIN PUBLIC KEY-----\r?\n([a-zA-Z0-9+/=\r\n]+)\r?\n-----END PUBLIC KEY-----(\r?\n)?.*$",
+        ),
+        (
+            "PublicKeyName, which pins both ends",
+            "^[a-zA-Z0-9-_]*$",
+            "^[a-zA-Z0-9-_]*$",
+        ),
+        (
+            "StageArn, which pins both ends",
+            "^arn:aws:ivs:[a-z0-9-]+:[0-9]+:stage/[a-zA-Z0-9-]+$",
+            "^arn:aws:ivs:[a-z0-9-]+:[0-9]+:stage/[a-zA-Z0-9-]+$",
+        ),
+        (
+            "an expression pinning only its open end",
+            "^arn:aws:ivs:",
+            "^arn:aws:ivs:.*$",
+        ),
+        (
+            "an expression pinning only its closing end",
+            "[a-z]+/key$",
+            "^.*[a-z]+/key$",
+        ),
+        (
+            "an open end that already carries the run",
+            r".*\S.*",
+            r"^.*\S.*$",
+        ),
+        (
+            "an expression closing with an escaped dollar",
+            r"[0-9]+\$",
+            r"^.*[0-9]+\$.*$",
+        ),
+        (
+            "an expression closing with an escaped dot repeated",
+            r"key\.*",
+            r"^.*key\.*.*$",
+        ),
+        (
+            "an alternation anchoring its own branches rather than its ends",
+            "(^stage$)|(^public-key$)",
+            "(^stage$)|(^public-key$)",
+        ),
+        (
+            "a character class holding the anchor characters",
+            "[$^]+",
+            "^.*[$^]+.*$",
+        ),
+    ];
+    for (case, modelled, expected) in cases {
+        let actual = required_pattern(modelled);
         assert_eq!(
             actual, expected,
             "case {case:?}: expected {expected:?}, got {actual:?}"

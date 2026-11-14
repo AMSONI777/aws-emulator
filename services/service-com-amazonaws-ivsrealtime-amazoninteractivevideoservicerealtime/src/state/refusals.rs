@@ -549,6 +549,84 @@ pub(super) fn as_decimal(value: &str) -> String {
     }
 }
 
+/// The unconstrained run an expression spells for an end a `@pattern` leaves OPEN.
+const ANY_RUN: &str = ".*";
+
+/// The expression a `@pattern` clause of this service QUOTES: the regex the whole value
+/// has to match, with both of its ends pinned.
+///
+/// A Smithy `@pattern` is a partial match — a value satisfies it when the expression is
+/// found ANYWHERE in it — so the expression a member declares and the expression its whole
+/// value must satisfy are two different texts, and the recordings show this service
+/// quoting the second: a member whose declared expression pins neither end is refused
+/// against that expression wrapped in the run each open end admits and the anchors that
+/// make the quoted form total, while a member whose expression already pins both ends —
+/// every name and ARN shape of this model — is quoted exactly as the model declares it,
+/// since there the two texts are the same.
+///
+/// The two ends are read INDEPENDENTLY, because a model may pin one and leave the other
+/// open: an end the model anchors keeps its own anchor and nothing is added at it, and an
+/// end it leaves open is spelled with [`ANY_RUN`] (unless the expression already opens or
+/// closes with that run) and then anchored. A `$` that is ESCAPED is a literal dollar
+/// rather than an anchor, and an expression that pins neither end while pinning both ends
+/// of each of its own top-level branches — the one fact every rendering of an expression
+/// turns on, so it is asked of [`service_common::validation::anchors_its_own_ends`] rather
+/// than restated here — already describes the whole value, so it is quoted as declared.
+///
+/// One form is outside what this model declares and so outside what this states: an
+/// expression that pins ONE end and alternates at its top level, where the run spelled at
+/// the open end belongs to the branch at that end alone. No `@pattern` of this service
+/// takes that form — each either pins both ends or alternates with its branches pinned.
+///
+/// The CHECK is always the model's expression as written, run by the framework's own
+/// constraint walk; only this quoting of it is the service's.
+pub fn required_pattern(pattern: &str) -> String {
+    let (body, anchored_at_start, anchored_at_end) = split_outer_anchors(pattern);
+    if !anchored_at_start
+        && !anchored_at_end
+        && service_common::validation::anchors_its_own_ends(pattern)
+    {
+        return pattern.to_string();
+    }
+    let mut stated = String::with_capacity(pattern.len() + 2 * (ANY_RUN.len() + 1));
+    stated.push('^');
+    if !anchored_at_start && !body.starts_with(ANY_RUN) {
+        stated.push_str(ANY_RUN);
+    }
+    stated.push_str(body);
+    if !anchored_at_end && !closes_with_any_run(body) {
+        stated.push_str(ANY_RUN);
+    }
+    stated.push('$');
+    stated
+}
+
+/// `pattern` without the anchors at its two ends, and whether each end carried one. The
+/// two ends are read independently, and a `$` preceded by an escape is a literal dollar.
+fn split_outer_anchors(pattern: &str) -> (&str, bool, bool) {
+    let (body, anchored_at_start) = match pattern.strip_prefix('^') {
+        Some(rest) => (rest, true),
+        None => (pattern, false),
+    };
+    match body.strip_suffix('$') {
+        Some(inner) if !ends_with_escape(inner) => (inner, anchored_at_start, true),
+        _ => (body, anchored_at_start, false),
+    }
+}
+
+/// Whether `expression` ends in an odd run of backslashes, i.e. whether the character
+/// AFTER it would be escaped.
+fn ends_with_escape(expression: &str) -> bool {
+    expression.chars().rev().take_while(|c| *c == '\\').count() % 2 == 1
+}
+
+/// Whether `body` already CLOSES with the unconstrained run, so no second one is spelled
+/// at that end. A trailing `\.*` is an escaped dot repeated rather than that run.
+fn closes_with_any_run(body: &str) -> bool {
+    body.strip_suffix(ANY_RUN)
+        .is_some_and(|before| !ends_with_escape(before))
+}
+
 /// One violation as this service states it: the operation, the dotted member path and
 /// the constraint the request violated.
 ///
@@ -571,7 +649,10 @@ pub fn violation_clause(operation: &str, violation: &Violation) -> String {
             as_decimal(found),
         ),
         ViolationKind::Pattern(pattern) => {
-            format!("{operation}.{path} does not match the required pattern {pattern}")
+            format!(
+                "{operation}.{path} does not match the required pattern {}",
+                required_pattern(pattern),
+            )
         }
         ViolationKind::MinLength(minimum) => format!(
             "{operation}.{path} is required to have a minimum length of {minimum}, found {}",
