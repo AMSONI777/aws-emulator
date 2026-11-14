@@ -37,10 +37,13 @@
 //!   not in it;
 //! * how the topology was WIRED — a group, a filter and an invoke permission a client put
 //!   through each service's own API, and the same three DECLARED by a CloudFormation stack,
-//!   which is how an infrastructure-as-code client builds this pipeline.
+//!   which is how an infrastructure-as-code client builds this pipeline. The DECLARED pipeline
+//!   is carried in both pattern shapes as well, one stack-declared filter selecting the whole
+//!   batch and another selecting part of it, because the pattern a template states is a
+//!   property the stack has to carry through to the filter it puts.
 //!
 //! The destination function itself always comes from that one stack, because a template is what
-//! archives inline source into a deployment package this emulator can run, and the stack-wired
+//! archives inline source into a deployment package this emulator can run, and each stack-wired
 //! row's group, permission and filter are declared beside it — one deployment, the shape the
 //! recorded topology has.
 //!
@@ -130,12 +133,16 @@ def handler(event, context):
     return {"framedBytes": len(frame)}
 "#;
 
-/// The logical ids the ONE stack below declares, which the suite reads its published values
-/// and its provisioned filter back by.
+/// The logical id the ONE stack below declares the destination function under, which the suite
+/// reads its published ARN back by.
 const DESTINATION_ID: &str = "Destination";
-const GROUP_ID: &str = "Group";
-const PERMISSION_ID: &str = "InvokePermission";
-const FILTER_ID: &str = "Filter";
+
+/// What the logical id of each child the stack declares for a stack-wired row ends in: the
+/// stack carries one group, one invoke permission and one filter PER such row, so each row's
+/// children are named for the row itself ([`Row::logical_prefix`]) followed by one of these.
+const GROUP_SUFFIX: &str = "Group";
+const PERMISSION_SUFFIX: &str = "InvokePermission";
+const FILTER_SUFFIX: &str = "Filter";
 
 /// How a row's log group, subscription filter and invoke permission came to exist.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -221,6 +228,26 @@ const ROWS: &[Row] = &[
             },
         ],
     },
+    Row {
+        case: "a stack-declared filter whose term pattern selects part of a three-event batch",
+        name: "deployed-selective",
+        pattern: "FORWARDED",
+        wired_by: WiredBy::Stack,
+        batch: &[
+            Written {
+                message: "FORWARDED deployed-selective first event",
+                selected: true,
+            },
+            Written {
+                message: "withheld deployed-selective second event",
+                selected: false,
+            },
+            Written {
+                message: "FORWARDED deployed-selective third event",
+                selected: true,
+            },
+        ],
+    },
 ];
 
 impl Row {
@@ -242,6 +269,29 @@ impl Row {
     /// The statement id the invoke permission for this row's group is added under.
     fn statement_id(&self) -> String {
         format!("{}-logs-invoke", self.name)
+    }
+
+    /// What the logical ids of this row's stack-declared children begin with. A logical id is
+    /// alphanumeric, so the row's own name travels with its separators dropped.
+    fn logical_prefix(&self) -> String {
+        self.name
+            .chars()
+            .filter(char::is_ascii_alphanumeric)
+            .collect()
+    }
+
+    /// The logical ids the stack declares this row's log group, invoke permission and
+    /// subscription filter under.
+    fn group_id(&self) -> String {
+        format!("{}{GROUP_SUFFIX}", self.logical_prefix())
+    }
+
+    fn permission_id(&self) -> String {
+        format!("{}{PERMISSION_SUFFIX}", self.logical_prefix())
+    }
+
+    fn filter_id(&self) -> String {
+        format!("{}{FILTER_SUFFIX}", self.logical_prefix())
     }
 
     /// The messages this row's `filterPattern` selects, in the order they were written —
@@ -474,37 +524,44 @@ async fn add_permission(router: &MultiServiceRouter, case: &str, row: &Row, acco
 
 /// The ONE stack this suite deploys, which is the recorded topology: the destination function
 /// (a template is what archives inline source into a deployment package this emulator can
-/// run), and — for the row that is wired this way — the log group, the invoke permission for it
+/// run), and — for each row that is wired this way — the log group, the invoke permission for it
 /// and the subscription filter that depends on that permission, exactly as an
 /// infrastructure-as-code client declares the pipeline. The permission and the filter reach the
 /// function through `Fn::GetAtt`, so each is created after the function the stack itself made.
 ///
 /// The two client-wired rows take the function ARN the stack publishes and put their own group,
 /// permission and filter through each service's own API.
-fn topology_template(row: &Row, role_arn: &str, account: &str) -> String {
+fn topology_template(rows: &[&Row], role_arn: &str, account: &str) -> String {
     let function_arn = json!({ "Fn::GetAtt": [DESTINATION_ID, "Arn"] });
-    json!({
-        "AWSTemplateFormatVersion": "2010-09-09",
-        "Resources": {
-            DESTINATION_ID: {
-                "Type": "AWS::Lambda::Function",
-                "Properties": {
-                    "FunctionName": FUNCTION,
-                    "Role": role_arn,
-                    "Runtime": "python3.12",
-                    "Handler": "index.handler",
-                    "Timeout": FUNCTION_TIMEOUT,
-                    "Code": { "ZipFile": HANDLER_SOURCE },
-                },
+    let mut resources = serde_json::Map::new();
+    resources.insert(
+        DESTINATION_ID.to_string(),
+        json!({
+            "Type": "AWS::Lambda::Function",
+            "Properties": {
+                "FunctionName": FUNCTION,
+                "Role": role_arn,
+                "Runtime": "python3.12",
+                "Handler": "index.handler",
+                "Timeout": FUNCTION_TIMEOUT,
+                "Code": { "ZipFile": HANDLER_SOURCE },
             },
-            GROUP_ID: {
+        }),
+    );
+    for row in rows {
+        resources.insert(
+            row.group_id(),
+            json!({
                 "Type": "AWS::Logs::LogGroup",
                 "Properties": {
                     "LogGroupName": row.group(),
                     "RetentionInDays": 1,
                 },
-            },
-            PERMISSION_ID: {
+            }),
+        );
+        resources.insert(
+            row.permission_id(),
+            json!({
                 "Type": "AWS::Lambda::Permission",
                 "Properties": {
                     "FunctionName": function_arn,
@@ -513,18 +570,25 @@ fn topology_template(row: &Row, role_arn: &str, account: &str) -> String {
                     "SourceArn": group_arn(account, &row.group()),
                     "SourceAccount": account,
                 },
-            },
-            FILTER_ID: {
+            }),
+        );
+        resources.insert(
+            row.filter_id(),
+            json!({
                 "Type": "AWS::Logs::SubscriptionFilter",
-                "DependsOn": [GROUP_ID, PERMISSION_ID],
+                "DependsOn": [row.group_id(), row.permission_id()],
                 "Properties": {
                     "LogGroupName": row.group(),
                     "FilterName": row.filter(),
                     "FilterPattern": row.pattern,
                     "DestinationArn": function_arn,
                 },
-            },
-        },
+            }),
+        );
+    }
+    json!({
+        "AWSTemplateFormatVersion": "2010-09-09",
+        "Resources": Value::Object(resources),
         "Outputs": {
             "FunctionArn": { "Value": function_arn },
         },
@@ -536,15 +600,15 @@ fn topology_template(row: &Row, role_arn: &str, account: &str) -> String {
 /// invocable.
 async fn deploy_topology(
     router: &MultiServiceRouter,
-    row: &Row,
+    rows: &[&Row],
     role_arn: &str,
     account: &str,
 ) -> String {
     let stack = "logs-subscription-to-lambda";
-    let template = topology_template(row, role_arn, account);
+    let template = topology_template(rows, role_arn, account);
     cloudformation(
         router,
-        row.case,
+        rows[0].case,
         "CreateStack",
         &[("StackName", stack), ("TemplateBody", &template)],
     )
@@ -680,13 +744,17 @@ async fn a_subscription_filters_lambda_destination_is_handed_the_events_it_selec
     )
     .await;
 
-    // The ONE stack: the destination function, and the group, permission and filter of the row
+    // The ONE stack: the destination function, and the group, permission and filter of every row
     // whose topology is DECLARED rather than put through each service's own API.
-    let stack_row = ROWS
+    let stack_rows: Vec<&Row> = ROWS
         .iter()
-        .find(|row| row.wired_by == WiredBy::Stack)
-        .expect("the table carries a stack-wired row");
-    let function_arn = deploy_topology(&router, stack_row, &role_arn, account).await;
+        .filter(|row| row.wired_by == WiredBy::Stack)
+        .collect();
+    assert!(
+        !stack_rows.is_empty(),
+        "the table carries at least one stack-wired row"
+    );
+    let function_arn = deploy_topology(&router, &stack_rows, &role_arn, account).await;
 
     // Every row's log group, invoke permission and subscription filter — wired the way the row
     // says — and then the row's own log stream, which is what its batch is written to.
