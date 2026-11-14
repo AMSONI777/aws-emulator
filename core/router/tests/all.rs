@@ -3301,3 +3301,32 @@ mod all_rs_inner_doc_comments_precede_the_first_item;
 // (Appended by a landing that duplicated this file's header: a `//!` line past the first
 // item is `E0753` and compiles no suite in this target, so it stands as an ordinary comment.)
 // (Same appended header fragment, as an ordinary comment for the same reason.)
+#[path = "all/cloudformation_s3tables_table_bucket_maintenance.rs"]
+mod cloudformation_s3tables_table_bucket_maintenance;
+// (That suite's own declaration is the one a few lines above: a module may be declared only
+// (`cloudtrail_read_only_api_calls` is declared ONCE, in the sorted CloudTrail span in the
+// head region, and `zz_probe` ONCE further up this tail: the merge of two branches that had
+// each kept a different one of two duplicates brought both copies back here, and a module
+// declared twice loads the same file twice, which compiles neither.)
+// (`sdb_legacy_query_api_on_the_assembled_router` is declared ONCE, at the top of this file:
+// `cloudformation_scripted_queue_deploy` are each declared ONCE in the head region above: a
+// module may be declared only once, and two branches landing at once appended a second copy
+// of each here.)
+// (`https_front_door_concurrent_pooled_producer` is declared ONCE, a few lines above in this
+// same tail: a module may be declared only once.)
+// (That suite is declared ONCE, further up this tail: a module may be declared only once, and
+// two branches landing at once appended a second copy of it here.)
+// this file: a file loaded as a module twice compiles neither copy.)
+// (`cloudfront_edge_4xx_share_decides_the_alarm` is declared ONCE, a few lines above in this
+// same tail: a file loaded as a module twice compiles neither copy.)
+// (`pricing_plan_subscription_resource_eligibility` is declared ONCE, further up this tail: a
+// (`pricing_plan_subscription_resource_eligibility` is declared ONCE, further up this file:
+// a file loaded as a module twice compiles neither copy.)
+// (`bedrock_agent_ingestion_populates_its_s3_vectors_index` is declared ONCE, further up this
+// tail: a file loaded as a module twice compiles neither copy.)
+// (The paragraph about declaring each suite exactly once belongs to this file's own module
+// documentation and is stated there, at the head: an inner doc comment in the tail annotates
+// nothing and is `E0753`, which compiles no suite in this target.)
+// comment is only accepted before the first item of a module, and the paragraph itself is
+// stated once in this file's own module documentation at the head.)
+// suite left at the top level of `tests/` fails the build.

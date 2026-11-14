@@ -679,7 +679,11 @@ fn reported_properties(described: &Value, members: &[(&str, &str)]) -> Value {
 /// A declared number in either spelling a template gives one: JSON's own, or the text a
 /// template resolves a parameter reference to. An integral value is carried as an integer, so
 /// a member modelled as one is not handed a fractional rendering of it.
-fn declared_number(value: &Value) -> Option<Value> {
+///
+/// Visible to [`super`]'s other per-type arms: a numeric member of ANY owning API's request is
+/// read out of a declaration the same way, so the rule is written once
+/// ([`super::s3_table_buckets`] reads a maintenance day count with it).
+pub(super) fn declared_number(value: &Value) -> Option<Value> {
     match value {
         Value::Number(_) => Some(value.clone()),
         Value::String(text) => {

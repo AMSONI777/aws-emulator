@@ -30,16 +30,66 @@ pub(super) const S3TABLES_NOT_FOUND: &str = "NotFoundException";
 
 /// Every property `AWS::S3Tables::TableBucket` publishes that this arm carries to Amazon S3
 /// Tables: the bucket's name, which is `CreateTableBucket`'s own `name` member, the
-/// encryption settings that call's `encryptionConfiguration` takes, and the tag list its
-/// `tags` map takes.
+/// encryption settings that call's `encryptionConfiguration` takes, the tag list its `tags`
+/// map takes, and the unreferenced-file-removal maintenance settings, which are no member of
+/// that create at all but a `PutTableBucketMaintenanceConfiguration` of their own
+/// ([`put_unreferenced_file_removal`]).
 ///
-/// A declaration naming anything else — the `UnreferencedFileRemoval` maintenance settings
-/// among them, which are no member of that create but a
-/// `PutTableBucketMaintenanceConfiguration` of their own — is REFUSED
-/// ([`refuse_unmapped_properties`]) rather than deployed with the property dropped, so a
-/// stack never reports a table bucket configured differently from its declaration.
-pub(super) const S3TABLES_TABLE_BUCKET_PROPERTIES: &[&str] =
-    &["TableBucketName", "EncryptionConfiguration", "Tags"];
+/// A declaration naming anything else is REFUSED ([`refuse_unmapped_properties`]) rather than
+/// deployed with the property dropped, so a stack never reports a table bucket configured
+/// differently from its declaration.
+pub(super) const S3TABLES_TABLE_BUCKET_PROPERTIES: &[&str] = &[
+    "TableBucketName",
+    "EncryptionConfiguration",
+    "Tags",
+    S3TABLES_UNREFERENCED_FILE_REMOVAL,
+];
+
+/// The property `AWS::S3Tables::TableBucket` publishes a table bucket's unreferenced-file
+/// removal settings under, which is the one property of the type that reaches Amazon S3
+/// Tables through a call of its OWN rather than through the create's members.
+pub(super) const S3TABLES_UNREFERENCED_FILE_REMOVAL: &str = "UnreferencedFileRemoval";
+
+/// The maintenance TASK those settings configure, as `TableBucketMaintenanceType` spells its
+/// one value — the `{type}` label of `PutTableBucketMaintenanceConfiguration`'s URI
+/// (`PUT /buckets/{tableBucketARN}/maintenance/{type}`) and the key the read answers the
+/// task's configuration under.
+const S3TABLES_UNREFERENCED_FILE_REMOVAL_TYPE: &str = "icebergUnreferencedFileRemoval";
+
+/// The segment that put's URI carries between the bucket and the task.
+const S3TABLES_MAINTENANCE_SEGMENT: &str = "maintenance";
+
+/// The operation that call is, as Amazon S3 Tables' own model names it.
+const S3TABLES_PUT_MAINTENANCE_CONFIGURATION: &str = "PutTableBucketMaintenanceConfiguration";
+
+/// The two day counts of that property against the members
+/// `IcebergUnreferencedFileRemovalSettings` spells them with: CloudFormation publishes
+/// `UnreferencedDays` and `NoncurrentDays`, while that structure's own members are
+/// `unreferencedDays` and `nonCurrentDays`
+/// (`smithy_query(query="shape", shape="IcebergUnreferencedFileRemovalSettings")` on that
+/// service's model).
+const S3TABLES_UNREFERENCED_FILE_REMOVAL_DAYS: &[(&str, &str)] = &[
+    ("UnreferencedDays", "unreferencedDays"),
+    ("NoncurrentDays", "nonCurrentDays"),
+];
+
+/// The property that declaration states the task's switch as, and the member
+/// `TableBucketMaintenanceConfigurationValue` takes it as, beside the member that structure's
+/// settings travel in.
+const S3TABLES_MAINTENANCE_STATUS: &str = "Status";
+const S3TABLES_MAINTENANCE_STATUS_MEMBER: &str = "status";
+const S3TABLES_MAINTENANCE_SETTINGS_MEMBER: &str = "settings";
+
+/// The member that put takes the whole configuration as (`value`, `@required`).
+const S3TABLES_MAINTENANCE_VALUE_MEMBER: &str = "value";
+
+/// The values `MaintenanceStatus` takes on the wire, from that model's own enum
+/// (`smithy_query(query="shape", shape="MaintenanceStatus")`: `enabled`, `disabled`).
+///
+/// `AWS::S3Tables::TableBucket` publishes the same switch with the upper-case initial
+/// CloudFormation spells an enum value with, so a declared status is carried as the value the
+/// OWNING model names ([`maintenance_status`]).
+const S3TABLES_MAINTENANCE_STATUS_VALUES: &[&str] = &["enabled", "disabled"];
 
 /// The members of an `AWS::S3Tables::TableBucket`'s `EncryptionConfiguration` as
 /// `CreateTableBucket` spells them: that type publishes the algorithm and the key with the
@@ -68,6 +118,11 @@ pub(super) const S3TABLES_ENCRYPTION_MEMBERS: &[(&str, &str)] = &[
 /// the ones CloudFormation gives the resource ([`tags_of`]), as the MAP that request takes,
 /// so `s3tables ListTagsForResource` on the ARN the stack publishes answers with the
 /// stack's own tags.
+///
+/// The one property that create takes no member for is the `UnreferencedFileRemoval`
+/// maintenance block, which S3 Tables writes through a put of its own
+/// ([`put_unreferenced_file_removal`]) — made right after the create, so the bucket a
+/// completed stack publishes runs the unreferenced file removal its declaration asked for.
 pub(super) async fn create_table_bucket(
     ctx: &smithy_server_runtime::OperationContext<'_>,
     region: &str,
@@ -108,12 +163,166 @@ pub(super) async fn create_table_bucket(
             code: "InternalFailure".to_string(),
             message: "Amazon S3 Tables answered CreateTableBucket without an arn".to_string(),
         })?;
+    if let Some(declared) = resource.properties.get(S3TABLES_UNREFERENCED_FILE_REMOVAL) {
+        put_unreferenced_file_removal(ctx, region, arn, declared).await?;
+    }
     let mut attributes = BTreeMap::new();
     attributes.insert(
         S3TABLES_TABLE_BUCKET_ARN_ATTRIBUTE.to_string(),
         arn.to_string(),
     );
     Ok(Created::attributes(attributes))
+}
+
+/// Apply a CHANGED `AWS::S3Tables::TableBucket` declaration to the table bucket the stack
+/// already has, through the one call Amazon S3 Tables publishes for a property of a bucket
+/// that exists.
+///
+/// `PutTableBucketMaintenanceConfiguration` "creates a new maintenance configuration or
+/// replaces an existing maintenance configuration for a table bucket", so a changed
+/// `UnreferencedFileRemoval` — another status, another day count — is applied to the bucket
+/// the stack created rather than replacing it: the resource keeps the ARN that is its physical
+/// id and the bucket keeps everything it holds.
+///
+/// The bucket's NAME is its identity, which a change to replaces the resource before this is
+/// reached. A declaration that states any OTHER property differently, or that drops the
+/// maintenance block S3 Tables publishes no call to remove, is reported as a change that was
+/// NOT applied rather than as a success that dropped it.
+pub(super) async fn update_table_bucket(
+    ctx: &smithy_server_runtime::OperationContext<'_>,
+    region: &str,
+    resource: &StoredResource,
+    declared: &Value,
+) -> Result<Option<Created>, Refusal> {
+    if table_bucket_fixed_properties(&resource.properties)
+        != table_bucket_fixed_properties(declared)
+    {
+        return Ok(None);
+    }
+    let held = resource.properties.get(S3TABLES_UNREFERENCED_FILE_REMOVAL);
+    let now = declared.get(S3TABLES_UNREFERENCED_FILE_REMOVAL);
+    if held == now {
+        return Ok(Some(Created::default()));
+    }
+    let Some(now) = now else {
+        return Ok(None);
+    };
+    put_unreferenced_file_removal(ctx, region, &resource.physical_resource_id, now).await?;
+    Ok(Some(Created::default()))
+}
+
+/// One table bucket declaration less the property a call of its own carries: the half of it no
+/// Amazon S3 Tables call can change on a bucket that already exists, so a declaration that
+/// states one of these differently is reported as not applied.
+fn table_bucket_fixed_properties(properties: &Value) -> Map<String, Value> {
+    match properties {
+        Value::Object(object) => object
+            .iter()
+            .filter(|(property, _)| property.as_str() != S3TABLES_UNREFERENCED_FILE_REMOVAL)
+            .map(|(property, value)| (property.clone(), value.clone()))
+            .collect(),
+        _ => Map::new(),
+    }
+}
+
+/// Write the unreferenced-file-removal maintenance configuration a declaration states onto the
+/// table bucket of `table_bucket_arn`, through the put Amazon S3 Tables publishes for it.
+///
+/// That one call "creates a new maintenance configuration or replaces an existing maintenance
+/// configuration for a table bucket", so it is this property's path at CREATE and at UPDATE
+/// alike — and the configuration a later `GetTableBucketMaintenanceConfiguration` reports for
+/// the task is exactly what the declaration asked for.
+async fn put_unreferenced_file_removal(
+    ctx: &smithy_server_runtime::OperationContext<'_>,
+    region: &str,
+    table_bucket_arn: &str,
+    declared: &Value,
+) -> Result<(), Refusal> {
+    let value = unreferenced_file_removal_value(declared)?;
+    let uri = format!(
+        "{}/{S3TABLES_MAINTENANCE_SEGMENT}/{S3TABLES_UNREFERENCED_FILE_REMOVAL_TYPE}",
+        table_bucket_uri(table_bucket_arn)
+    );
+    call_rest_json_named(
+        ctx,
+        S3TABLES_SIGNING_NAME,
+        region,
+        S3TABLES_PUT_MAINTENANCE_CONFIGURATION,
+        "PUT",
+        &uri,
+        Some(&serde_json::json!({ S3TABLES_MAINTENANCE_VALUE_MEMBER: value })),
+    )
+    .await
+    .map(|_answered| ())
+}
+
+/// The `TableBucketMaintenanceConfigurationValue` an `UnreferencedFileRemoval` declaration
+/// states: the task's `status`, and its `settings` — the `TableBucketMaintenanceSettings`
+/// union, whose one member is the task itself and carries the two day counts the declaration
+/// spells with an upper-case initial.
+///
+/// A member the declaration leaves out is not sent, so the task runs it under the setting S3
+/// Tables itself decides; a declaration that is no structure at all states no configuration
+/// this property can carry and is refused rather than deployed as an empty one.
+fn unreferenced_file_removal_value(declared: &Value) -> Result<Value, Refusal> {
+    let Some(members) = declared.as_object() else {
+        return Err(Refusal {
+            code: "ValidationException".to_string(),
+            message: format!(
+                "the {property} property of {resource_type} states a {status}, an {unreferenced} \
+                 and a {non_current}",
+                property = S3TABLES_UNREFERENCED_FILE_REMOVAL,
+                resource_type = S3TABLES_TABLE_BUCKET,
+                status = S3TABLES_MAINTENANCE_STATUS,
+                unreferenced = S3TABLES_UNREFERENCED_FILE_REMOVAL_DAYS[0].0,
+                non_current = S3TABLES_UNREFERENCED_FILE_REMOVAL_DAYS[1].0,
+            ),
+        });
+    };
+    let mut settings = Map::new();
+    for (property, member) in S3TABLES_UNREFERENCED_FILE_REMOVAL_DAYS {
+        if let Some(days) = members.get(*property) {
+            // Each day count is an INTEGER member of that settings structure, so a template
+            // that states one as the text a parameter reference resolves to carries the number
+            // itself; a value that is no number travels as written, and that service's own
+            // refusal of it is what the stack reports.
+            settings.insert(
+                (*member).to_string(),
+                declared_number(days).unwrap_or_else(|| days.clone()),
+            );
+        }
+    }
+    let mut value = Map::new();
+    if let Some(status) = members.get(S3TABLES_MAINTENANCE_STATUS) {
+        value.insert(
+            S3TABLES_MAINTENANCE_STATUS_MEMBER.to_string(),
+            Value::String(maintenance_status(&attribute_text(status))),
+        );
+    }
+    if !settings.is_empty() {
+        value.insert(
+            S3TABLES_MAINTENANCE_SETTINGS_MEMBER.to_string(),
+            serde_json::json!({
+                S3TABLES_UNREFERENCED_FILE_REMOVAL_TYPE: Value::Object(settings),
+            }),
+        );
+    }
+    Ok(Value::Object(value))
+}
+
+/// A declared maintenance status as the OWNING service's model spells it: that enum's values
+/// and the ones `AWS::S3Tables::TableBucket` publishes differ in their CASE alone (`Enabled`
+/// against `enabled`), so a declaration naming one of them is carried as the value the model
+/// names ([`S3TABLES_MAINTENANCE_STATUS_VALUES`]).
+///
+/// A declaration naming anything else travels as written rather than as a value invented here,
+/// so what the stack reports is Amazon S3 Tables' own refusal of the status the template really
+/// asked for.
+fn maintenance_status(declared: &str) -> String {
+    S3TABLES_MAINTENANCE_STATUS_VALUES
+        .iter()
+        .find(|value| value.eq_ignore_ascii_case(declared))
+        .map_or_else(|| declared.to_string(), |value| (*value).to_string())
 }
 
 /// Delete the table bucket a stack created, addressed by its ARN — this resource's physical

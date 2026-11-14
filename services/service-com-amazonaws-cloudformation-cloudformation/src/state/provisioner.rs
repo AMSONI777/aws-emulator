@@ -2591,6 +2591,14 @@ impl Provisioner {
             // bucket", replacing the one the bucket carries, so the call that attached the
             // policy is the call that applies a changed declaration to it.
             Self::S3BucketPolicy => set_bucket_policy(ctx, region, declared).await.map(Some),
+            // `PutTableBucketMaintenanceConfiguration` "creates a new maintenance
+            // configuration or replaces an existing maintenance configuration for a table
+            // bucket", so a changed `UnreferencedFileRemoval` is applied to the table bucket
+            // the stack created — which keeps the ARN that is its physical id and everything
+            // it holds — rather than replacing it ([`update_table_bucket`]).
+            Self::S3TablesTableBucket => {
+                update_table_bucket(ctx, region, resource, declared).await
+            }
             // Amazon EC2 Auto Scaling's own `UpdateAutoScalingGroup` is the call that
             // "updates the configuration for the specified Auto Scaling group", so a changed
             // declaration reaches the group through it — under the name the group was created

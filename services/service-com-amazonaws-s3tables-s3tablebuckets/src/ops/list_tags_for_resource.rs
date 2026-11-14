@@ -1,15 +1,6 @@
 // SPDX-License-Identifier: CC0-1.0
 
 //! @op ListTagsForResource
-//! SCAFFOLDED, NOT IMPLEMENTED: this operation answers HTTP 501 `NotImplemented` and
-//! asserts NOTHING about `ListTagsForResource`'s real behaviour. Implement it here — this is
-//! the ONLY file to touch for this operation.
-//!
-//! A 501 from this operation means "nobody has written it yet", never "the emulator is
-//! broken". Replace the `Err(..)` in [`ListTagsForResource::handle`] with real behaviour and
-//! delete the SCAFFOLDED marker line above; that line is the machine-readable record of
-//! which operations are still stubs (`grep -rl '^//! SCAFFOLDED, NOT IMPLEMENTED:' */src/ops/`),
-//! so leaving it on an implemented operation under-reports progress.
 //!
 //! ## Shape of an operation
 //!
@@ -121,6 +112,26 @@ impl From<ListTagsForResourceErrorModeled> for ListTagsForResourceError {
     }
 }
 
+/// The segment a TABLE's ARN carries after the ARN of the bucket that holds it
+/// ([`crate::state::table_arn`]: the bucket's ARN, then `/table/<table id>`), which
+/// is what tells the two resource kinds `ResourceArn` admits apart — "the tagged
+/// resource can be a table bucket or a table".
+const TABLE_ARN_SEGMENT: &str = "/table/";
+
+/// `NotFoundException` (HTTP 404) — the store holds no resource at the ARN the
+/// request addresses, stated as the class of resource that ARN names.
+fn no_such_resource(resource_arn: &str) -> ListTagsForResourceError {
+    let message = if resource_arn.contains(TABLE_ARN_SEGMENT) {
+        crate::state::TABLE_NOT_FOUND_MESSAGE
+    } else {
+        crate::state::BUCKET_NOT_FOUND_MESSAGE
+    };
+    ListTagsForResourceErrorModeled::NotFoundException(NotFoundException {
+        message: Some(message.to_string()),
+    })
+    .into()
+}
+
 /// The `ListTagsForResource` operation.
 ///
 /// Owns the shared engine (the constructor seam) and implements
@@ -157,18 +168,38 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         input: Self::Input,
         ctx: &smithy_server_runtime::OperationContext<'_>,
     ) -> Result<Self::Output, Self::Error> {
-        // The engine is reachable from `&self` (constructor-injected); `ctx` carries
-        // request metadata. Both are bound here so an implementer has them in scope.
-        let _ = (&input, ctx, &self.engine);
-        // Implement `ListTagsForResource` here, then delete the SCAFFOLDED marker at the top of
-        // this file. Return modeled failures as
-        // `Err(ListTagsForResourceErrorModeled::Variant(..).into())` — the `From` impl above lifts it.
-        //
-        // To refuse a bad request this operation models no error for, return
-        // `Err(crate::scaffolded::Scaffolded::validation("..."))` — a 400
-        // `ValidationException`. Do NOT answer 501 for it: 501 means "not written yet",
-        // not "bad request". Modeled constraints are already refused BEFORE this
-        // handler runs, so reaching here means the input satisfies every one of them.
-        Err(crate::scaffolded::Scaffolded::not_implemented("ListTagsForResource"))
+        let _ = ctx;
+        let state = crate::state::service_state(&*self.engine).ok_or_else(|| {
+            ListTagsForResourceErrorModeled::InternalServerErrorException(
+                InternalServerErrorException {
+                    message: Some("the S3 Tables table bucket store is unavailable".to_string()),
+                },
+            )
+        })?;
+
+        // A pure read: the tag set it answers with is the one the addressed
+        // resource's own record carries, and nothing in the store is touched.
+        let store = state.lock();
+        let tags = store
+            .table_buckets
+            .get(&input.resource_arn)
+            .map(|bucket| bucket.tags.clone())
+            // "The tagged resource can be a table bucket or a table", and a
+            // table is addressed by its own ARN, which nests inside its
+            // bucket's — so an ARN no bucket is held under is resolved through
+            // the table index before the resource is reported absent.
+            .or_else(|| {
+                store
+                    .table_by_arn(&input.resource_arn)
+                    .map(|table| table.tags.clone())
+            })
+            .ok_or_else(|| no_such_resource(&input.resource_arn))?;
+
+        // The member is the resource's whole tag set, which is EMPTY for a
+        // resource nothing ever tagged rather than absent: the resource exists
+        // and carries no tags, which is what an empty map says.
+        Ok(ListTagsForResourceOutput {
+            tags: Some(tags.into_iter().collect()),
+        })
     }
 }

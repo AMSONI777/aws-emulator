@@ -476,6 +476,14 @@ impl Emulator {
         .await
     }
 
+    /// `ListTagsForResource`: the resource's ARN is the one path label
+    /// (`GET /tag/{resourceArn}`), and the resource it names may be a table
+    /// bucket or a table.
+    pub async fn list_tags_for_resource(&self, region: &str, resource_arn: &str) -> Reply {
+        self.call("GET", &format!("/tag/{}", encode(resource_arn)), region, None)
+            .await
+    }
+
     pub async fn list_table_buckets(&self, region: &str, query: &[(&str, String)]) -> Reply {
         self.call("GET", &format!("/buckets{}", query_string(query)), region, None)
             .await
