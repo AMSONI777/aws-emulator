@@ -117,7 +117,10 @@ fn serial_of(certificate: &Certificate) -> String {
 ///
 /// Issuance completes on the clock, so the suite looks again until the certificate is there
 /// rather than waiting a span of its own.
-async fn poll_for_certificate(
+///
+/// `pub(crate)` so a sibling suite that has to let an issuance complete before it reads what
+/// the CA has done polls through THIS helper rather than growing a second copy of it.
+pub(crate) async fn poll_for_certificate(
     emulator: &Emulator,
     case: &str,
     ca_arn: &str,

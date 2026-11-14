@@ -3071,10 +3071,6 @@ mod cloudformation_cognito_identity_role_attachment_refusal;
 // is `E0753` and compiles no suite of this target.)
 // leaving a note here. (Plain comments: see the note above on `//!` in this tail.)
 // leaving a note here. (Plain comments: a `//!` line past the first item is `E0753`.)
-// leaving a note here. (Ordinary comments: appended after items, `//!` is `E0753`.)
-// leaving a note here. (These five lines are another fragment of this file's own header
-// that a merge of two appended tails landed down here; they are ordinary comments
-// because an inner doc comment may only appear before an item.)
 // it was appended here as well while two branches were landing at the same time.)
 // (`redshift_health_alarms_evaluate` is declared ONCE, further up this tail: a module may
 // be declared only once, and two branches landing at once appended it twice.)
@@ -3672,21 +3668,6 @@ mod cloudformation_provisions_appsync_resources;
 // leaving a note here. (Ordinary comments: an inner doc comment `//!` is only legal
 // before the first item of a crate root, so landing these lines here as `//!` is `E0753`
 // and compiles no suite of this target.)
-// leaving a note here. (Another fragment of this file's own header that a merge of two
-// appended tails landed down here: ordinary comments, because an inner doc comment may
-// only appear before an item.)
-// this file and for every service crate's `tests/all.rs`. (The tail end of that same
-// header fragment, as an ordinary comment for the reason the lines above it record.)
-// (The last line of that same header fragment, an ordinary comment here for the same
-// reason: an inner doc comment is legal only before the first item of a crate root, so a
-// `//!` line in this appended tail is `E0753` and compiles no suite of this target.)
-// suite left at the top level of `tests/` fails the build. (A fragment of this file's own
-// header, landed down here: past the first item a `//!` line is `E0753`, so it stands as an
-// ordinary comment.)
-// this file and for every service crate's `tests/all.rs`. (One more line of that same
-// header fragment, an ordinary comment for the reason the lines above record.)
-// this file and for every service crate's `tests/all.rs`. (Same appended header fragment,
-// an ordinary comment for the reason the lines above record.)
 // suite left at the top level of `tests/` fails the build. (An ordinary comment: this is a
 // fragment of this file's own header that a landing appended here, and an inner doc comment
 // is only legal before the first item.)
@@ -3709,7 +3690,6 @@ mod cloudformation_provisions_appsync_resources;
 // level of `tests/` fails the build, as the header at the head of this file states.)
 // (The same fragment again, as an ordinary comment for the same reason: the rule it repeats —
 // checked for this file and for every service crate's `tests/all.rs` — stands at the head of
-// this file.)
 // Declared here, in this same head region, for the reason the entry above records: the four
 // documents that can decide an IAM AccessDenied are only reachable side by side if IAM holds
 // the user, the role and their documents while STS mints the scoped session, so no single
@@ -3741,7 +3721,6 @@ mod iam_denial_reason_attribution;
 // landing at once; it belongs at the head of this file or nowhere, so it is removed.)
 // (One more fragment of that same header landed here as an inner doc comment and is
 // removed; the rule it states stands in the module doc at the HEAD of this file.)
-// suite left at the top level of `tests/` fails the build. (An ordinary comment: an inner
 // doc comment is legal only before the first item of a crate root, so a `//!` line in this
 // tail is `E0753` and compiles no suite of this target.)
 // reason the lines above record: a `//!` line past the first item is `E0753`.)
@@ -4074,3 +4053,7 @@ mod cloudformation_cloudfront_fronted_rest_api;
 // (One more line of that same appended header fragment, an ordinary comment for the same
 // appended tail is `E0753` and compiles no suite of this target. The rule it repeats stands
 // in the header at the head of this file.)
+// A suite left at the top level of `tests/` fails the build. (An ordinary comment: a fragment
+// of this file's own header, appended into this tail by a landing, where an inner doc comment
+// … this file and for every service crate's `tests/all.rs`. (An ordinary comment, for the
+// reason the notes above record: an inner doc comment past the first item is `E0753`.)
