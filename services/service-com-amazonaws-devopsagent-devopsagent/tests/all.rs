@@ -25,6 +25,8 @@ mod asset_file_listing;
 mod asset_file_updates;
 #[path = "all/asset_files.rs"]
 mod asset_files;
+#[path = "all/asset_identifier_form.rs"]
+mod asset_identifier_form;
 #[path = "all/asset_metadata_and_deletion.rs"]
 mod asset_metadata_and_deletion;
 #[path = "all/asset_versions.rs"]

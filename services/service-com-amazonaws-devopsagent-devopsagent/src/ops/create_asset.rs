@@ -233,7 +233,7 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
             .into());
         }
 
-        let asset_id = store.mint_id(ASSET_ID_PREFIX);
+        let asset_id = store.mint_asset_id();
         let record = crate::state::AssetRecord {
             asset_id: asset_id.clone(),
             agent_space_id: input.agent_space_id.clone(),
@@ -278,10 +278,6 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         })
     }
 }
-
-/// The prefix every minted `assetId` carries. Alphanumeric, so the minted id
-/// satisfies `ResourceId`'s `^[a-zA-Z0-9_.-]+$`.
-const ASSET_ID_PREFIX: &str = "asset";
 
 /// The scope one `CreateAsset` idempotency-token record belongs to: this operation
 /// in one agent space, because the asset it names lives in that space and is

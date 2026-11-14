@@ -12,6 +12,8 @@
 use std::collections::{BTreeMap, HashMap};
 use std::time::{Duration, SystemTime};
 
+use sha2::{Digest, Sha256};
+
 use crate::ops::types::{
     AgentSpace, Asset, AssetFile, AssetFileBody, AssetFileSummary, AssetVersionMetadata,
     IamAuthConfiguration, IdcAuthConfiguration, IdpAuthConfiguration, Recommendation,
@@ -1379,38 +1381,150 @@ pub struct ComAmazonawsDevopsagentDevopsagentState {
     /// `@idempotent` create replays its first result. Entries expire after
     /// [`CLIENT_TOKEN_TTL`] and the map is capped at [`MAX_CLIENT_TOKENS`].
     pub client_tokens: HashMap<String, ClientTokenRecord>,
-    /// Source of minted resource ids; monotonic, so no id is ever reused.
-    pub next_id: u64,
+    /// Source of minted resource ids: one monotonic sequence per KIND of resource,
+    /// keyed by the prefix that names the kind, so what numbers one kind's ids
+    /// never counts another's. Monotonic within a kind, so no id is handed out
+    /// twice.
+    pub next_ids: BTreeMap<String, u64>,
+    /// Source of this store's asset identifiers; see [`AssetIdentifierMint`].
+    pub asset_ids: AssetIdentifierMint,
+}
+
+/// Where an `assetId` comes from.
+///
+/// The asset plane names an asset by an opaque identifier of its own, so an asset
+/// identifier is drawn HERE rather than from the store's cross-resource sequence:
+/// what names one resource must not carry how many resources of other kinds were
+/// created before it, or the whole store's creation order can be read off any one
+/// identifier.
+pub struct AssetIdentifierMint {
+    /// Tells the identifiers of one store from another's, so an identifier is not
+    /// the ordinal of the call that asked for it. Drawn once per mint from entropy
+    /// this process did not choose.
+    namespace: u64,
+    /// How many identifiers this mint has handed out. Never reused, which is what
+    /// makes every identifier of one store different from every other.
+    minted: u64,
+}
+
+/// Renders nothing of the mint's draw: what it holds is of no interest to a reader
+/// of the store, and an identifier is reported through the asset that carries it.
+impl ::std::fmt::Debug for AssetIdentifierMint {
+    fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
+        f.debug_struct("AssetIdentifierMint").finish_non_exhaustive()
+    }
+}
+
+/// A mint with a fresh namespace and nothing handed out yet.
+impl Default for AssetIdentifierMint {
+    fn default() -> Self {
+        Self {
+            namespace: system_entropy(),
+            minted: 0,
+        }
+    }
+}
+
+impl AssetIdentifierMint {
+    /// The next asset identifier: the canonical hyphenated lowercase UUID text, over
+    /// 16 bytes of this mint's own.
+    ///
+    /// The model pins no form for `Asset$assetId` beyond `ResourceId`
+    /// (`^[a-zA-Z0-9_.-]+$`, 1..128), and what it promises is "the unique identifier
+    /// for this asset", so what is minted here is an OPAQUE identifier in the one
+    /// form this service already names its other per-resource identifiers in (a
+    /// goal's and a recommendation's, behind their plane's prefix) — and nothing
+    /// else: no prefix of this emulator's own invention, and no counter.
+    ///
+    /// The bytes are the SHA-256 of a context of its own, this mint's namespace and
+    /// this draw's never-reused number, so the identifier is unique per draw (the
+    /// number), is not the ordinal of the call that asked for it nor a function of
+    /// anything else the store holds (the namespace, inside the digest), and carries
+    /// nothing the request supplied. The UUID LAYOUT — its version and variant bits
+    /// and its `8-4-4-4-12` groups — comes from
+    /// [`::service_common::uuid_from_random_bytes`], this tree's one rendering of 16
+    /// opaque bytes, so it is not spelled out here.
+    fn next(&mut self) -> String {
+        self.minted += 1;
+        let mut digest = Sha256::new();
+        digest.update(ASSET_IDENTIFIER_CONTEXT.as_bytes());
+        digest.update(self.namespace.to_be_bytes());
+        digest.update(self.minted.to_be_bytes());
+        let digest = digest.finalize();
+        let mut bytes = [0u8; ASSET_ID_BYTES];
+        bytes.copy_from_slice(&digest[..ASSET_ID_BYTES]);
+        ::service_common::uuid_from_random_bytes(bytes)
+    }
+}
+
+/// What an asset identifier's digest is taken over, so a draw of this mint cannot
+/// coincide with a value some other digest of the same namespace and number produces.
+const ASSET_IDENTIFIER_CONTEXT: &str = "devopsagent/asset-identifier";
+
+/// The bytes an asset identifier is rendered from: a UUID's own width.
+const ASSET_ID_BYTES: usize = 16;
+
+/// The characters a minted `assetId` carries: the canonical UUID text's
+/// `8-4-4-4-12` hexadecimal digits and its four hyphens. Inside `ResourceId`'s
+/// published 1..128 bound, and its `^[a-zA-Z0-9_.-]+$` charset, by construction.
+pub const ASSET_ID_LEN: usize = 36;
+
+/// 64 bits of entropy this process did not choose, telling one
+/// [`AssetIdentifierMint`] apart from another.
+///
+/// `std::collections::hash_map::RandomState::new` "is initialized with random keys"
+/// (its own documentation) — the system seeds them — and a fresh one per call carries
+/// fresh keys, so what it yields cannot be derived from a request or from an earlier
+/// draw. EMULATOR-GRADE by design: it only keeps minted identifiers from reading as a
+/// counter, it is never a key, a secret or a signature, and the UNIQUENESS of a minted
+/// identifier comes from the mint's own never-reused number rather than from here.
+fn system_entropy() -> u64 {
+    use std::collections::hash_map::RandomState;
+    use std::hash::{BuildHasher, Hasher};
+    RandomState::new().build_hasher().finish()
 }
 
 impl ComAmazonawsDevopsagentDevopsagentState {
-    /// The next value of the store's monotonic id sequence.
+    /// The next value of the sequence that numbers the resources of `kind`.
     ///
-    /// The one place that advances it, so every minted id — whatever form it takes
-    /// — comes out of the same sequence and no value is handed out twice.
-    fn next_sequence(&mut self) -> u64 {
-        self.next_id += 1;
-        self.next_id
+    /// The one place that advances one, so every minted id — whatever form it
+    /// takes — comes out of its own kind's sequence and no value of that kind is
+    /// handed out twice. A kind's sequence counts nothing but that kind, so one
+    /// resource's id carries no count of the resources of any other.
+    fn next_sequence(&mut self, kind: &str) -> u64 {
+        let next = self.next_ids.entry(kind.to_string()).or_insert(0);
+        *next += 1;
+        *next
     }
 
     /// Mint a fresh resource id of the form `<prefix>-<hex sequence>`.
     ///
-    /// The sequence is monotonic within this emulator, so an id is never handed
-    /// out twice. `prefix` must be alphanumeric so the result satisfies both
-    /// `AgentSpaceId` (`^[a-zA-Z0-9-]{1,64}$`) and `ResourceId`
-    /// (`^[a-zA-Z0-9_.-]+$`, max 128).
+    /// The sequence is the one belonging to `prefix`, monotonic within this
+    /// emulator, so an id is never handed out twice. `prefix` must be alphanumeric
+    /// so the result satisfies both `AgentSpaceId` (`^[a-zA-Z0-9-]{1,64}$`) and
+    /// `ResourceId` (`^[a-zA-Z0-9_.-]+$`, max 128).
     pub fn mint_id(&mut self, prefix: &str) -> String {
-        format!("{prefix}-{:016x}", self.next_sequence())
+        format!("{prefix}-{:016x}", self.next_sequence(prefix))
+    }
+
+    /// Mint a fresh `assetId`: the opaque per-asset identifier the asset plane
+    /// issues, from this store's own [`AssetIdentifierMint`] rather than from the
+    /// sequences that number the control plane's resources.
+    pub fn mint_asset_id(&mut self) -> String {
+        self.asset_ids.next()
     }
 
     /// Mint a fresh Trigger identifier.
     ///
     /// A Trigger is the schedule of a goal, so the identifier is a goal
-    /// identifier: [`GOAL_ID_PREFIX`] and a UUID minted from the store's own
+    /// identifier: [`GOAL_ID_PREFIX`] and a UUID minted from the goal plane's own
     /// monotonic sequence, so it satisfies [`is_goal_id`] by construction and no
     /// two mints agree.
     pub fn mint_trigger_id(&mut self) -> String {
-        format!("{GOAL_ID_PREFIX}{}", goal_uuid(self.next_sequence()))
+        format!(
+            "{GOAL_ID_PREFIX}{}",
+            goal_uuid(self.next_sequence(GOAL_ID_PREFIX))
+        )
     }
 
     /// The id a previous `@idempotent` create recorded for `client_token`, when

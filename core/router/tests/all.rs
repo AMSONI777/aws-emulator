@@ -4142,3 +4142,10 @@ mod lambda_in_function_cloudwatch_authorization;
 // `E0753` and compiles nothing. `all/all_rs_declares_each_suite_once.rs` and
 // `all/all_rs_inner_doc_comments_precede_the_first_item.rs` check both halves of that for
 // leaving a note in the tail.
+// (`sfn_relayed_dynamodb_request_id` is declared ONCE, on the line above: two landings in
+// (`autoscaling_plans_policies_reach_application_auto_scaling` is declared ONCE, in the
+// head region above: two landings in the same window each appended a declaration here.)
+// this file and for every service crate's `tests/all.rs`, and
+// `all/all_rs_inner_doc_comments_precede_the_first_item.rs` checks that a note like this
+// one stays in the header: an inner doc comment past the first item is `E0753`, so the
+// same note appended to the tail of this file would compile no suite of this target.
