@@ -68,6 +68,14 @@ pub(crate) const IAM_API_VERSION: &str = "2010-05-08";
 /// machines `AWS::StepFunctions::StateMachine` names.
 pub(crate) const SFN_SIGNING_NAME: &str = "states";
 
+/// The sigv4 signing name of the Systems Manager service, whose own store holds the
+/// parameters `AWS::SSM::Parameter` names.
+pub(crate) const SSM_SIGNING_NAME: &str = "ssm";
+
+/// The `X-Amz-Target` prefix a client writes for that service: the local name of its
+/// Smithy service shape.
+pub(crate) const SSM_TARGET_PREFIX: &str = "AmazonSSM";
+
 /// The `X-Amz-Target` prefix a client writes for that service: the local name of its
 /// Smithy service shape.
 pub(crate) const SFN_TARGET_PREFIX: &str = "AWSStepFunctions";
@@ -276,6 +284,38 @@ impl Emulator {
         Self::mounted(|router, engine| {
             router.register_service(service_com_amazonaws_s3_amazons3::EmulatedService::new(engine));
         })
+    }
+
+    /// One emulator with the service that OWNS `AWS::SSM::Parameter` mounted beside this
+    /// one.
+    pub(crate) fn with_ssm() -> Self {
+        Self::mounted(|router, engine| {
+            router.register_service(
+                service_com_amazonaws_ssm_amazonssm::EmulatedService::new(engine),
+            );
+        })
+    }
+
+    /// One operation of the Systems Manager service — the OWNING service's own API, the one
+    /// a client uses when it is not going through Cloud Control API.
+    pub(crate) async fn ssm(&self, operation: &str, body: Value) -> (u16, Value) {
+        self.post(
+            SSM_SIGNING_NAME,
+            "application/x-amz-json-1.1",
+            &format!("{SSM_TARGET_PREFIX}.{operation}"),
+            body,
+        )
+        .await
+    }
+
+    /// One operation of the Systems Manager service, required to succeed.
+    pub(crate) async fn ssm_ok(&self, operation: &str, body: Value) -> Value {
+        let (status, decoded) = self.ssm(operation, body).await;
+        assert_eq!(
+            status, 200,
+            "{operation}: expected HTTP 200, got {status} with body {decoded:?}"
+        );
+        decoded
     }
 
     /// One operation of this service, as a `(status, body)` pair.

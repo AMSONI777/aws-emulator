@@ -29,6 +29,9 @@ service-com-amazonaws-iam-awsidentitymanagementv20100508 = { workspace = true }
 # And for `AWS::StepFunctions::StateMachine`: a state machine lives in the Step Functions
 # service's store, which is also where the ARN its primary identifier is comes from.
 service-com-amazonaws-sfn-awsstepfunctions = { workspace = true }
+# And for `AWS::SSM::Parameter`: a parameter lives in the Systems Manager service's store,
+# whichever API created it, so this crate reads and writes it THERE.
+service-com-amazonaws-ssm-amazonssm = { workspace = true }
 engine = { workspace = true }
 smithy-macros = { workspace = true }
 aws-smithy-schema = { workspace = true }

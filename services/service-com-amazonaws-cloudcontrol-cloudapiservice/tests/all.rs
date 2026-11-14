@@ -45,6 +45,8 @@ mod s3_bucket_provisioning;
 mod sns_topic_read_through;
 #[path = "all/sqs_queue_read_through.rs"]
 mod sqs_queue_read_through;
+#[path = "all/ssm_parameter_read_through.rs"]
+mod ssm_parameter_read_through;
 #[path = "all/state_roundtrip.rs"]
 mod state_roundtrip;
 #[path = "all/unsupported_actions.rs"]

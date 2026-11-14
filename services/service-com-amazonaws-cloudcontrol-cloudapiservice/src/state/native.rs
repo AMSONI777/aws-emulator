@@ -37,6 +37,7 @@ mod buckets;
 mod destinations;
 mod log_groups;
 mod managed_policies;
+mod parameters;
 mod queues;
 mod state_machines;
 mod topics;
@@ -207,6 +208,9 @@ impl NativeResources {
         if let Some(provider) = state_machines::StateMachineProvider::for_engine(engine) {
             providers.push(Box::new(provider));
         }
+        if let Some(provider) = parameters::ParameterProvider::for_engine(engine) {
+            providers.push(Box::new(provider));
+        }
         Self { providers }
     }
 
@@ -264,6 +268,12 @@ pub type IamState =
 /// `states:StartExecution` then accept under the ARN reported as its primary identifier.
 pub type SfnState =
     ::service_com_amazonaws_sfn_awsstepfunctions::state::ComAmazonawsSfnAwsstepfunctionsState;
+
+/// The Systems Manager store the resources of the `AWS::SSM::Parameter` type live in — that
+/// service's OWN state struct, reached through the shared engine, so a parameter
+/// `ssm:PutParameter` wrote is the parameter Cloud Control API resolves, and one
+/// `ssm:DeleteParameter` removed is one it reports as not found.
+pub type SsmState = ::service_com_amazonaws_ssm_amazonssm::ComAmazonawsSsmAmazonssmState;
 
 /// The window `(after, limit)` names of an owning store keyed by its resources' own
 /// identifiers: the entries whose key sorts AFTER `after`, in key order, at most `limit`
@@ -466,6 +476,10 @@ mod tests {
                 .provider("AWS::StepFunctions::StateMachine")
                 .is_some(),
             "expected the state machine provider, got {native:?}"
+        );
+        assert!(
+            native.provider("AWS::SSM::Parameter").is_some(),
+            "expected the parameter provider, got {native:?}"
         );
         for unbacked in ["AWS::Kinesis::Stream", "AWS::DynamoDB::Table", "AWS::Logs"] {
             assert!(

@@ -470,7 +470,7 @@ async fn a_patch_of_a_create_only_property_is_refused_with_the_schema_pointer() 
         (
             "a type whose identifier property is the bare Name",
             PARAMETER,
-            json!({ "Name": "create-only-parameter", "Type": "String" }),
+            json!({ "Name": "create-only-parameter", "Type": "String", "Value": "v" }),
             "Name",
         ),
         (
