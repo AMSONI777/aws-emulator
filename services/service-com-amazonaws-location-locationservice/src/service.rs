@@ -110,16 +110,14 @@ impl<Eng: Send + Sync + 'static> Service for EmulatedService<Eng> {
 
     fn override_refusal(&self, refusal: &Refusal) -> Option<Refused> {
         // The centralized walk calls this on a framework-level refusal (an absent
-        // required member, or a value outside a declared bound) to let this
-        // service reword it. Returning `None` keeps the framework's default
-        // wording. To state a refusal the way the emulated service states it,
-        // replace this body with a `match refusal { .. }` that returns
-        // `Some(Refused { code, message })` for the cases you reword and `None`
-        // for the rest. Replace BOTH the code and the message: a client branches
-        // on the code, so a message without its matching code is worse than
-        // leaving both alone.
-        let _ = refusal;
-        None
+        // required member, or a value outside a declared bound). This service
+        // states a value outside a member's declared PATTERN as one sentence about
+        // that member, the same form it words a refusal about a member whose value
+        // has to come from a documented set, so that refusal is reworded here —
+        // code and message together, since a client branches on the code. Every
+        // other refusal keeps the framework's own wording: see
+        // [`crate::state::refused_constraint`].
+        crate::state::refused_constraint(refusal)
     }
 
     fn override_routing_error(

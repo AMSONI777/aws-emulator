@@ -38,6 +38,19 @@ pub use map_styles::{
     PROVIDER_GRAB, PROVIDER_HERE, PROVIDER_OPEN_DATA,
 };
 
+/// How this service words a request the framework refused at the boundary, kept
+/// beside this module because it words the same kind of sentence as the refusals
+/// the handlers raise themselves.
+mod constraint_refusals;
+pub use constraint_refusals::{
+    modelled_member_name, pattern_refusal, refused_constraint, VALIDATION_EXCEPTION_CODE,
+};
+
+/// The sprite sheet a map resource publishes and the two paired files a sprite
+/// read serves from it, kept beside this module because the sheet is derived from
+/// the map resource's own catalog entry rather than from one request.
+pub mod map_sprites;
+
 /// Epoch milliseconds. Amazon Location renders every timestamp in ISO 8601
 /// `YYYY-MM-DDThh:mm:ss.sssZ` (see the `CreateTime`/`SampleTime` member docs in the
 /// Smithy model), so millisecond resolution is the precision the wire carries.

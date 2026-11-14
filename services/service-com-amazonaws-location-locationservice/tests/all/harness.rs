@@ -105,6 +105,30 @@ pub async fn call(
     call_in_region(router, method, path, bytes, REGION).await
 }
 
+/// One request as this crate's suites send it: addressed to `region`'s `geo`
+/// endpoint and signed into that credential scope, so the router's `can_handle`
+/// claims it for this service.
+///
+/// The ONE place a request is built, so the helpers below cannot drift apart.
+fn signed_request(
+    method: &str,
+    path: &str,
+    body: bytes::Bytes,
+    region: &str,
+) -> http::Request<bytes::Bytes> {
+    let authorization = format!(
+        "AWS4-HMAC-SHA256 Credential=AKIDEXAMPLE/20240101/{region}/geo/aws4_request, \
+         SignedHeaders=host, Signature=abc"
+    );
+    http::Request::builder()
+        .method(method)
+        .uri(format!("https://geo.{region}.amazonaws.com{path}"))
+        .header("authorization", authorization)
+        .header("content-type", "application/json")
+        .body(body)
+        .expect("test request builds")
+}
+
 /// Send one request whose SigV4 credential scope names `region`.
 pub async fn call_in_region(
     router: &MultiServiceRouter,
@@ -113,19 +137,9 @@ pub async fn call_in_region(
     body: bytes::Bytes,
     region: &str,
 ) -> Answer {
-    let authorization = format!(
-        "AWS4-HMAC-SHA256 Credential=AKIDEXAMPLE/20240101/{region}/geo/aws4_request, \
-         SignedHeaders=host, Signature=abc"
-    );
-    let request = http::Request::builder()
-        .method(method)
-        .uri(format!("https://geo.{region}.amazonaws.com{path}"))
-        .header("authorization", authorization)
-        .header("content-type", "application/json")
-        .body(body)
-        .expect("test request builds");
-
-    let response = router.dispatch(request).await;
+    let response = router
+        .dispatch(signed_request(method, path, body, region))
+        .await;
     let status = response.status().as_u16();
     let error_type = response
         .headers()
@@ -137,6 +151,40 @@ pub async fn call_in_region(
         status,
         error_type,
         body,
+    }
+}
+
+/// What the emulator answered to a request whose response body is BYTES rather
+/// than JSON: a blob-payload read, where the headers carry the metadata.
+pub struct RawAnswer {
+    pub status: u16,
+    pub headers: ::http::HeaderMap,
+    pub body: Vec<u8>,
+}
+
+impl RawAnswer {
+    /// One response header's value, or `None` when the answer carries no such
+    /// header.
+    pub fn header(&self, name: &str) -> Option<String> {
+        self.headers
+            .get(name)
+            .and_then(|value| value.to_str().ok())
+            .map(str::to_string)
+    }
+}
+
+/// Send one request and keep the response body as raw bytes.
+///
+/// [`call`] renders the body as text, which a PNG payload does not survive; a
+/// suite that reads a blob-payload operation uses this instead.
+pub async fn call_bytes(router: &MultiServiceRouter, method: &str, path: &str) -> RawAnswer {
+    let response = router
+        .dispatch(signed_request(method, path, bytes::Bytes::new(), REGION))
+        .await;
+    RawAnswer {
+        status: response.status().as_u16(),
+        headers: response.headers().clone(),
+        body: response.body().to_vec(),
     }
 }
 

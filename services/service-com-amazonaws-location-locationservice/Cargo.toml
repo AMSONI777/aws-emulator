@@ -28,6 +28,8 @@ tracing = { workspace = true }
 # Polygon geometry checks for geofence writes: ring self-intersection, interior-ring
 # containment and ring crossing (the `geo` crate's OGC validity), plus winding order.
 geo = { version = "0.33", default-features = false }
+# PNG codec for the map sprite sheet a sprite read serves as `image/png`.
+png = "0.17"
 
 [build-dependencies]
 emulator-core-build-support = { workspace = true }

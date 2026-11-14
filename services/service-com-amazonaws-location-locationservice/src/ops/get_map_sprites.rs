@@ -1,15 +1,15 @@
 // SPDX-License-Identifier: CC0-1.0
 
 //! @op GetMapSprites
-//! SCAFFOLDED, NOT IMPLEMENTED: this operation answers HTTP 501 `NotImplemented` and
-//! asserts NOTHING about `GetMapSprites`'s real behaviour. Implement it here — this is
-//! the ONLY file to touch for this operation.
-//!
-//! A 501 from this operation means "nobody has written it yet", never "the emulator is
-//! broken". Replace the `Err(..)` in [`GetMapSprites::handle`] with real behaviour and
-//! delete the SCAFFOLDED marker line above; that line is the machine-readable record of
-//! which operations are still stubs (`grep -rl '^//! SCAFFOLDED, NOT IMPLEMENTED:' */src/ops/`),
-//! so leaving it on an implemented operation under-reports progress.
+//! IMPLEMENTED: serves one sprite file of the sheet the map resource stored under
+//! the requested `MapName` in
+//! [`crate::state::ComAmazonawsLocationLocationserviceState::maps`] publishes —
+//! the PNG sheet for `sprites.png`/`sprites@2x.png`, the paired offsets document
+//! for `sprites.json`/`sprites@2x.json`, both derived from the map's stored style
+//! by [`crate::state::map_sprites`]. A `FileName` outside the published set is
+//! refused with `ValidationException`, and a name no map is stored under with
+//! `ResourceNotFoundException`. Reads only; this is the ONLY file to touch for this
+//! operation.
 //!
 //! ## Shape of an operation
 //!
@@ -94,6 +94,7 @@
 
 #[allow(unused_imports)]
 use super::types::*;
+use crate::state::map_sprites;
 
 // `#[operation_error]` below expands to an invocation of the LOCAL declarative
 // `smithy!` macro, which this line is what emits into the module. Without it the
@@ -167,18 +168,53 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         input: Self::Input,
         ctx: &smithy_server_runtime::OperationContext<'_>,
     ) -> Result<Self::Output, Self::Error> {
-        // The engine is reachable from `&self` (constructor-injected); `ctx` carries
-        // request metadata. Both are bound here so an implementer has them in scope.
-        let _ = (&input, ctx, &self.engine);
-        // Implement `GetMapSprites` here, then delete the SCAFFOLDED marker at the top of
-        // this file. Return modeled failures as
-        // `Err(GetMapSpritesErrorModeled::Variant(..).into())` — the `From` impl above lifts it.
-        //
-        // To refuse a bad request this operation models no error for, return
-        // `Err(crate::scaffolded::Scaffolded::validation("..."))` — a 400
-        // `ValidationException`. Do NOT answer 501 for it: 501 means "not written yet",
-        // not "bad request". Modeled constraints are already refused BEFORE this
-        // handler runs, so reaching here means the input satisfies every one of them.
-        Err(crate::scaffolded::Scaffolded::not_implemented("GetMapSprites"))
+        let _ = ctx;
+        let state = crate::state::service_state(&*self.engine).ok_or_else(|| {
+            GetMapSpritesErrorModeled::InternalServerException(InternalServerException {
+                message: "the Amazon Location state store is unavailable".to_string(),
+            })
+        })?;
+
+        // Which sprite files exist is a modelled pattern on `FileName`
+        // (`^sprites(@2x)?\.(png|json)$`), so the request boundary already refuses
+        // every other spelling before this handler runs; the check here keeps the
+        // handler total for a name the pattern would not admit, and states the
+        // same sentence that boundary refusal does, so one condition has one
+        // wording.
+        let Some(file) = map_sprites::sprite_file(&input.file_name) else {
+            return Err(GetMapSpritesErrorModeled::ValidationException(
+                crate::state::field_validation_exception(
+                    map_sprites::FILE_NAME_MEMBER,
+                    crate::state::pattern_refusal(
+                        map_sprites::FILE_NAME_MEMBER,
+                        map_sprites::FILE_NAME_PATTERN,
+                    ),
+                ),
+            )
+            .into());
+        };
+
+        // Read the provider the map's style is sourced from and release the
+        // store: laying the sheet out, drawing it and encoding it read nothing
+        // else, so a sprite read holds no lock while it renders and writes
+        // nothing at all.
+        let data_source = {
+            let store = state.lock();
+            let map = store.maps.get(&input.map_name).ok_or_else(|| {
+                GetMapSpritesErrorModeled::ResourceNotFoundException(ResourceNotFoundException {
+                    message: crate::state::resource_not_found(
+                        crate::state::MAP_RESOURCE,
+                        &input.map_name,
+                    ),
+                })
+            })?;
+            map.data_source.clone()
+        };
+
+        Ok(GetMapSpritesOutput {
+            blob: Some(map_sprites::sprite_file_bytes(&data_source, file)),
+            content_type: Some(map_sprites::content_type(file.kind).to_string()),
+            cache_control: Some(map_sprites::SPRITE_CACHE_CONTROL.to_string()),
+        })
     }
 }
