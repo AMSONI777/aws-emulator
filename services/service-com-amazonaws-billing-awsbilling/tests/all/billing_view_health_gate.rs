@@ -132,7 +132,7 @@ async fn a_view_that_is_not_healthy_refuses_every_write() {
 
     for (index, row) in rows().into_iter().enumerate() {
         let case = row.case;
-        let arn = create_view(&router, case, &format!("health-{index}"), &held()).await;
+        let arn = create_view(&router, &engine, case, &format!("health-{index}"), &held()).await;
         let mut request = row.members.clone();
         request["arn"] = json!(arn);
 
@@ -190,7 +190,7 @@ async fn the_update_the_gate_refused_is_not_applied_later() {
     // update was attempted still carries its created attributes once it is
     // HEALTHY again, and no instant on it moved.
     let (router, engine) = emulator_with_engine();
-    let arn = create_view(&router, "not queued", "health-not-queued", &held()).await;
+    let arn = create_view(&router, &engine, "not queued", "health-not-queued", &held()).await;
     let created = stored_view(&router, "not queued", &arn).await;
 
     set_health_status(&engine, &arn, "UNHEALTHY");

@@ -25,7 +25,9 @@
 use serde_json::{json, Value};
 use smithy_server_runtime::MultiServiceRouter;
 
-use crate::billing_views::{call, emulator, error_code, ACCOUNT_ID, PRIMARY_ARN};
+use crate::billing_views::{
+    call, emulator, emulator_with_engine, error_code, plant_source_views, ACCOUNT_ID, PRIMARY_ARN,
+};
 
 /// Account ids other than the emulated caller's, for the ARNs of source views
 /// owned elsewhere. Any 12-digit string is one — the modeled `AccountId` shape is
@@ -45,11 +47,11 @@ fn view_arn(account: &str, view_id: &str) -> String {
 /// Create one `CUSTOM` billing view drawing from `source_views` and return its
 /// minted ARN.
 ///
-/// `CreateBillingView` stores the `sourceViews` it is given without resolving
-/// them, so the rows below can name a view of another account; were that
-/// ownership check ever added, these creates — not the assertions they set up —
-/// are what would start refusing, and the rows would move to an association
-/// that is allowed.
+/// A create resolves every ARN its `sourceViews` names against the store and
+/// refuses one no view answers to, so the rows below are driven over a store
+/// that HOLDS the views they name — including the views of the other accounts,
+/// which this one store keeps too (see `plant_view`). What the rows vary is
+/// which ACCOUNT owns each source, which is what this suite is about.
 async fn create_view(
     router: &MultiServiceRouter,
     case: &str,
@@ -181,10 +183,16 @@ fn rows() -> Vec<Row> {
     ]
 }
 
+/// Every source ARN the table names, in one list to plant.
+fn all_row_sources() -> Vec<String> {
+    rows().into_iter().flat_map(|row| row.source_views).collect()
+}
+
 #[tokio::test]
 async fn every_read_reports_the_account_owning_the_views_a_view_draws_from() {
-    let router = emulator();
+    let (router, engine) = emulator_with_engine();
     let rows = rows();
+    plant_source_views(&engine, &all_row_sources());
     let mut arns = Vec::new();
     for (index, row) in rows.iter().enumerate() {
         arns.push(
@@ -246,8 +254,9 @@ async fn every_read_reports_the_account_owning_the_views_a_view_draws_from() {
 
 #[tokio::test]
 async fn the_filter_selects_every_view_that_uses_the_account_as_a_source() {
-    let router = emulator();
+    let (router, engine) = emulator_with_engine();
     let rows = rows();
+    plant_source_views(&engine, &all_row_sources());
     let mut arns = Vec::new();
     for (index, row) in rows.iter().enumerate() {
         arns.push(

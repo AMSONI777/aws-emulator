@@ -156,13 +156,13 @@ fn invalid_field(member: &str, why: &str) -> AssociateSourceViewsError {
 }
 
 /// The modeled `ResourceNotFoundException` (HTTP 404) for a billing-view ARN no
-/// view is stored under, named by the member that carried it.
+/// view is stored under, named by the member that carried it — the one wording
+/// every operation resolving such an ARN shares
+/// ([`crate::state::billing_view_not_found`]).
 fn not_found(arn: &str, member: &str) -> AssociateSourceViewsError {
-    AssociateSourceViewsErrorModeled::ResourceNotFoundException(ResourceNotFoundException {
-        message: format!("{member}: billing view {arn} does not exist"),
-        resource_id: arn.to_string(),
-        resource_type: crate::state::BILLING_VIEW_RESOURCE_TYPE.to_string(),
-    })
+    AssociateSourceViewsErrorModeled::ResourceNotFoundException(
+        crate::state::billing_view_not_found(arn, member),
+    )
     .into()
 }
 
@@ -261,11 +261,10 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         }
 
         // Every source must name a view this account holds, or the association
-        // would point at nothing.
-        for source in &input.source_views {
-            if !state.billing_views.contains_key(source) {
-                return Err(not_found(source, "sourceViews"));
-            }
+        // would point at nothing: the rule every writer of this field shares,
+        // `ComAmazonawsBillingAwsbillingState::unknown_source_view`.
+        if let Some(missing) = state.unknown_source_view(&input.source_views) {
+            return Err(not_found(missing, "sourceViews"));
         }
 
         // `BillingViewHealthStatusException`: "a billing view's health status

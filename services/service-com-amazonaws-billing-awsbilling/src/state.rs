@@ -49,7 +49,8 @@ use service_com_amazonaws_sts_awssecuritytokenservicev20110615::state as sts_sta
 
 use crate::ops::types::{
     AccessDeniedException, BillingViewHealthStatus, BillingViewHealthStatusException, Expression,
-    ResourceTag, ValidationException, ValidationExceptionField, BILLING_FEATURE_VALUES,
+    ResourceNotFoundException, ResourceTag, ValidationException, ValidationExceptionField,
+    BILLING_FEATURE_VALUES,
 };
 
 /// The Support-eligible spend `ListBusinessSupportAccountCharges` prices.
@@ -1000,6 +1001,23 @@ impl ComAmazonawsBillingAwsbillingState {
         false
     }
 
+    /// The first entry of `sources` that names no billing view this store
+    /// holds, or `None` when every one of them resolves.
+    ///
+    /// A billing view draws its data from OTHER billing views, so a
+    /// `sourceViews` entry under which no view is stored names nothing to draw
+    /// from. Every writer of a view's source list — the create that mints a view
+    /// over them and the association that adds one later — refuses such a
+    /// request with the modeled `ResourceNotFoundException`, built by
+    /// [`billing_view_not_found`], so no read can report a source the same
+    /// store answers 404 for.
+    pub fn unknown_source_view<'a>(&self, sources: &'a [String]) -> Option<&'a str> {
+        sources
+            .iter()
+            .find(|source| !self.billing_views.contains_key(*source))
+            .map(String::as_str)
+    }
+
     /// Whether another view fits under [`MAX_BILLING_VIEWS`], counting the
     /// idempotency entry it would write against [`MAX_IDEMPOTENCY_TOKENS`].
     pub fn has_room_for_another_view(&self, writes_token: bool) -> bool {
@@ -1550,6 +1568,21 @@ pub fn not_a_custom_view(arn: &str, action: &str) -> ValidationException {
             name: "arn".to_string(),
             message: format!("{arn} does not correspond to a Custom Billing View."),
         }]),
+    }
+}
+
+/// The modeled `ResourceNotFoundException` payload (HTTP 404) for a billing-view
+/// ARN no stored view answers to, named by the request member that carried it.
+///
+/// Shared by every operation that resolves a billing-view ARN a request names —
+/// the view it acts on and the source views it draws from (see
+/// [`ComAmazonawsBillingAwsbillingState::unknown_source_view`]) — so the same
+/// unresolvable ARN is refused in one wording whichever operation was asked.
+pub fn billing_view_not_found(arn: &str, member: &str) -> ResourceNotFoundException {
+    ResourceNotFoundException {
+        message: format!("{member}: billing view {arn} does not exist"),
+        resource_id: arn.to_string(),
+        resource_type: BILLING_VIEW_RESOURCE_TYPE.to_string(),
     }
 }
 

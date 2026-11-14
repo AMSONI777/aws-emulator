@@ -3347,3 +3347,6 @@ mod cloudformation_s3tables_table_bucket_maintenance;
 // (`cloudformation_kms_encrypted_sns_sqs_pipeline` is declared ONCE, in the head region
 // above: a module may be declared only once, and two branches landing in the same window
 // each appended a copy here.)
+// leaving a note here. (Line comments: these lines sit after the first item, where an
+// inner doc comment is `E0753` and compiles no suite at all.)
+// doc comment in this appended tail is `E0753` and compiles nothing.)

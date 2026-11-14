@@ -93,12 +93,18 @@ fn stored_source_views(engine: &Arc<engine::InMemoryEngine>, arn: &str) -> Vec<S
 }
 
 /// Create a `CUSTOM` billing view holding `held` and return its minted ARN.
+///
+/// A create resolves every ARN its `sourceViews` names against the store, so the
+/// views it is handed are planted first: this suite is about the WORDING of a
+/// later refusal, not about whether a source exists.
 async fn create_view(
     router: &MultiServiceRouter,
+    engine: &Arc<engine::InMemoryEngine>,
     case: &str,
     name: &str,
     held: &[String],
 ) -> String {
+    crate::billing_views::plant_source_views(engine, held);
     let (status, created) = call(
         router,
         "CreateBillingView",
@@ -196,7 +202,7 @@ async fn disassociating_from_a_non_custom_view_answers_its_own_sentence() {
     let held: Vec<String> = (0..10).map(|i| source_arn(&format!("rmt-{i}"))).collect();
 
     for (index, view_type) in managed_types.iter().enumerate() {
-        let arn = create_view(&router, view_type, &format!("rmt-view-{index}"), &held).await;
+        let arn = create_view(&router, &engine, view_type, &format!("rmt-view-{index}"), &held).await;
         set_view_type(&engine, &arn, view_type);
 
         // The requests differ in how many source views they name (one, several,

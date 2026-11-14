@@ -711,6 +711,7 @@ async fn an_invalid_request_is_refused_as_the_model_declares() {
     // A CUSTOM view, the kind the modeled `arn` says "aren't supported".
     let custom = create_view(
         &router,
+        &engine,
         "a custom view",
         "segments-custom",
         &[source_arn("segments-source")],

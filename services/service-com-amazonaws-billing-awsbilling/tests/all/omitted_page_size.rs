@@ -14,7 +14,7 @@
 
 use serde_json::{json, Value};
 
-use crate::billing_views::{call, emulator, ACCOUNT_ID, PRIMARY_ARN};
+use crate::billing_views::{call, emulator, emulator_with_engine, ACCOUNT_ID, PRIMARY_ARN};
 
 /// The page size `ListBillingViews` serves a request that names none.
 ///
@@ -190,13 +190,17 @@ async fn list_source_views_with_no_max_results_answers_a_bounded_page() {
     // carries no token — and a request naming a size of one still walks them.
     for source_count in 1..=MAX_SOURCE_VIEWS {
         let case = format!("{source_count} source views, no maxResults");
-        let router = emulator();
+        let (router, engine) = emulator_with_engine();
         let sources: Vec<String> = std::iter::once(PRIMARY_ARN.to_string())
             .chain(
                 (1..source_count)
                     .map(|index| format!("arn:aws:billing::{ACCOUNT_ID}:billingview/source-{index}")),
             )
             .collect();
+        // A create resolves every ARN its `sourceViews` names against the
+        // store, so the views this row draws from are planted first: the row
+        // varies the COUNT of sources, not whether one exists.
+        crate::billing_views::plant_source_views(&engine, &sources);
         let (status, created) = call(
             &router,
             "CreateBillingView",

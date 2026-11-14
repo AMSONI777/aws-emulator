@@ -20,7 +20,10 @@ use serde_json::{json, Value};
 // The awsJson1_0 harness — a router over ONE shared engine, plus `call` and
 // `error_code` — already exists for the billing-view lifecycle suite, so this
 // module reuses it instead of building a second one.
-use crate::billing_views::{call, emulator, error_code, ABSENT_ARN, ACCOUNT_ID, PRIMARY_ARN};
+use crate::billing_views::{
+    call, emulator, emulator_with_engine, error_code, plant_source_views, ABSENT_ARN, ACCOUNT_ID,
+    PRIMARY_ARN,
+};
 
 /// A pattern-valid `BillingViewArn` for a source view with resource id `id`.
 fn source_arn(id: &str) -> String {
@@ -75,6 +78,25 @@ fn source_views(body: &Value) -> Vec<String> {
         .unwrap_or_default()
 }
 
+/// A router whose store already holds a view under every source ARN the rows
+/// name, and the engine it was built over.
+///
+/// A create resolves every `sourceViews` entry against the store, so a row that
+/// pins the stored ORDER of particular ARNs needs views to exist under them.
+fn emulator_holding(sources: &[String]) -> smithy_server_runtime::MultiServiceRouter {
+    let (router, engine) = emulator_with_engine();
+    plant_source_views(&engine, sources);
+    router
+}
+
+/// Every source ARN the table names, in one list to plant.
+fn all_row_sources() -> Vec<String> {
+    source_view_rows()
+        .into_iter()
+        .flat_map(|row| row.source_views)
+        .collect()
+}
+
 /// Create a billing view holding `source_views` and return its minted ARN.
 async fn create_view(
     router: &smithy_server_runtime::MultiServiceRouter,
@@ -100,7 +122,7 @@ async fn create_view(
 
 #[tokio::test]
 async fn every_persisted_source_view_is_reported_in_stored_order() {
-    let router = emulator();
+    let router = emulator_holding(&all_row_sources());
 
     for (index, row) in source_view_rows().iter().enumerate() {
         let case = row.case;
@@ -142,7 +164,7 @@ async fn every_persisted_source_view_is_reported_in_stored_order() {
 
 #[tokio::test]
 async fn pagination_returns_every_source_view_exactly_once_for_every_page_size() {
-    let router = emulator();
+    let router = emulator_holding(&all_row_sources());
 
     for (index, row) in source_view_rows().iter().enumerate() {
         let arn = create_view(
@@ -290,7 +312,7 @@ async fn an_arn_no_view_is_stored_under_is_refused_with_the_modeled_error() {
 
 #[tokio::test]
 async fn a_request_the_service_cannot_honour_is_refused_with_a_validation_error() {
-    let router = emulator();
+    let router = emulator_holding(&[source_arn("src-a"), source_arn("src-b")]);
     let arn = create_view(
         &router,
         "validation",
@@ -354,8 +376,8 @@ async fn a_request_the_service_cannot_honour_is_refused_with_a_validation_error(
 
 #[tokio::test]
 async fn listing_the_source_views_does_not_change_what_a_later_caller_sees() {
-    let router = emulator();
     let stored = vec![source_arn("src-b"), PRIMARY_ARN.to_string(), source_arn("src-a")];
+    let router = emulator_holding(&stored);
     let arn = create_view(&router, "repeated reads", "sv-repeat", &stored).await;
 
     // The same first page three times over, then the whole list: a read neither

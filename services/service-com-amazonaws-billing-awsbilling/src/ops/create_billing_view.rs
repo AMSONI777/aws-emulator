@@ -8,6 +8,13 @@
 //! account of a consolidated billing family is refused with
 //! `ValidationException` (400) before anything is stored.
 //!
+//! The view is minted OVER the billing views `sourceViews` names, so each of
+//! them must be a view this service holds: a request naming an ARN no view is
+//! stored under is refused with `ResourceNotFoundException` (404) — the rule
+//! every writer of a view's source list shares
+//! ([`crate::state::ComAmazonawsBillingAwsbillingState::unknown_source_view`]),
+//! so nothing a read reports as a source resolves to nothing.
+//!
 //! The view is minted with the tags the request carries, collected through the
 //! one rule every writer of a tag set in this service shares
 //! ([`crate::state::requested_tag_set`]): a `resourceTags` list that gives the
@@ -151,6 +158,19 @@ pub struct CreateBillingView<Eng> {
     engine: ::std::sync::Arc<Eng>,
 }
 
+/// Refuse a `sourceViews` entry that names no stored billing view, in the
+/// modeled `ResourceNotFoundException` shape (HTTP 404) this operation declares
+/// for "the specified ARN in the request doesn't exist" — the one wording every
+/// operation resolving a billing-view ARN shares
+/// ([`crate::state::billing_view_not_found`]).
+fn source_view_not_found(arn: &str) -> CreateBillingViewError {
+    CreateBillingViewErrorModeled::ResourceNotFoundException(crate::state::billing_view_not_found(
+        arn,
+        "sourceViews",
+    ))
+    .into()
+}
+
 /// Refuse a request member as invalid, in the modeled `ValidationException`
 /// shape (HTTP 400) this operation declares.
 fn invalid_field(member: &str, why: &str) -> CreateBillingViewError {
@@ -257,6 +277,19 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
                     created_at: Some(crate::state::timestamp(view.created_at)),
                 });
             }
+        }
+
+        // The view is minted OVER the source views the request names, so every
+        // one of them must be a billing view this service holds: a source
+        // nothing is stored under would leave the new record drawing from
+        // nothing, and its own reads would report a source this same store
+        // answers 404 for. The rule is the one every writer of a view's source
+        // list shares — see
+        // `ComAmazonawsBillingAwsbillingState::unknown_source_view`. Decided
+        // before anything is minted or stored, so the refusal leaves no view
+        // behind and records no idempotency token.
+        if let Some(missing) = state.unknown_source_view(&input.source_views) {
+            return Err(source_view_not_found(missing));
         }
 
         let created_at = std::time::SystemTime::now();

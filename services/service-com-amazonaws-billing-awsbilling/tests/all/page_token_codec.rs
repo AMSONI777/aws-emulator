@@ -24,7 +24,7 @@ use smithy_server_runtime::MultiServiceRouter;
 // The awsJson1_0 harness — a router over ONE shared engine, plus `call` and
 // `error_code` — already exists for the billing-view lifecycle suite, so this
 // module reuses it instead of building a second one.
-use crate::billing_views::{call, emulator, error_code, ACCOUNT_ID};
+use crate::billing_views::{call, emulator_with_engine, error_code, plant_source_views, ACCOUNT_ID};
 
 /// A pattern-valid `BillingViewArn` for a source view with resource id `id`.
 fn source_arn(id: &str) -> String {
@@ -143,12 +143,20 @@ fn entries(operation: &str, body: &Value) -> Vec<String> {
 
 /// The world both reads page over: a `CUSTOM` view holding three source views,
 /// beside the account's `PRIMARY` view.
-async fn walks(router: &MultiServiceRouter) -> Vec<Walk> {
+///
+/// The three source views are planted first: a create resolves every ARN its
+/// `sourceViews` names against the store, and this suite is about the token
+/// codec, not about whether a source exists.
+async fn walks(
+    router: &MultiServiceRouter,
+    engine: &std::sync::Arc<engine::InMemoryEngine>,
+) -> Vec<Walk> {
     let sources = vec![
         source_arn("codec-src-a"),
         source_arn("codec-src-b"),
         source_arn("codec-src-c"),
     ];
+    plant_source_views(engine, &sources);
     let (status, created) = call(
         router,
         "CreateBillingView",
@@ -197,9 +205,9 @@ async fn walks(router: &MultiServiceRouter) -> Vec<Walk> {
 
 #[tokio::test]
 async fn every_paginated_read_mints_its_token_with_the_shared_encoder() {
-    let router = emulator();
+    let (router, engine) = emulator_with_engine();
 
-    for walk in walks(&router).await {
+    for walk in walks(&router, &engine).await {
         let case = walk.operation;
         let mut request = walk.base.clone();
         request["maxResults"] = json!(1);
@@ -219,9 +227,9 @@ async fn every_paginated_read_mints_its_token_with_the_shared_encoder() {
 
 #[tokio::test]
 async fn a_token_spelling_the_shared_codec_accepts_resumes_every_paginated_read() {
-    let router = emulator();
+    let (router, engine) = emulator_with_engine();
 
-    for walk in walks(&router).await {
+    for walk in walks(&router, &engine).await {
         for spelling in spellings().into_iter().filter(|spelling| spelling.accepted) {
             let case = format!("{} / {}", walk.operation, spelling.case);
             let mut request = walk.base.clone();
@@ -243,8 +251,8 @@ async fn a_token_spelling_the_shared_codec_accepts_resumes_every_paginated_read(
 
 #[tokio::test]
 async fn a_token_spelling_the_shared_codec_rejects_is_refused_the_same_way_by_every_read() {
-    let router = emulator();
-    let walks = walks(&router).await;
+    let (router, engine) = emulator_with_engine();
+    let walks = walks(&router, &engine).await;
 
     for spelling in spellings()
         .into_iter()

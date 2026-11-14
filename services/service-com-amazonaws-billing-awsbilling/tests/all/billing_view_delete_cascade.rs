@@ -21,7 +21,7 @@
 use serde_json::{json, Value};
 use smithy_server_runtime::MultiServiceRouter;
 
-use crate::billing_views::{call, emulator, error_code, PRIMARY_ARN};
+use crate::billing_views::{call, emulator_with_engine, error_code, PRIMARY_ARN};
 use crate::source_view_disassociation::create_view;
 
 /// One row: a view created holding `held` real source views, `derived` views
@@ -119,7 +119,7 @@ fn never_updated(view: &Value) -> bool {
 
 #[tokio::test]
 async fn a_forced_delete_leaves_no_view_drawing_from_the_deleted_one() {
-    let router = emulator();
+    let (router, engine) = emulator_with_engine();
 
     for (index, row) in rows().iter().enumerate() {
         let case = row.case;
@@ -130,6 +130,7 @@ async fn a_forced_delete_leaves_no_view_drawing_from_the_deleted_one() {
             sources.push(
                 create_view(
                     &router,
+                    &engine,
                     case,
                     &format!("casc-{index}-src-{slot}"),
                     &[PRIMARY_ARN.to_string()],
@@ -142,6 +143,7 @@ async fn a_forced_delete_leaves_no_view_drawing_from_the_deleted_one() {
             drawing.push(
                 create_view(
                     &router,
+                    &engine,
                     case,
                     &format!("casc-{index}-derived-{nth}"),
                     &sources,
@@ -242,6 +244,7 @@ async fn a_forced_delete_leaves_no_view_drawing_from_the_deleted_one() {
         // it was created with — even at the modeled maximum of ten.
         let replacement = create_view(
             &router,
+            &engine,
             case,
             &format!("casc-{index}-replacement"),
             &[PRIMARY_ARN.to_string()],
@@ -272,13 +275,15 @@ async fn a_forced_delete_leaves_no_view_drawing_from_the_deleted_one() {
 
 #[tokio::test]
 async fn a_forced_delete_in_a_chain_drops_only_the_deleted_link() {
-    let router = emulator();
+    let (router, engine) = emulator_with_engine();
     // A three-link chain: `head` draws from `middle`, `middle` draws from
     // `tail`, `tail` draws from the account's PRIMARY view.
     let case = "chain";
-    let tail = create_view(&router, case, "chain-tail", &[PRIMARY_ARN.to_string()]).await;
-    let middle = create_view(&router, case, "chain-middle", std::slice::from_ref(&tail)).await;
-    let head = create_view(&router, case, "chain-head", std::slice::from_ref(&middle)).await;
+    let tail = create_view(&router, &engine, case, "chain-tail", &[PRIMARY_ARN.to_string()]).await;
+    let middle =
+        create_view(&router, &engine, case, "chain-middle", std::slice::from_ref(&tail)).await;
+    let head =
+        create_view(&router, &engine, case, "chain-head", std::slice::from_ref(&middle)).await;
 
     let (status, forced) = call(
         &router,
@@ -326,11 +331,12 @@ async fn a_forced_delete_in_a_chain_drops_only_the_deleted_link() {
 
 #[tokio::test]
 async fn only_the_sets_that_named_the_deleted_view_are_rewritten() {
-    let router = emulator();
+    let (router, engine) = emulator_with_engine();
     let case = "untouched";
-    let source = create_view(&router, case, "ctl-source", &[PRIMARY_ARN.to_string()]).await;
-    let drawing = create_view(&router, case, "ctl-drawing", std::slice::from_ref(&source)).await;
-    let lone = create_view(&router, case, "ctl-lone", &[PRIMARY_ARN.to_string()]).await;
+    let source = create_view(&router, &engine, case, "ctl-source", &[PRIMARY_ARN.to_string()]).await;
+    let drawing =
+        create_view(&router, &engine, case, "ctl-drawing", std::slice::from_ref(&source)).await;
+    let lone = create_view(&router, &engine, case, "ctl-lone", &[PRIMARY_ARN.to_string()]).await;
 
     // A view nothing draws from needs no `force`, and deleting it rewrites
     // nobody else's set.

@@ -148,6 +148,44 @@ pub(crate) fn plant_view(
     state.billing_views.insert(arn.to_string(), view);
 }
 
+/// Plant a billing view under every ARN in `arns` that holds none yet, so a
+/// suite may name those exact ARNs as the source views of a view it creates.
+///
+/// A billing view draws from billing views the service HOLDS: every writer of a
+/// view's source list resolves each ARN it is given against the store and
+/// refuses one no view answers to with `ResourceNotFoundException`. So a suite
+/// whose rows need sources at PARTICULAR ARNs — to pin the stored order, a page
+/// boundary, or the account that owns a source — makes those views exist first,
+/// instead of naming ARNs nothing is stored under. Each planted view is a
+/// `CUSTOM` view named for the resource id of its ARN and drawing from nothing,
+/// and an ARN the store already holds is left exactly as it stands.
+pub(crate) fn plant_source_views(engine: &Arc<engine::InMemoryEngine>, arns: &[String]) {
+    let missing: Vec<String> = {
+        let state = engine
+            .state::<service_com_amazonaws_billing_awsbilling::ComAmazonawsBillingAwsbillingState>(
+            );
+        let state = state.lock();
+        arns.iter()
+            .filter(|arn| !state.billing_views.contains_key(arn.as_str()))
+            .cloned()
+            .collect()
+    };
+    for arn in missing {
+        plant_view(engine, &arn, |view| {
+            view.billing_view_type = "CUSTOM".to_string();
+            view.name = view
+                .arn
+                .rsplit('/')
+                .next()
+                .unwrap_or("source")
+                .replace('/', "-");
+            view.description = None;
+            view.source_views.clear();
+            view.tags.clear();
+        });
+    }
+}
+
 /// One row of the create/get round-trip table: a billing view this emulator must
 /// store and report back unchanged.
 struct ViewRow {
@@ -159,15 +197,33 @@ struct ViewRow {
     data_filter_expression: Option<Value>,
 }
 
+/// The source views the rows of [`view_rows`] draw from, beside the account's
+/// `PRIMARY` view.
+///
+/// A create resolves every ARN its `sourceViews` names against the store, so
+/// these are planted as real views by [`emulator_holding_row_sources`] instead
+/// of being named as ARNs nothing answers to. The rows still vary the COUNT of
+/// sources a view draws from, which is what they are about.
+pub(crate) fn row_source_arns() -> Vec<String> {
+    (0..10)
+        .map(|index| format!("arn:aws:billing::{ACCOUNT_ID}:billingview/source-{index}"))
+        .collect()
+}
+
+/// A router whose store already holds the source views [`view_rows`] draws from.
+fn emulator_holding_row_sources() -> MultiServiceRouter {
+    let (router, engine) = emulator_with_engine();
+    plant_source_views(&engine, &row_source_arns());
+    router
+}
+
 /// The rows differ along everything the rule generalises over: name shape and
 /// length (including the `@length` maximum of 128), whether a description is
 /// absent, empty or long, how many source views are associated (1 through the
 /// modeled maximum of 10), how many tags are attached, and whether a data filter
 /// expression is carried.
 fn view_rows() -> Vec<ViewRow> {
-    let long_source_views: Vec<String> = (0..10)
-        .map(|i| format!("arn:aws:billing::{ACCOUNT_ID}:billingview/source-{i}"))
-        .collect();
+    let long_source_views: Vec<String> = row_source_arns();
     vec![
         ViewRow {
             case: "one source view, a description",
@@ -236,7 +292,7 @@ impl ViewRow {
 
 #[tokio::test]
 async fn a_created_view_is_reported_back_by_get_for_every_row() {
-    let router = emulator();
+    let router = emulator_holding_row_sources();
 
     for (index, row) in view_rows().iter().enumerate() {
         let case = row.case;
@@ -335,7 +391,7 @@ async fn a_created_view_is_reported_back_by_get_for_every_row() {
 
 #[tokio::test]
 async fn every_created_view_appears_in_the_list_and_derived_counts_follow_the_sources() {
-    let router = emulator();
+    let router = emulator_holding_row_sources();
     let rows = view_rows();
     let mut created_arns = Vec::new();
 
@@ -368,8 +424,9 @@ async fn every_created_view_appears_in_the_list_and_derived_counts_follow_the_so
     }
     assert_eq!(
         arns.len(),
-        created_arns.len() + 1,
-        "case \"no filters\": expected the PRIMARY view plus every created one, got {arns:?}"
+        created_arns.len() + row_source_arns().len() + 1,
+        "case \"no filters\": expected the PRIMARY view, the planted source views and every \
+         created one, got {arns:?}"
     );
     let mut sorted = arns.clone();
     sorted.sort_unstable();
@@ -416,8 +473,11 @@ async fn every_created_view_appears_in_the_list_and_derived_counts_follow_the_so
 
 #[tokio::test]
 async fn the_list_honours_each_filter() {
-    let router = emulator();
+    let router = emulator_holding_row_sources();
     let rows = view_rows();
+    // The views the rows draw from are in the store too, so every expectation
+    // that spans the whole store names them beside the created views.
+    let planted = row_source_arns();
     let mut created_arns = Vec::new();
     for (index, row) in rows.iter().enumerate() {
         let (status, created) =
@@ -443,6 +503,7 @@ async fn the_list_honours_each_filter() {
             json!({ "arns": [] }),
             {
                 let mut all = created_arns.clone();
+                all.extend(planted.iter().cloned());
                 all.push(PRIMARY_ARN.to_string());
                 all.sort();
                 all
@@ -458,6 +519,7 @@ async fn the_list_honours_each_filter() {
             json!({ "billingViewTypes": ["CUSTOM"] }),
             {
                 let mut all = created_arns.clone();
+                all.extend(planted.iter().cloned());
                 all.sort();
                 all
             },
@@ -496,6 +558,7 @@ async fn the_list_honours_each_filter() {
             json!({ "ownerAccountId": ACCOUNT_ID }),
             {
                 let mut all = created_arns.clone();
+                all.extend(planted.iter().cloned());
                 all.push(PRIMARY_ARN.to_string());
                 all.sort();
                 all
@@ -510,7 +573,8 @@ async fn the_list_honours_each_filter() {
             // "only billing views that use the specified account as a source":
             // every row of `view_rows` names a source view of the caller's own
             // account, so the caller's account selects them all — and the
-            // PRIMARY view, which draws from nothing, none of them.
+            // PRIMARY view and the planted source views, which draw from
+            // nothing, none of them.
             // `source_account_id.rs` is the suite that spans this filter.
             "sourceAccountId selects the views drawing on that account's views",
             json!({ "sourceAccountId": ACCOUNT_ID }),
@@ -556,7 +620,7 @@ async fn the_list_honours_each_filter() {
 
 #[tokio::test]
 async fn pagination_returns_every_view_exactly_once_for_every_page_size() {
-    let router = emulator();
+    let router = emulator_holding_row_sources();
     for (index, row) in view_rows().iter().enumerate() {
         let (status, created) =
             call(&router, "CreateBillingView", &row.create_body(&format!("p-{index}"))).await;
@@ -572,8 +636,9 @@ async fn pagination_returns_every_view_exactly_once_for_every_page_size() {
         .collect();
     assert_eq!(
         expected.len(),
-        5,
-        "case \"unpaginated\": four created views plus the PRIMARY one, got {expected:?}"
+        view_rows().len() + row_source_arns().len() + 1,
+        "case \"unpaginated\": every created view, the planted source views and the PRIMARY \
+         one, got {expected:?}"
     );
 
     // Every page size from 1 to one past the result count, plus the modeled
@@ -757,7 +822,7 @@ async fn update_changes_only_the_members_the_request_carries() {
 
 #[tokio::test]
 async fn a_deleted_view_is_gone_for_the_next_caller() {
-    let router = emulator();
+    let router = emulator_holding_row_sources();
     let row = &view_rows()[1];
     let (status, created) = call(&router, "CreateBillingView", &row.create_body("d-0")).await;
     assert_eq!(status, 200, "case \"create\": got {status} {created:?}");

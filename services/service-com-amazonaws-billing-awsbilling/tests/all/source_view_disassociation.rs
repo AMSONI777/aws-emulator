@@ -27,7 +27,7 @@ use service_com_amazonaws_billing_awsbilling::ComAmazonawsBillingAwsbillingState
 use smithy_server_runtime::MultiServiceRouter;
 
 use crate::billing_views::{
-    call, emulator_with_engine, error_code, ABSENT_ARN, ACCOUNT_ID, PRIMARY_ARN,
+    call, emulator_with_engine, error_code, plant_source_views, ABSENT_ARN, ACCOUNT_ID, PRIMARY_ARN,
 };
 use crate::rejection_fidelity::message;
 
@@ -142,12 +142,19 @@ pub(crate) fn set_health_status(
 }
 
 /// Create a `CUSTOM` billing view holding `held` and return its minted ARN.
+///
+/// A create resolves every ARN its `sourceViews` names against the store and
+/// refuses one no view answers to, so the views a row names as sources are
+/// planted first: the rows are about which sources a later call REMOVES, not
+/// about whether a source exists.
 pub(crate) async fn create_view(
     router: &MultiServiceRouter,
+    engine: &std::sync::Arc<engine::InMemoryEngine>,
     case: &str,
     name: &str,
     held: &[String],
 ) -> String {
+    plant_source_views(engine, held);
     let (status, created) = call(
         router,
         "CreateBillingView",
@@ -183,11 +190,11 @@ async fn read_back(router: &MultiServiceRouter, case: &str, arn: &str) -> (Vec<S
 
 #[tokio::test]
 async fn a_disassociation_leaves_the_set_difference_and_nothing_else() {
-    let (router, _engine) = emulator_with_engine();
+    let (router, engine) = emulator_with_engine();
 
     for (index, row) in rows().iter().enumerate() {
         let case = row.case;
-        let arn = create_view(&router, case, &format!("dsv-{index}"), &row.held).await;
+        let arn = create_view(&router, &engine, case, &format!("dsv-{index}"), &row.held).await;
 
         let (status, answer) = call(
             &router,
@@ -242,9 +249,9 @@ async fn a_source_view_can_be_removed_and_associated_again() {
     // The round trip in both directions over one view: what a disassociation
     // removed, an association puts back, and each step is read back from the
     // store rather than from the answer.
-    let (router, _engine) = emulator_with_engine();
+    let (router, engine) = emulator_with_engine();
     let held = vec![source_arn("first"), source_arn("second")];
-    let arn = create_view(&router, "round trip", "dsv-round-trip", &held).await;
+    let arn = create_view(&router, &engine, "round trip", "dsv-round-trip", &held).await;
 
     let (status, _) = call(
         &router,
@@ -284,7 +291,7 @@ async fn a_view_that_is_not_healthy_cannot_be_disassociated() {
     // (`BILLING_VIEW_STATUS_VALUES` = CREATING, HEALTHY, UNHEALTHY, UPDATING).
     let (router, engine) = emulator_with_engine();
     let held = vec![source_arn("a"), source_arn("b")];
-    let arn = create_view(&router, "health", "dsv-health", &held).await;
+    let arn = create_view(&router, &engine, "health", "dsv-health", &held).await;
 
     for status in ["CREATING", "UNHEALTHY", "UPDATING"] {
         set_health_status(&engine, &arn, status);
@@ -329,9 +336,10 @@ async fn a_view_that_is_not_healthy_cannot_be_disassociated() {
 
 #[tokio::test]
 async fn a_view_whose_association_is_not_the_callers_is_refused() {
-    let (router, _engine) = emulator_with_engine();
+    let (router, engine) = emulator_with_engine();
     let custom = create_view(
         &router,
+        &engine,
         "control",
         "dsv-refusals",
         &[source_arn("a"), source_arn("b")],
