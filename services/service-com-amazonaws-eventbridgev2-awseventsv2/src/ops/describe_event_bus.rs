@@ -192,9 +192,10 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         Ok(DescribeEventBusOutput {
             event_bus_arn: Some(bus.arn.clone()),
             name: Some(bus.name.clone()),
-            description: bus.description.clone(),
+            // A read reports the bus's description, empty when it holds none.
+            description: Some(bus.reported_description()),
             encryption_configuration: bus.encryption_configuration.clone(),
-            storage_configuration: bus.storage_configuration_output(now),
+            storage_configuration: Some(bus.storage_configuration_output(now)),
             creation_time: Some(crate::state::to_date_time(bus.creation_time)),
             last_modified_time: Some(crate::state::to_date_time(bus.last_modified_time)),
             state: Some(bus.state.wire_value().to_string()),

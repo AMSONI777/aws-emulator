@@ -1706,7 +1706,9 @@ async fn a_retention_period_is_reported_with_its_window_start() {
         );
     }
 
-    // A bus created without one reports no storage configuration at all.
+    // A bus created without one reports its EFFECTIVE configuration: every bus
+    // holds a retention period, so a create that named none leaves the bus on
+    // the service default and the read reports that.
     let created = harness
         .create(CreateEventBusInput {
             name: "no-retention".to_string(),
@@ -1718,9 +1720,13 @@ async fn a_retention_period_is_reported_with_its_window_start() {
         .describe(created.event_bus_arn.as_deref().expect("an ARN"))
         .await
         .expect("case \"absent\": DescribeEventBus must succeed");
-    assert!(
-        described.storage_configuration.is_none(),
-        "case \"absent\": nothing was configured, so nothing is reported, got {:?}",
+    assert_eq!(
+        described
+            .storage_configuration
+            .as_ref()
+            .and_then(|config| config.retention_period_in_days),
+        Some(eventsv2::state::DEFAULT_RETENTION_PERIOD_IN_DAYS),
+        "case \"absent\": a bus created without a retention period reports the default, got {:?}",
         described.storage_configuration
     );
 }

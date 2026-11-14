@@ -538,11 +538,11 @@ pub fn delivered_body(subscriber: &Subscriber, event: &DeliveredEvent) -> Option
 /// `at` as the instant a delivered event's metadata carries.
 ///
 /// An event's instant is RFC 3339 at whole-second precision closed by `Z`
-/// (`2026-01-01T00:00:00Z`), the form an event carries it in, so the sub-second
-/// remainder of a server clock reading is dropped before the instant is
-/// formatted rather than written into a field no delivered event carries it in.
+/// (`2026-01-01T00:00:00Z`), the form an event carries it in, which is the
+/// resolution [`super::to_date_time`] already reports every instant of this
+/// service at.
 fn to_event_time(at: SystemTime) -> String {
-    ::aws_smithy_types::DateTime::from_secs(super::to_date_time(at).secs())
+    super::to_date_time(at)
         .fmt(::aws_smithy_types::date_time::Format::DateTime)
         .unwrap_or_default()
 }

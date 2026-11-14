@@ -292,7 +292,12 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
             region,
             description: input.description.clone(),
             encryption_configuration: input.encryption_configuration.clone(),
-            storage_configuration: input.storage_configuration.clone(),
+            // A bus always has an effective retention period, so an
+            // unspecified one takes the service default here, where the bus is
+            // stored, and every read of it reports what the bus holds.
+            retention_period_in_days: crate::state::effective_retention_period(
+                input.storage_configuration.as_ref(),
+            ),
             // Provisioning is asynchronous, so the bus is reported CREATING and
             // the clock owes it ACTIVE one span later.
             state: crate::state::BusLifecycleState::Creating,
@@ -337,7 +342,7 @@ fn created_response(
         name: Some(bus.name.clone()),
         description: bus.description.clone(),
         encryption_configuration: bus.encryption_configuration.clone(),
-        storage_configuration: bus.storage_configuration_output(now),
+        storage_configuration: Some(bus.storage_configuration_output(now)),
         state: Some(bus.state.wire_value().to_string()),
         state_reason: bus.state_reason.clone(),
         creation_time: Some(crate::state::to_date_time(bus.creation_time)),
@@ -358,14 +363,12 @@ fn matches_stored(bus: &crate::state::EventBus, input: &CreateEventBusInput) -> 
         .encryption_configuration
         .as_ref()
         .map(|config| config.kms_key_identifier.clone());
-    let stored_retention = bus
-        .storage_configuration
-        .as_ref()
-        .map(|config| config.retention_period_in_days);
-    let requested_retention = input
-        .storage_configuration
-        .as_ref()
-        .map(|config| config.retention_period_in_days);
+    // Compared as the EFFECTIVE retention period on both sides: a request that
+    // names none asks for the same bus as one naming the default, so a replay of
+    // either is the replay the client token promises.
+    let stored_retention = bus.retention_period_in_days;
+    let requested_retention =
+        crate::state::effective_retention_period(input.storage_configuration.as_ref());
     let requested_tags: ::std::collections::BTreeMap<String, String> = input
         .tags
         .clone()

@@ -83,6 +83,16 @@ pub const MAX_EMULATED_REGIONS: usize = 10;
 /// the per-region quota.
 pub const MAX_EVENT_BUSES_PER_EMULATOR: usize = MAX_EVENT_BUSES * MAX_EMULATED_REGIONS;
 
+/// The retention period an event bus holds when the create that minted it named
+/// no `StorageConfiguration` (or one carrying no `RetentionPeriodInDays`).
+///
+/// A bus ALWAYS has an effective storage configuration — `StorageConfigurationOutput`
+/// is documented as "Event storage configuration of an event bus, as returned on
+/// reads" — so an unspecified retention period is defaulted on the bus rather than
+/// left unset. Recorded behaviour puts that default at one day, which is also the
+/// minimum of `RetentionPeriodInDays`'s modelled `@range 1..365`.
+pub const DEFAULT_RETENTION_PERIOD_IN_DAYS: i32 = 1;
+
 /// The most events one bus keeps.
 ///
 /// This is the EMULATOR's memory bound, not an AWS rule: a configured retention
@@ -154,10 +164,15 @@ pub struct EventBus {
     pub region: String,
     pub description: Option<String>,
     pub encryption_configuration: Option<EncryptionConfiguration>,
-    /// The retention settings as requested. `StorageConfigurationOutput` adds a
-    /// derived `RetentionWindowStartTime`, so reads project this through
-    /// [`EventBus::storage_configuration_output`] rather than storing it.
-    pub storage_configuration: Option<StorageConfiguration>,
+    /// The bus's EFFECTIVE retention period in days: what its create asked for,
+    /// or [`DEFAULT_RETENTION_PERIOD_IN_DAYS`] when it asked for nothing. Every
+    /// bus has one, which is why this is not optional.
+    ///
+    /// `StorageConfigurationOutput` pairs it with a `RetentionWindowStartTime`
+    /// derived from the reading clock, which is why reads project this field
+    /// through [`EventBus::storage_configuration_output`] instead of storing a
+    /// window start that would go stale.
+    pub retention_period_in_days: i32,
     pub state: BusLifecycleState,
     pub state_reason: Option<String>,
     pub creation_time: SystemTime,
@@ -181,32 +196,40 @@ pub struct EventBus {
 
 impl EventBus {
     /// The earliest instant from which this bus's stored events are still
-    /// available — `RetentionWindowStartTime`. `None` when no retention period is
-    /// configured, in which case nothing expires from retention.
+    /// available — `RetentionWindowStartTime`.
     ///
     /// Never earlier than the bus's own creation: events from before the bus
     /// existed cannot have been stored.
-    pub fn retention_window_start(&self, now: SystemTime) -> Option<SystemTime> {
-        let days = self
-            .storage_configuration
-            .as_ref()?
-            .retention_period_in_days?;
+    pub fn retention_window_start(&self, now: SystemTime) -> SystemTime {
+        let days = self.retention_period_in_days;
         let window = Duration::from_secs(u64::from(days.unsigned_abs()).saturating_mul(86_400));
-        Some(
-            now.checked_sub(window)
-                .filter(|start| *start > self.creation_time)
-                .unwrap_or(self.creation_time),
-        )
+        now.checked_sub(window)
+            .filter(|start| *start > self.creation_time)
+            .unwrap_or(self.creation_time)
     }
 
-    /// The storage configuration as reads report it: the requested retention
-    /// period plus the derived `RetentionWindowStartTime`.
-    pub fn storage_configuration_output(&self, now: SystemTime) -> Option<StorageConfigurationOutput> {
-        let configured = self.storage_configuration.as_ref()?;
-        Some(StorageConfigurationOutput {
-            retention_period_in_days: configured.retention_period_in_days,
-            retention_window_start_time: self.retention_window_start(now).map(to_date_time),
-        })
+    /// The storage configuration as reads report it: the bus's effective
+    /// retention period plus the derived `RetentionWindowStartTime`. Every bus
+    /// has one, so a read always reports it.
+    pub fn storage_configuration_output(&self, now: SystemTime) -> StorageConfigurationOutput {
+        StorageConfigurationOutput {
+            retention_period_in_days: Some(self.retention_period_in_days),
+            retention_window_start_time: Some(to_date_time(self.retention_window_start(now))),
+        }
+    }
+
+    /// The free-text description as a READ of this bus reports it: what the bus
+    /// holds, and the EMPTY string for a bus holding none.
+    ///
+    /// `Description` is modelled `@length 0..512`, so the empty string is a legal
+    /// value of the member, and a read reports a bus with no description as
+    /// having an empty one rather than dropping the member — which is what lets a
+    /// client round-trip a read into an update, or render the field, without
+    /// distinguishing "absent" from "empty". The CREATE response is projected from
+    /// the request as submitted and so carries the member only when the create
+    /// named one.
+    pub fn reported_description(&self) -> String {
+        self.description.clone().unwrap_or_default()
     }
 
     /// Drop the events the configured retention period has already carried past
@@ -217,9 +240,7 @@ impl EventBus {
     /// or not anybody called, so materialising it on the next call that observes
     /// the store is what makes the reported window describe the stored log.
     pub fn expire_retained_events(&mut self, now: SystemTime) {
-        let Some(window_start) = self.retention_window_start(now) else {
-            return;
-        };
+        let window_start = self.retention_window_start(now);
         // The log is in receipt order, so the expired events are a prefix.
         let expired = self
             .events
@@ -499,6 +520,18 @@ pub fn event_bus_not_found(event_bus_arn: &str) -> ResourceNotFoundException {
     }
 }
 
+/// The retention period a request asking for `requested` leaves the bus on: the
+/// `RetentionPeriodInDays` it named, or [`DEFAULT_RETENTION_PERIOD_IN_DAYS`] when
+/// it named none.
+///
+/// ONE place decides what an unspecified retention period means, so the bus a
+/// create stores and the configuration a later read reports cannot disagree.
+pub fn effective_retention_period(requested: Option<&StorageConfiguration>) -> i32 {
+    requested
+        .and_then(|configured| configured.retention_period_in_days)
+        .unwrap_or(DEFAULT_RETENTION_PERIOD_IN_DAYS)
+}
+
 /// 128 bits for one identifier: `seed` spread over the whole range, with the
 /// instant it was minted at in the high half so ids of one store do not read as
 /// a counter.
@@ -549,15 +582,21 @@ pub fn lifecycle_due(now: SystemTime) -> SystemTime {
     now.checked_add(LIFECYCLE_SPAN).unwrap_or(now)
 }
 
-/// A `SystemTime` as the modelled `Timestamp` type.
+/// A `SystemTime` as the modelled `Timestamp` type, at the resolution this
+/// service reports an instant in: WHOLE epoch seconds.
+///
+/// Every `Timestamp` member this service answers with travels as an epoch
+/// date-time item of the `rpcv2Cbor` protocol, and the instants AWS reports in
+/// them carry no sub-second remainder, so the remainder of a server clock
+/// reading is dropped here — once, where every read projects an instant — rather
+/// than written into a precision no response of this service carries. A client
+/// that compares, hashes or round-trips the serialized value therefore reads the
+/// same instant back on every read.
 pub fn to_date_time(time: SystemTime) -> ::aws_smithy_types::DateTime {
     let since_epoch = time
         .duration_since(SystemTime::UNIX_EPOCH)
         .unwrap_or_default();
-    ::aws_smithy_types::DateTime::from_secs_and_nanos(
-        i64::try_from(since_epoch.as_secs()).unwrap_or(i64::MAX),
-        since_epoch.subsec_nanos(),
-    )
+    ::aws_smithy_types::DateTime::from_secs(i64::try_from(since_epoch.as_secs()).unwrap_or(i64::MAX))
 }
 
 /// The modelled `Timestamp` type as a `SystemTime`, for a client-supplied time.

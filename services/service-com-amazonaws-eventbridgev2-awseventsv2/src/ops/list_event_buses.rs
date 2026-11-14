@@ -220,7 +220,7 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
             .map(|bus| EventBusSummary {
                 name: Some(bus.name.clone()),
                 event_bus_arn: Some(bus.arn.clone()),
-                description: bus.description.clone(),
+                description: Some(bus.reported_description()),
                 creation_time: Some(crate::state::to_date_time(bus.creation_time)),
                 last_modified_time: Some(crate::state::to_date_time(bus.last_modified_time)),
                 state: Some(bus.state.wire_value().to_string()),
