@@ -71,6 +71,8 @@ mod resource_tags;
 mod restore_job;
 #[path = "all/restore_job_listing.rs"]
 mod restore_job_listing;
+#[path = "all/restore_job_listing_pages.rs"]
+mod restore_job_listing_pages;
 #[path = "all/restore_job_state_change_events.rs"]
 mod restore_job_state_change_events;
 #[path = "all/restore_metadata_validation.rs"]
