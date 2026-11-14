@@ -939,6 +939,9 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
             // belong to the operation that reports them,
             // `GetTableMaintenanceConfiguration`.
             maintenance: ::std::collections::BTreeMap::new(),
+            // Nor any schedule of its own: every task has been eligible to run
+            // on the table since it was created, under its default status.
+            maintenance_schedules: ::std::collections::BTreeMap::new(),
             tags,
         };
 

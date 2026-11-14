@@ -319,9 +319,19 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         // The operation REPLACES the configuration of the task it names and
         // leaves every other task's alone, so what a read reports for this task
         // afterwards is exactly this request's configuration.
+        let schedule = crate::state::table_task_schedule(table, kind);
         table
             .maintenance
             .insert(kind, TableMaintenance { status, settings });
+        // Turning a task on starts the period it runs in, and turning it off
+        // ends it, so the job this task runs reports against the configuration
+        // now in force. A put that leaves the task's status where it was leaves
+        // its schedule alone, so new settings neither re-run a completed job nor
+        // discard the run it already completed.
+        let enabled = crate::state::table_task_is_enabled(table, kind);
+        table
+            .maintenance_schedules
+            .insert(kind, schedule.with_status(enabled, ::std::time::SystemTime::now()));
         // The lock covers the state change only; everything below is owned.
         drop(store);
 

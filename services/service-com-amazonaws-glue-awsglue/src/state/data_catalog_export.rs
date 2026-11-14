@@ -372,6 +372,10 @@ pub fn create_export_table_bucket<Eng: Send + Sync + 'static>(
             metrics: None,
             replication: None,
             maintenance: BTreeMap::new(),
+            // Nor any maintenance schedule of its own: every task has been
+            // eligible to run on the bucket since it was created, under its
+            // default status.
+            maintenance_schedules: BTreeMap::new(),
             tags: BTreeMap::new(),
             // A bucket S3 Tables has just taken holds no namespaces: what a namespace or a
             // table in it is created by is that service's own writes.

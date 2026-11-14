@@ -67,3 +67,5 @@ mod table_record_expiration;
 mod wire_forms;
 #[path = "all/metrics_configuration_delete_scope.rs"]
 mod metrics_configuration_delete_scope;
+#[path = "all/table_maintenance_job_status.rs"]
+mod table_maintenance_job_status;

@@ -427,6 +427,29 @@ impl Emulator {
         .await
     }
 
+    /// `GetTableMaintenanceJobStatus`: the bucket's ARN, the namespace and the
+    /// table's name are path labels.
+    pub async fn get_table_maintenance_job_status(
+        &self,
+        region: &str,
+        arn: &str,
+        namespace: &str,
+        name: &str,
+    ) -> Reply {
+        self.call(
+            "GET",
+            &format!(
+                "/tables/{}/{}/{}/maintenance-job-status",
+                encode(arn),
+                encode(namespace),
+                encode(name)
+            ),
+            region,
+            None,
+        )
+        .await
+    }
+
     /// `PutTableMaintenanceConfiguration`: the maintenance type is a path label
     /// too, and the configuration travels as the body's `value`.
     pub async fn put_table_maintenance_configuration(

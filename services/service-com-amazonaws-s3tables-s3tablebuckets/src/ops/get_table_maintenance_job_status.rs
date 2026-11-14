@@ -1,15 +1,7 @@
 // SPDX-License-Identifier: CC0-1.0
 
 //! @op GetTableMaintenanceJobStatus
-//! SCAFFOLDED, NOT IMPLEMENTED: this operation answers HTTP 501 `NotImplemented` and
-//! asserts NOTHING about `GetTableMaintenanceJobStatus`'s real behaviour. Implement it here — this is
-//! the ONLY file to touch for this operation.
-//!
-//! A 501 from this operation means "nobody has written it yet", never "the emulator is
-//! broken". Replace the `Err(..)` in [`GetTableMaintenanceJobStatus::handle`] with real behaviour and
-//! delete the SCAFFOLDED marker line above; that line is the machine-readable record of
-//! which operations are still stubs (`grep -rl '^//! SCAFFOLDED, NOT IMPLEMENTED:' */src/ops/`),
-//! so leaving it on an implemented operation under-reports progress.
+//! Reports the status of each maintenance job that runs on a table.
 //!
 //! ## Shape of an operation
 //!
@@ -123,6 +115,37 @@ impl From<GetTableMaintenanceJobStatusErrorModeled> for GetTableMaintenanceJobSt
     }
 }
 
+/// `NotFoundException` (HTTP 404) — no table bucket is stored at the ARN the
+/// request addresses.
+fn no_such_bucket() -> GetTableMaintenanceJobStatusError {
+    GetTableMaintenanceJobStatusErrorModeled::NotFoundException(NotFoundException {
+        message: Some(crate::state::BUCKET_NOT_FOUND_MESSAGE.to_string()),
+    })
+    .into()
+}
+
+/// `NotFoundException` (HTTP 404) — no table is stored at what the request
+/// addresses.
+fn no_such_table() -> GetTableMaintenanceJobStatusError {
+    GetTableMaintenanceJobStatusErrorModeled::NotFoundException(NotFoundException {
+        message: Some(crate::state::TABLE_NOT_FOUND_MESSAGE.to_string()),
+    })
+    .into()
+}
+
+/// One job's status, in the wire form the response's `status` map carries.
+fn wire_value(report: &crate::state::MaintenanceJobReport) -> TableMaintenanceJobStatusValue {
+    TableMaintenanceJobStatusValue {
+        status: report.status.as_wire().to_string(),
+        // Reported only for a job a run of which has completed: an instant for
+        // a job that has not run would be a claim about work nothing performed.
+        last_run_timestamp: report.last_run_at.map(::aws_smithy_types::DateTime::from),
+        // Nothing in this emulator fails a maintenance run, so no job carries a
+        // failure to state.
+        failure_message: None,
+    }
+}
+
 /// The `GetTableMaintenanceJobStatus` operation.
 ///
 /// Owns the shared engine (the constructor seam) and implements
@@ -159,18 +182,46 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         input: Self::Input,
         ctx: &smithy_server_runtime::OperationContext<'_>,
     ) -> Result<Self::Output, Self::Error> {
-        // The engine is reachable from `&self` (constructor-injected); `ctx` carries
-        // request metadata. Both are bound here so an implementer has them in scope.
-        let _ = (&input, ctx, &self.engine);
-        // Implement `GetTableMaintenanceJobStatus` here, then delete the SCAFFOLDED marker at the top of
-        // this file. Return modeled failures as
-        // `Err(GetTableMaintenanceJobStatusErrorModeled::Variant(..).into())` — the `From` impl above lifts it.
-        //
-        // To refuse a bad request this operation models no error for, return
-        // `Err(crate::scaffolded::Scaffolded::validation("..."))` — a 400
-        // `ValidationException`. Do NOT answer 501 for it: 501 means "not written yet",
-        // not "bad request". Modeled constraints are already refused BEFORE this
-        // handler runs, so reaching here means the input satisfies every one of them.
-        Err(crate::scaffolded::Scaffolded::not_implemented("GetTableMaintenanceJobStatus"))
+        let _ = ctx;
+        let state = crate::state::service_state(&*self.engine).ok_or_else(|| {
+            GetTableMaintenanceJobStatusErrorModeled::InternalServerErrorException(
+                InternalServerErrorException {
+                    message: Some("the S3 Tables table bucket store is unavailable".to_string()),
+                },
+            )
+        })?;
+
+        // A pure read: every job's status is derived from the table's own
+        // record, its bucket's and the clock, and nothing in the store is
+        // touched — so two reads of a table nobody reconfigured answer the same.
+        let at = ::std::time::SystemTime::now();
+        let store = state.lock();
+        // The table is resolved through the bucket the request names, so a
+        // request against a bucket the store does not hold is refused for that
+        // reason rather than reported as a missing table.
+        let bucket = store
+            .table_buckets
+            .get(&input.table_bucket_arn)
+            .ok_or_else(no_such_bucket)?;
+        let table = bucket
+            .namespaces
+            .get(&input.namespace)
+            .and_then(|namespace| namespace.tables.get(&input.name))
+            .ok_or_else(no_such_table)?;
+
+        // S3 Tables maintains every table from the moment it is created, so the
+        // read reports one entry per modeled maintenance job: the two the
+        // table's own configuration settles, and the one its bucket's does.
+        let status = crate::state::table_maintenance_job_status(bucket, table, at)
+            .iter()
+            .map(|(job, report)| (job.as_wire().to_string(), wire_value(report)))
+            .collect();
+
+        Ok(GetTableMaintenanceJobStatusOutput {
+            // The table's OWN ARN, as the store holds it, rather than one built
+            // from what the request carried.
+            table_arn: table.table_arn.clone(),
+            status,
+        })
     }
 }

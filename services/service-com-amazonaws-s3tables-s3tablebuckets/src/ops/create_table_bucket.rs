@@ -274,6 +274,9 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
             // and until then every modeled task runs under the service's own
             // defaults.
             maintenance: ::std::collections::BTreeMap::new(),
+            // Nor any schedule of its own: every task has been eligible to run
+            // on the bucket since it was created, under its default status.
+            maintenance_schedules: ::std::collections::BTreeMap::new(),
             tags,
             // A fresh bucket holds no namespaces; `CreateNamespace` is what
             // puts one in it.

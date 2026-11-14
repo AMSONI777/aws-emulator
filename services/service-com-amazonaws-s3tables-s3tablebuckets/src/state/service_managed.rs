@@ -122,6 +122,7 @@ impl ComAmazonawsS3tablesS3tablebucketsState {
             storage_class,
             record_expiration: None,
             maintenance: BTreeMap::new(),
+            maintenance_schedules: BTreeMap::new(),
             tags: BTreeMap::new(),
         };
 

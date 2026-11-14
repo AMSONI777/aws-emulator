@@ -2980,7 +2980,6 @@ mod cloudformation_cognito_identity_role_attachment_refusal;
 // tail: a module may be declared only once, however many landings append it here.)
 // Declared in the appended tail: what a session an identity pool vends may DO is decided by
 // IAM's record of the mapped role and
-// Declare each suite exactly ONCE: this is one crate root, so a second `mod` for the same
 // name is `E0428` and fails every suite in this target. `all/all_rs_declares_each_suite_once.rs`
 // checks that for this file and for every service crate's `tests/all.rs`, so check there
 // rather than leaving a note here.
@@ -2995,9 +2994,6 @@ mod cloudformation_task_definition_runs_an_ecs_service;
 // inner doc comment may only appear before an item.)
 // leaving a note here. (Written as ordinary comments: an inner doc comment `//!` may only
 // appear before any item, so one in this appended tail is `E0753` and compiles nothing.)
-// name is `E0428` and fails every suite in this target.
-// `all/all_rs_declares_each_suite_once.rs` checks that for this file and for every service
-// crate's `tests/all.rs`, so check there rather than leaving a note here.
 // (The crate-level guidance two concurrent landings appended here belongs to the module
 // header at the top of this file, where it now stands: an inner doc comment may only precede
 // items, so a `//!` line in this appended tail is `E0753` and compiles nothing.)
@@ -3007,3 +3003,4 @@ mod cloudformation_task_definition_runs_an_ecs_service;
 // this file and for every service crate's `tests/all.rs`. It is a LINE comment here: an
 // inner doc comment is only legal before the first item, so landing it in this tail failed
 // every suite in this target.)
+//! this file and for every service crate's `tests/all.rs`.

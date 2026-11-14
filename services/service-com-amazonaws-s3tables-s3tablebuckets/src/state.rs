@@ -22,6 +22,11 @@ pub use iceberg::*;
 mod service_managed;
 pub use service_managed::*;
 
+/// The maintenance jobs that run on a table: which run, the schedule each runs
+/// under, and the status a read of them reports.
+mod maintenance_jobs;
+pub use maintenance_jobs::*;
+
 /// The region a table bucket's ARN carries when the request carries no
 /// parseable SigV4 credential scope to name one.
 pub const DEFAULT_REGION: &str = "us-east-1";
@@ -906,6 +911,11 @@ pub struct TableBucket {
     /// defaults, which [`effective_bucket_maintenance`] is where it is reported
     /// from.
     pub maintenance: BTreeMap<TableBucketMaintenanceType, TableBucketMaintenance>,
+    /// The schedule each of this bucket's maintenance tasks runs under, keyed
+    /// by the task, written by the put that turns a task on or off. A task with
+    /// no entry has run under its default status since the bucket was created,
+    /// which [`bucket_task_schedule`] is where it is resolved from.
+    pub maintenance_schedules: BTreeMap<TableBucketMaintenanceType, MaintenanceSchedule>,
     pub tags: BTreeMap<String, String>,
     /// The namespaces resident in this bucket, keyed by namespace name, so a
     /// list has one stable order to page over.
@@ -983,6 +993,11 @@ pub struct Table {
     /// defaults, which [`effective_table_maintenance`] is where it is reported
     /// from — so what is persisted here is what a caller asked for.
     pub maintenance: BTreeMap<TableMaintenanceType, TableMaintenance>,
+    /// The schedule each of this table's maintenance tasks runs under, keyed by
+    /// the task, written by the put that turns a task on or off. A task with no
+    /// entry has run under its default status since the table was created,
+    /// which [`table_task_schedule`] is where it is resolved from.
+    pub maintenance_schedules: BTreeMap<TableMaintenanceType, MaintenanceSchedule>,
     pub tags: BTreeMap<String, String>,
 }
 
