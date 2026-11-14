@@ -3688,3 +3688,11 @@ mod iam_denial_reason_attribution;
 // comment past the first item is `E0753`, so this fragment of the module header stands as
 // ordinary comments here, and the header at the HEAD of this file carries the rule:
 // the fragment above records.)
+// (An appended fragment of the header above, kept as an ordinary comment because an inner
+// doc comment is only legal before the first item: it checks this file and every service
+// crate's `tests/all.rs`.)
+// (A suite left at the top level of `tests/` fails the build — another fragment of this
+// file's own header, kept as a line comment because an inner doc comment is only legal
+// before the first item.)
+// (An appended fragment of the header above, kept as a line comment because an inner doc
+// comment is only legal before the first item: it checks this file and every service

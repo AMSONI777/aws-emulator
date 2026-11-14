@@ -15,6 +15,8 @@
 mod autocomplete_completions;
 #[path = "all/catalog_coverage_and_position_resolution.rs"]
 mod catalog_coverage_and_position_resolution;
+#[path = "all/chain_branch_ranking.rs"]
+mod chain_branch_ranking;
 #[path = "all/localized_projection_and_granularity.rs"]
 mod localized_projection_and_granularity;
 #[path = "all/place_handles_and_extents.rs"]

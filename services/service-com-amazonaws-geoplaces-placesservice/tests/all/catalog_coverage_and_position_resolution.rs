@@ -502,7 +502,7 @@ async fn a_bounding_box_keeps_the_matches_inside_it() {
             case: "downtown-seattle-coffee",
             area: [-122.36, 47.60, -122.33, 47.62],
             query: "coffee",
-            expected: 4,
+            expected: 5,
         },
         BoxRow {
             case: "capitol-hill-coffee",
@@ -609,13 +609,13 @@ async fn widening_the_query_radius_reaches_more_places() {
             case: "space-needle-block",
             anchor: [-122.3493, 47.6205],
             ladder: &[20, 40, 85, 2_000],
-            expected: &[2, 3, 5, 12],
+            expected: &[2, 3, 5, 13],
         },
         RadiusRow {
             case: "seattle-city",
             anchor: [-122.330_062, 47.603_832],
             ladder: &[100, 2_000, 20_000],
-            expected: &[2, 8, 16],
+            expected: &[2, 9, 17],
         },
         RadiusRow {
             case: "paris-city",

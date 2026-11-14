@@ -3452,6 +3452,13 @@ fn street_in(
 /// delivery segment, which in the United States is a ZIP+4 where the data has the
 /// add-on and the five-digit code where it does not.
 ///
+/// Each record is ONE place: its `Position` is the WGS 84 coordinate of the street
+/// address the record carries, so the `Distance` an operation measures to it (and
+/// the ranking that distance decides) names the place its `Address` names. A
+/// business chain is therefore seeded with the branches that really stand around
+/// each anchor the catalog covers — leaving one out, or placing one off the street
+/// it is addressed on, would rank a different place at that distance.
+///
 /// The category ids and names are this catalog's own: the model carries no
 /// enumeration of AWS's place categories, only the `Category` structure shape.
 fn seed_catalog() -> ComAmazonawsGeoplacesPlacesserviceState {
@@ -3908,9 +3915,10 @@ fn seed_catalog() -> ComAmazonawsGeoplacesPlacesserviceState {
 
     // --- Seattle: density. Three records sit within 40 m of the Space Needle and
     // --- two more between 40 m and 85 m, so widening a `QueryRadius` selects
-    // --- between them; four coffee shops sit inside downtown and two outside it,
-    // --- so a `BoundingBox` does too; and the chain has several stores, so a page
-    // --- of N results can hold N.
+    // --- between them; five coffee shops sit inside downtown and two outside it,
+    // --- so a `BoundingBox` does too; and the chain has several stores at varied
+    // --- distances from the Seattle Center, so a distance-ranked page of N
+    // --- results holds the N nearest branches.
     places.extend([
         PlaceRecord::new(
             "Seattle Center Monorail",
@@ -3983,7 +3991,9 @@ fn seed_catalog() -> ComAmazonawsGeoplacesPlacesserviceState {
         PlaceRecord::new(
             "STARBUCKS",
             PLACE_TYPE_POINT_OF_INTEREST,
-            [-122.335_81, 47.622_76],
+            // Terry Ave N, in South Lake Union: the store sits on the avenue its
+            // address names, one block east of Westlake Ave N.
+            [-122.336_95, 47.622_87],
             street_in(
                 &seattle,
                 "442",
@@ -3997,6 +4007,27 @@ fn seed_catalog() -> ComAmazonawsGeoplacesPlacesserviceState {
         .with_business_chains(&["Starbucks"])
         .with_contacts(&["+1 206-624-4521"], &["https://www.starbucks.com"])
         .with_opening_hours(&["Mon-Fri: 05:30 - 18:00"])
+        .in_time_zone(pacific),
+        // The branch in Belltown, on 7th Ave at Virginia St: the chain's store
+        // between the Seattle Center and downtown, so the ladder of branches
+        // around the Center has no gap between the South Lake Union store and
+        // the ones in the retail core.
+        PlaceRecord::new(
+            "STARBUCKS",
+            PLACE_TYPE_POINT_OF_INTEREST,
+            [-122.338_22, 47.615_23],
+            street_in(
+                &seattle,
+                "2011",
+                "7th Ave",
+                "98121-2601",
+                Some("Belltown"),
+            ),
+        )
+        .with_categories(&[("coffee_shop", "Coffee Shop")])
+        .with_food_types(&["Coffee"])
+        .with_business_chains(&["Starbucks"])
+        .with_opening_hours(&["Mon-Fri: 05:00 - 19:00", "Sat-Sun: 06:00 - 18:00"])
         .in_time_zone(pacific),
         PlaceRecord::new(
             "STARBUCKS",
