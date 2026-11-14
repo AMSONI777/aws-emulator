@@ -205,10 +205,25 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
 
         // `PublicKeyMap` is keyed by key name, so the last value given for a name is
         // the one the authorizer carries; the record keeps the map ordered so every
-        // reader reports it the same way.
+        // reader reports it the same way. How MANY keys one authorizer registers is
+        // bounded ([`crate::state::MAX_TOKEN_SIGNING_PUBLIC_KEYS`]), because every
+        // later `TestInvokeAuthorizer` of this authorizer checks a presented signature
+        // against each of them.
         let token_signing_public_keys: Option<::std::collections::BTreeMap<String, String>> = input
             .token_signing_public_keys
             .map(|keys| keys.into_iter().collect());
+        if let Some(keys) = &token_signing_public_keys {
+            if keys.len() > crate::state::MAX_TOKEN_SIGNING_PUBLIC_KEYS {
+                return Err(CreateAuthorizerErrorModeled::InvalidRequestException(
+                    InvalidRequestException {
+                        message: Some(crate::state::token_signing_public_keys_limit_message(
+                            keys.len(),
+                        )),
+                    },
+                )
+                .into());
+            }
+        }
 
         let mut store = state.lock();
 

@@ -1,15 +1,21 @@
 // SPDX-License-Identifier: CC0-1.0
 
 //! @op TestInvokeAuthorizer
-//! SCAFFOLDED, NOT IMPLEMENTED: this operation answers HTTP 501 `NotImplemented` and
-//! asserts NOTHING about `TestInvokeAuthorizer`'s real behaviour. Implement it here — this is
-//! the ONLY file to touch for this operation.
 //!
-//! A 501 from this operation means "nobody has written it yet", never "the emulator is
-//! broken". Replace the `Err(..)` in [`TestInvokeAuthorizer::handle`] with real behaviour and
-//! delete the SCAFFOLDED marker line above; that line is the machine-readable record of
-//! which operations are still stubs (`grep -rl '^//! SCAFFOLDED, NOT IMPLEMENTED:' */src/ops/`),
-//! so leaving it on an implemented operation under-reports progress.
+//! RUNS the custom authorizer the request names: it resolves the authorizer in this
+//! service's authorizer store, verifies the presented token signature against the
+//! authorizer's token signing public keys unless the authorizer disables signing, and
+//! invokes the authorizer's Lambda function with the authorization event — the answer
+//! is the one that function returned.
+//!
+//! The signature check and the function invocation both live in
+//! [`crate::state::custom_authorizer`], so what this handler does is order them and
+//! turn each refusal into the modelled error for it: `ResourceNotFoundException` (404)
+//! for a name the store does not hold, `InvalidRequestException` (400) for a token
+//! whose signature verifies against none of the authorizer's keys (and for a missing
+//! token or signature where the authorizer validates one), and
+//! `InvalidResponseException` (400) where the function answered something other than
+//! an authorization answer, or was never reached at all.
 //!
 //! ## Shape of an operation
 //!
@@ -164,18 +170,114 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         input: Self::Input,
         ctx: &smithy_server_runtime::OperationContext<'_>,
     ) -> Result<Self::Output, Self::Error> {
-        // The engine is reachable from `&self` (constructor-injected); `ctx` carries
-        // request metadata. Both are bound here so an implementer has them in scope.
-        let _ = (&input, ctx, &self.engine);
-        // Implement `TestInvokeAuthorizer` here, then delete the SCAFFOLDED marker at the top of
-        // this file. Return modeled failures as
-        // `Err(TestInvokeAuthorizerErrorModeled::Variant(..).into())` — the `From` impl above lifts it.
-        //
-        // To refuse a bad request this operation models no error for, return
-        // `Err(crate::scaffolded::Scaffolded::validation("..."))` — a 400
-        // `ValidationException`. Do NOT answer 501 for it: 501 means "not written yet",
-        // not "bad request". Modeled constraints are already refused BEFORE this
-        // handler runs, so reaching here means the input satisfies every one of them.
-        Err(crate::scaffolded::Scaffolded::not_implemented("TestInvokeAuthorizer"))
+        let Some(state) = crate::state::service_state(&*self.engine) else {
+            return Err(TestInvokeAuthorizerErrorModeled::InternalFailureException(
+                InternalFailureException {
+                    message: Some("the IoT emulator has no state store attached".to_string()),
+                },
+            )
+            .into());
+        };
+
+        // The authorizer record is read and the lock is RELEASED right away: nothing
+        // here writes state, the signature check runs over a bounded copy of what the
+        // authorizer registered ([`crate::state::MAX_TOKEN_SIGNING_PUBLIC_KEYS`]), and
+        // holding the lock across either that check or the invocation would make every
+        // other request of this service wait behind them.
+        let (function_arn, signing_disabled, public_keys) = {
+            let store = state.lock();
+            let authorizer = store.authorizers.get(&input.authorizer_name).ok_or_else(|| {
+                TestInvokeAuthorizerErrorModeled::ResourceNotFoundException(
+                    ResourceNotFoundException {
+                        message: Some(crate::state::missing_authorizer_message(
+                            &input.authorizer_name,
+                        )),
+                    },
+                )
+            })?;
+            (
+                authorizer.authorizer_function_arn.clone(),
+                authorizer.signing_disabled,
+                authorizer.token_signing_public_keys.clone().unwrap_or_default(),
+            )
+        };
+
+        // "Specifies whether IoT validates the token signature in an authorization
+        // request": an authorizer that validates one is given a token and a signature
+        // over it, and that signature has to verify against one of the keys the
+        // authorizer registered — any of them, so a service that rotates its signing
+        // key can sign with either while its fleet moves over. An authorizer that
+        // validates no signature is handed the request as it came.
+        let signature_verified = if signing_disabled {
+            false
+        } else {
+            let token = input.token.as_deref().ok_or_else(|| {
+                TestInvokeAuthorizerErrorModeled::InvalidRequestException(
+                    InvalidRequestException {
+                        message: Some(crate::state::missing_token_message(&input.authorizer_name)),
+                    },
+                )
+            })?;
+            let token_signature = input.token_signature.as_deref().ok_or_else(|| {
+                TestInvokeAuthorizerErrorModeled::InvalidRequestException(
+                    InvalidRequestException {
+                        message: Some(crate::state::missing_token_signature_message(
+                            &input.authorizer_name,
+                        )),
+                    },
+                )
+            })?;
+            if !crate::state::token_signature_verifies(&public_keys, token, token_signature) {
+                return Err(TestInvokeAuthorizerErrorModeled::InvalidRequestException(
+                    InvalidRequestException {
+                        message: Some(crate::state::signature_mismatch_message(
+                            &input.authorizer_name,
+                        )),
+                    },
+                )
+                .into());
+            }
+            true
+        };
+
+        let event = crate::state::authorizer_event(
+            input.token.as_deref(),
+            signature_verified,
+            input.http_context.as_ref(),
+            input.mqtt_context.as_ref(),
+            input.tls_context.as_ref(),
+            &crate::state::fresh_uuid(),
+        );
+
+        let region = crate::state::request_region(ctx.parts());
+        // Either failure — a function that was never reached, and one that answered
+        // something other than an authorization answer — is the modelled
+        // `InvalidResponseException`: the authorization answer the caller asked for does
+        // not exist. The two are worded apart, so the refusal never claims an answer
+        // that never existed.
+        let answered = async {
+            let payload =
+                crate::state::invoke_authorizer_function(ctx, &function_arn, &region, &event)
+                    .await?;
+            crate::state::read_verdict(&payload)
+        }
+        .await;
+
+        // The authorization answer is the function's, member for member: nothing here
+        // decides whether the token authenticates, which principal it is, or which
+        // policies apply.
+        let verdict = answered.map_err(|failure| {
+            TestInvokeAuthorizerErrorModeled::InvalidResponseException(InvalidResponseException {
+                message: Some(failure.message(&input.authorizer_name)),
+            })
+        })?;
+
+        Ok(TestInvokeAuthorizerOutput {
+            is_authenticated: Some(verdict.is_authenticated),
+            principal_id: verdict.principal_id,
+            policy_documents: verdict.policy_documents,
+            refresh_after_in_seconds: verdict.refresh_after_in_seconds,
+            disconnect_after_in_seconds: verdict.disconnect_after_in_seconds,
+        })
     }
 }

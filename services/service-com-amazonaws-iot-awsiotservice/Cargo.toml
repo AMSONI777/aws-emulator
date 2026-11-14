@@ -16,7 +16,9 @@ emulator-server = { workspace = true }
 emulator-telemetry = { workspace = true }
 aws-smithy-runtime-api = { workspace = true }
 aws-smithy-types = { workspace = true }
-tokio = { workspace = true }
+# `time` on top of the workspace features: the wait for an authorizer's Lambda function to
+# answer is bounded by `tokio::time::timeout` (`state::custom_authorizer`).
+tokio = { workspace = true, features = ["time"] }
 bytes = { workspace = true }
 http = { workspace = true }
 serde_json = { workspace = true }
@@ -71,6 +73,16 @@ pkcs8 = "0.10"
 # Writes that PKCS#1 RSA private key as the PEM block `KeyPair$PrivateKey` carries.
 pkcs1 = { version = "0.7", features = ["pem"] }
 
+# `TestInvokeAuthorizer` RUNS the custom authorizer the request names, which means
+# invoking the authorizer's Lambda function over the in-process callback into this same
+# emulator (`state::custom_authorizer`). Built as the SDK's generated client only: no
+# network client feature is enabled, so the transport is the emulator's own.
+aws-sdk-lambda = { version = "1", default-features = false }
+# A token signature is "Base-64-encoded" (`TestInvokeAuthorizer$tokenSignature`), and an
+# MQTT password is a blob that travels base-64 in the authorizer's JSON event, so both
+# are decoded and encoded with it (`state::custom_authorizer`).
+base64 = "0.22"
+
 [build-dependencies]
 emulator-core-build-support = { workspace = true }
 
@@ -86,6 +98,13 @@ service-com-amazonaws-kinesis-kinesis-20131202 = { workspace = true }
 # The Amazon S3 service, mounted beside IoT on one engine so the input file a bulk thing
 # provisioning task names is an object staged with `PutObject`.
 service-com-amazonaws-s3-amazons3 = { workspace = true }
+# The AWS Lambda service, mounted beside IoT on one engine — exactly as the assembled
+# emulator mounts them — because `TestInvokeAuthorizer` runs the authorizer by calling a
+# function that service holds.
+service-com-amazonaws-lambda-awsgirapiservice = { workspace = true }
+# An authorizer function's deployment package is a .zip archive, and its handler module is
+# one entry in it.
+zip = { version = "9", default-features = false, features = ["deflate"] }
 
 [lints]
 workspace = true

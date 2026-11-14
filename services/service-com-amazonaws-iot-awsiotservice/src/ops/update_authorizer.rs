@@ -172,6 +172,25 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
             )
             .into());
         };
+        // Checked BEFORE the record is reached, so a refused update writes none of the
+        // members it carried: how MANY token signing public keys one authorizer
+        // registers is bounded by the ceiling the create enforces
+        // ([`crate::state::MAX_TOKEN_SIGNING_PUBLIC_KEYS`]), for the same reason —
+        // every later `TestInvokeAuthorizer` of this authorizer checks a presented
+        // signature against each registered key.
+        if let Some(keys) = &input.token_signing_public_keys {
+            if keys.len() > crate::state::MAX_TOKEN_SIGNING_PUBLIC_KEYS {
+                return Err(UpdateAuthorizerErrorModeled::InvalidRequestException(
+                    InvalidRequestException {
+                        message: Some(crate::state::token_signing_public_keys_limit_message(
+                            keys.len(),
+                        )),
+                    },
+                )
+                .into());
+            }
+        }
+
         let mut store = state.lock();
 
         // The name addresses the record: a name the store does not hold is the modelled

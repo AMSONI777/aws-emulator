@@ -1940,6 +1940,30 @@ pub const MAX_AUTHORIZERS: usize = 100;
 /// maximum, so without a ceiling one request would choose how large a record is.
 pub const MAX_AUTHORIZER_TAGS: usize = MAX_POLICY_TAGS;
 
+/// How many token signing public keys one authorizer may register.
+///
+/// `PublicKeyMap` has no modelled maximum, and the map is read on EVERY
+/// `TestInvokeAuthorizer` of that authorizer — a presented signature is checked against
+/// each key until one verifies — so without a ceiling one request would choose how much
+/// signature verification every later request does. The emulator's own ceiling, like
+/// [`MAX_AUTHORIZERS`], and comfortably above what the member exists for: a service
+/// rotating its signing key publishes the new key beside the old one and signs with
+/// either while its fleet moves over. A write past it is refused with the modelled
+/// `InvalidRequestException` ("The request is not valid", HTTP 400) rather than recorded.
+pub const MAX_TOKEN_SIGNING_PUBLIC_KEYS: usize = 8;
+
+/// How this service refuses a write that would register more token signing public keys
+/// than [`MAX_TOKEN_SIGNING_PUBLIC_KEYS`]: one wording for every writer of an
+/// authorizer, so two of them cannot refuse the same request differently. The fixed
+/// text names the member and the limit, and the variable part is how many the request
+/// carried.
+pub fn token_signing_public_keys_limit_message(requested: usize) -> String {
+    format!(
+        "an authorizer may register at most {MAX_TOKEN_SIGNING_PUBLIC_KEYS} token signing \
+         public keys; this request carries {requested}"
+    )
+}
+
 /// The `status` an authorizer created without one carries.
 ///
 /// `AuthorizerStatus` is `ACTIVE | INACTIVE`
@@ -3008,6 +3032,16 @@ pub use certificate_providers::{
     certificate_provider_arn, default_provider_conflict_message,
     missing_certificate_provider_message, RegisteredCertificateProvider,
     CERTIFICATE_PROVIDER_OPERATIONS, MAX_CERTIFICATE_PROVIDERS,
+};
+
+// How a CUSTOM AUTHORIZER is RUN — the token-signature check, the event its Lambda
+// function is invoked with and the authorization answer read back out of it — lives in
+// `state/custom_authorizer.rs`, beside the authorizer record it runs.
+pub mod custom_authorizer;
+pub use custom_authorizer::{
+    authorizer_event, invalid_response_message, invoke_authorizer_function,
+    missing_token_message, missing_token_signature_message, not_invoked_message, read_verdict,
+    signature_mismatch_message, token_signature_verifies, AuthorizerFailure, AuthorizerVerdict,
 };
 
 // What a FLEET PROVISIONING TEMPLATE is — the record one holds, its versions and which

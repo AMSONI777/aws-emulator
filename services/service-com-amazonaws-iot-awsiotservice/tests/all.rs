@@ -35,6 +35,8 @@ mod command_execution_read;
 mod command_listing;
 #[path = "all/command_registry.rs"]
 mod command_registry;
+#[path = "all/custom_authorizer_invocation.rs"]
+mod custom_authorizer_invocation;
 #[path = "all/describe_endpoint.rs"]
 mod describe_endpoint;
 #[path = "all/device_certificate_issuance.rs"]
