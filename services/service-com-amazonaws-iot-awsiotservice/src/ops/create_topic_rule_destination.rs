@@ -186,6 +186,10 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         let Some(http_url) = configuration.http_url_configuration.as_ref() else {
             return Err(invalid_request(unsupported_destination_kind(configuration)));
         };
+        // The configured URL, with the surrounding whitespace an address never carries
+        // removed: this one value is what the policy below reads, what a refusal quotes back
+        // and what the record and its challenge are built from, so the three cannot disagree
+        // about which value the request named.
         let confirmation_url = http_url.confirmation_url.trim().to_string();
         // `HttpUrlDestinationConfiguration$confirmationUrl` is `@required` with `length
         // 0..2000`, so the empty string, a bare word and a cleartext URL all satisfy the
@@ -193,15 +197,12 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         // by the destination policy instead, BEFORE anything is recorded and before any
         // request is built: a value outside it is refused rather than stored as a
         // destination that could never leave `IN_PROGRESS`.
-        if let Some(reason) =
-            crate::state::topic_rule_destinations::unchallengeable_confirmation_url(
-                &confirmation_url,
-            )
-        {
-            return Err(invalid_request(format!(
-                "confirmationUrl {confirmation_url} is not a URL this destination's \
-                 confirmation request can be sent to: {reason}"
-            )));
+        if !crate::state::topic_rule_destinations::is_challengeable_confirmation_url(
+            &confirmation_url,
+        ) {
+            return Err(invalid_request(
+                crate::state::invalid_confirmation_url_message(&confirmation_url),
+            ));
         }
 
         let region = crate::state::request_region(ctx.parts());

@@ -28,7 +28,7 @@
 //! `DestinationConfirmation` request to the `confirmationUrl` the configuration named,
 //! carrying a [`CONFIRMATION_TOKEN_QUERY_PARAMETER`] the owner of that endpoint hands
 //! back through `ConfirmTopicRuleDestination`. The URL a create may name is held to this
-//! module's own policy ([`unchallengeable_confirmation_url`]) and the challenge is sent over
+//! module's own policy ([`is_challengeable_confirmation_url`]) and the challenge is sent over
 //! the emulator's own IN-PROCESS transport and nothing else ([`InProcessTransport`]), so a
 //! URL a caller configured reaches only what this emulator serves itself: no socket is
 //! opened, no host name is resolved and no redirect is followed.
@@ -99,11 +99,66 @@ pub fn topic_rule_destination_arn(region: &str, destination_id: &str) -> String 
     )
 }
 
-/// How every operation that addresses ONE topic rule destination refuses an `arn` this
-/// account holds no destination under: the family's fixed text, with the ARN taken from
-/// the request.
-pub fn missing_topic_rule_destination_message(arn: &str) -> String {
-    format!("Topic rule destination {arn} not found")
+/// The opening every ARN is written with, whatever resource it names: the literal `arn`
+/// field and its separator.
+const ARN_OPENING: &str = "arn:";
+
+/// Why `value`, bound where this service takes an `AwsArn`, addresses no resource THIS
+/// account could hold — or `None` when it is for this account's store to answer.
+///
+/// `AwsArn` carries no `@pattern` (`smithy_query(query="shape",shape="AwsArn")`), so a bare
+/// word satisfies the model and reaches the handler. Reading the value is therefore the
+/// operation's own work, and it has two outcomes a request has to be FIXED for rather than
+/// retried, each stated in the sentence AWS states it in:
+///
+/// * the value is not an ARN at all — it does not even open with [`ARN_OPENING`], so it
+///   names no resource in any account;
+/// * the value is an ARN naming another ACCOUNT, so no resource of this account answers to
+///   it, whatever its resource field says.
+///
+/// Both are refused before any lookup runs, which is what keeps a client-side ARN bug from
+/// being reported as a resource that does not exist.
+///
+/// The fields are read through the one ARN parse the services share
+/// ([`::service_common::arn`]) rather than split here. Two values it rejects are
+/// DELIBERATELY left to the store: one that opens like an ARN and is not one (too few
+/// fields for [`::service_common::arn::has_arn_fields`], or an empty partition, vendor or
+/// resource), which AWS's leading-`arn:` sentence does not describe and which no recorded
+/// response gives wording for; and an ARN written with no account at all
+/// (`arn:aws:s3:::bucket`, how AWS writes a partition-global resource), which names no
+/// account to disagree with. Both get the answer an ARN nothing answers to gets — a DENIAL
+/// ([`unreadable_topic_rule_destination_message`]) — which discloses nothing either way.
+pub fn unaddressable_arn(value: &str) -> Option<String> {
+    if !value.starts_with(ARN_OPENING) {
+        return Some(format!("ARNs must start with '{ARN_OPENING}': {value}"));
+    }
+    let account = ::service_common::arn::parse(value).map(|arn| arn.account);
+    let this_account = ::emulator_server::emulator_account_id();
+    match account {
+        Some(account) if !account.is_empty() && account != this_account => Some(format!(
+            "Resource account ({this_account}) doesn't match account from ARN: {value}"
+        )),
+        _ => None,
+    }
+}
+
+/// How every operation that addresses ONE topic rule destination by ARN refuses an ARN
+/// that resolves to no destination this account can read: the family's fixed text, with
+/// the ARN taken from the request.
+///
+/// A destination is addressed by ARN, so the ARN names an account as well as a resource,
+/// and the answer to "may this caller read it?" is the same whether the destination belongs
+/// to somebody else or to nobody: access is DENIED, and non-existence is not disclosed.
+/// That is why the single-destination operations all model `UnauthorizedException` (HTTP
+/// 401) and none of them models a not-found error.
+pub fn unreadable_topic_rule_destination_message(arn: &str) -> String {
+    format!("Access to TopicRuleDestination '{arn}' was denied")
+}
+
+/// How a create refuses a `confirmationUrl` that is not an HTTPS URL a confirmation
+/// request could be sent to: the fixed text, with the URL quoted from the request.
+pub fn invalid_confirmation_url_message(url: &str) -> String {
+    format!("Invalid confirmationUrl: '{url}' is not a valid HTTPS URL")
 }
 
 /// How `ConfirmTopicRuleDestination` refuses a token that is no destination's.
@@ -111,7 +166,19 @@ pub fn missing_topic_rule_destination_message(arn: &str) -> String {
 /// The token is the whole request, so there is no resource name to qualify the sentence
 /// with — and the token itself is not echoed: a caller that sent the wrong one learns
 /// that it was not accepted, not what this service holds.
-pub const INVALID_CONFIRMATION_TOKEN_MESSAGE: &str = "Invalid confirmation token";
+pub const INVALID_CONFIRMATION_TOKEN_MESSAGE: &str = "Invalid confirmation token.";
+
+/// `TopicRuleDestination$statusReason` for a destination that is `IN_PROGRESS` because its
+/// confirmation has not completed: "Additional details or reason why the topic rule
+/// destination is in the current status".
+///
+/// A destination enters the lifecycle "created but has not been confirmed"
+/// (`TopicRuleDestinationStatus$IN_PROGRESS`) and a fresh challenge puts it back there, so
+/// this is the reason both a create and a requested challenge leave on the record — fixed
+/// text, with nothing of the request in it.
+pub const AWAITING_CONFIRMATION_REASON: &str =
+    "Awaiting confirmation. The confirmation message has not been sent to the destination \
+     endpoint yet.";
 
 /// How an update refuses a `status` the destination cannot be moved to from the one it
 /// holds: the two statuses, in the order the sentence states them.
@@ -174,7 +241,7 @@ impl RegisteredTopicRuleDestination {
             confirmation_url,
             confirmation_token,
             status: DESTINATION_IN_PROGRESS.to_string(),
-            status_reason: None,
+            status_reason: Some(AWAITING_CONFIRMATION_REASON.to_string()),
             created_at: now,
             last_updated_at: now,
             confirmed_due_at: None,
@@ -224,7 +291,7 @@ impl RegisteredTopicRuleDestination {
     pub fn challenge_again(&mut self, token: String, now: SystemTime) -> String {
         self.confirmation_token = token;
         self.status = DESTINATION_IN_PROGRESS.to_string();
-        self.status_reason = None;
+        self.status_reason = Some(AWAITING_CONFIRMATION_REASON.to_string());
         self.confirmed_due_at = None;
         self.last_updated_at = now;
         self.confirmation_token.clone()
@@ -600,7 +667,7 @@ fn is_read_by_this_emulators_dispatch(name: &str) -> bool {
 /// carry — so a create naming any other scheme is refused rather than recorded.
 pub const CONFIRMATION_URL_SCHEME: &str = "https";
 
-/// Why `url` is not a confirmation URL this service will challenge, or `None` when it is.
+/// Whether `url` is an HTTPS URL this service can send a confirmation request to.
 ///
 /// This is the DESTINATION POLICY the create applies to the one value it takes from the
 /// request, before anything is recorded or any challenge is built:
@@ -614,20 +681,17 @@ pub const CONFIRMATION_URL_SCHEME: &str = "https";
 ///   the challenge is matched against ([`InProcessTransport`]);
 /// * it must carry no fragment: a fragment is never sent to a server, so a token added
 ///   after one would reach nobody.
-pub fn unchallengeable_confirmation_url(url: &str) -> Option<&'static str> {
+///
+/// A value outside it is refused in the one sentence this service states for a
+/// `confirmationUrl` that is no HTTPS URL ([`invalid_confirmation_url_message`]), whichever
+/// of the clauses above it fails.
+pub fn is_challengeable_confirmation_url(url: &str) -> bool {
     let Ok(uri) = url.parse::<::http::Uri>() else {
-        return Some("it is not a URL");
+        return false;
     };
-    if uri.scheme_str() != Some(CONFIRMATION_URL_SCHEME) {
-        return Some("its scheme is not https");
-    }
-    if uri.authority().is_none() {
-        return Some("it names no host");
-    }
-    if url.contains('#') {
-        return Some("it carries a URL fragment, which is not sent to an endpoint");
-    }
-    None
+    uri.scheme_str() == Some(CONFIRMATION_URL_SCHEME)
+        && uri.authority().is_some()
+        && !url.contains('#')
 }
 
 /// The ONE transport every request this module makes is made over: the emulator the

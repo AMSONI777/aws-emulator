@@ -142,6 +142,21 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
             })
         })?;
 
+        // The `arn` label is an `AwsArn` with no modelled pattern, so a value that is not an
+        // ARN, or one naming another account, reaches here. Neither addresses a resource this
+        // account could hold, so each is refused as the modelled `InvalidRequestException`
+        // (HTTP 400) before the store is consulted at all, rather than reported as a
+        // destination that is not readable: a caller that sent a bad ARN has to fix the
+        // request, not retry it.
+        if let Some(message) = crate::state::unaddressable_arn(&input.arn) {
+            return Err(GetTopicRuleDestinationErrorModeled::InvalidRequestException(
+                InvalidRequestException {
+                    message: Some(message),
+                },
+            )
+            .into());
+        }
+
         let mut store = state.lock();
         // A status the clock already owes is materialised before the read, so what this
         // reports is the destination's current status and not the one it held when the
@@ -151,14 +166,14 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
             ::std::time::SystemTime::now(),
         );
 
-        // `GetTopicRuleDestination` models no not-found error (its errors are
-        // `InternalException`, `InvalidRequestException`, `ServiceUnavailableException` and
-        // `UnauthorizedException`), so an ARN this account holds no destination under is
-        // refused as the modelled `InvalidRequestException` (HTTP 400) in the sentence the
-        // whole family states a miss with.
+        // A destination is addressed by an ARN, which names an account as well as a
+        // resource, and this operation models no not-found error: an ARN this account holds
+        // no destination under is refused as the modelled `UnauthorizedException` (HTTP 401,
+        // "You are not authorized to perform this operation"), which denies access without
+        // disclosing whether anything exists under it.
         let destination = store.topic_rule_destinations.get(&input.arn).ok_or_else(|| {
-            GetTopicRuleDestinationErrorModeled::InvalidRequestException(InvalidRequestException {
-                message: Some(crate::state::missing_topic_rule_destination_message(
+            GetTopicRuleDestinationErrorModeled::UnauthorizedException(UnauthorizedException {
+                message: Some(crate::state::unreadable_topic_rule_destination_message(
                     &input.arn,
                 )),
             })

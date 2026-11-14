@@ -1178,19 +1178,20 @@ async fn a_request_no_destination_can_serve_is_refused_with_a_modelled_error() {
     let arn = created.arn();
     let unknown_arn = format!("arn:aws:iot:{REGION}:{ACCOUNT_ID}:ruledestination/http/nobody");
 
-    // A read of an ARN this account holds no destination under.
+    // A read of an ARN this account holds no destination under: AWS denies access rather
+    // than disclosing that nothing exists under it.
     let missing = emulator.get_destination(&unknown_arn).await;
     assert_eq!(
         (missing.status, missing.error_code.as_deref()),
-        (400, Some("InvalidRequestException")),
+        (401, Some("UnauthorizedException")),
         "an unknown ARN must be refused, got {} {:?}",
         missing.status,
         missing.body
     );
     assert_eq!(
         missing.message(),
-        format!("Topic rule destination {unknown_arn} not found"),
-        "an unknown ARN must be refused in the family's own sentence, got {:?}",
+        format!("Access to TopicRuleDestination '{unknown_arn}' was denied"),
+        "an unknown ARN must be denied in the family's own sentence, got {:?}",
         missing.message()
     );
 
@@ -1205,9 +1206,9 @@ async fn a_request_no_destination_can_serve_is_refused_with_a_modelled_error() {
             missing_update.message()
         ),
         (
-            400,
-            Some("InvalidRequestException"),
-            format!("Topic rule destination {unknown_arn} not found")
+            401,
+            Some("UnauthorizedException"),
+            format!("Access to TopicRuleDestination '{unknown_arn}' was denied")
         ),
         "an update of an unknown ARN must be refused the same way, got {} {:?}",
         missing_update.status,
@@ -1225,7 +1226,7 @@ async fn a_request_no_destination_can_serve_is_refused_with_a_modelled_error() {
         (
             400,
             Some("InvalidRequestException"),
-            "Invalid confirmation token".to_string()
+            "Invalid confirmation token.".to_string()
         ),
         "an unknown token must be refused, got {} {:?}",
         bad_token.status,

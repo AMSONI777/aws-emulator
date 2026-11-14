@@ -2797,9 +2797,6 @@ mod bedrock_agent_ingestion_populates_its_s3_vectors_index;
 // leaving a note here. These lines sit after the first item in this file, so they are
 // ordinary comments: an inner doc comment here is `E0753` and compiles no suite at all.)
 // suite left at the top level of `tests/` fails the build. Declare each suite exactly
-// ONCE: this is one crate root, so a second `mod` for the same name is `E0428` and fails
-// every suite in this target. `all/all_rs_declares_each_suite_once.rs` checks that for
-// this file and for every service crate's `tests/all.rs`, so check there rather than
 // leaving a note here. (Line comments, not `//!`: an inner doc comment is only legal at
 // the head of a crate root, so one in this tail is `E0753` and compiles no suite at all.)
 // (The five lines below arrived as INNER doc comments (`//!`) in this appended tail, where
@@ -3034,3 +3031,8 @@ mod cloudformation_grants_acmpca_permissions;
 // `apigateway_cognito_authorizer_app_client_audience` are each declared ONCE, in the head
 // region of this file: two branches landing in the same window appended a second declaration
 // of each here, and a module declared twice compiles neither.)
+// (An inner doc comment is only legal at the head of a crate root, so this span — a
+// duplicate of the header above, appended here by concurrently landing branches — is a
+// plain comment: as `//!` it was `E0753` and compiled nothing in this target.) Declare each
+// suite exactly ONCE: this is one crate root, so a second `mod` for the same name is
+// `E0428` and fails every suite in this target. `all/all_rs_declares_each_suite_once.rs`

@@ -183,22 +183,35 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         })?;
         let now = ::std::time::SystemTime::now();
 
+        // `arn` is an `AwsArn` with no modelled pattern, so a value that is not an ARN, or
+        // one naming another account, reaches here; neither addresses a resource this account
+        // could hold, so each is refused before the store is consulted at all.
+        if let Some(message) = crate::state::unaddressable_arn(&input.arn) {
+            return Err(invalid_request(message));
+        }
+
         // The write happens under the guard; the challenge a requested `IN_PROGRESS` owes is
         // sent with the guard released.
         let challenge_owed = {
             let mut store = state.lock();
             crate::state::settle_destinations(&mut store.topic_rule_destinations, now);
 
-            // This operation models no not-found error, so an ARN this account holds no
-            // destination under is refused as the modelled `InvalidRequestException` (HTTP
-            // 400) in the sentence the whole family states a miss with.
+            // This operation models no not-found error: an ARN this account holds no
+            // destination under is refused as the modelled `UnauthorizedException` (HTTP
+            // 401), which denies access without disclosing whether anything exists under it.
             let destination = store
                 .topic_rule_destinations
                 .get_mut(&input.arn)
                 .ok_or_else(|| {
-                    invalid_request(crate::state::missing_topic_rule_destination_message(
-                        &input.arn,
-                    ))
+                    UpdateTopicRuleDestinationErrorModeled::UnauthorizedException(
+                        UnauthorizedException {
+                            message: Some(
+                                crate::state::unreadable_topic_rule_destination_message(
+                                    &input.arn,
+                                ),
+                            ),
+                        },
+                    )
                 })?;
             let current = destination.status.clone();
 

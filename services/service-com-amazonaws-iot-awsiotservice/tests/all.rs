@@ -121,6 +121,8 @@ mod thing_type_registry;
 mod thing_update;
 #[path = "all/topic_rule_deletion.rs"]
 mod topic_rule_deletion;
+#[path = "all/topic_rule_destination_access.rs"]
+mod topic_rule_destination_access;
 #[path = "all/topic_rule_destination_lifecycle.rs"]
 mod topic_rule_destination_lifecycle;
 #[path = "all/topic_rule_enablement.rs"]

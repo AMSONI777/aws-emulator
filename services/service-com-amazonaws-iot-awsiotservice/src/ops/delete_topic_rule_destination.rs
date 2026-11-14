@@ -1,15 +1,12 @@
 // SPDX-License-Identifier: CC0-1.0
 
 //! @op DeleteTopicRuleDestination
-//! SCAFFOLDED, NOT IMPLEMENTED: this operation answers HTTP 501 `NotImplemented` and
-//! asserts NOTHING about `DeleteTopicRuleDestination`'s real behaviour. Implement it here — this is
-//! the ONLY file to touch for this operation.
-//!
-//! A 501 from this operation means "nobody has written it yet", never "the emulator is
-//! broken". Replace the `Err(..)` in [`DeleteTopicRuleDestination::handle`] with real behaviour and
-//! delete the SCAFFOLDED marker line above; that line is the machine-readable record of
-//! which operations are still stubs (`grep -rl '^//! SCAFFOLDED, NOT IMPLEMENTED:' */src/ops/`),
-//! so leaving it on an implemented operation under-reports progress.
+//! Removes one topic rule destination from this account's destinations store
+//! (`crate::state::ComAmazonawsIotAwsiotserviceState::topic_rule_destinations`), addressed
+//! by the ARN the request names it with. Once it is gone, nothing of it is readable: a
+//! later `GetTopicRuleDestination` for that ARN is denied like any other ARN this account
+//! holds no destination under. See `crate::state::topic_rule_destinations` for the state
+//! machine the four single-destination operations share.
 //!
 //! ## Shape of an operation
 //!
@@ -104,6 +101,29 @@ impl From<DeleteTopicRuleDestinationErrorModeled> for DeleteTopicRuleDestination
     }
 }
 
+/// Record this state-changing call for attribution: the operation, the identity the
+/// request PRESENTED (the SigV4 access key id, a public identifier and never a secret),
+/// the request target, the destination the call addressed and how the call ended.
+///
+/// A removal is what takes an endpoint's confirmation away, so without a record nothing
+/// says which call stopped a rule's traffic reaching it. Every request-derived field goes
+/// through [`crate::state::audit_field`], which bounds it and strips the control characters
+/// that would otherwise forge a second record; the subscriber supplies the timestamp.
+fn audit(ctx: &smithy_server_runtime::OperationContext<'_>, arn: &str, outcome: &'static str) {
+    let parts = ctx.parts();
+    ::tracing::info!(
+        target: "emulator::audit",
+        service = ctx.identity().signing_name(),
+        operation = "DeleteTopicRuleDestination",
+        access_key_id = %crate::state::audit_field(&::engine::extract_akid(&parts.headers)),
+        request_target =
+            %crate::state::audit_field(&format!("{} {}", parts.method, parts.uri.path())),
+        topic_rule_destination = %crate::state::audit_field(arn),
+        outcome,
+        "state-changing operation"
+    );
+}
+
 /// The `DeleteTopicRuleDestination` operation.
 ///
 /// Owns the shared engine (the constructor seam) and implements
@@ -140,18 +160,60 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         input: Self::Input,
         ctx: &smithy_server_runtime::OperationContext<'_>,
     ) -> Result<Self::Output, Self::Error> {
-        // The engine is reachable from `&self` (constructor-injected); `ctx` carries
-        // request metadata. Both are bound here so an implementer has them in scope.
-        let _ = (&input, ctx, &self.engine);
-        // Implement `DeleteTopicRuleDestination` here, then delete the SCAFFOLDED marker at the top of
-        // this file. Return modeled failures as
-        // `Err(DeleteTopicRuleDestinationErrorModeled::Variant(..).into())` — the `From` impl above lifts it.
-        //
-        // To refuse a bad request this operation models no error for, return
-        // `Err(crate::scaffolded::Scaffolded::validation("..."))` — a 400
-        // `ValidationException`. Do NOT answer 501 for it: 501 means "not written yet",
-        // not "bad request". Modeled constraints are already refused BEFORE this
-        // handler runs, so reaching here means the input satisfies every one of them.
-        Err(crate::scaffolded::Scaffolded::not_implemented("DeleteTopicRuleDestination"))
+        let state = crate::state::service_state(&*self.engine).ok_or_else(|| {
+            DeleteTopicRuleDestinationErrorModeled::InternalException(InternalException {
+                message: Some("the IoT emulator has no state store attached".to_string()),
+            })
+        })?;
+        let now = ::std::time::SystemTime::now();
+
+        // The `arn` label is an `AwsArn` with no modelled pattern, so a value that is not an
+        // ARN, or one naming another account, reaches here. Neither addresses a resource this
+        // account could hold, so each is refused as the modelled `InvalidRequestException`
+        // (HTTP 400) before the store is consulted at all.
+        if let Some(message) = crate::state::unaddressable_arn(&input.arn) {
+            return Err(
+                DeleteTopicRuleDestinationErrorModeled::InvalidRequestException(
+                    InvalidRequestException {
+                        message: Some(message),
+                    },
+                )
+                .into(),
+            );
+        }
+
+        {
+            let mut store = state.lock();
+            crate::state::settle_destinations(&mut store.topic_rule_destinations, now);
+
+            // This operation models no not-found error: an ARN this account holds no
+            // destination under is refused as the modelled `UnauthorizedException` (HTTP
+            // 401), which denies access without disclosing whether anything exists under it
+            // — so a destination removed by an earlier delete is refused exactly like one
+            // that never existed. A destination this account DOES hold is removed, and with
+            // it everything a reader or a rule's `http` action could resolve through it.
+            if store.topic_rule_destinations.remove(&input.arn).is_none() {
+                return Err(
+                    DeleteTopicRuleDestinationErrorModeled::UnauthorizedException(
+                        UnauthorizedException {
+                            message: Some(
+                                crate::state::unreadable_topic_rule_destination_message(
+                                    &input.arn,
+                                ),
+                            ),
+                        },
+                    )
+                    .into(),
+                );
+            }
+        }
+
+        // What the call DID: this ARN addresses no destination any more, so neither a read
+        // of it nor a rule's `http` action admitted by it has anything left to resolve.
+        audit(ctx, &input.arn, "deleted");
+
+        // `DeleteTopicRuleDestination` models no output members at all, so a removal is an
+        // empty 200 and what it did is read back through `GetTopicRuleDestination`.
+        Ok(DeleteTopicRuleDestinationOutput {})
     }
 }
