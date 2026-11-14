@@ -33,9 +33,15 @@
 //! different tag sets for one resource:
 //! [`ComAmazonawsInspector2Inspector2State::resource_tag_slot_mut`] is the one place a
 //! `resourceArn` is resolved to the record whose tags a tagging call reads or writes.
+//!
+//! No resource lives here for the CIS-session RPCs: [`cis_session`] holds the single
+//! identity gate all four of them answer their callers with, which is decided from the
+//! calling identity alone and so reaches no store.
 
+mod cis_session;
 mod vulnerability_catalog;
 
+pub use cis_session::*;
 pub use vulnerability_catalog::*;
 
 use std::collections::{BTreeMap, BTreeSet, VecDeque};

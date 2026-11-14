@@ -3350,3 +3350,4 @@ mod cloudformation_s3tables_table_bucket_maintenance;
 // leaving a note here. (Line comments: these lines sit after the first item, where an
 // inner doc comment is `E0753` and compiles no suite at all.)
 // doc comment in this appended tail is `E0753` and compiles nothing.)
+// states, for this file and for every service crate's `tests/all.rs`.)
