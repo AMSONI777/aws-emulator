@@ -1787,6 +1787,17 @@ pub(crate) fn return_values(
             attributes.insert("KeyId".to_string(), id.clone());
             (id, attributes)
         }
+        // The six AWS AppSync types a GraphQL API's estate is declared with, whose return
+        // values — the ARNs AppSync builds on the ids it mints, and the endpoints only that
+        // service can report — are [`appsync`]'s.
+        APPSYNC_GRAPHQL_API
+        | APPSYNC_GRAPHQL_SCHEMA
+        | APPSYNC_DATA_SOURCE
+        | APPSYNC_RESOLVER
+        | APPSYNC_FUNCTION_CONFIGURATION
+        | APPSYNC_API_KEY => {
+            appsync_return_values(resource_type, name, properties, scope, budget)
+        }
         // "Ref returns the ARN of the cluster" for both kinds of Amazon MSK cluster, and
         // that ARN is the type's one published `Fn::GetAtt` attribute too. Amazon MSK
         // MINTS it: its resource path is `cluster/<name>/<id>`, where the id is the

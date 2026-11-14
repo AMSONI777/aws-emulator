@@ -3515,3 +3515,34 @@ mod chime_deleted_meeting_tagging;
 // `E0753` and fails every suite in this target.)
 // (And another copy of the same tail line, as an ordinary comment for the same reason:
 // this file and for every service crate's `tests/all.rs`.)
+// above: this tail's copy is removed and the first declaration stands.)
+// the copy that stood here is removed and the first declaration stands.)
+// head of this file: the copies this tail carried are removed and the first declarations
+// stand.)
+// Declared here, in this appended tail: that a stack's `AWS::AppSync::*` estate — its GraphQL
+// API, the schema it serves, its data sources, its resolvers, its pipeline functions and its
+// API keys — is really created in AWS AppSync, and that the endpoints and identifiers the stack
+// publishes are the ones that service answered, spans CloudFormation, AppSync, Amazon Cognito
+// user pools, Amazon DynamoDB and IAM at once, so no single service crate's test target can
+// deploy it and then read each resource back through its owner.
+#[path = "all/cloudformation_provisions_appsync_resources.rs"]
+mod cloudformation_provisions_appsync_resources;
+// this tail: the copy that stood here is removed and the first declaration stands.)
+// Declared here, in this appended tail: whether the request id a Step Functions task relays
+// from DynamoDB is that service's own spans both services, so neither crate's own test target
+// can drive it.
+// (`cloudformation_kms_encrypted_sns_sqs_pipeline` is declared ONCE, a few lines above: the
+// copy that stood here is removed and the first declaration stands.)
+// (A note that landed in this tail as an inner doc comment, which only an item may be preceded
+// by: the guidance it repeats is in this file's own module doc at the head, and
+// `all/all_rs_declares_each_suite_once.rs` is what checks it.)
+// (A note that landed in this tail as an inner doc comment, which only an item may be
+// preceded by: the guidance it repeats is in this file's own module doc at the head, and
+// `all/all_rs_declares_each_suite_once.rs` is what checks it. Nothing new goes here.)
+// (`cloudformation_provisions_appsync_resources` is declared ONCE, further up this file, and
+// `cloudformation_provisions_cloudfront_resources` in the sorted span above: a module may be
+// Declared here, in this appended tail: each of the five suites below lost its declaration
+// while two branches were resolving the duplicate copies this tail had accumulated of it, and
+// a suite that is declared nowhere compiles nowhere and never runs. One declaration each, here.
+// (The line that stood here was an inner doc comment too, for the same reason and with the
+// same fix.)

@@ -1,0 +1,878 @@
+// SPDX-License-Identifier: CC0-1.0
+
+use super::*;
+
+/// The type of an IAM access key: the long-term credential of an IAM user, under the
+/// namespace the IAM model's own `awsService.cloudFormationName` (`IAM`) spells.
+///
+/// "Ref returns the AWS::IAM::AccessKey resource's access key ID", and `Fn::GetAtt` reads
+/// `SecretAccessKey` — "the secret access key for the specified AWS::IAM::AccessKey
+/// resource". IAM mints both, which is why [`identity_is_service_assigned`] names this type
+/// and why neither value is computed here ([`return_values`]).
+pub const IAM_ACCESS_KEY: &str = "AWS::IAM::AccessKey";
+
+/// The `AWS::<cloudFormationName>::<Resource>` type of an Amazon Data Firehose stream.
+/// The middle segment is the Firehose model's own `awsService.cloudFormationName`
+/// (`smithy_query(query="service_info")` on that service's model).
+pub const FIREHOSE_DELIVERY_STREAM: &str = "AWS::KinesisFirehose::DeliveryStream";
+
+/// The `AWS::<cloudFormationName>::<Resource>` type of an Amazon Kinesis data stream — a
+/// different service from the Firehose one above, whose middle segment is the Kinesis
+/// model's own `awsService.cloudFormationName` (`Kinesis`).
+///
+/// "Ref returns the stream name", which is the name the owning service creates the stream
+/// under, so a GENERATED one is held to that service's own rules for it ([`naming_rules`])
+/// and the identity is not service-assigned.
+pub const KINESIS_STREAM: &str = "AWS::Kinesis::Stream";
+
+/// The `AWS::<cloudFormationName>::<Resource>` types of the Amazon Bedrock resources an
+/// agent estate declares. The middle segment is that model's own
+/// `awsService.cloudFormationName` (`Bedrock`).
+///
+/// Each one's owning API — Amazon Bedrock Agent's build-time service — identifies the
+/// resource by a ten-character identifier IT mints (`CreateKnowledgeBase` answers a
+/// `knowledgeBaseId`, `CreateAgent` an `agentId`) and takes a new name on the matching
+/// update, which is why [`name_is_create_only`] names these types.
+pub const BEDROCK_KNOWLEDGE_BASE: &str = "AWS::Bedrock::KnowledgeBase";
+pub const BEDROCK_AGENT: &str = "AWS::Bedrock::Agent";
+pub const BEDROCK_AGENT_ALIAS: &str = "AWS::Bedrock::AgentAlias";
+pub const BEDROCK_DATA_SOURCE: &str = "AWS::Bedrock::DataSource";
+
+/// The `AWS::<cloudFormationName>::<Resource>` type of an Amazon Bedrock GUARDRAIL, the one
+/// resource of that estate whose owning API is Bedrock's own control plane
+/// (`CreateGuardrail`) rather than the agent build-time one.
+pub const BEDROCK_GUARDRAIL: &str = "AWS::Bedrock::Guardrail";
+
+/// Amazon Bedrock's ARN namespace, which is that model's own `awsService.arnNamespace`
+/// (`bedrock`) — the namespace a guardrail ARN carries
+/// (`arn:aws:bedrock:<region>:<account>:guardrail/<id>`, from `GuardrailArn`'s pattern).
+pub const BEDROCK_ARN_NAMESPACE: &str = "bedrock";
+
+/// The salt the guardrail-id stand-in is derived under, and how many characters it carries:
+/// `GuardrailId` is `^[a-z0-9]+$` with `@length(max: 64)`, so the stand-in is lower-case
+/// alphanumeric and carries no separator. Twelve characters is the length Amazon Bedrock's
+/// own minted ids carry.
+pub(super) const BEDROCK_GUARDRAIL_ID_SALT: &str = "bedrock/guardrail";
+pub(super) const BEDROCK_GUARDRAIL_ID_DIGITS: usize = 12;
+
+/// The version a freshly created guardrail carries: `CreateGuardrail`'s `version` is
+/// `^DRAFT$` ("This value will always be DRAFT").
+pub(super) const BEDROCK_GUARDRAIL_DRAFT_VERSION: &str = "DRAFT";
+
+/// The salt the knowledge-base-id stand-in is derived under, and how many characters it
+/// carries: a `knowledgeBaseId` is `^[0-9a-zA-Z]{10}$`, so the stand-in is exactly ten
+/// alphanumeric characters and carries no separator.
+pub(super) const BEDROCK_KNOWLEDGE_BASE_ID_SALT: &str = "bedrock/knowledge-base";
+pub(super) const BEDROCK_KNOWLEDGE_BASE_ID_DIGITS: usize = 10;
+
+/// The `AWS::<cloudFormationName>::<Resource>` type of an Amazon Braket SPENDING LIMIT: the
+/// cost control that service's own `CreateSpendingLimit` makes for a quantum device. The
+/// middle segment is that model's own `awsService.sdkId` (`Braket`).
+///
+/// "Ref returns the spending limit ARN", and `Fn::GetAtt` reads `SpendingLimitArn` and
+/// `CreatedAt`. Amazon Braket mints that ARN and keeps that instant, which is why
+/// [`identity_is_service_assigned`] names this type and why neither value can be recomputed
+/// from the template.
+pub const BRAKET_SPENDING_LIMIT: &str = "AWS::Braket::SpendingLimit";
+
+/// Amazon Braket's ARN namespace, which is the namespace a spending-limit ARN carries
+/// (`SpendingLimitArn`: `^arn:aws[a-z\-]*:braket:[a-z0-9\-]+:[0-9]{12}:spending-limit/.*$`).
+pub const BRAKET_ARN_NAMESPACE: &str = "braket";
+
+/// The resource path a spending-limit ARN carries before the identifier Amazon Braket minted
+/// for it, from that same pattern.
+pub(super) const BRAKET_SPENDING_LIMIT_PATH: &str = "spending-limit";
+
+/// The `AWS::<cloudFormationName>::<Resource>` type of an AWS Amplify APP: the hosting
+/// application that service's own `CreateApp` makes, and the parent every other Amplify
+/// resource hangs off. The middle segment is that model's own `awsService.cloudFormationName`
+/// (`Amplify`).
+///
+/// "Ref returns the ARN of the app" — the type's primary identifier — and `Fn::GetAtt` reads
+/// [`AMPLIFY_APP_ATTRIBUTES`]. AWS Amplify MINTS the `appId` (`^d[a-z0-9]+$`, which no name
+/// CloudFormation decides satisfies) and the ARN built around it, and serves the app's branches
+/// under a default domain of its own, so none of those values can be recomputed from the
+/// template: that is what [`identity_is_service_assigned`] names this type for.
+pub const AMPLIFY_APP: &str = "AWS::Amplify::App";
+
+/// Every `Fn::GetAtt` attribute an [`AMPLIFY_APP`] publishes, in the sorted order a resource's
+/// own attribute map holds them in: the id that service minted, the app's name, its ARN and the
+/// default domain it is served under — each of them a value only AWS Amplify can produce, so
+/// each stands in ([`service_assigned_document`]) until that service has reported what it
+/// really answered.
+pub(super) const AMPLIFY_APP_ATTRIBUTES: &[&str] =
+    &["AppId", "AppName", "Arn", "DefaultDomain"];
+
+/// The `AWS::<cloudFormationName>::<Resource>` types of the three user-interface entities of
+/// an Amplify app environment: the component, the form and the theme Amplify UI
+/// Builder's own `CreateComponent`, `CreateForm` and `CreateTheme` make. The middle segment is
+/// that model's own `awsService.cloudFormationName` (`AmplifyUIBuilder`) and the resource
+/// segment each entity's own `@cfnResource` name (`Component`, `Form`, `Theme`).
+///
+/// Each type's identity is that service's to mint: every one of those creates takes the app
+/// and the environment as its URI labels and the entity's NAME in its payload, takes no
+/// identifier at all, and answers the `id` Amplify UI Builder assigned — a `Uuid`, which is
+/// what `GetComponent`, `UpdateForm`, `DeleteTheme` and every other call on one is addressed
+/// by. That is what [`identity_is_service_assigned`] names all three for.
+///
+/// The values a resource of one of these types publishes are the three identifiers of its own
+/// resource shape (`smithy_query(query="shape", shape="ComponentResource")`:
+/// `identifiers: {id, appId, environmentName}`) — the app and the environment the declaration
+/// states, and the id that service minted — beside the members the entity itself carries as
+/// READ-ONLY (`cfnMutability: "read"`), which are the two instants a component and a theme are
+/// reported with ([`AMPLIFYUIBUILDER_INSTANT_ATTRIBUTES`]); a form's own structure carries
+/// neither.
+pub const AMPLIFYUIBUILDER_COMPONENT: &str = "AWS::AmplifyUIBuilder::Component";
+pub const AMPLIFYUIBUILDER_FORM: &str = "AWS::AmplifyUIBuilder::Form";
+pub const AMPLIFYUIBUILDER_THEME: &str = "AWS::AmplifyUIBuilder::Theme";
+
+/// Every `Fn::GetAtt` attribute an `AWS::AmplifyUIBuilder::Form` publishes, in the sorted order
+/// a resource's own attribute map holds them in: the identifiers of the type's resource shape
+/// ([`AMPLIFYUIBUILDER_COMPONENT`]).
+///
+/// Two of them are the declaration's own values, and the `Id` is the one value only Amplify UI
+/// Builder can produce, so it stands in as a uuid of that member's own form
+/// ([`generated_uuid`]) until `super::provisioning` has reported the id the create really
+/// answered.
+pub(super) const AMPLIFYUIBUILDER_ATTRIBUTES: &[&str] = &["AppId", "EnvironmentName", "Id"];
+
+/// The two further attributes a COMPONENT and a THEME publish: the instants their own
+/// structures carry `cfnMutability: "read"` on (`Component$createdAt`, `Component$modifiedAt`
+/// and the same pair on `Theme`), which is that model's own statement that they are read-only
+/// properties of the type. A `Form`'s structure carries neither member, so a form publishes
+/// only [`AMPLIFYUIBUILDER_ATTRIBUTES`].
+///
+/// Both are Amplify UI Builder's clock, so neither is computed here: each stands in
+/// ([`service_assigned_document`]) until that service has reported the entity it created.
+pub(super) const AMPLIFYUIBUILDER_INSTANT_ATTRIBUTES: &[&str] = &["CreatedAt", "ModifiedAt"];
+
+/// [`AMPLIFYUIBUILDER_ATTRIBUTES`] and [`AMPLIFYUIBUILDER_INSTANT_ATTRIBUTES`] together, in
+/// that sorted order: what a component and a theme publish.
+pub(super) const AMPLIFYUIBUILDER_TIMED_ATTRIBUTES: &[&str] =
+    &["AppId", "CreatedAt", "EnvironmentName", "Id", "ModifiedAt"];
+
+/// The properties a declaration of one of those types states the app environment the entity
+/// belongs to in, which are also two of the values it publishes
+/// ([`AMPLIFYUIBUILDER_ATTRIBUTES`]).
+pub(super) const AMPLIFYUIBUILDER_APP_ID: &str = "AppId";
+pub(super) const AMPLIFYUIBUILDER_ENVIRONMENT_NAME: &str = "EnvironmentName";
+
+/// The attribute carrying the identifier Amplify UI Builder mints for the entity.
+pub(super) const AMPLIFYUIBUILDER_ID_ATTRIBUTE: &str = "Id";
+
+/// The physical resource id of one of those three entities: the TRIPLE its own resource shape
+/// is identified by — the app, the environment and the id that service minted — joined with
+/// [`COMPOSITE_IDENTITY_SEPARATOR`], which is what the type's `Ref` returns.
+///
+/// Not a row of [`composite_identity_properties`]: that one builds an identity out of the
+/// values a declaration STATES, and the last part of this one is the id Amplify UI Builder
+/// assigns, which no declaration carries. So the identity is built here as a stand-in and
+/// again by [`crate::state::provisioner`] from the entity that service answered — the one
+/// place each of the three parts is really known.
+pub(crate) fn amplifyuibuilder_identity(app_id: &str, environment_name: &str, id: &str) -> String {
+    [app_id, environment_name, id].join(COMPOSITE_IDENTITY_SEPARATOR)
+}
+
+/// The three parts of such an identity, where `identity` is one
+/// ([`amplifyuibuilder_identity`]); `None` for a value that is not.
+pub(crate) fn amplifyuibuilder_identity_parts(identity: &str) -> Option<(&str, &str, &str)> {
+    let mut parts = identity.split(COMPOSITE_IDENTITY_SEPARATOR);
+    let (app_id, environment_name, id) = (parts.next()?, parts.next()?, parts.next()?);
+    parts.next().is_none().then_some((app_id, environment_name, id))
+}
+
+/// The attribute of [`AMPLIFY_APP_ATTRIBUTES`] that carries the app's ARN, which is the
+/// identity a `Ref` to one resolves to.
+pub(super) const APP_ARN_STAND_IN_ATTRIBUTE: &str = "Arn";
+
+/// The `AWS::<cloudFormationName>::<Resource>` type of an Amazon Managed Workflows for
+/// Apache Airflow ENVIRONMENT: the Apache Airflow deployment that service's own
+/// `CreateEnvironment` makes. The middle segment is that model's own `awsService.sdkId`
+/// (`MWAA`).
+///
+/// "Ref returns the name of the Amazon MWAA environment", which is the name the owning
+/// service creates the environment under — so a GENERATED one is held to that service's own
+/// rules for it ([`naming_rules`]) and the identity is not service-assigned.
+pub const MWAA_ENVIRONMENT: &str = "AWS::MWAA::Environment";
+
+/// Amazon MWAA's ARN namespace (that model's `awsService.arnNamespace`), which is `airflow`
+/// rather than the `MWAA` its resource type is spelled with — the namespace an environment
+/// ARN carries (`EnvironmentArn`:
+/// `^arn:aws(-[a-z]+)?:airflow:[a-z0-9\-]+:\d{12}:environment/\w+`).
+pub(super) const MWAA_ARN_NAMESPACE: &str = "airflow";
+
+/// The resource path an environment ARN carries before the environment's name, from that
+/// same pattern.
+pub(super) const MWAA_ENVIRONMENT_PATH: &str = "environment";
+
+/// Every `Fn::GetAtt` attribute an `AWS::MWAA::Environment` publishes, in the sorted order a
+/// resource's own attribute map holds them in.
+///
+/// Source: the type's own "Return values" section — the environment's ARN, the Apache Airflow
+/// web server's URL, the Celery Executor's queue, the two VPC endpoint services, and the
+/// CloudWatch Logs group each Apache Airflow log type publishes to, which that section spells
+/// `LoggingConfiguration.<log type>.CloudWatchLogGroupArn`.
+///
+/// Only the ARN is a value these naming rules can compute. Every other one is Amazon MWAA's
+/// own — the web server host it brings up, the queue and the endpoint services it makes for
+/// the environment, the log groups it creates for the log types the declaration enabled — so
+/// each stands in ([`service_assigned_document`]) until that service has reported what it
+/// really answered.
+pub(super) const MWAA_ENVIRONMENT_ATTRIBUTES: &[&str] = &[
+    "Arn",
+    "CeleryExecutorQueue",
+    "DatabaseVpcEndpointService",
+    "LoggingConfiguration.DagProcessingLogs.CloudWatchLogGroupArn",
+    "LoggingConfiguration.SchedulerLogs.CloudWatchLogGroupArn",
+    "LoggingConfiguration.TaskLogs.CloudWatchLogGroupArn",
+    "LoggingConfiguration.WebserverLogs.CloudWatchLogGroupArn",
+    "LoggingConfiguration.WorkerLogs.CloudWatchLogGroupArn",
+    "WebserverUrl",
+    "WebserverVpcEndpointService",
+];
+
+/// The one attribute of [`MWAA_ENVIRONMENT_ATTRIBUTES`] these naming rules compute rather
+/// than stand in for.
+pub(super) const MWAA_ENVIRONMENT_ARN_ATTRIBUTE: &str = "Arn";
+
+/// The `AWS::<cloudFormationName>::<Resource>` types of the two OpenSearch Serverless
+/// resources a stack creates. The middle segment is that service's own
+/// `awsService.cloudFormationName` (`OpenSearchServerless`).
+pub const AOSS_COLLECTION: &str = "AWS::OpenSearchServerless::Collection";
+pub const AOSS_SECURITY_POLICY: &str = "AWS::OpenSearchServerless::SecurityPolicy";
+
+/// The type of an Amazon OpenSearch Service domain — a different service from the
+/// serverless one above, whose own model is reached by the `es` signing name. Its middle
+/// segment is the one the resource-type namespace publishes (`OpenSearchService`) rather
+/// than that model's shorter `awsService.cloudFormationName` (`OpenSearch`).
+///
+/// "Ref returns the domain name", which is the name the owning service creates the domain
+/// under — so a GENERATED one is held to that service's own rules for it
+/// ([`naming_rules`]) and the identity is not service-assigned.
+pub const OPENSEARCH_DOMAIN: &str = "AWS::OpenSearchService::Domain";
+
+/// The type of an Amazon S3 bucket, whose middle segment is that model's own
+/// `cloudFormationName` the same way. "Ref returns the bucket name" for this type, so a
+/// bucket's physical resource id is the name its owning service creates it under — which
+/// is why [`naming_rules`] holds a GENERATED one to S3's bucket naming rules.
+pub const S3_BUCKET: &str = "AWS::S3::Bucket";
+
+/// The type of an Amazon S3 TABLE bucket, the third bucket variant beside `AWS::S3::Bucket`
+/// and `AWS::S3Vectors::VectorBucket`. The middle segment is that model's own sdk identity
+/// (`smithy_query(query="service_info",
+/// model_path="services/service-com-amazonaws-s3tables-s3tablebuckets/smithy-model/\
+/// com-amazonaws-s3tables-s3tablebuckets.json")` reports `sdkId: S3Tables`).
+///
+/// This type's primary identifier is its own ARN (`bucket/<name>` under the ARN namespace
+/// below), so `Ref` resolves to the ARN its owning service keys the bucket by — which is
+/// what `GetTableBucket`, `PutTableBucketPolicy` and every other S3 Tables operation on a
+/// table bucket take as `tableBucketARN`.
+pub const S3TABLES_TABLE_BUCKET: &str = "AWS::S3Tables::TableBucket";
+
+/// Amazon S3 Tables' ARN namespace, which is its model's own `awsService.arnNamespace`
+/// (`s3tables`) rather than the `S3Tables` its resource types are spelled with.
+pub const S3TABLES_ARN_NAMESPACE: &str = "s3tables";
+
+/// The segment a table bucket occupies in an Amazon S3 Tables ARN, from the
+/// `TableBucketARN` pattern that model declares
+/// (`…:s3tables:<region>:<account>:bucket/<name>`).
+///
+/// The same literal as the Amazon S3 Vectors one beside it, and a separate constant all the
+/// same: each is its own model's statement about its own ARNs, so neither follows from the
+/// other and a change to one is not a change to both.
+pub const S3TABLES_BUCKET_SEGMENT: &str = "bucket/";
+
+/// The one `Fn::GetAtt` attribute an `AWS::S3Tables::TableBucket` publishes, spelled with
+/// the upper-case `ARN` its own model spells the member with (`TableBucketARN`).
+pub const S3TABLES_TABLE_BUCKET_ARN_ATTRIBUTE: &str = "TableBucketARN";
+
+/// The types of the two Amazon S3 Vectors resources a stack creates. The middle segment is
+/// that model's own sdk identity (`smithy_query(query="service_info",
+/// model_path="services/service-com-amazonaws-s3vectors-s3vectors/smithy-model/\
+/// com-amazonaws-s3vectors-s3vectors.json")` reports `sdkId: S3Vectors`), beside the
+/// sibling bucket variants `AWS::S3::Bucket` and `AWS::S3Tables::TableBucket`.
+///
+/// Each type's primary identifier is its own ARN — a vector bucket is
+/// `bucket/<name>` and an index `bucket/<bucket>/index/<name>` under the ARN namespace
+/// below — so `Ref` resolves to the ARN its owning service keys the resource by, which is
+/// what `GetVectorBucket`/`GetIndex` take as `vectorBucketArn`/`indexArn`.
+pub const S3VECTORS_VECTOR_BUCKET: &str = "AWS::S3Vectors::VectorBucket";
+pub const S3VECTORS_INDEX: &str = "AWS::S3Vectors::Index";
+
+/// Amazon S3 Vectors' ARN namespace, which is its model's own `awsService.arnNamespace`
+/// (`s3vectors`) rather than the `S3Vectors` its resource types are spelled with.
+pub const S3VECTORS_ARN_NAMESPACE: &str = "s3vectors";
+
+/// The segment a vector bucket occupies in an Amazon S3 Vectors ARN, from the
+/// `VectorBucketArn` pattern that model declares
+/// (`…:s3vectors:<region>:<account>:bucket/<name>`).
+pub const S3VECTORS_BUCKET_SEGMENT: &str = "bucket/";
+
+/// The type of an Amazon EMR cluster: the EMR model carries
+/// `awsService.cloudFormationName: EMR`. "Ref returns the cluster ID", the `j-` job-flow id
+/// `RunJobFlow` mints, which is why [`identity_is_service_assigned`] names this type.
+pub const EMR_CLUSTER: &str = "AWS::EMR::Cluster";
+
+/// The type of an AWS Transfer Family server: that model carries
+/// `awsService.cloudFormationName: Transfer`. "Ref returns the Amazon Resource Name (ARN)
+/// of the server", and `Fn::GetAtt` reads `Arn` and `ServerId` — "the service-assigned ID
+/// of the server that is created". Transfer Family MINTS both (`CreateServer` takes no
+/// identifier and answers the `ServerId` it assigned), which is why
+/// [`identity_is_service_assigned`] names this type: the ARN a `Ref` resolves to is the one
+/// that service created the server under, not one these naming rules computed.
+pub const TRANSFER_SERVER: &str = "AWS::Transfer::Server";
+
+/// The types of the two kinds of Amazon MSK cluster a stack creates: the Amazon MSK model
+/// carries `awsService.cloudFormationName: MSK`, and the namespace publishes one type per
+/// kind of cluster — a provisioned one, whose brokers the declaration sizes, and a
+/// serverless one, which has none.
+///
+/// For both, "Ref returns the ARN of the cluster", which is also each type's one published
+/// `Fn::GetAtt` attribute. Amazon MSK MINTS that ARN (its resource path is
+/// `cluster/<name>/<id>`, where the id is the service's own), which is why
+/// [`identity_is_service_assigned`] names both types.
+pub const MSK_CLUSTER: &str = "AWS::MSK::Cluster";
+pub const MSK_SERVERLESS_CLUSTER: &str = "AWS::MSK::ServerlessCluster";
+
+/// Amazon MSK's ARN namespace, which is its model's own `awsService.arnNamespace`
+/// (`kafka`) rather than the `MSK` its resource types are spelled with.
+pub const MSK_ARN_NAMESPACE: &str = "kafka";
+
+/// The type of an Amazon MQ broker: that middle segment is the Amazon MQ model's own
+/// `awsService.cloudFormationName` (`AmazonMQ`).
+///
+/// "Ref returns the Amazon MQ broker ID", and `Fn::GetAtt` reads `Arn` — the broker's own
+/// ARN. Amazon MQ MINTS that id (`CreateBroker` takes the broker's name and answers with
+/// the `brokerId` it generated, which is the `@httpLabel` every operation on a broker is
+/// addressed by), which is why [`identity_is_service_assigned`] names this type: the id a
+/// `Ref` resolves to is the one that service created the broker under, not one these naming
+/// rules computed.
+pub const MQ_BROKER: &str = "AWS::AmazonMQ::Broker";
+
+/// Amazon MQ's ARN namespace, which is its model's own `awsService.arnNamespace` (`mq`)
+/// rather than the `AmazonMQ` its resource type is spelled with.
+pub const MQ_ARN_NAMESPACE: &str = "mq";
+
+/// What an Amazon MQ broker id begins with (`b-` followed by 128 bits in the 8-4-4-4-12
+/// grouping `BrokerId`'s own documented form carries).
+///
+/// The id built on it here is a PLACEHOLDER, and one that is never reported for a broker
+/// that exists: the id a created broker carries is the one Amazon MQ minted, which
+/// [`super::provisioning::reconcile`] adopts over this one. What this value is for is the
+/// shape of the identifier a declaration reports BEFORE its create answers.
+pub(super) const MQ_BROKER_ID_PREFIX: &str = "b-";
+
+/// The 1-based ordinal an Amazon MSK cluster ARN ends with
+/// (`cluster/<name>/<id>-<ordinal>`), as the stand-in identifier computed here carries it.
+///
+/// A PLACEHOLDER, and one that is never reported for a cluster that exists: the ARN a
+/// created cluster carries is the one Amazon MSK minted, where the ordinal is that
+/// service's own count of the clusters it has registered, and
+/// [`super::provisioning::reconcile`] adopts that ARN over this one. What this value is
+/// for is the shape of the identifier a declaration reports BEFORE its create answers.
+pub(super) const MSK_CLUSTER_ARN_ORDINAL: u32 = 1;
+
+/// The same for an Amazon SQS queue: the SQS model carries
+/// `awsService.cloudFormationName: SQS`.
+pub const SQS_QUEUE: &str = "AWS::SQS::Queue";
+
+/// The provisioned-cluster type of Amazon Redshift: the Redshift model carries
+/// `awsService.cloudFormationName: Redshift`.
+///
+/// "Ref returns the name of the cluster" — a cluster's `ClusterIdentifier` — so this
+/// resource's identity is CloudFormation's to compute, under that property
+/// ([`declared_name_property`]) and Amazon Redshift's own rules for it
+/// ([`naming_rules`]).
+pub const REDSHIFT_CLUSTER: &str = "AWS::Redshift::Cluster";
+
+/// The cluster SUBNET GROUP of Amazon Redshift: the subnets of a VPC a cluster is
+/// launched into, which a cluster's `ClusterSubnetGroupName` names.
+///
+/// "Ref returns the name of the cluster subnet group" and the type declares no name
+/// property of its own — its three properties are `Description`, `SubnetIds` and `Tags` —
+/// so the name is one CloudFormation GENERATES, held to Amazon Redshift's own rules for
+/// it ([`naming_rules`]), and that generated name is the physical resource id a dependent
+/// cluster resolves the group by.
+pub const REDSHIFT_CLUSTER_SUBNET_GROUP: &str = "AWS::Redshift::ClusterSubnetGroup";
+
+/// The two resource types that carry a QUEUE's access policy: the one that applies a
+/// document to a list of queues, and the one that belongs to a single queue.
+///
+/// Neither is a resource of Amazon SQS's own — a queue's policy is its `Policy` ATTRIBUTE —
+/// so neither carries a [`return_values`] arm: the default applies and the physical
+/// resource id is the name CloudFormation generated for the resource, which is what "Ref
+/// returns the policy ID" for these types means here.
+pub const SQS_QUEUE_POLICY: &str = "AWS::SQS::QueuePolicy";
+pub const SQS_QUEUE_INLINE_POLICY: &str = "AWS::SQS::QueueInlinePolicy";
+
+/// The `AWS::<cloudFormationName>::<Resource>` type of a SageMaker model package group —
+/// the model registry's container for the versioned model packages registered into it, and
+/// the carrier of the registry's resource policy. The middle segment is the SageMaker
+/// model's own `awsService.cloudFormationName`
+/// (`smithy_query(query="service_info")` on that service's model reports `SageMaker`).
+///
+/// This type deliberately carries NO [`return_values`] arm, so the default applies: its
+/// physical resource id is the group's NAME. That is what every SageMaker model-registry
+/// operation addresses the group by — `ModelPackageGroupName` is modelled `EntityName`,
+/// name-only on the policy operations — so the name is the identifier a client can use,
+/// and it is what the provisioner passes to `CreateModelPackageGroup`. The group's ARN is
+/// not computed here either: `Arn`/`ModelPackageGroupArn` are the ARN SageMaker itself
+/// answered, which the provisioner records on the resource, rather than one minted from a
+/// pattern. SageMaker's own model says nothing about this type's `Ref`, so the identifier a
+/// client can resolve is preferred over a guess at CloudFormation's.
+pub const SAGEMAKER_MODEL_PACKAGE_GROUP: &str = "AWS::SageMaker::ModelPackageGroup";
+
+/// An Amazon CloudWatch metric stream's resource type (the CloudWatch model:
+/// `cloudFormationName: CloudWatch`). This is the type `super::provisioning` creates in
+/// CloudWatch itself, through that service's own `PutMetricStream`.
+pub const CLOUDWATCH_METRIC_STREAM: &str = "AWS::CloudWatch::MetricStream";
+
+/// The `AWS::DynamoDB::Table` property that enables the table's stream, whose presence is
+/// what says the table publishes a `StreamArn` at all ("You must specify the
+/// StreamSpecification property to use this attribute").
+pub(super) const DYNAMODB_STREAM_SPECIFICATION: &str = "StreamSpecification";
+
+/// The salt and length of the stand-in LABEL a declared stream's ARN carries until the
+/// table's own create answers the one Amazon DynamoDB minted
+/// (`TableDescription$LatestStreamLabel`, "a timestamp, in ISO 8601 format").
+pub(super) const DYNAMODB_STREAM_LABEL_SALT: &str = "dynamodb/stream-label";
+pub(super) const DYNAMODB_STREAM_LABEL_DIGITS: usize = 16;
+
+/// The flag the API's own `StreamSpecification` carries, which a template may state beside
+/// the view type: "indicates whether DynamoDB Streams is enabled (true) or disabled (false)
+/// on the table".
+pub(super) const DYNAMODB_STREAM_ENABLED: &str = "StreamEnabled";
+
+/// Whether a declared `StreamSpecification` enables a stream — which is what decides whether
+/// the table publishes a `StreamArn` at all.
+///
+/// A declaration that states the property asks for a stream, and one that states the flag
+/// keeps what it states: a specification turning the stream OFF leaves the table with no
+/// stream, and so with no stream ARN for anything to read. The flag is read as the TEXT it
+/// resolved to ([`crate::state::scalar_text`], this service's one reading of a scalar
+/// property), so a template that writes it as the string a YAML or an intrinsic can yield is
+/// read the same way as one that writes the JSON boolean.
+pub(super) fn stream_is_enabled(declared: Option<&Value>) -> bool {
+    let Some(declared) = declared.filter(|value| !value.is_null()) else {
+        return false;
+    };
+    declared
+        .get(DYNAMODB_STREAM_ENABLED)
+        .and_then(crate::state::scalar_text)
+        .is_none_or(|enabled| !enabled.eq_ignore_ascii_case("false"))
+}
+
+/// An Amazon CloudWatch dashboard's resource type. This is the type `super::provisioning`
+/// creates in CloudWatch itself, through that service's own `PutDashboard`.
+pub const CLOUDWATCH_DASHBOARD: &str = "AWS::CloudWatch::Dashboard";
+
+/// The same for an Amazon SNS topic: the SNS model carries
+/// `awsService.cloudFormationName: SNS`.
+pub const SNS_TOPIC: &str = "AWS::SNS::Topic";
+
+/// An Amazon SNS subscription's resource type, under the same namespace: the type a
+/// template declares a subscriber of a topic with, beside the topic's own inline
+/// `Subscription` list.
+///
+/// It carries no [`return_values`] arm, so the computed physical id is the generated name
+/// — a stand-in that the create replaces with the subscription ARN Amazon SNS mints, which
+/// is this type's published return value ("Ref returns the subscription ARN") and the
+/// identifier `Unsubscribe`/`SetSubscriptionAttributes` address a subscription by.
+pub const SNS_SUBSCRIPTION: &str = "AWS::SNS::Subscription";
+
+/// The two resource types that carry a TOPIC's access policy: the one that applies a
+/// document to a list of topics, and the one that belongs to a single topic.
+///
+/// Neither is a resource of Amazon SNS's own — a topic's policy is its `Policy` ATTRIBUTE —
+/// so neither carries a [`return_values`] arm: the default applies and the physical resource
+/// id is the name CloudFormation generated for the resource, exactly as it is for the two
+/// queue-policy types ([`SQS_QUEUE_POLICY`]).
+pub const SNS_TOPIC_POLICY: &str = "AWS::SNS::TopicPolicy";
+pub const SNS_TOPIC_INLINE_POLICY: &str = "AWS::SNS::TopicInlinePolicy";
+
+/// An Amazon SES configuration set's resource type (the SES model:
+/// `awsService.cloudFormationName: SES`). This is the type `super::provisioning` creates
+/// in Amazon SES itself, through that service's own `CreateConfigurationSet`.
+///
+/// It deliberately carries NO [`return_values`] arm, so the default applies and its
+/// physical resource id is the set's NAME — which is that type's published return value
+/// ("Ref returns the configuration set name") and the identifier every operation of the
+/// owning service addresses a configuration set by (`ConfigurationSetName`, on
+/// `DescribeConfigurationSet` and `DeleteConfigurationSet` alike). The type publishes no
+/// `Fn::GetAtt` attribute, so it carries no entry in [`published_attribute_names`] either.
+pub const SES_CONFIGURATION_SET: &str = "AWS::SES::ConfigurationSet";
+
+/// An Amazon SES receipt rule set's resource type, under the same namespace. This is the
+/// type `super::provisioning` creates in Amazon SES itself, through that service's own
+/// `CreateReceiptRuleSet`.
+///
+/// It carries NO [`return_values`] arm either, so its physical resource id is the set's
+/// NAME — that type's published return value ("Ref returns the rule set name") and the
+/// identifier every operation of the owning service addresses a receipt rule set by
+/// (`RuleSetName`, on `DescribeReceiptRuleSet`, `SetActiveReceiptRuleSet` and
+/// `DeleteReceiptRuleSet` alike). The name property it is read from is unconventional, so
+/// the type is registered in [`declared_name_property`].
+pub const SES_RECEIPT_RULE_SET: &str = "AWS::SES::ReceiptRuleSet";
+
+/// One receipt rule OF such a set, under the same namespace: the type a template declares a
+/// rule of a rule set with, created through the owning service's own `CreateReceiptRule`.
+///
+/// Its published return value is the RULE's name ("Ref returns the receipt rule name"),
+/// which a declaration states INSIDE the type's `Rule` property rather than through a name
+/// property of its own — so no naming rule here computes it and
+/// [`identity_is_service_assigned`] names this type: the identifier in force is the one the
+/// create answered with.
+pub const SES_RECEIPT_RULE: &str = "AWS::SES::ReceiptRule";
+
+/// The `AWS::ECR::PublicRepository` resource type: an Amazon ECR Public repository.
+///
+/// Spelled as AWS's own CloudFormation resource reference publishes it, under the `ECR`
+/// namespace beside the private registry's `AWS::ECR::Repository`, rather than from the
+/// ECR Public model's `awsService.cloudFormationName` (`ECRPUBLIC`): the type is what a
+/// template spells.
+pub const ECR_PUBLIC_REPOSITORY: &str = "AWS::ECR::PublicRepository";
+
+/// An Amazon ECR repository's resource type (ECR's model: `cloudFormationName: ECR`).
+pub const ECR_REPOSITORY: &str = "AWS::ECR::Repository";
+
+/// An AWS CodeBuild report group's resource type (CodeBuild's model:
+/// `awsService.cloudFormationName: CodeBuild`). This is the type `super::provisioning`
+/// creates in CodeBuild itself, through that service's own `CreateReportGroup`.
+///
+/// Its physical resource id is the report group's NAME — that type's published return
+/// value ("Ref returns the report group name"), which is also the `Name` property a
+/// declaration states it under ([`physical_name`]) and the one value
+/// `CreateReportGroup` takes to key the group by. [`return_values`] carries its one
+/// published attribute, `Arn`: the ARN CodeBuild forms for a report group is that
+/// service's own `report-group/<name>` path under the single account id this emulator
+/// mints, so the value computed here and the one the create answers with are the same
+/// ARN — the position [`SNS_TOPIC`] is in.
+pub const CODEBUILD_REPORT_GROUP: &str = "AWS::CodeBuild::ReportGroup";
+
+/// An AWS CodeBuild build project's resource type, under that same namespace. This is the
+/// type `super::provisioning` creates in CodeBuild itself, through that service's own
+/// `CreateProject`.
+///
+/// Its physical resource id is the project's NAME — that type's published return value
+/// ("Ref returns the project name"), which is also the `Name` property a declaration states
+/// it under ([`physical_name`]) and the one value `CreateProject` takes to key the project
+/// by, which is what every CodeBuild operation on a project (`StartBuild`,
+/// `BatchGetProjects`, `DeleteProject`) addresses it with. [`return_values`] carries its one
+/// published attribute, `Arn`: the ARN CodeBuild forms for a project is that service's own
+/// `project/<name>` path under the single account id this emulator mints, so the value
+/// computed here and the one the create answers with are the same ARN — the position
+/// [`CODEBUILD_REPORT_GROUP`] is in.
+pub const CODEBUILD_PROJECT: &str = "AWS::CodeBuild::Project";
+
+/// The ARN namespace of the CodeBuild service, from its model's `aws.api#service`
+/// `arnNamespace` — the service segment of every ARN it forms.
+pub const CODEBUILD_ARN_NAMESPACE: &str = "codebuild";
+
+/// An AWS CodeCommit repository's resource type (that model:
+/// `awsService.cloudFormationName: CodeCommit`). This is the type `super::provisioning`
+/// creates in CodeCommit itself, through that service's own `CreateRepository`.
+///
+/// It deliberately carries NO [`return_values`] arm, so the default applies and its
+/// physical resource id is the repository's NAME — which is that type's published return
+/// value ("Ref returns the repository name") and the identifier every CodeCommit operation
+/// addresses a repository by (`repositoryName`, on `GetRepository`,
+/// `PutRepositoryTriggers` and `DeleteRepository` alike). Its published attributes are not
+/// computed here either: the ARN and the two clone URLs are the ones CodeCommit itself
+/// answered the create with — the clone URLs name the endpoint this emulator serves the
+/// repository's git transport on, which no pattern here could mint — and the provisioner
+/// records them on the resource.
+pub const CODECOMMIT_REPOSITORY: &str = "AWS::CodeCommit::Repository";
+
+/// An AWS CodeArtifact domain's resource type (that model:
+/// `awsService.cloudFormationName: CodeArtifact`). This is the type `super::provisioning`
+/// creates in CodeArtifact itself, through that service's own `CreateDomain`.
+///
+/// It carries a [`return_values`] arm because its `Ref` is NOT its name: "Ref returns the
+/// Amazon Resource Name (ARN) of the domain", and the name is one of the three values
+/// `Fn::GetAtt` reads off it (`Arn`, `Name`, `Owner` — the type's read-only properties).
+/// That is what a repository's own declaration names the domain holding it by, since a
+/// `Ref` to the domain would hand `CreateRepository` an ARN rather than the domain name
+/// that call takes.
+pub const CODEARTIFACT_DOMAIN: &str = "AWS::CodeArtifact::Domain";
+
+/// An AWS CodeArtifact repository's resource type, under the same namespace, created
+/// through that service's own `CreateRepository` in the domain its declaration names.
+///
+/// Its `Ref` is its ARN too ("Ref returns the Amazon Resource Name (ARN) of the
+/// repository"), and its published attributes are `Arn`, `DomainOwner` and `Name`. The
+/// `DomainName` a declaration states is a create-only PROPERTY rather than one of them.
+pub const CODEARTIFACT_REPOSITORY: &str = "AWS::CodeArtifact::Repository";
+
+/// The resource types a template declares a CloudFormation HOOK with: the Guard Hook, which
+/// evaluates CloudFormation Guard rules against a stack operation's targets, and the Lambda
+/// Hook, which hands those targets to a function. Both are among the types this service
+/// admits ([`crate::state::resource_types`]).
+///
+/// Each carries a [`return_values`] arm because its `Ref` is NOT its name: "Ref returns the
+/// Hook ARN", and `HookArn` — the ARN of the activated Hook — is what `Fn::GetAtt` reads off
+/// it. Those are the two values a declaration publishes about a Hook, and a stack that
+/// outputs either hands its caller the identifier the extension APIs address that Hook by.
+pub const CLOUDFORMATION_GUARD_HOOK: &str = "AWS::CloudFormation::GuardHook";
+/// See [`CLOUDFORMATION_GUARD_HOOK`].
+pub const CLOUDFORMATION_LAMBDA_HOOK: &str = "AWS::CloudFormation::LambdaHook";
+
+/// CodeArtifact's ARN namespace, which its own model carries as `awsService.arnNamespace`
+/// (`codeartifact`) — the service segment of a domain's and a repository's ARN, and the
+/// one that service's own state module builds both ARNs under.
+pub(super) const CODEARTIFACT_ARN_NAMESPACE: &str = "codeartifact";
+
+/// The type of an Amazon Cognito identity pool (the cognito-identity model's
+/// `awsService.cloudFormationName: Cognito`). This is the type `super::super::provisioning`
+/// creates in Amazon Cognito Identity itself.
+///
+/// It deliberately carries NO [`return_values`] arm: "Ref returns the Amazon Cognito
+/// identity pool ID" and that id is the owning service's to mint
+/// ([`identity_is_service_assigned`] names the type), so the identifier the naming rules
+/// compute is only the stand-in a declaration is resolved against until `CreateIdentityPool`
+/// answers — and the `Name` the type publishes through `Fn::GetAtt` is what that create
+/// reports for the pool.
+pub const COGNITO_IDENTITY_POOL: &str = "AWS::Cognito::IdentityPool";
+
+/// The type of the role attachment that binds an identity pool's IAM roles and role
+/// mappings to it — the `SetIdentityPoolRoles` call in template form.
+///
+/// It carries no [`return_values`] arm either, and its identity is NOT service-assigned: the
+/// attachment is not a resource of its own in the owning API (a pool has at most one role
+/// configuration, which each call replaces), so CloudFormation's own generated identifier is
+/// the physical id and the pool it configures stays a declared PROPERTY.
+pub const COGNITO_IDENTITY_POOL_ROLE_ATTACHMENT: &str =
+    "AWS::Cognito::IdentityPoolRoleAttachment";
+
+/// The type of the principal-tag attribute map of ONE identity provider of ONE identity
+/// pool — the `SetPrincipalTagAttributeMap` call in template form.
+///
+/// It declares no entity of its own: the mapping belongs to the
+/// `(IdentityPoolId, IdentityProviderName)` pair that call is addressed by, and that pair is
+/// the type's primary identifier — so its physical resource id, which is what `Ref` returns,
+/// is the two values joined ([`composite_identity_properties`]) rather than a name
+/// CloudFormation generated, which carries neither half and no call of the owning service
+/// takes.
+pub const COGNITO_IDENTITY_POOL_PRINCIPAL_TAG: &str = "AWS::Cognito::IdentityPoolPrincipalTag";
+
+/// The type of an Amazon Cognito user-pool group: the cognito-idp model carries
+/// `awsService.cloudFormationName: Cognito`.
+///
+/// This type deliberately carries NO [`return_values`] arm, so the default applies and its
+/// physical resource id is the group's NAME — the identifier every operation of the owning
+/// service addresses a group by (`GetGroup`, `UpdateGroup` and `DeleteGroup` each take a
+/// `GroupName` beside the `UserPoolId` of the pool that holds it), and the one a template
+/// declares through [`declared_name_property`]. Its `UserPoolId` is the other half of that
+/// identity and stays a declared PROPERTY, which is what the provisioner's calls carry.
+pub const COGNITO_USER_POOL_GROUP: &str = "AWS::Cognito::UserPoolGroup";
+
+/// The three attributes `AWS::Cognito::UserPool` publishes, read off the IDENTITY in force:
+/// the pool's ARN, and the issuer a pool's tokens name it by, as a name
+/// (`cognito-idp.<region>.amazonaws.com/<id>`) and as the URL of that name.
+///
+/// The ONE place that formula is written, because the identity it is read off changes: the
+/// name CloudFormation computed stands in until `CreateUserPool` has answered, and the id
+/// Amazon Cognito minted is the identity from then on — so the provisioner recomputes the
+/// three from that id ([`crate::state::provisioning::cognito_user_pool`]) rather than keeping
+/// values built on a name that identifies no pool.
+pub fn user_pool_attributes(region: &str, identity: &str) -> Vec<(String, String)> {
+    let host = format!("{COGNITO_IDP_ARN_NAMESPACE}.{region}.{URL_SUFFIX}");
+    vec![
+        (
+            "Arn".to_string(),
+            ::emulator_server::emulator_arn(
+                COGNITO_IDP_ARN_NAMESPACE,
+                region,
+                &format!("userpool/{identity}"),
+            ),
+        ),
+        ("ProviderName".to_string(), format!("{host}/{identity}")),
+        (
+            "ProviderURL".to_string(),
+            format!("https://{host}/{identity}"),
+        ),
+    ]
+}
+
+/// The type of an Amazon Cognito user pool (the cognito-idp model's
+/// `awsService.cloudFormationName: Cognito`), whose published return values
+/// [`return_values`] carries: a pool is how a federated identity pool, an app client and an
+/// OpenID relying party all name the same user pool, and each of them names it through one
+/// of those values.
+pub const COGNITO_USER_POOL: &str = "AWS::Cognito::UserPool";
+
+/// The type of an APP CLIENT of a user pool, whose published return values
+/// [`return_values`] carries: the client id its `Ref` returns is what every sign-in and
+/// every `DescribeUserPoolClient` names the client by, and the secret its `ClientSecret`
+/// publishes is what a confidential client signs its token requests with.
+pub const COGNITO_USER_POOL_CLIENT: &str = "AWS::Cognito::UserPoolClient";
+
+/// The type of a third-party IDENTITY PROVIDER of a user pool. Its identity is the
+/// `ProviderName` its declaration states — the name that service addresses a provider by,
+/// beside the pool that holds it — which is what [`declared_name_property`] names the
+/// property it is stated in.
+pub const COGNITO_USER_POOL_IDENTITY_PROVIDER: &str = "AWS::Cognito::UserPoolIdentityProvider";
+
+/// The type of a RESOURCE SERVER of a user pool: the API whose custom scopes an app client of
+/// the pool may be permitted. Its identity is the `Identifier` its declaration states — the
+/// value every call on one addresses it by beside its pool, and the one a scope is spelled
+/// `<identifier>/<scope>` with — which is what [`declared_name_property`] names the property
+/// it is stated in.
+pub const COGNITO_USER_POOL_RESOURCE_SERVER: &str = "AWS::Cognito::UserPoolResourceServer";
+
+/// Amazon Cognito user pools' ARN namespace and endpoint prefix, which its own model
+/// carries as `awsService.arnNamespace` and `endpointPrefix` (`cognito-idp`) — the service
+/// segment of a pool's ARN and the host its pool endpoints are served under.
+pub(super) const COGNITO_IDP_ARN_NAMESPACE: &str = "cognito-idp";
+
+/// An Amazon ECS cluster's resource type (ECS's model: `cloudFormationName: ECS`). This
+/// is the type `super::provisioning` creates in Amazon ECS itself.
+pub const ECS_CLUSTER: &str = "AWS::ECS::Cluster";
+
+/// The three AWS Elastic Beanstalk resource types `super::provisioning` creates in
+/// Elastic Beanstalk itself (that model: `cloudFormationName: ElasticBeanstalk`).
+///
+/// Each deliberately carries NO [`return_values`] arm, so the default applies and the
+/// physical resource id is the resource's NAME — which is what each type's published
+/// return value is ("Ref returns the Elastic Beanstalk application name", "Ref returns
+/// the Elastic Beanstalk environment name", "Ref returns the auto-generated version
+/// label") and what every Elastic Beanstalk operation addresses the resource by. The
+/// environment's one published attribute, `EndpointURL`, is not computed here either: it
+/// is the endpoint Elastic Beanstalk itself answered the create with, which the
+/// provisioner records on the resource.
+///
+/// `AWS::ElasticBeanstalk::ConfigurationTemplate` is NOT among them: this emulator's
+/// `DeleteConfigurationTemplate` is still a stub, so a stack that created one could never
+/// delete it, and the type is left declared-only (which `super::provisioning` documents)
+/// rather than provisioned into a resource no stack deletion could remove.
+pub const ELASTIC_BEANSTALK_APPLICATION: &str = "AWS::ElasticBeanstalk::Application";
+/// See [`ELASTIC_BEANSTALK_APPLICATION`].
+pub const ELASTIC_BEANSTALK_APPLICATION_VERSION: &str =
+    "AWS::ElasticBeanstalk::ApplicationVersion";
+/// See [`ELASTIC_BEANSTALK_APPLICATION`].
+pub const ELASTIC_BEANSTALK_ENVIRONMENT: &str = "AWS::ElasticBeanstalk::Environment";
+
+/// An Amazon ECS task definition's resource type.
+pub const ECS_TASK_DEFINITION: &str = "AWS::ECS::TaskDefinition";
+
+/// An AWS Batch compute environment's resource type (that model:
+/// `cloudFormationName: Batch`). "Ref returns the compute environment ARN"; `Fn::GetAtt`:
+/// `ComputeEnvironmentArn`.
+pub const BATCH_COMPUTE_ENVIRONMENT: &str = "AWS::Batch::ComputeEnvironment";
+/// An AWS Batch job queue's resource type. "Ref returns the job queue ARN";
+/// `Fn::GetAtt`: `JobQueueArn`.
+pub const BATCH_JOB_QUEUE: &str = "AWS::Batch::JobQueue";
+/// An AWS Batch service environment's resource type. "Ref returns the service environment
+/// ARN"; `Fn::GetAtt`: `ServiceEnvironmentArn`.
+pub const BATCH_SERVICE_ENVIRONMENT: &str = "AWS::Batch::ServiceEnvironment";
+/// AWS Batch's ARN namespace, from its model's `awsService.arnNamespace`.
+pub(super) const BATCH_ARN_NAMESPACE: &str = "batch";
+
+/// Amazon EKS's ARN namespace, from its model's `awsService.arnNamespace`, which the ARNs
+/// of a cluster and of a pod identity association are built under.
+pub(super) const EKS_ARN_NAMESPACE: &str = "eks";
+
+/// The three CodeDeploy resource types `super::provisioning` creates in CodeDeploy itself
+/// (that model: `cloudFormationName: CodeDeploy`).
+///
+/// Each deliberately carries NO [`return_values`] arm, so the default applies and the
+/// physical resource id is the resource's NAME — which is what each type's published return
+/// value is ("Ref returns the application name", "Ref returns the deployment group name",
+/// "Ref returns the deployment configuration name") and the identifier every CodeDeploy
+/// operation addresses the resource by (`GetApplication` takes an `applicationName`,
+/// `GetDeploymentGroup` that name and a `deploymentGroupName`, `GetDeploymentConfig` a
+/// `deploymentConfigName`). A deployment group's `ApplicationName` is the other half of its
+/// identity and stays a declared PROPERTY, which is what the provisioner's calls carry.
+pub const CODEDEPLOY_APPLICATION: &str = "AWS::CodeDeploy::Application";
+/// See [`CODEDEPLOY_APPLICATION`].
+pub const CODEDEPLOY_DEPLOYMENT_GROUP: &str = "AWS::CodeDeploy::DeploymentGroup";
+/// See [`CODEDEPLOY_APPLICATION`].
+pub const CODEDEPLOY_DEPLOYMENT_CONFIG: &str = "AWS::CodeDeploy::DeploymentConfig";
+
+/// An Elastic Load Balancing v2 load balancer's resource type (that model's
+/// `cloudFormationName: ElasticLoadBalancingV2`).
+pub const ELB_LOAD_BALANCER: &str = "AWS::ElasticLoadBalancingV2::LoadBalancer";
+
+/// An Elastic Load Balancing v2 target group's resource type.
+pub const ELB_TARGET_GROUP: &str = "AWS::ElasticLoadBalancingV2::TargetGroup";
+
+/// An AWS Fault Injection Service experiment template's resource type (the FIS model:
+/// `cloudFormationName: FIS`). This is the type `super::provisioning` creates in FIS
+/// itself, so the id a stack's output reports for it is the id FIS minted.
+pub const FIS_EXPERIMENT_TEMPLATE: &str = "AWS::FIS::ExperimentTemplate";
+
+/// An AWS WAF Classic regional IPSet's resource type (the AWS WAF Regional model:
+/// `cloudFormationName: WAFRegional`). This is a type `super::provisioning` creates in that
+/// service itself, and "Ref returns the IPSet ID" — an id only AWS WAF Classic mints — so
+/// the id a stack's output reports for it is the one that service answered with.
+pub const WAF_REGIONAL_IP_SET: &str = "AWS::WAFRegional::IPSet";
+
+/// The four WAF (WAFv2) resource types a stack creates in that service (the WAFv2 model:
+/// `cloudFormationName: WAFv2`).
+///
+/// Each one's identity is WAF's OWN to mint: its create takes the NAME and the scope the
+/// template declares and answers a `Summary` carrying the `Id` it assigned and the `ARN` it
+/// built from the scope, that name and that id — "a unique identifier for the … This ID is
+/// returned in the responses to create and list commands. You provide it to operations like
+/// update and delete" (`WebACLSummary$Id` and its siblings). So the identifiers a stack
+/// publishes for one are the ones that service answered with, which is what
+/// `GetWebACL`/`GetIPSet`/`GetRuleGroup`/`GetRegexPatternSet` resolve and what
+/// `AssociateWebACL` takes, rather than values these naming rules computed.
+pub const WAFV2_WEB_ACL: &str = "AWS::WAFv2::WebACL";
+pub const WAFV2_RULE_GROUP: &str = "AWS::WAFv2::RuleGroup";
+pub const WAFV2_IP_SET: &str = "AWS::WAFv2::IPSet";
+pub const WAFV2_REGEX_PATTERN_SET: &str = "AWS::WAFv2::RegexPatternSet";
+
+/// The type that puts one of those web ACLs IN FRONT OF a protected resource (the same
+/// model, `cloudFormationName: WAFv2`).
+///
+/// It is no entity of AWS WAF's own: it is the BINDING `AssociateWebACL` makes and
+/// `DisassociateWebACL` removes, and what identifies the binding is the pair it binds — so
+/// its physical resource id is that pair rather than a name no call of that service takes
+/// ([`composite_identity_properties`]).
+pub const WAFV2_WEB_ACL_ASSOCIATION: &str = "AWS::WAFv2::WebACLAssociation";
+
+/// The type of an Amazon EKS access entry: the access one IAM principal has to one cluster
+/// (the Amazon EKS model's `awsService.cloudFormationName: EKS`).
+///
+/// Another binding identified by the pair it binds: every operation on an access entry
+/// addresses it by the cluster and the principal, which are that operation's two
+/// `@httpLabel`s, so this type's physical resource id is that pair too
+/// ([`composite_identity_properties`]).
+pub const EKS_ACCESS_ENTRY: &str = "AWS::EKS::AccessEntry";
+
+/// The type of an Amazon EKS cluster: the Kubernetes control plane that service runs (the
+/// Amazon EKS model's `awsService.cloudFormationName: EKS`).
+///
+/// "Ref returns the name of the cluster", which is also the handle every Amazon EKS
+/// operation on one takes (`DescribeCluster$name`) and the `Name` property a declaration
+/// states, so the physical resource id the naming rules compute for the type is already the
+/// identifier in force.
+pub const EKS_CLUSTER: &str = "AWS::EKS::Cluster";
+
+/// The type of an Amazon EKS pod identity association: the IAM role one Kubernetes service
+/// account of one cluster assumes (same model).
+///
+/// `CreatePodIdentityAssociation` takes no identifier — a declaration states the cluster,
+/// the namespace, the service account and the role — and answers the association's own ARN
+/// and id, which is why this type's identity is the owning service's
+/// ([`identity_is_service_assigned`]).
+pub const EKS_POD_IDENTITY_ASSOCIATION: &str = "AWS::EKS::PodIdentityAssociation";
+
+/// The `AWS::<cloudFormationName>::<Resource>` types of the AWS AppConfig resources a
+/// configuration estate declares. The middle segment is that model's own
+/// `awsService.cloudFormationName` (`AppConfig`).
+///
+/// Each one's identity is AppConfig's OWN to mint: every create takes the resource's NAME and
+/// no identifier, and answers the `Id` that service assigned — modelled `Id` with pattern
+/// `^[a-z0-9]{4,7}$`, which no name CloudFormation decides could satisfy. "Ref returns the
+/// application ID" and "Ref returns the deployment strategy ID", and the ids a child's
+/// `Fn::GetAtt EnvironmentId`/`ConfigurationProfileId` reports are the ones its create
+/// answered — which is also the `ApplicationId`, `EnvironmentId`, `ConfigurationProfileId`
+/// and `DeploymentStrategyId` every later AppConfig call takes
+/// (`CreateHostedConfigurationVersion`, `StartDeployment`). That is what
+/// [`identity_is_service_assigned`] names all four for, and
+/// [`crate::state::provisioning::appconfig_resources`] is what creates them.
+pub const APPCONFIG_APPLICATION: &str = "AWS::AppConfig::Application";
+pub const APPCONFIG_ENVIRONMENT: &str = "AWS::AppConfig::Environment";
+pub const APPCONFIG_CONFIGURATION_PROFILE: &str = "AWS::AppConfig::ConfigurationProfile";
+pub const APPCONFIG_DEPLOYMENT_STRATEGY: &str = "AWS::AppConfig::DeploymentStrategy";

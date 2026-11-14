@@ -203,6 +203,10 @@ mod apigateway_rest_api;
 /// the configuration profile that reads a configuration and the deployment strategy that
 /// rolls one out: created in AWS AppConfig itself ([`appconfig_resources`]).
 mod appconfig_resources;
+/// The six `AWS::AppSync::*` types a GraphQL API's estate is declared with — the API, its
+/// schema, its data sources, its resolvers, its pipeline functions and its API keys: created
+/// in AWS AppSync itself ([`appsync_resources`]).
+mod appsync_resources;
 /// The two `AWS::ApplicationAutoScaling::*` types a stack declares — the scalable target and
 /// the policy that steers it: visible to the rest of this service's state because the types'
 /// own NAMES live here, beside the arms that provision them
@@ -982,6 +986,11 @@ pub(super) enum Owner {
     /// deployment strategy a rollout follows. Which of them it is travels with the owner, as
     /// it does for the types above.
     AppConfigResource(appconfig_resources::Kind),
+    /// One of the six `AWS::AppSync::*` types [`appsync_resources`] creates in AWS AppSync:
+    /// the GraphQL API, the schema it serves, a data source it reads through, a resolver on
+    /// one of its fields, a pipeline function and an API key. Which of them it is travels with
+    /// the owner, as it does for the types above.
+    AppSyncResource(appsync_resources::Kind),
     /// One of the two Amazon CloudFront types [`cloudfront_resources`] creates: the
     /// distribution, and the origin access control its origins reach a private bucket with.
     /// Which of them it is travels with the owner, as it does for the types above.
@@ -1067,6 +1076,9 @@ pub(super) fn owner_for(resource_type: &str) -> Option<Owner> {
     }
     if let Some(kind) = appconfig_resources::kind_of(resource_type) {
         return Some(Owner::AppConfigResource(kind));
+    }
+    if let Some(kind) = appsync_resources::kind_of(resource_type) {
+        return Some(Owner::AppSyncResource(kind));
     }
     if let Some(kind) = elastic_load_balancing::kind_of(resource_type) {
         return Some(Owner::ElasticLoadBalancing(kind));

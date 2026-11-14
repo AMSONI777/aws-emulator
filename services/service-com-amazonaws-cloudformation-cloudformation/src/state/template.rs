@@ -2108,6 +2108,14 @@ fn identity_depends_on_another_resource(resource_type: &str) -> bool {
             | CODEARTIFACT_REPOSITORY
             | LAMBDA_VERSION
             | LAMBDA_ALIAS
+            // Every child of an AWS AppSync GraphQL API: each one is identified by the ARN
+            // AppSync builds UNDER the API's own id, so its identity is settled only once
+            // that API has one (`appsync` in the return-value catalogue).
+            | APPSYNC_GRAPHQL_SCHEMA
+            | APPSYNC_DATA_SOURCE
+            | APPSYNC_RESOLVER
+            | APPSYNC_FUNCTION_CONFIGURATION
+            | APPSYNC_API_KEY
     )
 }
 
@@ -4231,9 +4239,17 @@ fn directive_parameters(
 /// Replace every `{"Ref": "<parameter>"}` inside a directive's argument with the value in
 /// force for that parameter, so a directive reading a parameter resolves from the template
 /// and the request alone. Refuses below [`MAX_EXPANSION_DEPTH`], like the expander itself.
+///
+/// Every replacement is CHARGED to the expansion's budget before it is made, from an upper
+/// bound on the value's own size ([`json_size_bound`]): both how many references a directive's
+/// argument holds and how long one parameter's value is come from the submitting request, so
+/// the product of the two is what one body could otherwise amplify into memory. A template
+/// whose references would cost more than the budget is refused instead of resolved, exactly as
+/// one whose loops would.
 fn resolve_parameter_refs(
     node: &mut Value,
     parameters: &DirectiveParameters,
+    budget: &mut ExpansionBudget,
     depth: usize,
 ) -> Result<(), String> {
     if depth > MAX_EXPANSION_DEPTH {
@@ -4242,20 +4258,21 @@ fn resolve_parameter_refs(
     match node {
         Value::Array(items) => {
             for item in items.iter_mut() {
-                resolve_parameter_refs(item, parameters, depth + 1)?;
+                resolve_parameter_refs(item, parameters, budget, depth + 1)?;
             }
         }
         Value::Object(map) => {
             if map.len() == 1 {
                 if let Some(name) = map.get(REF_FUNCTION).and_then(Value::as_str) {
                     if let Some(value) = parameters.value_of(name) {
+                        budget.charge(REF_FUNCTION, 0, json_size_bound(&value, 0))?;
                         *node = value;
                     }
                     return Ok(());
                 }
             }
             for value in map.values_mut() {
-                resolve_parameter_refs(value, parameters, depth + 1)?;
+                resolve_parameter_refs(value, parameters, budget, depth + 1)?;
             }
         }
         _ => {}
@@ -4312,7 +4329,7 @@ fn expand_for_each(
     // "The collection ... can be a list or a reference to a list": a `Ref` to a list-typed
     // parameter is resolved to the items in force for it, like every other directive's
     // argument.
-    resolve_parameter_refs(&mut collection, parameters, depth + 1)?;
+    resolve_parameter_refs(&mut collection, parameters, budget, depth + 1)?;
     let Value::Array(collection) = collection else {
         return Err(format!(
             "{FOR_EACH_PREFIX}{loop_name}: the collection is not a list this service can \
@@ -4547,7 +4564,7 @@ fn evaluate_directive(
             // The argument's own parameter references first: "an intrinsic function that
             // returns an array" includes a `Ref` to a list-typed parameter.
             let mut argument = argument.clone();
-            resolve_parameter_refs(&mut argument, parameters, 0)?;
+            resolve_parameter_refs(&mut argument, parameters, budget, 0)?;
             match &argument {
                 Value::Array(items) => Ok(Some(Value::from(items.len()))),
                 // Not a list the DOCUMENT decides: the directive is left where it is, for
@@ -4561,7 +4578,7 @@ fn evaluate_directive(
         }
         FN_TO_JSON_STRING => {
             let mut argument = argument.clone();
-            resolve_parameter_refs(&mut argument, parameters, 0)?;
+            resolve_parameter_refs(&mut argument, parameters, budget, 0)?;
             if holds_intrinsic(&argument, 0) {
                 // Likewise: a document still holding an intrinsic function is rendered by
                 // the deployment, which can evaluate it.

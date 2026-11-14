@@ -167,6 +167,14 @@ impl Owner {
             Self::AppConfigResource(kind) => {
                 appconfig_resources::create(ctx, region, kind, resource, propagated).await
             }
+            // A GraphQL API is taggable: its `Tags` property is the tag map `CreateGraphqlApi`
+            // takes, so the API carries the tags CloudFormation gives it beside its own. None
+            // of its children is: every tagging call of that service addresses an API, so
+            // there is no call that could carry a tag to a schema, a data source, a resolver, a
+            // function or a key.
+            Self::AppSyncResource(kind) => {
+                appsync_resources::create(ctx, region, kind, resource, propagated).await
+            }
             // Every one of these types publishes a `Tags` property and every one of the four
             // creates takes that list as its own member, so a stack's load balancer, target
             // group, listener and rule carry the tags CloudFormation gives them.
@@ -291,6 +299,13 @@ impl Owner {
             // An application, an environment, a configuration profile and a deployment
             // strategy each exist from the moment their own create answers.
             Self::AppConfigResource(_) => Ok(appconfig_resources::ready()),
+            // An API, a data source, a resolver, a function and a key each exist from the
+            // moment their own create answers; a SCHEMA is installed ASYNCHRONOUSLY, so that
+            // arm reads the creation's status back
+            // ([`appsync_resources::readiness`]).
+            Self::AppSyncResource(kind) => {
+                appsync_resources::readiness(ctx, region, kind, physical_resource_id).await
+            }
             // `CreateLoadBalancer` answers the load balancer `provisioning`, in which it
             // serves no connection, so that arm waits for Elastic Load Balancing to report it
             // `active` ([`elastic_load_balancing::readiness`]); a target group, a listener and
@@ -408,6 +423,10 @@ impl Owner {
             // came back with that same create, so there is nothing left to read once the
             // resource is up.
             Self::AppConfigResource(_) => Ok(BTreeMap::new()),
+            // Each AppSync resource publishes the identifiers its own create answered — the
+            // API's id, ARN and endpoints among them — so there is nothing left to read once
+            // the resource is up.
+            Self::AppSyncResource(_) => Ok(BTreeMap::new()),
             // A load balancer is the one type here with more to read once it is up: the host
             // it publishes, its hosted zone and the groups in front of it are what Elastic
             // Load Balancing fills in as it provisions the load balancer
@@ -531,6 +550,10 @@ impl Owner {
             // no state a deleted application, environment, profile or strategy is still being
             // removed in.
             Self::AppConfigResource(_) => Ok(appconfig_resources::removal()),
+            // Each AppSync delete takes the resource away as it answers: that service reports
+            // no state a removed API, data source, resolver, function or key is still being
+            // deleted in.
+            Self::AppSyncResource(_) => Ok(appsync_resources::removal()),
             // Each Elastic Load Balancing delete takes the resource away as it answers: that
             // service reports no state a deleted load balancer, target group, listener or rule
             // is still being removed in.
@@ -689,6 +712,9 @@ impl Owner {
             Self::AppConfigResource(kind) => {
                 appconfig_resources::update(ctx, region, kind, resource, declared).await
             }
+            Self::AppSyncResource(kind) => {
+                appsync_resources::update(ctx, region, kind, resource, declared).await
+            }
             Self::ElasticLoadBalancing(kind) => {
                 elastic_load_balancing::update(ctx, region, kind, resource, declared).await
             }
@@ -786,6 +812,10 @@ impl Owner {
             // The tags of an AppConfig resource that already exists are reconciled by no arm
             // here yet ([`Provisioner::retag`]'s own default), so nothing is asked about them.
             Self::AppConfigResource(_) => Ok(()),
+            // The tags of a GraphQL API that already exists are reconciled by no arm here yet
+            // ([`Provisioner::retag`]'s own default), and no child of one is taggable at all, so
+            // nothing is asked about them.
+            Self::AppSyncResource(_) => Ok(()),
             // The tags of a load balancer, a target group, a listener or a rule that already
             // exists are reconciled by no arm here yet ([`Provisioner::retag`]'s own default),
             // so nothing is asked about them.
@@ -933,6 +963,12 @@ impl Owner {
             Self::AppConfigResource(kind) => {
                 appconfig_resources::delete(ctx, region, kind, resource).await
             }
+            // AppSync takes no snapshot of an API or of anything under one on the way out:
+            // there is no such call, so a `Snapshot` deletion policy on one of them deletes the
+            // resource with no snapshot invented for it.
+            Self::AppSyncResource(kind) => {
+                appsync_resources::delete(ctx, region, kind, resource).await
+            }
             // Elastic Load Balancing takes no snapshot of a load balancer, a target group, a
             // listener or a rule on the way out: there is no such call, so a `Snapshot`
             // deletion policy on one of them deletes the resource with no snapshot invented
@@ -1065,6 +1101,9 @@ impl Owner {
             Self::AppConfigResource(kind) => {
                 appconfig_resources::actual_configuration(ctx, region, kind, resource).await?
             }
+            Self::AppSyncResource(kind) => {
+                appsync_resources::actual_configuration(ctx, region, kind, resource).await?
+            }
             Self::ElasticLoadBalancing(kind) => {
                 elastic_load_balancing::actual_configuration(ctx, region, kind, resource).await?
             }
@@ -1113,6 +1152,8 @@ impl Owner {
             Self::ApplicationAutoScaling(_) => message.to_string(),
             // AWS AppConfig's does the same.
             Self::AppConfigResource(_) => message.to_string(),
+            // AWS AppSync's does the same.
+            Self::AppSyncResource(_) => message.to_string(),
             // Elastic Load Balancing's does the same.
             Self::ElasticLoadBalancing(_) => message.to_string(),
         }
