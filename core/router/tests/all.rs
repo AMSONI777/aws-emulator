@@ -3333,3 +3333,5 @@ mod cloudformation_s3tables_table_bucket_maintenance;
 // first item of a crate root, so a `//!` line in this appended tail is `E0753`.)
 // this file and for every service crate's `tests/all.rs`. (An ordinary comment for the
 // reason the lines above it record: `//!` in this tail is `E0753`.)
+// this file and for every service crate's `tests/all.rs`. (A line comment, not an inner
+// doc comment: this is the tail of the file, where a `//!` line is `E0753`.)
