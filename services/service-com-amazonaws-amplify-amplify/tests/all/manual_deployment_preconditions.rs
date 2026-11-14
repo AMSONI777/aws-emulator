@@ -399,8 +399,9 @@ async fn a_deployment_whose_file_never_arrived_is_not_started() {
         );
         assert_eq!(
             string_member(&record, "activeJobId"),
-            job_id,
+            format!("{job_id:0>10}"),
             "case {case:?}: the started deployment is the branch's active job, \
+             identified in the ten-digit field the job's ARN segment carries, \
              got {record:?}"
         );
         let listed = list_jobs(&emulator, &app_id, &branch).await;
@@ -535,7 +536,7 @@ async fn a_deleted_branch_reports_the_jobs_it_actually_started() {
             ),
             Some(job_id) => assert_eq!(
                 string_member(&record, "activeJobId"),
-                job_id,
+                format!("{job_id:0>10}"),
                 "case {:?}: expected the started job as the active one, got {record:?}",
                 row.case
             ),

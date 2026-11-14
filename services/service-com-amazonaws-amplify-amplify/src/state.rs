@@ -46,9 +46,9 @@ pub use custom_headers::{
     MAX_CUSTOM_HEADER_RULES_PER_APP,
 };
 pub use hosting_address::{
-    addressed_hosted_site, amplify_zone_default_domain, hosted_branch_host, hosted_site_host,
-    hosted_site_path, hosting_plane_prefix, names_the_hosting_zone, HostedSiteAddress,
-    HOSTING_PLANE_LABEL,
+    addressed_hosted_site, amplify_zone_default_domain, default_domain_prefix, hosted_branch_host,
+    hosted_site_host, hosted_site_path, hosting_plane_prefix, names_the_hosting_zone,
+    HostedSiteAddress, HOSTING_PLANE_LABEL,
 };
 
 /// One Amplify app as this service persists it: the modelled record it hands back,
@@ -465,13 +465,28 @@ pub fn job_limit_message(branch_name: &str) -> String {
 /// A number too long for the field is written as it stands: padding only ever adds
 /// digits, so an id outside the width is still addressable.
 pub fn job_arn(branch_arn: &str, job_id: &str) -> String {
-    format!(
-        "{branch_arn}/jobs/{job_id:0>width$}",
-        width = JOB_ARN_NUMBER_DIGITS
-    )
+    format!("{branch_arn}/jobs/{}", padded_job_number(job_id))
 }
 
-/// How wide the job-number field of a [`job_arn`] is.
+/// A job's number in the FIXED-WIDTH form every field that identifies a job by its place
+/// in its branch's sequence carries: `job_id` padded with leading zeroes to
+/// [`JOB_ARN_NUMBER_DIGITS`] digits.
+///
+/// Two kinds of member name a job: one reports the number itself — `JobSummary$jobId`,
+/// modelled `pattern ^[0-9]+$` — and one identifies the job's place among its branch's
+/// jobs, which recorded behaviour shows written in a fixed-width field: the last segment
+/// of a job ARN ([`job_arn`]) and `Branch$activeJobId` (modelled `length 0..1000` with no
+/// pattern, so the form is the service's rather than the model's). Formatted HERE rather
+/// than in each handler, so the ARN and the branch's own view of its active job cannot
+/// drift apart — a client correlating the two string-compares them.
+///
+/// A number too long for the field is written as it stands: padding only ever adds
+/// digits, so a job outside the width is still identified.
+pub fn padded_job_number(job_id: &str) -> String {
+    format!("{job_id:0>width$}", width = JOB_ARN_NUMBER_DIGITS)
+}
+
+/// How wide the job-number field of a [`job_arn`] and of a [`padded_job_number`] is.
 pub const JOB_ARN_NUMBER_DIGITS: usize = 10;
 
 /// One deployment reserved on a branch and not started yet: the `jobId` it reserved,

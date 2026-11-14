@@ -300,8 +300,11 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         // The branch's own view of its jobs: the job just started is the active one,
         // and `totalNumberOfJobs` counts the jobs this branch has STARTED — which a
         // RETRY, re-running an existing job, leaves where it was, and which retiring
-        // old history does not rewrite.
-        branch.branch.active_job_id = summary.job_id.clone();
+        // old history does not rewrite. `activeJobId` IDENTIFIES that job rather than
+        // reporting its number, so it carries the fixed-width form the job's ARN
+        // segment carries (`crate::state::padded_job_number`), which is what a client
+        // correlating a branch with its job compares.
+        branch.branch.active_job_id = crate::state::padded_job_number(&summary.job_id);
         branch.branch.total_number_of_jobs = branch.jobs_started().to_string();
 
         Ok(StartJobOutput {

@@ -386,11 +386,14 @@ async fn job_ids_are_counted_per_branch_and_the_branch_reports_its_jobs() {
                 started.member("jobSummary")
             );
 
-            // The branch's own view of its jobs follows the jobs it holds.
+            // The branch's own view of its jobs follows the jobs it holds. `activeJobId`
+            // IDENTIFIES the active job, so it carries the number in the same ten-digit
+            // field the job's ARN segment carries (see
+            // `tests/all/branch_active_job_identity.rs`), while `jobId` reports it bare.
             let record = emulator.get_branch(&app_id, branch).await.member("branch");
             assert_eq!(
                 string_member(&record, "activeJobId"),
-                expected,
+                format!("{expected:0>10}"),
                 "case {branch:?}: the job just started is the active one, got {record:?}"
             );
             assert_eq!(
@@ -723,8 +726,10 @@ async fn a_branch_keeps_a_bounded_job_history() {
     );
 
     // Once the clock has finished those jobs, the oldest FINISHED job is retired to
-    // make room, so a caller is never blocked for good.
-    sleep(past_the_settle_span());
+    // make room, so a caller is never blocked for good. The case waits for that
+    // CONDITION — the oldest job's own record reporting a terminal status — rather than
+    // for a fixed time, so it reads the same on a loaded or a faster host.
+    settled_job(&emulator, &app_id, branch, "1").await;
     let accepted = start_job(&emulator, &app_id, branch, &json!({ "jobType": "MANUAL" })).await;
     let expected_id = (MAX_JOBS_PER_BRANCH + 1).to_string();
     assert_eq!(
@@ -763,7 +768,7 @@ async fn a_branch_keeps_a_bounded_job_history() {
     );
     assert_eq!(
         string_member(&record, "activeJobId"),
-        expected_id,
+        format!("{expected_id:0>10}"),
         "case \"bounded history\": the job just started is the active one, got {record:?}"
     );
 

@@ -328,7 +328,10 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
 
         // The branch's own view of its jobs: the deployment just started is the active
         // one, and `totalNumberOfJobs` counts the jobs this branch has STARTED.
-        branch.branch.active_job_id = summary.job_id.clone();
+        // `activeJobId` IDENTIFIES that job rather than reporting its number, so it
+        // carries the fixed-width form the job's ARN segment carries
+        // (`crate::state::padded_job_number`).
+        branch.branch.active_job_id = crate::state::padded_job_number(&summary.job_id);
         branch.branch.total_number_of_jobs = branch.jobs_started().to_string();
 
         Ok(StartDeploymentOutput {

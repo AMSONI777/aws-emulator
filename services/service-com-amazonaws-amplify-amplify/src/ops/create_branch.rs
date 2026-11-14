@@ -270,8 +270,13 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         let branch = Branch {
             branch_arn: format!("{}/branches/{}", app.app.app_arn, input.branch_name),
             // `displayName` "is used as the default domain prefix", and a branch's
-            // default domain prefix is its own name.
-            display_name: input.display_name.unwrap_or_else(|| input.branch_name.clone()),
+            // default domain prefix is its own name drawn into the alphabet of a host
+            // label: a request that named no display name gets the name with every
+            // character a label cannot carry replaced, so the branch's default domain is
+            // addressable (see `crate::state::default_domain_prefix`).
+            display_name: input
+                .display_name
+                .unwrap_or_else(|| crate::state::default_domain_prefix(&input.branch_name)),
             branch_name: input.branch_name,
             // The @required members below have no value in a request that omits them.
             // The record holds the empty value of the member's type, which is what

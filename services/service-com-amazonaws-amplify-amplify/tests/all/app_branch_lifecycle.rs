@@ -834,7 +834,10 @@ fn branch_cases() -> Vec<BranchCase> {
                 "basicAuthCredentials": "dXNlcjpwYXNz",
             }),
             stage: "EXPERIMENTAL",
-            display_name: "Experimental.1",
+            // `displayName` is the branch's default domain PREFIX, which is one host
+            // label, so the dot of the branch name cannot survive into it (see
+            // `tests/all/branch_domain_prefix.rs`).
+            display_name: "Experimental-1",
             ttl: "0",
             framework: Value::Null,
             enable_auto_build: true,

@@ -90,6 +90,41 @@ pub fn hosted_branch_host(display_name: &str, default_domain: &str) -> String {
     hosted_site_host(&format!("{display_name}.{default_domain}"))
 }
 
+/// The default domain PREFIX of a branch of this name: the branch's name drawn into the
+/// ALPHABET of a host label, which is what `Branch$displayName` carries when the create
+/// named no display name ("The display name for the branch. This is used as the default
+/// domain prefix", `smithy_query(query="doc",shape="Branch",member="displayName")`).
+///
+/// The prefix is the label of the branch site's host ([`hosted_branch_host`]) and the
+/// segment that names the branch in its site's path ([`hosted_site_path`]), and the
+/// characters a host label may carry are letters, digits and the hyphen. A branch name is
+/// drawn from a wider set — letters, digits and the symbols `/_.-`
+/// (`crate::state::is_branch_name`) — so every character of the name outside that alphabet
+/// becomes a hyphen, and a name already drawn from it is its own prefix, unchanged. This is
+/// a SUBSTITUTION and nothing more: the name's own length and the placement of its hyphens
+/// reach the prefix as they were written, which is what recorded behaviour reports.
+///
+/// Because only characters are replaced, the prefix is as long as the name and stays inside
+/// `DisplayName`'s modelled `length 0..255`
+/// (`smithy_query(query="shape",shape="Branch")`), which `BranchName`'s own `length 1..255`
+/// already bounds.
+pub fn default_domain_prefix(branch_name: &str) -> String {
+    branch_name
+        .chars()
+        .map(|character| {
+            if character.is_ascii_alphanumeric() || character == LABEL_HYPHEN {
+                character
+            } else {
+                LABEL_HYPHEN
+            }
+        })
+        .collect()
+}
+
+/// The one punctuation mark a host label may carry, and so what every character outside a
+/// label's alphabet becomes in a [`default_domain_prefix`].
+const LABEL_HYPHEN: char = '-';
+
 /// The path one branch's site answers at on this emulator's own endpoint: the app's own
 /// prefix ([`hosting_plane_prefix`]) and the branch's display name, which is the label that
 /// names the branch wherever a default domain announces one.

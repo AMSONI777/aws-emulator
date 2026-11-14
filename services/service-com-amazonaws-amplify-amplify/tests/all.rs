@@ -23,10 +23,14 @@ mod app_branch_updates;
 mod backend_environment_listing;
 #[path = "all/backend_environments.rs"]
 mod backend_environments;
+#[path = "all/branch_active_job_identity.rs"]
+mod branch_active_job_identity;
 #[path = "all/branch_deletion_visibility.rs"]
 mod branch_deletion_visibility;
 #[path = "all/branch_deployments.rs"]
 mod branch_deployments;
+#[path = "all/branch_domain_prefix.rs"]
+mod branch_domain_prefix;
 #[path = "all/branch_duplicate_refusal.rs"]
 mod branch_duplicate_refusal;
 #[path = "all/branch_job_listing.rs"]
