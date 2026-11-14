@@ -3712,3 +3712,8 @@ mod cloudformation_provisions_redshift_snapshot_copy_grants;
 // region of this file: two landings each appended a declaration of it here as well.)
 // it here. The `sfn_relayed_dynamodb_request_id` declaration that stood here is the same
 // case: it is declared once, a few lines above.)
+// (A note that landed mid-file as an INNER doc comment, which is `E0753` anywhere but a
+// crate root's head, so it is a plain comment here; the file's own module docs are at its
+// head.) A suite left at the top level of `tests/` fails the build. Declare each suite
+// fails every suite in this target. `all/all_rs_declares_each_suite_once.rs` checks that
+// for this file and for every service crate's `tests/all.rs`, so check there rather than

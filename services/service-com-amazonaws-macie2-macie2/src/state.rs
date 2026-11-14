@@ -43,6 +43,13 @@ pub use findings::*;
 
 use crate::ops::types::{ClassificationExportConfiguration, S3Destination, SeverityLevel};
 
+/// The ONE criterion an allow list specifies, and how a request specifying the
+/// wrong number of them is refused.
+pub mod allow_list_criteria;
+/// The ONE bounded compile of a regular expression a caller sent, which both
+/// the custom-data-identifier refusal and an allow list's status rest on.
+pub mod bounded_pattern;
+
 pub mod allow_lists;
 
 pub use allow_lists::{AllowList, AllowListCriterion};

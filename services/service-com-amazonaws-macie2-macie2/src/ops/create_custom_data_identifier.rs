@@ -410,27 +410,17 @@ fn documented_violation(input: &CreateCustomDataIdentifierInput) -> Option<Strin
 /// fixed text: it interpolates neither the pattern nor any other request value.
 const UNSUPPORTED_PATTERN_MESSAGE: &str = "Unsafe regex, keywords, or ignoreWords.";
 
-/// The byte budget one compiled pattern may occupy. Compiling a pattern that
-/// came off the wire is caller-driven work, so it is bounded twice: by
-/// [`crate::state::MAX_REGEX_CHARS`] on the input and by this limit on the
-/// program built from it, past which `regex` answers an error instead of
-/// growing the heap.
-const PATTERN_PROGRAM_BYTES: usize = 1 << 20;
-
 /// The refusal `regex` earns when it is not a pattern this service can run, or
 /// `None` when it is one.
 ///
-/// The syntax is decided by the `regex` crate rather than by a hand-written
-/// reader of the pattern language: it parses the whole expression, refuses what
-/// it cannot represent, and matches in time linear in the subject, so no
-/// pattern a caller sends can make matching blow up later.
+/// Whether it is one is the crate's one bounded compile of a caller's pattern
+/// ([`crate::state::bounded_pattern`]), which an allow list's status rests on
+/// too; only this message is this operation's own.
 fn pattern_violation(pattern: &str) -> Option<String> {
-    ::regex::RegexBuilder::new(pattern)
-        .size_limit(PATTERN_PROGRAM_BYTES)
-        .dfa_size_limit(PATTERN_PROGRAM_BYTES)
-        .build()
-        .err()
-        .map(|_| UNSUPPORTED_PATTERN_MESSAGE.to_string())
+    if crate::state::bounded_pattern::pattern_compiles(pattern) {
+        return None;
+    }
+    Some(UNSUPPORTED_PATTERN_MESSAGE.to_string())
 }
 
 /// The documented rule for `severityLevels`: as many as three entries, one for

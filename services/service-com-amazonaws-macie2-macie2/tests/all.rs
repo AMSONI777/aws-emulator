@@ -13,6 +13,8 @@
 // points it into `tests/all/`.
 #[path = "all/allow_list_criteria_and_status.rs"]
 mod allow_list_criteria_and_status;
+#[path = "all/allow_lists.rs"]
+mod allow_lists;
 #[path = "all/automated_discovery_configuration.rs"]
 mod automated_discovery_configuration;
 #[path = "all/classification_export_configuration.rs"]

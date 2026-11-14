@@ -18,7 +18,13 @@ use std::time::SystemTime;
 
 use ::smithy_server_runtime::EmbeddedEmulator;
 
-use crate::ops::types::{AllowListCriteria, AllowListStatus, S3WordsList};
+use crate::ops::types::AllowListStatus;
+
+/// The ONE criterion a list specifies lives beside this module, because turning
+/// a request's `criteria` into it is its own concern; it is re-exported here, so
+/// every path that reads an allow list's criteria resolves through this module
+/// as before.
+pub use super::allow_list_criteria::{AllowListCriterion, CRITERIA_MUST_SPECIFY_ONE_MESSAGE};
 
 /// The resource-type segment of an allow list's ARN, read off the ARN grammar
 /// the model pins for `CreateAllowListResponse$arn`
@@ -37,15 +43,6 @@ pub const MAX_ALLOW_LISTS: usize = 10_000;
 /// `maxResults` carries a modelled range of 1 to 25, so 25 is the page the
 /// service itself bounds this read to.
 pub const MAX_ALLOW_LIST_PAGE_SIZE: usize = 25;
-
-/// How the service refuses a `criteria` that does not specify exactly one
-/// criterion. The whole sentence is the documented rule for the shape ("The
-/// criteria must specify a regular expression (regex) or an S3 object
-/// (s3WordsList). It can't specify both"), so it interpolates nothing from the
-/// request.
-pub const CRITERIA_MUST_SPECIFY_ONE_MESSAGE: &str =
-    "The criteria must specify a regular expression (regex) or an S3 object (s3WordsList). \
-     It can't specify both.";
 
 /// The `AllowListStatusCode` of a list whose criteria Macie can access and use:
 /// "OK - Macie can retrieve and parse the contents of the object." An entry of
@@ -82,71 +79,6 @@ pub const STATUS_UNKNOWN_ERROR: &str = "UNKNOWN_ERROR";
 /// a limit of this process rather than a published number, chosen well above
 /// any word list a client stages in an emulator.
 pub const MAX_WORDS_LIST_BYTES: i64 = 35 * 1024 * 1024;
-
-/// The byte budget one compiled allow-list pattern may occupy. Compiling a
-/// pattern that came off the wire is caller-driven work, so it is bounded
-/// twice: by the member's modelled length (1..512) on the input and by this
-/// limit on the program built from it, past which `regex` answers an error
-/// instead of growing the heap.
-const PATTERN_PROGRAM_BYTES: usize = 1 << 20;
-
-/// The ONE criterion an allow list specifies.
-///
-/// The modelled `AllowListCriteria` carries both members optionally, so it can
-/// spell a request that specifies both or neither; a STORED list carries
-/// exactly one, which is what the shape documents ("The criteria must specify a
-/// regular expression (regex) or an S3 object (s3WordsList). It can't specify
-/// both"). [`AllowListCriterion::from_modeled`] is where a request becomes one
-/// of these, or is refused.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum AllowListCriterion {
-    /// A regular expression that defines the text pattern to ignore.
-    Regex(String),
-    /// The location and name of the S3 object that lists specific text to
-    /// ignore.
-    WordsList {
-        /// The full name of the S3 bucket that contains the object.
-        bucket_name: String,
-        /// The full name (key) of the object.
-        object_key: String,
-    },
-}
-
-impl AllowListCriterion {
-    /// The one criterion `criteria` specifies, or the message the service
-    /// refuses it with when it specifies both or neither.
-    pub fn from_modeled(criteria: &AllowListCriteria) -> Result<Self, String> {
-        match (criteria.regex.as_deref(), criteria.s3_words_list.as_ref()) {
-            (Some(regex), None) => Ok(Self::Regex(regex.to_string())),
-            (None, Some(words)) => Ok(Self::WordsList {
-                bucket_name: words.bucket_name.clone(),
-                object_key: words.object_key.clone(),
-            }),
-            _ => Err(CRITERIA_MUST_SPECIFY_ONE_MESSAGE.to_string()),
-        }
-    }
-
-    /// The same criterion as the modelled shape a read reports, which carries
-    /// the member this criterion is and leaves the other absent.
-    pub fn to_modeled(&self) -> AllowListCriteria {
-        match self {
-            Self::Regex(regex) => AllowListCriteria {
-                regex: Some(regex.clone()),
-                s3_words_list: None,
-            },
-            Self::WordsList {
-                bucket_name,
-                object_key,
-            } => AllowListCriteria {
-                regex: None,
-                s3_words_list: Some(S3WordsList {
-                    bucket_name: bucket_name.clone(),
-                    object_key: object_key.clone(),
-                }),
-            },
-        }
-    }
-}
 
 /// A stored allow list.
 ///
@@ -331,9 +263,8 @@ pub async fn read_words_list(
 /// with the expression — its doc states "If the list's criteria specify a
 /// regular expression (regex), this value is typically OK. Amazon Macie can
 /// compile the expression" — so the expression is COMPILED and the status says
-/// whether that succeeded. Compiling is the `regex` crate's business rather
-/// than a hand-written reader of the pattern language, and the program it
-/// builds is bounded by [`PATTERN_PROGRAM_BYTES`]; the pattern is never matched
+/// whether that succeeded. The compile is the crate's one bounded compile of a
+/// caller's pattern ([`super::bounded_pattern`]); the pattern is never matched
 /// against anything here.
 pub async fn derive_status(
     callback: &EmbeddedEmulator,
@@ -363,16 +294,16 @@ pub async fn derive_status(
 
 /// Whether `pattern` is an expression this service can compile and run.
 fn pattern_is_runnable(pattern: &str) -> bool {
-    ::regex::RegexBuilder::new(pattern)
-        .size_limit(PATTERN_PROGRAM_BYTES)
-        .dfa_size_limit(PATTERN_PROGRAM_BYTES)
-        .build()
-        .is_ok()
+    super::bounded_pattern::pattern_compiles(pattern)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    // The criteria SHAPE and its S3 member are what these cases build a request's
+    // criteria out of; the module itself now reads the criterion
+    // ([`AllowListCriterion`]) rather than the shape.
+    use crate::ops::types::{AllowListCriteria, S3WordsList};
 
     /// Every answer the object store can give derives the status code whose own
     /// documentation states that answer, and only the store's "no such object"
