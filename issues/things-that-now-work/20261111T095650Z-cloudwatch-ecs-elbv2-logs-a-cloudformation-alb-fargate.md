@@ -37,3 +37,20 @@ Check cloudwatch__ecs__elbv2__logs.deploy-ecs-alb-service-stack-routes-traffic [
 2. Poll elbv2 DescribeTargetHealth on the stack's TargetGroupArn output for TargetHealth.State == "healthy", then GET the ALB DNS name.
 3. Observe neither ever settles.
 4. Re-replay cloudwatch__ecs__elbv2__logs.deploy-ecs-alb-service-stack-routes-traffic to confirm a fix.
+
+## Resolution
+The key this report carries (`_poll_until#11`) no longer fails: a stack that declares an
+AWS::ECS::Service now really creates it in Amazon ECS, which runs the task set the declaration
+asks for, registers each running task into the target group its `loadBalancers` bind, and the
+load balancer's checks report that target `healthy`, so a client polling DescribeTargetHealth on
+the stack's output reaches a verdict. Held to end to end by
+`core/router/tests/all/cloudformation_alb_fargate_service_converges.rs`.
+
+What this report's recorded check waits on NEXT is still unserved, and is a capability of its
+own rather than part of this convergence: the HTTP request to the published ALB DNS name is
+forwarded to the Fargate task's own address, and nothing in this process listens there — a
+container's declared argument vector runs in a bounded in-process shell with a fixed catalogue
+of session-local utilities and no container image, so no server stands behind the task. The load
+balancer answers that forward with the status it gives a target whose connection cannot be made
+rather than inventing a body. Serving it needs an in-process server behind a container, which is
+tracked by the issues filed for the data-plane leg itself.

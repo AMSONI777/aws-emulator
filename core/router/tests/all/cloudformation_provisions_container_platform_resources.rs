@@ -543,8 +543,7 @@ async fn deleting_the_stack_deletes_the_cluster_it_created() {
 ///
 /// A service ARN is `service/<cluster>/<name>`, so the value a stack hands back is only
 /// addressable if the cluster segment names the cluster the stack created — which the
-/// declaration names by `Ref` of another resource, the case a crate-local suite cannot
-/// drive because the cluster has to EXIST in Amazon ECS for the stack to complete.
+/// declaration names by `Ref` of another resource.
 #[tokio::test]
 async fn an_ecs_services_reported_arn_carries_the_cluster_the_stack_created() {
     let router = build_router();
@@ -555,6 +554,8 @@ async fn an_ecs_services_reported_arn_carries_the_cluster_the_stack_created() {
         "    Type: AWS::ECS::Cluster\n",
         "    Properties:\n",
         "      ClusterName: checkout-cluster\n",
+        // A service using the Amazon ECS deployment controller names the revision its tasks
+        // run, so the template declares one for it to name.
         "  AppTask:\n",
         "    Type: AWS::ECS::TaskDefinition\n",
         "    Properties:\n",

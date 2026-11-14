@@ -15,15 +15,15 @@
 //!
 //! What the rows span: the chain at both depths (a listener in a load balancer, a rule in
 //! that listener), both template spellings, all the ways a service's declaration can name
-//! its cluster (a literal short name, a cluster ARN, a template parameter, and not at all
-//! — which is the `default` cluster), two of the three load balancer types, a named and an
-//! unnamed resource, a declaration naming NO parent and one naming a value that is not an
-//! ARN (which must not be turned into one), and an attribute nothing publishes.
+//! its cluster (a cluster of the same template by `Ref`, one named by a template parameter,
+//! and not at all — which is the `default` cluster), two of the three load balancer types, a
+//! named and an unnamed resource, a declaration naming NO parent and one naming a value that
+//! is not an ARN (which must not be turned into one), and an attribute nothing publishes.
 //!
-//! The one case this suite cannot drive is a service whose cluster is another RESOURCE of
-//! the template: `AWS::ECS::Cluster` is created in Amazon ECS, which a crate-local suite
-//! cannot mount, so it lives in
-//! `core/router/tests/all/cloudformation_provisions_container_platform_resources.rs`.
+//! A service is CREATED in the cluster its declaration names, and Amazon ECS holds no cluster
+//! nothing created, so every row declares the cluster its services run on —
+//! `core/router/tests/all/cloudformation_provisions_container_platform_resources.rs` is where
+//! the same chain is read back through the owning services' own wires.
 //!
 //! The load balancers these rows declare are CREATED in Elastic Load Balancing itself, which
 //! resolves their placement against Amazon EC2, so each row declares the VPC and the subnets
@@ -157,6 +157,24 @@ fn nested_prefix(parent: &str, from: &str, to: &str) -> Option<String> {
         .then(|| format!("{}/", parent.replacen(&marker, &format!(":{to}/"), 1)))
 }
 
+/// The task-definition resource a row's services run from, in the YAML spelling: a service
+/// using the Amazon ECS deployment controller names the revision its tasks run, so every row
+/// that declares a service declares one of these for it to name.
+///
+/// The container reserves `Memory`, because the revision is really registered in Amazon ECS:
+/// "at least one of 'memory' or 'memoryReservation' must be specified" for a container of a
+/// task that reserves none itself.
+const TASK_DEFINITION: &str = concat!(
+    "  Task:\n",
+    "    Type: AWS::ECS::TaskDefinition\n",
+    "    Properties:\n",
+    "      Family: chain-task\n",
+    "      ContainerDefinitions:\n",
+    "        - Name: app\n",
+    "          Image: public.ecr.aws/nginx/nginx:latest\n",
+    "          Memory: 256\n",
+);
+
 /// The network a row's load balancer is placed in: a VPC and two subnets of it, in two
 /// Availability Zones, since Elastic Load Balancing resolves a placement against Amazon EC2
 /// and an Application Load Balancer needs subnets in at least two zones.
@@ -209,11 +227,11 @@ fn params(pairs: &[(&str, &str)]) -> Vec<(String, String)> {
 fn cases() -> Vec<Case> {
     vec![
         Case {
-            // The shape the issue's own check deploys, minus the cluster resource the
-            // router suite owns: an ECS service on a named cluster, with an Application
-            // Load Balancer, a target group, a listener and a listener rule, in the YAML
-            // short-form spelling a CFN-driven integration writes. Every output is a `Ref`
-            // or an `Fn::GetAtt` of a created resource, so every one must carry a value.
+            // The shape the issue's own check deploys: an ECS service on a cluster of the
+            // same template, with an Application Load Balancer, a target group, a listener
+            // and a listener rule, in the YAML short-form spelling a CFN-driven integration
+            // writes. Every output is a `Ref` or an `Fn::GetAtt` of a created resource, so
+            // every one must carry a value.
             case: "yaml short form: a listener and a rule under an application load balancer",
             stack_name: "ecs-elb-chain",
             template: [
@@ -257,6 +275,13 @@ fn cases() -> Vec<Case> {
                     "      Actions:\n",
                     "        - Type: forward\n",
                     "          TargetGroupArn: !Ref TargetGroup\n",
+                    "  Cluster:\n",
+                    "    Type: AWS::ECS::Cluster\n",
+                    "    Properties:\n",
+                    "      ClusterName: chain-cluster\n",
+                ),
+                TASK_DEFINITION,
+                concat!(
                     "  Service:\n",
                     "    Type: AWS::ECS::Service\n",
                     "    Properties:\n",
@@ -264,18 +289,6 @@ fn cases() -> Vec<Case> {
                     "      Cluster: !Ref Cluster\n",
                     "      TaskDefinition: !Ref Task\n",
                     "      DesiredCount: 1\n",
-                    "  Cluster:\n",
-                    "    Type: AWS::ECS::Cluster\n",
-                    "    Properties:\n",
-                    "      ClusterName: chain-cluster\n",
-                    "  Task:\n",
-                    "    Type: AWS::ECS::TaskDefinition\n",
-                    "    Properties:\n",
-                    "      Family: chain-task\n",
-                    "      ContainerDefinitions:\n",
-                    "        - Name: app\n",
-                    "          Image: public.ecr.aws/nginx/nginx:latest\n",
-                    "          Memory: 256\n",
                     "Outputs:\n",
                     "  AlbRef:\n",
                     "    Value: !Ref Alb\n",
@@ -342,8 +355,8 @@ fn cases() -> Vec<Case> {
                 // A rule a template declares is never a listener's DEFAULT rule: that one
                 // is created with the listener, as its `DefaultActions`.
                 ("RuleIsDefault", Expect::Exact("false".to_string())),
-                // A service ARN carries the cluster that hosts it, named here by its short
-                // name.
+                // A service ARN carries the cluster that hosts it, named here by the
+                // cluster resource the same template declares.
                 (
                     "ServiceRef",
                     Expect::Exact(ecs_arn("service/chain-cluster/chain-service")),
@@ -355,7 +368,9 @@ fn cases() -> Vec<Case> {
             // The JSON spelling with long-form intrinsics: a listener under an INTERNAL
             // NETWORK load balancer (so the ARN it nests in carries the `net` segment), a
             // service whose cluster is named by the ARN form the property also takes, and
-            // a service that names NO cluster, which is the `default` one.
+            // a service that names NO cluster, which is the `default` one — declared here,
+            // because a service is created in the cluster it names and Amazon ECS holds no
+            // cluster nothing created.
             case: "json long form: a listener under a network load balancer, a cluster by arn",
             stack_name: "ecs-elb-json",
             template: r#"{"Resources":{
@@ -424,9 +439,9 @@ fn cases() -> Vec<Case> {
                     "SoloRef",
                     Expect::Exact(ecs_arn("service/default/solo-service")),
                 ),
-                // The complement: a service's RUNNING state is not something this emulator
-                // provisioned a service to be in, so the output is reported with its key
-                // and no value rather than an invented one.
+                // The complement: a service's RUNNING state is not an attribute the type
+                // publishes, so the output is reported with its key and no value rather
+                // than an invented one.
                 ("SoloStatus", Expect::NoValue),
             ],
         },

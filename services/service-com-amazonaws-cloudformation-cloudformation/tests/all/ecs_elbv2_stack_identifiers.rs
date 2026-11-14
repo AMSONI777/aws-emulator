@@ -32,9 +32,10 @@
 //! generate the name, how deep the chain of embedded identifiers runs (load balancer →
 //! listener → rule) and both template spellings.
 //!
-//! An `AWS::ECS::Cluster` is CREATED in Amazon ECS, which a crate-local suite cannot
-//! mount, so the rows here name their cluster rather than declaring one; the cluster as a
-//! resource of the same template is
+//! An `AWS::ECS::Cluster` and an `AWS::ECS::Service` are CREATED in Amazon ECS, so the row
+//! that declares a service declares the cluster it runs on too: a service is created in the
+//! cluster its declaration names, and that service holds no cluster nothing created. The
+//! same chain read back through each owning service's own wire is
 //! `core/router/tests/all/cloudformation_provisions_container_platform_resources.rs`.
 //!
 //! The load balancers, target groups, listeners and rules the rows declare are CREATED in
@@ -48,10 +49,13 @@
 //! (`my-nlb-1234567890abcdef.elb.us-west-2.amazonaws.com`).
 
 use std::collections::BTreeMap;
+use std::time::{Duration, Instant};
+
+use smithy_server_runtime::MultiServiceRouter;
 
 use crate::nested_resource_outputs::{is_lower_hex, is_upper_hex};
 use crate::stack_lifecycle::{
-    acknowledging_iam, create_stack, describe_stack, router, wait_for_the_transition, xml_text,
+    acknowledging_iam, create_stack, describe_stack, resource_event_reason, router, xml_text,
     ACCOUNT_ID, REGION,
 };
 use crate::stack_outputs::wire_outputs;
@@ -569,8 +573,15 @@ Resources:
       DefaultActions:
         - Type: forward
           TargetGroupArn: !Ref Tg
+  Cluster:
+    Type: AWS::ECS::Cluster
+    Properties:
+      ClusterName: !Ref ClusterName
   Service:
     Type: AWS::ECS::Service
+    # A target group can only carry a service's tasks once a listener forwards to it, which
+    # is why a load-balanced service waits for the listener AWS's own examples make it wait
+    # for.
     DependsOn: Listener
     Properties:
       ServiceName: !Ref App
@@ -730,6 +741,30 @@ Outputs:
     ]
 }
 
+/// The stack as `DescribeStacks` reports it once the operation in flight on it has SETTLED:
+/// looked at again until its status is not `CREATE_IN_PROGRESS`, or the deadline passes.
+///
+/// A row's resources come up through the states their owning services report them in, and the
+/// number of those spans differs per row, so the condition is what is waited for rather than a
+/// fixed number of them. The deadline is only here so a failure is a failure rather than a
+/// hang.
+async fn settled_stack(router: &MultiServiceRouter, stack: &str) -> String {
+    let deadline = Instant::now() + Duration::from_secs(60);
+    loop {
+        let (status_code, body) = describe_stack(router, stack).await;
+        assert_eq!(
+            status_code, 200,
+            "DescribeStacks({stack}) must answer 200, got {status_code}: {body}"
+        );
+        if xml_text(&body, "StackStatus").as_deref() != Some(status::CREATE_IN_PROGRESS)
+            || Instant::now() >= deadline
+        {
+            return body;
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+}
+
 #[tokio::test]
 async fn a_stack_reports_the_published_identifier_of_every_resource_it_declares() {
     let router = router();
@@ -745,19 +780,18 @@ async fn a_stack_reports_the_published_identifier_of_every_resource_it_declares(
             case.case
         );
 
-        wait_for_the_transition().await;
-        let (status_code, body) = describe_stack(&router, case.stack_name).await;
-        assert_eq!(
-            status_code, 200,
-            "case {:?}: DescribeStacks must answer 200, got {status_code}: {body}",
-            case.case
-        );
+        // A row's resources come up through the states their owning services report them
+        // in — a load balancer `provisioning` before it is `active`, an ECS service's
+        // rollout `IN_PROGRESS` before it is `COMPLETED` — so the stack is LOOKED AT again
+        // until it has settled rather than after a fixed wait.
+        let body = settled_stack(&router, case.stack_name).await;
         assert_eq!(
             xml_text(&body, "StackStatus").as_deref(),
             Some(status::CREATE_COMPLETE),
             "case {:?}: the stack must have reached CREATE_COMPLETE before its outputs \
-             are read, got {body}",
-            case.case
+             are read, got {body} with the service's own reason {:?}",
+            case.case,
+            resource_event_reason(&router, case.stack_name, "Service", "CREATE_FAILED").await,
         );
 
         let outputs = wire_outputs(&body);

@@ -3140,3 +3140,30 @@ mod ecr_scan_on_push_event_reaches_its_queue_target;
 // `all/all_rs_declares_each_suite_once.rs`; the fragments of that header which successive
 // merges landed down here, one of them as an inner doc comment that no item follows, are
 // removed.)
+// stack-deployed ALB + Fargate ECS service converges on healthy targets spans CloudFormation,
+// Amazon ECS, Amazon EC2 and Elastic Load Balancing v2 at once, so no single service crate's
+// test target can deploy the stack and then read the health of what it registered.
+#[path = "all/cloudformation_alb_fargate_service_converges.rs"]
+mod cloudformation_alb_fargate_service_converges;
+// CloudTrail suites above: a module may be declared only once.)
+// `zz_probe` and `cloudformation_metric_stream_filter_update` are declared ONCE each — the
+// first further up this tail, the second in the head region above — so the copies two branches
+// appended here while landing at once are gone: a module may be declared only once.
+// `cloudformation_metric_stream_filter_update` is declared once, in the head region above: a
+// (`https_front_door_concurrent_pooled_producer`, `sdb_legacy_query_api_on_the_assembled_router`,
+// `apigateway_cognito_authorizer_app_client_audience`, `lambda_sqs_event_source_visibility_hold`
+// and `cloudformation_scripted_queue_deploy` are each declared ONCE in the spans above: two
+// landings appended a second copy of each here, and a module declared twice loads the same file
+// `apigateway_sns_service_integration` is declared once, further up this tail: a module may be
+// declared only once.
+// items for one name is a redefinition that compiles neither. `redshift_health_alarms_evaluate`
+// and `cloudformation_metric_stream_estate_is_drainable` are each declared once further up this
+// tail, for the same reason.
+// (`cloudfront_edge_4xx_share_decides_the_alarm` is declared ONCE, further up this tail: a
+// above: two branches landing in the same window declared it here as well.)
+// (`cloudformation_kms_encrypted_sns_sqs_pipeline` is declared ONCE, further up this tail: a
+// (A suite left at the top level of `tests/` fails the build, and each suite is declared
+// exactly ONCE: this is one crate root, so a second `mod` for the same name is `E0428` and
+// fails every suite in this target. `all/all_rs_declares_each_suite_once.rs` checks that for
+// this file and for every service crate's `tests/all.rs`, so check there rather than leaving a
+// note here.)
