@@ -219,16 +219,16 @@ async fn a_started_session_round_trips_through_get_browser_session() {
     let custom = create_browser(&router, CUSTOM_BROWSER_NAME).await;
 
     // Rows differ along the browser, whether `name` was supplied and how long it is, the
-    // time-to-live (omitted so the modelled default applies, both published bounds of
-    // `BrowserSessionTimeout` 1..28800, and the documented recommended minimum), the
+    // time-to-live (omitted so the service's own default applies, both published bounds
+    // of `BrowserSessionTimeout` 1..28800, and the documented recommended minimum), the
     // viewport (both published bounds of `ViewPortWidth` 320..3840 and `ViewPortHeight`
     // 240..2160), and which of the remaining optional members were supplied.
     let cases: Vec<(&str, String, Value, i64)> = vec![
         (
-            "no-optional-members-takes-the-modelled-default",
+            "no-optional-members-runs-under-the-service-default-timeout",
             SYSTEM_BROWSER.to_string(),
             json!({}),
-            3_600,
+            900,
         ),
         (
             "named-at-the-lowest-timeout-and-the-smallest-viewport",
@@ -431,10 +431,11 @@ async fn a_started_session_round_trips_through_get_browser_session() {
 async fn session_status_follows_the_time_to_live_the_request_asked_for() {
     let (router, engine) = emulator();
 
-    // `BrowserSessionTimeout` is range 1..28800 with default 3600 (source: smithy_query
-    // query="operation" operation="StartBrowserSession"): both published bounds, the
-    // default and the documented recommended minimum.
-    for timeout in [1_i64, 60, 3_600, 28_800] {
+    // `BrowserSessionTimeout` is range 1..28800 (source: smithy_query query="operation"
+    // operation="StartBrowserSession"): both published bounds, the documented recommended
+    // minimum, and one value in between. A request that names NO timeout runs under the
+    // service's own default instead, which `browser_session_streams.rs` covers.
+    for timeout in [1_i64, 60, 1_200, 28_800] {
         let case = format!("timeout-{timeout}");
         let (status, started) =
             start_session(&router, SYSTEM_BROWSER, json!({"sessionTimeoutSeconds": timeout})).await;

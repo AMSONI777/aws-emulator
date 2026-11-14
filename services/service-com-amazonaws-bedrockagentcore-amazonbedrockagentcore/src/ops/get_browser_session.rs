@@ -2,16 +2,18 @@
 
 //! @op GetBrowserSession
 //! Reports one browser session as [`crate::ops::start_browser_session`] persisted it,
-//! with the status the clock implies: `READY` while the session is inside the
-//! time-to-live its start asked for, `TERMINATED` from the instant that runs out. A
-//! session this emulator does not hold is a 404.
+//! with the status stored state and the clock imply: `READY` while the session is inside
+//! the time-to-live it runs under, `TERMINATED` once a stop has terminated it or that
+//! time-to-live has run out. A session this emulator does not hold is a 404.
 //!
 //! `@readonly`: nothing is written here, not even the termination a time-to-live has
 //! already made due — that reading is a function of the stored record and the clock.
 //!
-//! Two members of the response are not reported, because nothing in this emulator backs
-//! them: `streams` (an automation stream is a WebSocket endpoint no process here
-//! serves) and `sessionReplayArtifact` (no session replay is recorded).
+//! The session's streams are the ones its start materialised and stored
+//! ([`crate::state::BrowserSessionRecord::streams`]), so this read and that start
+//! cannot report different ones. One member of the response is not reported, because
+//! nothing in this emulator backs it: `sessionReplayArtifact` (no session replay is
+//! recorded).
 //!
 //! ## Shape of an operation
 //!
@@ -266,9 +268,9 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
             profile_configuration: session.profile_configuration.clone(),
             session_timeout_seconds: Some(session.session_timeout_seconds),
             status: Some(session.status_as_of(now).to_string()),
-            // No process here serves a browser automation or live view stream, so this
-            // session has none to report.
-            streams: None,
+            // The endpoints this session was started with, with the automation stream's
+            // status as it stands now.
+            streams: Some(session.streams()),
             proxy_configuration: session.proxy_configuration.clone(),
             certificates: session.certificates.clone(),
             filesystem_configurations: session.filesystem_configurations.clone(),

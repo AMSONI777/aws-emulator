@@ -12,11 +12,16 @@
 //! and an identifier naming none is the modelled 404 rather than a session started on
 //! nothing.
 //!
-//! The session's STREAMS are not reported: an automation stream endpoint is a
-//! WebSocket a browser-automation client connects to, and this emulator runs no such
-//! endpoint, so naming one would name something no client can reach. `streams` is an
-//! optional member of this response, and `UpdateBrowserStream` — the operation that
-//! owns a session's streams — is still a scaffold.
+//! The session's STREAMS are materialised here and persisted with the session, so this
+//! response and [`crate::ops::get_browser_session`] cannot report different ones: an
+//! endpoint per stream under the address this emulator answers on
+//! ([`smithy_server_runtime::OperationContext::endpoint`]), with the automation stream
+//! enabled for the session this call makes usable. `UpdateBrowserStream` is what moves
+//! that stream's status afterwards.
+//!
+//! What is stored as the session's time-to-live is the one it RUNS under
+//! ([`crate::state::effective_session_timeout_seconds`]): the value the request asked
+//! for, or the service's own default when the request asked for none.
 //!
 //! ## Shape of an operation
 //!
@@ -223,11 +228,11 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         input: Self::Input,
         ctx: &smithy_server_runtime::OperationContext<'_>,
     ) -> Result<Self::Output, Self::Error> {
-        // Request metadata is not read by this operation: every member it needs is
-        // bound into `input` by the centralized request walk. `traceId` / `traceParent`
-        // are carried on the request for distributed tracing and are not part of any
-        // response or stored record.
-        let _ = ctx;
+        // The streams this call materialises address THIS emulator: the base a client of
+        // it reaches a resource at. `traceId` / `traceParent` are carried on the request
+        // for distributed tracing and are not part of any response or stored record.
+        let endpoint = ctx.endpoint();
+        let endpoint_base = endpoint.as_str();
         let state = crate::state::service_state(&*self.engine).ok_or_else(|| {
             StartBrowserSessionErrorModeled::InternalServerException(InternalServerException {
                 message: Some("the shared engine does not carry this service's state".to_string()),
@@ -261,6 +266,7 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         }
 
         let mut store = state.lock();
+        let now = ::std::time::SystemTime::now();
 
         // `clientToken` is an `@idempotencyToken` on an `@idempotent` operation, and
         // the model documents that a token matching an earlier request is ignored
@@ -274,26 +280,23 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
                     browser_identifier: started.browser_identifier.clone(),
                     session_id: started.session_id.clone(),
                     created_at: ::aws_smithy_types::DateTime::from(started.created_at),
-                    streams: None,
+                    // Read off the session that token started, not materialised again.
+                    streams: Some(started.streams()),
                 });
             }
         }
 
         let seq = store.next_seq();
-        let session = crate::state::BrowserSessionRecord::started(
-            seq,
-            ::std::time::SystemTime::now(),
-            &input,
-        );
+        let session = crate::state::BrowserSessionRecord::started(seq, now, &input, endpoint_base);
         // Built from what is about to be stored, so the response and the store cannot
         // disagree. `BrowserSessionStatus` models only READY and TERMINATED, so a
         // started session is usable at once — which is why this response models no
-        // status at all.
+        // status at all, and why its automation stream is enabled.
         let output = StartBrowserSessionOutput {
             browser_identifier: session.browser_identifier.clone(),
             session_id: session.session_id.clone(),
             created_at: ::aws_smithy_types::DateTime::from(session.created_at),
-            streams: None,
+            streams: Some(session.streams()),
         };
         // Registers the browser and holds every bound the store declares, so no caller
         // can grow it without limit.

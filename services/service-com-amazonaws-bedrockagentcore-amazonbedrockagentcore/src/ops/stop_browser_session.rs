@@ -1,15 +1,16 @@
 // SPDX-License-Identifier: CC0-1.0
 
 //! @op StopBrowserSession
-//! SCAFFOLDED, NOT IMPLEMENTED: this operation answers HTTP 501 `NotImplemented` and
-//! asserts NOTHING about `StopBrowserSession`'s real behaviour. Implement it here — this is
-//! the ONLY file to touch for this operation.
+//! Terminates one browser session: the stop is recorded on the session
+//! ([`crate::state::BrowserSessionRecord::stop`]), so every later
+//! [`crate::ops::get_browser_session`] reports `TERMINATED` and the session's automation
+//! stream is no longer enabled. A replayed `clientToken` answers with the stop it
+//! already performed, and a session that is already terminated is a conflict rather than
+//! a second stop — the model documents that a stopped session cannot be restarted.
 //!
-//! A 501 from this operation means "nobody has written it yet", never "the emulator is
-//! broken". Replace the `Err(..)` in [`StopBrowserSession::handle`] with real behaviour and
-//! delete the SCAFFOLDED marker line above; that line is the machine-readable record of
-//! which operations are still stubs (`grep -rl '^//! SCAFFOLDED, NOT IMPLEMENTED:' */src/ops/`),
-//! so leaving it on an implemented operation under-reports progress.
+//! A browser is NOT this data plane's resource, so the `browserIdentifier` is resolved
+//! against the component that owns browsers ([`crate::state::resolve_browser`]) before
+//! anything is looked for among its sessions.
 //!
 //! ## Shape of an operation
 //!
@@ -181,18 +182,93 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         input: Self::Input,
         ctx: &smithy_server_runtime::OperationContext<'_>,
     ) -> Result<Self::Output, Self::Error> {
-        // The engine is reachable from `&self` (constructor-injected); `ctx` carries
-        // request metadata. Both are bound here so an implementer has them in scope.
-        let _ = (&input, ctx, &self.engine);
-        // Implement `StopBrowserSession` here, then delete the SCAFFOLDED marker at the top of
-        // this file. Return modeled failures as
-        // `Err(StopBrowserSessionErrorModeled::Variant(..).into())` — the `From` impl above lifts it.
-        //
-        // To refuse a bad request this operation models no error for, return
-        // `Err(crate::scaffolded::Scaffolded::validation("..."))` — a 400
-        // `ValidationException`. Do NOT answer 501 for it: 501 means "not written yet",
-        // not "bad request". Modeled constraints are already refused BEFORE this
-        // handler runs, so reaching here means the input satisfies every one of them.
-        Err(crate::scaffolded::Scaffolded::not_implemented("StopBrowserSession"))
+        // Request metadata is not read by this operation: every member it needs is
+        // bound into `input` by the centralized request walk. `traceId` / `traceParent`
+        // are carried for distributed tracing and are part of no response.
+        let _ = ctx;
+        let state = crate::state::service_state(&*self.engine).ok_or_else(|| {
+            StopBrowserSessionErrorModeled::InternalServerException(InternalServerException {
+                message: Some("the shared engine does not carry this service's state".to_string()),
+            })
+        })?;
+
+        // A session is addressed BY its browser, and the path resolves outside-in: a
+        // browser this emulator does not hold is what the refusal names. The resolution
+        // and both sentences live in `crate::state`; this operation only says which of
+        // its own modelled errors carries each.
+        if let Err(unavailable) =
+            crate::state::resolve_browser(&*self.engine, &input.browser_identifier)
+        {
+            return Err(match unavailable {
+                crate::state::BrowserUnavailable::NotFound(message) => {
+                    StopBrowserSessionErrorModeled::ResourceNotFoundException(
+                        ResourceNotFoundException {
+                            message: Some(message),
+                        },
+                    )
+                }
+                crate::state::BrowserUnavailable::StoreUnavailable(message) => {
+                    StopBrowserSessionErrorModeled::InternalServerException(
+                        InternalServerException {
+                            message: Some(message),
+                        },
+                    )
+                }
+            }
+            .into());
+        }
+
+        let now = ::std::time::SystemTime::now();
+        let mut store = state.lock();
+        let session = store
+            .browser_session_mut(&input.browser_identifier, &input.session_id)
+            .ok_or_else(|| {
+                StopBrowserSessionErrorModeled::ResourceNotFoundException(
+                    ResourceNotFoundException {
+                        // The session is the resource addressed and the only one named:
+                        // the browser it was looked for on is not part of this message.
+                        message: Some(crate::state::resource_not_found_message(
+                            crate::state::NotFoundResource::Session,
+                            &input.session_id,
+                        )),
+                    },
+                )
+            })?;
+
+        // `clientToken` is an `@idempotencyToken` on an `@idempotent` operation, and
+        // the model documents that a token matching an earlier request is ignored
+        // rather than refused: answer with the stop that token already performed, so a
+        // retried stop is not a conflict with itself.
+        if let Some(already) = input
+            .client_token
+            .as_deref()
+            .and_then(|token| session.replayed_call(crate::state::BrowserSessionCall::Stop, token))
+        {
+            return Ok(StopBrowserSessionOutput {
+                browser_identifier: session.browser_identifier.clone(),
+                session_id: session.session_id.clone(),
+                last_updated_at: ::aws_smithy_types::DateTime::from(already),
+            });
+        }
+
+        // A session that is no longer running cannot be stopped again:
+        // `BrowserSessionStatus` models READY and TERMINATED only, a stopped session is
+        // documented as not restartable, and `ConflictException` is the modelled answer
+        // for a request that conflicts with the current state of the resource.
+        if session.status_as_of(now) == crate::state::BROWSER_SESSION_TERMINATED {
+            return Err(StopBrowserSessionErrorModeled::ConflictException(
+                ConflictException {
+                    message: Some(crate::state::session_already_terminated(&input.session_id)),
+                },
+            )
+            .into());
+        }
+
+        session.stop(now, input.client_token.as_deref());
+        Ok(StopBrowserSessionOutput {
+            browser_identifier: session.browser_identifier.clone(),
+            session_id: session.session_id.clone(),
+            last_updated_at: ::aws_smithy_types::DateTime::from(session.last_updated_at),
+        })
     }
 }

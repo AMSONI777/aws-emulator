@@ -1,15 +1,17 @@
 // SPDX-License-Identifier: CC0-1.0
 
 //! @op UpdateBrowserStream
-//! SCAFFOLDED, NOT IMPLEMENTED: this operation answers HTTP 501 `NotImplemented` and
-//! asserts NOTHING about `UpdateBrowserStream`'s real behaviour. Implement it here — this is
-//! the ONLY file to touch for this operation.
+//! Applies one update to a browser session's streams and reports the session's streams
+//! as they stand after it. The only modelled update is the automation stream's status,
+//! so this moves that status on the stored session
+//! ([`crate::state::BrowserSessionRecord::set_automation_stream_enabled`]) and every
+//! later [`crate::ops::get_browser_session`] reports it. A replayed `clientToken`
+//! answers with the update it already applied, and a session that is terminated has no
+//! stream left to update.
 //!
-//! A 501 from this operation means "nobody has written it yet", never "the emulator is
-//! broken". Replace the `Err(..)` in [`UpdateBrowserStream::handle`] with real behaviour and
-//! delete the SCAFFOLDED marker line above; that line is the machine-readable record of
-//! which operations are still stubs (`grep -rl '^//! SCAFFOLDED, NOT IMPLEMENTED:' */src/ops/`),
-//! so leaving it on an implemented operation under-reports progress.
+//! A browser is NOT this data plane's resource, so the `browserIdentifier` is resolved
+//! against the component that owns browsers ([`crate::state::resolve_browser`]) before
+//! anything is looked for among its sessions.
 //!
 //! ## Shape of an operation
 //!
@@ -179,18 +181,105 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         input: Self::Input,
         ctx: &smithy_server_runtime::OperationContext<'_>,
     ) -> Result<Self::Output, Self::Error> {
-        // The engine is reachable from `&self` (constructor-injected); `ctx` carries
-        // request metadata. Both are bound here so an implementer has them in scope.
-        let _ = (&input, ctx, &self.engine);
-        // Implement `UpdateBrowserStream` here, then delete the SCAFFOLDED marker at the top of
-        // this file. Return modeled failures as
-        // `Err(UpdateBrowserStreamErrorModeled::Variant(..).into())` — the `From` impl above lifts it.
-        //
-        // To refuse a bad request this operation models no error for, return
-        // `Err(crate::scaffolded::Scaffolded::validation("..."))` — a 400
-        // `ValidationException`. Do NOT answer 501 for it: 501 means "not written yet",
-        // not "bad request". Modeled constraints are already refused BEFORE this
-        // handler runs, so reaching here means the input satisfies every one of them.
-        Err(crate::scaffolded::Scaffolded::not_implemented("UpdateBrowserStream"))
+        // Request metadata is not read by this operation: every member it needs is
+        // bound into `input` by the centralized request walk.
+        let _ = ctx;
+        let state = crate::state::service_state(&*self.engine).ok_or_else(|| {
+            UpdateBrowserStreamErrorModeled::InternalServerException(InternalServerException {
+                message: Some("the shared engine does not carry this service's state".to_string()),
+            })
+        })?;
+
+        // A session is addressed BY its browser, and the path resolves outside-in: a
+        // browser this emulator does not hold is what the refusal names. The resolution
+        // and both sentences live in `crate::state`; this operation only says which of
+        // its own modelled errors carries each.
+        if let Err(unavailable) =
+            crate::state::resolve_browser(&*self.engine, &input.browser_identifier)
+        {
+            return Err(match unavailable {
+                crate::state::BrowserUnavailable::NotFound(message) => {
+                    UpdateBrowserStreamErrorModeled::ResourceNotFoundException(
+                        ResourceNotFoundException {
+                            message: Some(message),
+                        },
+                    )
+                }
+                crate::state::BrowserUnavailable::StoreUnavailable(message) => {
+                    UpdateBrowserStreamErrorModeled::InternalServerException(
+                        InternalServerException {
+                            message: Some(message),
+                        },
+                    )
+                }
+            }
+            .into());
+        }
+
+        let now = ::std::time::SystemTime::now();
+        let mut store = state.lock();
+        let session = store
+            .browser_session_mut(&input.browser_identifier, &input.session_id)
+            .ok_or_else(|| {
+                UpdateBrowserStreamErrorModeled::ResourceNotFoundException(
+                    ResourceNotFoundException {
+                        // The session is the resource addressed and the only one named:
+                        // the browser it was looked for on is not part of this message.
+                        message: Some(crate::state::resource_not_found_message(
+                            crate::state::NotFoundResource::Session,
+                            &input.session_id,
+                        )),
+                    },
+                )
+            })?;
+
+        // `clientToken` is an `@idempotencyToken` on an `@idempotent` operation, and
+        // the model documents that a token matching an earlier request is ignored
+        // rather than refused: answer with the update that token already applied.
+        if let Some(already) = input.client_token.as_deref().and_then(|token| {
+            session.replayed_call(crate::state::BrowserSessionCall::StreamUpdate, token)
+        }) {
+            return Ok(UpdateBrowserStreamOutput {
+                browser_identifier: session.browser_identifier.clone(),
+                session_id: session.session_id.clone(),
+                streams: session.streams(),
+                updated_at: ::aws_smithy_types::DateTime::from(already),
+            });
+        }
+
+        // A session that is no longer running has no stream to update: a stop "releases
+        // associated resources and makes the session unavailable for further use", and
+        // `ConflictException` is the modelled answer for a request that conflicts with
+        // the current state of the resource.
+        if session.status_as_of(now) == crate::state::BROWSER_SESSION_TERMINATED {
+            return Err(UpdateBrowserStreamErrorModeled::ConflictException(
+                ConflictException {
+                    message: Some(crate::state::session_already_terminated(&input.session_id)),
+                },
+            )
+            .into());
+        }
+
+        // `StreamUpdate` models one member, and `AutomationStreamUpdate` models one
+        // optional `streamStatus`: an update that names no status leaves the stream's
+        // status as it is rather than choosing one.
+        let StreamUpdate::automationStreamUpdate(update) = &input.stream_update;
+        if let Some(requested) = update.stream_status.as_deref() {
+            let enabled = requested == crate::state::AUTOMATION_STREAM_ENABLED;
+            session.set_automation_stream_enabled(
+                enabled,
+                now,
+                input.client_token.as_deref(),
+            );
+        }
+
+        Ok(UpdateBrowserStreamOutput {
+            browser_identifier: session.browser_identifier.clone(),
+            session_id: session.session_id.clone(),
+            // Read off the session this call just wrote, so the response and the store
+            // cannot disagree.
+            streams: session.streams(),
+            updated_at: ::aws_smithy_types::DateTime::from(session.last_updated_at),
+        })
     }
 }

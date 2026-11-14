@@ -78,7 +78,8 @@
 //!
 //! The BROWSER tools plane is its own concern and lives in [`browser`]: a browser holds
 //! the sessions `StartBrowserSession` started on it, read back by `GetBrowserSession`,
-//! bounded the same way as the code interpreter plane.
+//! with the streams that start materialised, the status the stop that terminated one
+//! leaves it in, and the same bounds as the code interpreter plane.
 //!
 //! The AgentCore A/B TESTING plane is a concern of its own, so it lives in
 //! [`ab_tests`]: the tests `CreateABTest` minted, what `ListABTests` reports from them,

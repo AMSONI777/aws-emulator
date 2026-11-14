@@ -5,10 +5,11 @@
 //! A browser is created through the CONTROL plane, a different service, so a browser is
 //! registered here by the first `StartBrowserSession` that names it — the same way a
 //! code interpreter is registered by the first session started on it. The record a start
-//! writes ([`BrowserSessionRecord`]) is exactly what `GetBrowserSession` reports back,
-//! and its status is read off the clock against the time-to-live the request asked for
-//! ([`BrowserSessionRecord::status_as_of`]), so no call is needed to make a termination
-//! that is already due visible.
+//! writes ([`BrowserSessionRecord`]) is exactly what `GetBrowserSession` reports back:
+//! its streams ([`BrowserSessionStreamRecord`]) are materialised by the start, and its
+//! status is read off the stop that terminated it or off the clock against the session's
+//! effective time-to-live ([`BrowserSessionRecord::status_as_of`]), so no call is needed
+//! to make a termination that is already due visible.
 //!
 //! `StartBrowserSession` is this plane's only growth site and a caller chooses both the
 //! `browserIdentifier` and the `clientToken` it inserts under, so each level carries a
@@ -16,14 +17,15 @@
 //! ([`MAX_BROWSERS`], [`MAX_BROWSER_SESSIONS`],
 //! [`MAX_IDEMPOTENCY_RECORDS_PER_BROWSER`]).
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::time::{Duration, SystemTime};
 
 use service_com_amazonaws_bedrockagentcorecontrol_amazonbedrockagentcorecontrol as control_plane;
 
 use crate::ops::types::{
-    BrowserEnterprisePolicy, BrowserExtension, BrowserProfileConfiguration, Certificate,
-    ProxyConfiguration, StartBrowserSessionInput, ToolsFileSystemConfiguration, ViewPort,
+    AutomationStream, BrowserEnterprisePolicy, BrowserExtension, BrowserProfileConfiguration,
+    BrowserSessionStream, Certificate, LiveViewStream, ProxyConfiguration,
+    StartBrowserSessionInput, ToolsFileSystemConfiguration, ViewPort,
 };
 
 use super::{
@@ -42,14 +44,122 @@ pub const MAX_BROWSER_SESSIONS: usize = 256;
 /// The most `clientToken` records this emulator retains for one browser.
 pub const MAX_IDEMPOTENCY_RECORDS_PER_BROWSER: usize = 1_000;
 
+/// The most replayed-call `clientToken` records ONE session keeps, so a caller looping
+/// on `StopBrowserSession` or `UpdateBrowserStream` with a fresh token cannot grow the
+/// record without limit.
+pub const MAX_IDEMPOTENT_CALL_TOKENS_PER_SESSION: usize = 256;
+
 /// `BrowserSessionStatus` for a session that is still inside its time-to-live, so it can
 /// serve work (source: smithy_query query="shape" shape="BrowserSessionStatus", values
 /// READY | TERMINATED).
 pub const BROWSER_SESSION_READY: &str = "READY";
 
-/// `BrowserSessionStatus` for a session whose time-to-live has run out, from the same
-/// enum.
+/// `BrowserSessionStatus` for a session a stop has terminated or whose time-to-live has
+/// run out, from the same enum.
 pub const BROWSER_SESSION_TERMINATED: &str = "TERMINATED";
+
+/// `AutomationStreamStatus` for an automation stream that carries commands (source:
+/// smithy_query query="shape" shape="AutomationStreamStatus", values ENABLED |
+/// DISABLED).
+pub const AUTOMATION_STREAM_ENABLED: &str = "ENABLED";
+
+/// `AutomationStreamStatus` for one that does not, from the same enum.
+pub const AUTOMATION_STREAM_DISABLED: &str = "DISABLED";
+
+/// The `@default` the model declares for
+/// `StartBrowserSessionRequest$sessionTimeoutSeconds` (source: smithy_query
+/// query="operation" operation="StartBrowserSession"). The protocol's request walk binds
+/// it server-side for a request that carries no timeout, which is the only trace such a
+/// request leaves a handler.
+pub const MODELLED_SESSION_TIMEOUT_DEFAULT: i32 = 3_600;
+
+/// The time-to-live, in seconds, a browser session runs under when its start asks for
+/// none: the service assigns its own fifteen-minute default rather than the value the
+/// request member's `@default` declares, and the assigned value is what every read of
+/// the session reports.
+pub const SERVICE_SESSION_TIMEOUT_DEFAULT: i32 = 900;
+
+/// The time-to-live a session started with `requested` seconds actually runs under: the
+/// requested value, or [`SERVICE_SESSION_TIMEOUT_DEFAULT`] when the request named no
+/// timeout at all.
+///
+/// A request that names none is bound to [`MODELLED_SESSION_TIMEOUT_DEFAULT`] before any
+/// handler sees it, so that value IS "no timeout requested" on this wire; every other
+/// value in the member's range is the session's own.
+pub fn effective_session_timeout_seconds(requested: i32) -> i32 {
+    if requested == MODELLED_SESSION_TIMEOUT_DEFAULT {
+        SERVICE_SESSION_TIMEOUT_DEFAULT
+    } else {
+        requested
+    }
+}
+
+/// The path every stream of one browser session is addressed under, beneath the address
+/// this emulator answers on: the service lays a session's streams out per browser and
+/// session, with one trailing segment per stream
+/// (`/browser-streams/{browserIdentifier}/sessions/{sessionId}/<stream>`).
+const STREAM_PATH_PREFIX: &str = "browser-streams";
+
+/// The trailing segment of the stream a browser-automation client drives the session
+/// over.
+const AUTOMATION_STREAM_SEGMENT: &str = "automation";
+
+/// The scheme the automation stream is addressed over: the stream is the bidirectional
+/// channel a client "establish[es] a WebSocket connection to … for sending commands and
+/// receiving responses" (source: smithy_query query="shape" shape="AutomationStream",
+/// member `streamEndpoint`), so its address is a WebSocket URL on the host this emulator
+/// answers on, where the live view is read over that host's own scheme.
+const AUTOMATION_STREAM_SCHEME: &str = "wss";
+
+/// The scheme every address this emulator answers on carries
+/// ([`smithy_server_runtime::EndpointUrl`] parses no other), and therefore the one the
+/// automation stream's scheme replaces.
+const ENDPOINT_SCHEME_PREFIX: &str = "https://";
+
+/// The trailing segment of the stream an embedded live view reads the session from.
+const LIVE_VIEW_STREAM_SEGMENT: &str = "live-view";
+
+/// The streams one browser session exposes: the addresses `StartBrowserSession`
+/// materialised for it and the automation stream's status, which is the ONE place
+/// `StartBrowserSession`, `GetBrowserSession` and `UpdateBrowserStream` read a session's
+/// streams from, so no two of them can report different ones.
+#[derive(Debug, Clone)]
+pub struct BrowserSessionStreamRecord {
+    /// Where a browser-automation client dials this session. `AutomationStream` models
+    /// the member `@required` with `@length 10..512`, so a session always carries one.
+    pub automation_endpoint: String,
+    /// Where an embedded live view reads this session from.
+    pub live_view_endpoint: String,
+    /// Whether the automation stream carries commands: enabled for a session the service
+    /// has just started, and afterwards whatever the last `UpdateBrowserStream` set.
+    pub automation_enabled: bool,
+}
+
+impl BrowserSessionStreamRecord {
+    /// The streams a session gets when it is started: an endpoint per stream under
+    /// `endpoint_base` — the address this emulator answers on, which is where a client
+    /// of THIS emulator reaches a resource of it — and an automation stream the started
+    /// session can be driven over.
+    ///
+    /// The host and port of an endpoint are the environment's; its presence and the
+    /// session it addresses are the session's.
+    pub fn materialized(endpoint_base: &str, browser_identifier: &str, session_id: &str) -> Self {
+        let session_path =
+            format!("{STREAM_PATH_PREFIX}/{browser_identifier}/sessions/{session_id}");
+        let host = endpoint_base
+            .strip_prefix(ENDPOINT_SCHEME_PREFIX)
+            .unwrap_or(endpoint_base);
+        Self {
+            automation_endpoint: format!(
+                "{AUTOMATION_STREAM_SCHEME}://{host}/{session_path}/{AUTOMATION_STREAM_SEGMENT}"
+            ),
+            live_view_endpoint: format!(
+                "{endpoint_base}/{session_path}/{LIVE_VIEW_STREAM_SEGMENT}"
+            ),
+            automation_enabled: true,
+        }
+    }
+}
 
 /// One browser's sessions, as `StartBrowserSession` wrote them.
 #[derive(Debug, Default)]
@@ -81,8 +191,10 @@ pub struct BrowserSessionRecord {
     pub browser_identifier: String,
     pub name: Option<String>,
     pub created_at: SystemTime,
-    /// The session's time-to-live in seconds, as the request asked for it (the model
-    /// defaults it to 3600 when a request omits it).
+    /// The session's EFFECTIVE time-to-live in seconds: what the request asked for, or
+    /// the service's own default when it asked for nothing
+    /// ([`effective_session_timeout_seconds`]). This is the value the read reports and
+    /// the span the status is read against, so the two cannot disagree.
     pub session_timeout_seconds: i32,
     /// The viewport the start asked for, or `None` when it asked for none: AWS
     /// publishes no default viewport size, so this emulator reports no dimensions
@@ -95,8 +207,21 @@ pub struct BrowserSessionRecord {
     pub certificates: Option<Vec<Certificate>>,
     pub filesystem_configurations: Option<Vec<ToolsFileSystemConfiguration>>,
     /// When this session was last changed by a call: its creation instant until a call
-    /// changes it.
+    /// changes it, and the instant of the stop or stream update that last did
+    /// afterwards.
     pub last_updated_at: SystemTime,
+    /// The streams this session exposes, materialised when it was started.
+    pub streams: BrowserSessionStreamRecord,
+    /// When `StopBrowserSession` terminated this session, or `None` while no stop has. A
+    /// stopped session is `TERMINATED` from that instant on, whatever is left of its
+    /// time-to-live, and the documented effect of a stop is that it cannot be restarted.
+    pub stopped_at: Option<SystemTime>,
+    /// The `clientToken` of each call this session has already served, with the instant
+    /// that call answered with: both `StopBrowserSession` and `UpdateBrowserStream` are
+    /// `@idempotent` with an `@idempotencyToken` `clientToken`, so a replayed token
+    /// answers with the call it already performed rather than conflicting with it.
+    /// Bounded by [`MAX_IDEMPOTENT_CALL_TOKENS_PER_SESSION`].
+    pub idempotent_calls: BTreeMap<(BrowserSessionCall, String), SystemTime>,
     /// The value [`ComAmazonawsBedrockagentcoreAmazonbedrockagentcoreState::next_seq`]
     /// handed this session: its eviction order, and what keeps two sessions started in
     /// the same millisecond apart.
@@ -105,14 +230,28 @@ pub struct BrowserSessionRecord {
 
 impl BrowserSessionRecord {
     /// A session as the call that starts it leaves it: the configuration that call asked
-    /// for, created at `created_at`, nothing stopped and nothing changed since.
-    pub fn started(seq: u64, created_at: SystemTime, input: &StartBrowserSessionInput) -> Self {
+    /// for, created at `created_at`, with the streams that call materialised under
+    /// `endpoint_base`, nothing stopped and nothing changed since.
+    pub fn started(
+        seq: u64,
+        created_at: SystemTime,
+        input: &StartBrowserSessionInput,
+        endpoint_base: &str,
+    ) -> Self {
+        let session_id = mint_browser_session_id(seq);
         Self {
-            session_id: mint_browser_session_id(seq),
+            streams: BrowserSessionStreamRecord::materialized(
+                endpoint_base,
+                &input.browser_identifier,
+                &session_id,
+            ),
+            session_id,
             browser_identifier: input.browser_identifier.clone(),
             name: input.name.clone(),
             created_at,
-            session_timeout_seconds: input.session_timeout_seconds,
+            session_timeout_seconds: effective_session_timeout_seconds(
+                input.session_timeout_seconds,
+            ),
             view_port: input.view_port.clone(),
             extensions: input.extensions.clone(),
             enterprise_policies: input.enterprise_policies.clone(),
@@ -123,6 +262,8 @@ impl BrowserSessionRecord {
             // Nothing has changed this session yet, so the last instant it changed is
             // the instant it came into being.
             last_updated_at: created_at,
+            stopped_at: None,
+            idempotent_calls: BTreeMap::new(),
             seq,
         }
     }
@@ -132,7 +273,7 @@ impl BrowserSessionRecord {
     ///
     /// `sessionTimeoutSeconds` is modelled as "the duration in seconds (time-to-live)
     /// after which the session automatically terminates, regardless of ongoing
-    /// activity", so the session's own requested value is the span — nothing chosen
+    /// activity", so the session's own effective value is the span — nothing chosen
     /// here. The model's range makes it positive; a value that is not is read as no time
     /// at all rather than as a time in the past.
     pub fn expires_at(&self) -> Option<SystemTime> {
@@ -140,16 +281,113 @@ impl BrowserSessionRecord {
         self.created_at.checked_add(ttl)
     }
 
-    /// This session's `BrowserSessionStatus` at `now`: `TERMINATED` once its
-    /// time-to-live has run out, `READY` until then. The reading comes off stored state
-    /// and the clock, so a read reports the termination that was already due without
-    /// writing anything.
+    /// This session's `BrowserSessionStatus` at `now`: `TERMINATED` once a stop has
+    /// terminated it or its time-to-live has run out, `READY` until then. Both readings
+    /// come off stored state and the clock, so a read reports the termination that was
+    /// already due without writing anything.
     pub fn status_as_of(&self, now: SystemTime) -> &'static str {
+        if self.stopped_at.is_some() {
+            return BROWSER_SESSION_TERMINATED;
+        }
         match self.expires_at() {
             Some(expiry) if now >= expiry => BROWSER_SESSION_TERMINATED,
             _ => BROWSER_SESSION_READY,
         }
     }
+
+    /// This session's streams, as every operation that reports them reports them: the
+    /// endpoints the start materialised, and the automation stream's status as the start
+    /// enabled it and `UpdateBrowserStream` last set it.
+    ///
+    /// `AutomationStreamStatus` is the STREAM's own status, not the session's: the
+    /// session's `BrowserSessionStatus` is what says whether the session can be used at
+    /// all, so a termination is reported there and leaves the stream reporting the status
+    /// that was set for it.
+    pub fn streams(&self) -> BrowserSessionStream {
+        BrowserSessionStream {
+            automation_stream: AutomationStream {
+                stream_endpoint: self.streams.automation_endpoint.clone(),
+                stream_status: if self.streams.automation_enabled {
+                    AUTOMATION_STREAM_ENABLED.to_string()
+                } else {
+                    AUTOMATION_STREAM_DISABLED.to_string()
+                },
+            },
+            live_view_stream: Some(LiveViewStream {
+                stream_endpoint: Some(self.streams.live_view_endpoint.clone()),
+            }),
+        }
+    }
+
+    /// Terminate this session at `now`, as `StopBrowserSession` does: the status every
+    /// later read reports becomes `TERMINATED`, and `now` is the `lastUpdatedAt` this
+    /// stop and every replay of its `client_token` answer with.
+    pub fn stop(&mut self, now: SystemTime, client_token: Option<&str>) {
+        self.stopped_at = Some(now);
+        self.last_updated_at = now;
+        self.record_call(BrowserSessionCall::Stop, client_token, now);
+    }
+
+    /// Set whether this session's automation stream carries commands, as
+    /// `UpdateBrowserStream` does, at `now`.
+    pub fn set_automation_stream_enabled(
+        &mut self,
+        enabled: bool,
+        now: SystemTime,
+        client_token: Option<&str>,
+    ) {
+        self.streams.automation_enabled = enabled;
+        self.last_updated_at = now;
+        self.record_call(BrowserSessionCall::StreamUpdate, client_token, now);
+    }
+
+    /// The instant the `call` this `client_token` already performed answered with, or
+    /// `None` when this token has performed none of that call.
+    pub fn replayed_call(
+        &self,
+        call: BrowserSessionCall,
+        client_token: &str,
+    ) -> Option<SystemTime> {
+        self.idempotent_calls
+            .get(&(call, client_token.to_string()))
+            .copied()
+    }
+
+    /// Record that `client_token` performed `call` at `at`, holding
+    /// [`MAX_IDEMPOTENT_CALL_TOKENS_PER_SESSION`]: the earliest-recorded token gives way
+    /// first, so the call a caller just made stays answerable.
+    fn record_call(
+        &mut self,
+        call: BrowserSessionCall,
+        client_token: Option<&str>,
+        at: SystemTime,
+    ) {
+        let Some(token) = client_token else {
+            return;
+        };
+        self.idempotent_calls.insert((call, token.to_string()), at);
+        while self.idempotent_calls.len() > MAX_IDEMPOTENT_CALL_TOKENS_PER_SESSION {
+            let Some(oldest) = self
+                .idempotent_calls
+                .iter()
+                .min_by_key(|(key, at)| (**at, (*key).clone()))
+                .map(|(key, _)| key.clone())
+            else {
+                break;
+            };
+            self.idempotent_calls.remove(&oldest);
+        }
+    }
+}
+
+/// Which call of a browser session a recorded `clientToken` served, so the token of one
+/// operation is never read as the token of another.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub enum BrowserSessionCall {
+    /// `StopBrowserSession`.
+    Stop,
+    /// `UpdateBrowserStream`.
+    StreamUpdate,
 }
 
 impl ComAmazonawsBedrockagentcoreAmazonbedrockagentcoreState {

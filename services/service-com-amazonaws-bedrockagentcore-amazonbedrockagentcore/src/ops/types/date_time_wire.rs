@@ -62,7 +62,8 @@ use ::aws_smithy_schema_server::{missing_member, DeserializableStruct};
 use super::{
     Amount, AvailableLimits, GetBrowserSessionOutput, GetCodeInterpreterSessionOutput,
     PaymentSession, PaymentSessionSummary, SessionLimits, StartBrowserSessionOutput,
-    StartCodeInterpreterSessionOutput, StopCodeInterpreterSessionOutput,
+    StartCodeInterpreterSessionOutput, StopBrowserSessionOutput, StopCodeInterpreterSessionOutput,
+    UpdateBrowserStreamOutput,
 };
 
 /// The namespace every shape of this service lives in.
@@ -709,6 +710,143 @@ impl SerializableStruct for GetBrowserSessionOutput {
         if let Some(last_updated_at) = self.last_updated_at.as_ref() {
             s.write_timestamp(&Self::M_LAST_UPDATED_AT, last_updated_at)?;
         }
+        Ok(())
+    }
+}
+
+impl StopBrowserSessionOutput {
+    pub const M_BROWSER_IDENTIFIER: Schema = Schema::new_member(
+        ShapeId::from_static(
+            "com.amazonaws.bedrockagentcore#StopBrowserSessionResponse$browserIdentifier",
+            NS,
+            "browserIdentifier",
+        ),
+        ShapeType::String,
+        "browserIdentifier",
+        0,
+    );
+
+    pub const M_SESSION_ID: Schema = Schema::new_member(
+        ShapeId::from_static(
+            "com.amazonaws.bedrockagentcore#StopBrowserSessionResponse$sessionId",
+            NS,
+            "sessionId",
+        ),
+        ShapeType::String,
+        "sessionId",
+        1,
+    );
+
+    /// Targets `DateTimestamp`, hence the format the derive cannot attach.
+    pub const M_LAST_UPDATED_AT: Schema = Schema::new_member(
+        ShapeId::from_static(
+            "com.amazonaws.bedrockagentcore#StopBrowserSessionResponse$lastUpdatedAt",
+            NS,
+            "lastUpdatedAt",
+        ),
+        ShapeType::Timestamp,
+        "lastUpdatedAt",
+        2,
+    )
+    .with_timestamp_format(TimestampFormat::DateTime);
+
+    pub const SCHEMA: Schema = Schema::new_struct(
+        ShapeId::from_static(
+            "com.amazonaws.bedrockagentcore#StopBrowserSessionResponse",
+            NS,
+            "StopBrowserSessionResponse",
+        ),
+        ShapeType::Structure,
+        &[
+            &Self::M_BROWSER_IDENTIFIER,
+            &Self::M_SESSION_ID,
+            &Self::M_LAST_UPDATED_AT,
+        ],
+    );
+}
+
+pub static STOP_BROWSER_SESSION_OUTPUT_SCHEMA: &Schema = &StopBrowserSessionOutput::SCHEMA;
+
+impl SerializableStruct for StopBrowserSessionOutput {
+    fn serialize_members(&self, s: &mut dyn ShapeSerializer) -> Result<(), SerdeError> {
+        s.write_string(&Self::M_BROWSER_IDENTIFIER, self.browser_identifier.as_str())?;
+        s.write_string(&Self::M_SESSION_ID, self.session_id.as_str())?;
+        s.write_timestamp(&Self::M_LAST_UPDATED_AT, &self.last_updated_at)?;
+        Ok(())
+    }
+}
+
+impl UpdateBrowserStreamOutput {
+    pub const M_BROWSER_IDENTIFIER: Schema = Schema::new_member(
+        ShapeId::from_static(
+            "com.amazonaws.bedrockagentcore#UpdateBrowserStreamResponse$browserIdentifier",
+            NS,
+            "browserIdentifier",
+        ),
+        ShapeType::String,
+        "browserIdentifier",
+        0,
+    );
+
+    pub const M_SESSION_ID: Schema = Schema::new_member(
+        ShapeId::from_static(
+            "com.amazonaws.bedrockagentcore#UpdateBrowserStreamResponse$sessionId",
+            NS,
+            "sessionId",
+        ),
+        ShapeType::String,
+        "sessionId",
+        1,
+    );
+
+    pub const M_STREAMS: Schema = Schema::new_member(
+        ShapeId::from_static(
+            "com.amazonaws.bedrockagentcore#UpdateBrowserStreamResponse$streams",
+            NS,
+            "streams",
+        ),
+        ShapeType::Structure,
+        "streams",
+        2,
+    );
+
+    /// Targets `DateTimestamp`, hence the format the derive cannot attach.
+    pub const M_UPDATED_AT: Schema = Schema::new_member(
+        ShapeId::from_static(
+            "com.amazonaws.bedrockagentcore#UpdateBrowserStreamResponse$updatedAt",
+            NS,
+            "updatedAt",
+        ),
+        ShapeType::Timestamp,
+        "updatedAt",
+        3,
+    )
+    .with_timestamp_format(TimestampFormat::DateTime);
+
+    pub const SCHEMA: Schema = Schema::new_struct(
+        ShapeId::from_static(
+            "com.amazonaws.bedrockagentcore#UpdateBrowserStreamResponse",
+            NS,
+            "UpdateBrowserStreamResponse",
+        ),
+        ShapeType::Structure,
+        &[
+            &Self::M_BROWSER_IDENTIFIER,
+            &Self::M_SESSION_ID,
+            &Self::M_STREAMS,
+            &Self::M_UPDATED_AT,
+        ],
+    );
+}
+
+pub static UPDATE_BROWSER_STREAM_OUTPUT_SCHEMA: &Schema = &UpdateBrowserStreamOutput::SCHEMA;
+
+impl SerializableStruct for UpdateBrowserStreamOutput {
+    fn serialize_members(&self, s: &mut dyn ShapeSerializer) -> Result<(), SerdeError> {
+        s.write_string(&Self::M_BROWSER_IDENTIFIER, self.browser_identifier.as_str())?;
+        s.write_string(&Self::M_SESSION_ID, self.session_id.as_str())?;
+        s.write_struct(&Self::M_STREAMS, &self.streams)?;
+        s.write_timestamp(&Self::M_UPDATED_AT, &self.updated_at)?;
         Ok(())
     }
 }

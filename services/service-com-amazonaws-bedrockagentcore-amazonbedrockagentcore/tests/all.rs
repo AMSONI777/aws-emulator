@@ -19,6 +19,8 @@ mod ab_test_support;
 mod ab_tests;
 #[path = "all/batch_evaluations.rs"]
 mod batch_evaluations;
+#[path = "all/browser_session_streams.rs"]
+mod browser_session_streams;
 #[path = "all/browser_sessions.rs"]
 mod browser_sessions;
 #[path = "all/code_interpreter_session_stop.rs"]

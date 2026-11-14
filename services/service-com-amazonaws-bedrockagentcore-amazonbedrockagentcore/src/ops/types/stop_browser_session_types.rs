@@ -21,7 +21,11 @@ pub struct StopBrowserSessionInput {
     pub client_token: Option<String>,
 }
 
-#[smithy_macros::smithy(shape = "com.amazonaws.bedrockagentcore#StopBrowserSessionResponse")]
+/// `StopBrowserSessionResponse`. Its schema and serializer come from
+/// [`super::date_time_wire`] rather than `#[smithy_macros::smithy(shape = ...)]`
+/// because `lastUpdatedAt` targets `DateTimestamp`, which carries
+/// `@timestampFormat("date-time")`, and the derive does not put that trait on a member
+/// schema — see `types/date_time_wire.rs`.
 #[derive(Debug, Clone)]
 pub struct StopBrowserSessionOutput {
     pub browser_identifier: String,
