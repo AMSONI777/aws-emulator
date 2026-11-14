@@ -3972,3 +3972,15 @@ mod cloudformation_provisions_redshift_snapshot_copy_grants;
 // item, so it is an ordinary comment.)
 // this file and for every service crate's `tests/all.rs`. (The same header fragment again,
 // as an ordinary comment for the reason the lines above record.)
+// (`zz_probe` is declared further up this tail, for the reason recorded there: the copy that
+// stood here was the second declaration of it, which compiled no suite in this target.)
+// Declared here, in the appended tail: this suite spans CloudFormation, API Gateway and
+// CloudFront, so it belongs to no one service's span of the sorted list at the head.
+#[path = "all/cloudformation_cloudfront_fronted_rest_api.rs"]
+mod cloudformation_cloudfront_fronted_rest_api;
+// (The guidance that stood here — declare each suite under `tests/all/` exactly once — is
+// the head block's at the top of this file, where an INNER doc comment may appear: a `//!`
+// line after the first item is `E0753` and compiles no suite in this target.)
+// (The guidance that stood here — declare each suite under `tests/all/` exactly once — is the
+// head block's at the top of this file, where an INNER doc comment may appear: a `//!` line
+// after the first item is `E0753` and compiles no suite in this target.)

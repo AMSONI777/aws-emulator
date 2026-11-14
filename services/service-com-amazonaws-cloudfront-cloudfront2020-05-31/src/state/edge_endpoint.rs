@@ -45,6 +45,12 @@
 //! resource's id, and dropping it (the delete) closes the port and severs every connection
 //! in flight on it.
 //!
+//! The address it answers at is recorded engine-wide as one THIS service answers at
+//! ([`::service_common::published_data_planes`]) and withdrawn when the port closes. Nobody
+//! can read a service off a `host:port`, so that record is what lets anything else placing a
+//! request addressed there resolve it to this service, instead of reading the viewer's own
+//! path as some other plane's addressing.
+//!
 //! # Which viewers an address admits
 //!
 //! These addresses are the emulator's own loopback ports, so a page the developer's browser
@@ -361,8 +367,21 @@ pub struct EdgeEndpoint {
     /// The resource this listener serves, published to the handler once the create that
     /// opened the listener has minted its id.
     resource: Arc<OnceLock<String>>,
+    /// The engine-wide record that THIS service answers at [`Self::authority`], held so the
+    /// record is withdrawn when the port closes ([`Drop`]).
+    published: Option<::service_common::published_data_planes::PublishedPlanes>,
     /// The listener itself. Never read: it is held because dropping it closes the port.
     _listener: ::emulator_server::ResourceListener,
+}
+
+/// The record of this address goes with the port: a listener that is closed answers nothing,
+/// so nothing may route a request addressed there to this service any more.
+impl Drop for EdgeEndpoint {
+    fn drop(&mut self) {
+        if let Some(published) = &self.published {
+            published.withdraw(&self.authority);
+        }
+    }
 }
 
 impl std::fmt::Debug for EdgeEndpoint {
@@ -463,12 +482,21 @@ async fn open(
     let opened = ::tokio::spawn(async move { listeners.tcp_plaintext(handler).await.ok() }).await;
     let listener = opened.ok().flatten()?;
     let authority = ::service_common::data_plane_addressing::listener_authority(&listener);
+    // An address nobody can read the service off — it is a `host:port`, not an endpoint
+    // hostname — so the one record of WHICH service answers there is the engine-wide one,
+    // written here and withdrawn when the port closes. Whatever has to place a request
+    // addressed at this address reads it back rather than guessing from the path.
+    let published = ::service_common::published_data_planes::PublishedPlanes::of(shared);
+    if let Some(published) = &published {
+        published.publish(&authority, crate::ROUTE_KEY);
+    }
     // The handler now knows the address it answers on, which is what it names this address by
     // when it announces a cross-origin grant ([`EdgeTarget::announce`]).
     let _ = address.set(authority.clone());
     Some(EdgeEndpoint {
         authority,
         resource,
+        published,
         _listener: listener,
     })
 }
@@ -704,16 +732,37 @@ fn forwarded(
 /// a prefix above the distribution's own. It is refused here instead, which is the answer a
 /// listener gives a request it resolves to no distribution: a viewer addresses an object,
 /// never a path above the distribution it addressed.
+///
+/// Two readings, because a check and the reader it protects have to SPLIT the path the same
+/// way. A path carrying an ENCODED separator or an encoded `%` ([`OPAQUE_ESCAPES`]) is one
+/// this reading cannot see the segments of: a reader that decodes before it resolves would
+/// split it where this does not, so what it resolved would not be what was checked. Such a
+/// path is refused whole. What is left is split on the separator, and each segment is read as
+/// a DECODER reads it — through the crate that owns the encoding, so the spellings covered are
+/// percent-encoding's own rather than a list kept here.
 fn within_the_distribution(path: &str) -> Option<&str> {
     if !path.starts_with('/') {
         return None;
     }
+    let lowercase = path.to_ascii_lowercase();
+    if OPAQUE_ESCAPES
+        .iter()
+        .any(|escape| lowercase.contains(escape))
+    {
+        return None;
+    }
     let dot_segment = path.split('/').any(|segment| {
-        let decoded = segment.replace("%2e", ".").replace("%2E", ".");
+        let decoded = ::percent_encoding::percent_decode_str(segment).decode_utf8_lossy();
         decoded == "." || decoded == ".."
     });
     (!dot_segment).then_some(path)
 }
+
+/// The escapes that make a path's own segment structure unreadable here: the two separators
+/// RFC 3986 and a filesystem reader take (`/` and `\`) and the escape character itself, which
+/// is how a second layer of encoding hides either of them. None of them names an object below
+/// a distribution, so a path carrying one is refused rather than read.
+const OPAQUE_ESCAPES: [&str; 3] = ["%2f", "%5c", "%25"];
 
 /// The transport-safety refusals the core applies to its OWN HTTP listeners, applied here
 /// from the core's own predicates so this address and a core listener decide them alike:
@@ -871,15 +920,17 @@ mod tests {
     #[test]
     fn a_viewer_path_that_could_leave_the_distribution_is_not_forwarded() {
         // Rows differ along WHERE the dot segment sits and HOW it is spelled — a leading,
-        // middle and trailing segment, a single dot, percent-encoded dots in either case —
+        // middle and trailing segment, a single dot, percent-encoded dots in either case, a
+        // second layer of encoding, and a dot segment hidden behind an encoded separator —
         // and along the ordinary paths that must still be forwarded: a dot inside a name, a
         // hidden file, the root, and a path whose query carries dots.
-        let cases: [(&str, &str, bool); 12] = [
+        let cases: [(&str, &str, bool); 16] = [
             ("the root", "/", true),
             ("an object", "/items/one.json", true),
             ("a dot inside a segment", "/a..b/c", true),
             ("a hidden file", "/.well-known/x", true),
             ("three dots", "/.../x", true),
+            ("an encoded space in a name", "/my%20items/one", true),
             ("a leading parent segment", "/../2020-05-31/distribution", false),
             ("a parent segment in the middle", "/items/../../x", false),
             ("a trailing parent segment", "/items/..", false),
@@ -887,6 +938,9 @@ mod tests {
             ("a percent-encoded parent segment", "/%2e%2e/x", false),
             ("a percent-encoded parent segment, upper case", "/%2E%2E/x", false),
             ("a percent-encoded dot segment", "/%2e/x", false),
+            ("a parent segment behind an encoded separator", "/items%2f..%2fx", false),
+            ("a parent segment behind an encoded backslash", "/items%5c..%5cx", false),
+            ("a double-encoded parent segment", "/%252e%252e/x", false),
         ];
         for (case, path, forwarded) in cases {
             let actual = within_the_distribution(path).is_some();

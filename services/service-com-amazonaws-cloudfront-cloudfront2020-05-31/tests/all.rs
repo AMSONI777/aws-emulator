@@ -280,6 +280,8 @@ mod path_identifier_shape;
 mod precondition_family_wording;
 #[path = "all/published_address_every_mint.rs"]
 mod published_address_every_mint;
+#[path = "all/published_address_resolves_to_this_service.rs"]
+mod published_address_resolves_to_this_service;
 #[path = "all/published_edge_address.rs"]
 mod published_edge_address;
 #[path = "all/published_routing_endpoint.rs"]

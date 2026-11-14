@@ -14,12 +14,16 @@
 //! it published, and whatever has to route a request to an address a caller was handed reads
 //! it back.
 //!
-//! The reader today is a RUNNING Lambda function's own HTTP request: a handler reads a
-//! resource's endpoint out of the control plane (a collection's `collectionEndpoint`, a
-//! cluster's `Endpoint`) and dials it, and the host half of that seam has to know which
+//! Two kinds of reader. The first is a RUNNING Lambda function's own HTTP request: a handler
+//! reads a resource's endpoint out of the control plane (a collection's `collectionEndpoint`,
+//! a cluster's `Endpoint`) and dials it, and the host half of that seam has to know which
 //! service's credential scope to sign the in-process request with — which is exactly what
-//! this records. Nothing here is read by the front door, which resolves such a request by
-//! the host the owning service's own `Service::can_handle` claims.
+//! this records. The second is a DATA PLANE deciding whether a request addressed at such an
+//! address is its OWN: a plane that reads its resource out of the request's PATH, on a host
+//! that names no service, asks here first, because an address another service published for
+//! one of its resources is that service's to answer whatever the path spells. That reading is
+//! reached from the owning service's `Service::can_handle`, so one request still has one
+//! claimant.
 //!
 //! Engine-scoped, like every other store two services on either side of a hand-off share:
 //! the records live in the SAME shared engine as the services' own, so a listener one
