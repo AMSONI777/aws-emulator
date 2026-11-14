@@ -100,7 +100,8 @@ fn violation_path(member: &str) -> String {
 /// the unreadable-reference sentences and the ceiling name the member that carried it.
 ///
 /// `Err(message)` is the `ValidationError` message the operation answers.
-pub async fn fetch(
+pub async fn fetch<Eng: Send + Sync + 'static>(
+    engine: &Eng,
     ctx: &smithy_server_runtime::OperationContext<'_>,
     region: &str,
     url_member: &str,
@@ -109,6 +110,7 @@ pub async fn fetch(
 ) -> Result<String, String> {
     let object = super::template_url::object_of(url_member, url)?;
     super::template_url::read(
+        engine,
         ctx,
         region,
         &object,

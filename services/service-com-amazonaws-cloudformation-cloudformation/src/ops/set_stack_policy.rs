@@ -181,6 +181,7 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         let submitted = match &input.stack_policy_url {
             Some(url) => Some(
                 crate::state::stack_policy::fetch(
+                    &*self.engine,
                     ctx,
                     &region,
                     "StackPolicyURL",

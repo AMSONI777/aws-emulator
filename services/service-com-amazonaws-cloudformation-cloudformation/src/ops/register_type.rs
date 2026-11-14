@@ -240,7 +240,7 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         // handler. Whatever that read finds decides whether the registration can register a
         // version — it does not refuse the REQUEST, because validating the package is part of
         // registering rather than of accepting the registration.
-        let schema = handler_package(ctx, &region, &input.type_name, &object).await;
+        let schema = handler_package(&*self.engine, ctx, &region, &input.type_name, &object).await;
         let Some(state) = crate::state::service_state(&*self.engine) else {
             // Not the shared in-memory engine: there is no registry to register an extension
             // in, so this answers 501 rather than a token nothing recorded.
@@ -400,13 +400,15 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
 /// will not hand over, an object that is not a ZIP archive, and an archive carrying no
 /// provider definition schema of the extension being registered all leave the registration
 /// with nothing to register, which is what "validating the extension schema" concludes.
-async fn handler_package(
+async fn handler_package<Eng: Send + Sync + 'static>(
+    engine: &Eng,
     ctx: &smithy_server_runtime::OperationContext<'_>,
     region: &str,
     type_name: &str,
     object: &crate::state::template_url::Object,
 ) -> Result<String, String> {
     let archive = crate::state::template_url::read_bytes(
+        engine,
         ctx,
         region,
         object,

@@ -2804,20 +2804,10 @@ impl StoredStack {
         let Some(held) = self.recorded_resource_mut(logical_id) else {
             return;
         };
-        let mut changed = false;
-        for (name, value) in attributes {
-            if held.attributes.get(name) == Some(value) {
-                continue;
-            }
-            if !held.attributes.contains_key(name)
-                && held.attributes.len() >= template::MAX_ATTRIBUTES_PER_RESOURCE
-            {
-                continue;
-            }
-            held.attributes.insert(name.clone(), value.clone());
-            changed = true;
-        }
-        if changed {
+        // The merge itself is the record's own ([`StoredResource::publish_attributes`]), shared
+        // with the walk that records the same values for a resource its owning service reports
+        // ready as the create answers.
+        if held.publish_attributes(attributes) {
             self.reevaluate_outputs();
         }
     }

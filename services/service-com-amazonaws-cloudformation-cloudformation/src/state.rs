@@ -310,6 +310,10 @@ pub mod include;
 /// so the operation goes on exactly as it would with an inline `TemplateBody`.
 pub mod template_url;
 
+/// Whether the CALLING PRINCIPAL may read the Amazon S3 object a request addresses by
+/// reference, which is the authorization every such read is made under.
+pub mod caller_object_access;
+
 /// Computing a change set: comparing the stack's template and parameters with the ones a
 /// change set submits, and the resource-level change list that comparison answers.
 pub mod change_plan;
@@ -1609,6 +1613,34 @@ impl StoredResource {
     /// and an event's text must not depend on how the workspace was compiled.
     pub fn properties_blob(&self) -> Option<String> {
         template::properties_blob(&self.properties)
+    }
+
+    /// Take the values the service that owns this resource publishes for it NOW THAT IT IS UP
+    /// into the record's attributes, and answer whether any of them changed it.
+    ///
+    /// The ONE merge of published values, so the two places that learn a resource is up — the
+    /// deployment walk, where the owning service reports it ready as the create answers, and
+    /// the pass that releases the wait the create opened
+    /// ([`StoredStack::record_ready_attributes`]) — cannot hold a resource's attributes to
+    /// different rules. A value already carried changes nothing, so a repeated read evaluates
+    /// nothing again, and the set stays under the ceiling every resource's attributes are held
+    /// to ([`template::MAX_ATTRIBUTES_PER_RESOURCE`]): a name the record does not carry yet is
+    /// left out once that ceiling is reached, while one it does carry is still updated.
+    pub fn publish_attributes(&mut self, attributes: &BTreeMap<String, String>) -> bool {
+        let mut changed = false;
+        for (name, value) in attributes {
+            if self.attributes.get(name) == Some(value) {
+                continue;
+            }
+            if !self.attributes.contains_key(name)
+                && self.attributes.len() >= template::MAX_ATTRIBUTES_PER_RESOURCE
+            {
+                continue;
+            }
+            self.attributes.insert(name.clone(), value.clone());
+            changed = true;
+        }
+        changed
     }
 }
 

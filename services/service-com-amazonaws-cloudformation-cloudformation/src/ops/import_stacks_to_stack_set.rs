@@ -304,6 +304,7 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
                     crate::scaffolded::Scaffolded::validation_error(NOT_A_READABLE_STACK_ID_LIST)
                 })?;
                 let listed = crate::state::template_url::read(
+                    &*self.engine,
                     ctx,
                     &region,
                     &object,

@@ -308,6 +308,7 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
             (Some(body), _) => Some(body.clone()),
             (None, Some(url)) => Some(
                 crate::state::template_url::fetch_as(
+                    &*self.engine,
                     ctx,
                     &crate::state::request_region(ctx.parts()),
                     url,

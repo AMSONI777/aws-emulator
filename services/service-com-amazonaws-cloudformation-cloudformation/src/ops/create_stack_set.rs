@@ -267,6 +267,7 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
             // submitted inline create the same StackSet (`crate::state::template_url`).
             (None, Some(url)) => Some(
                 crate::state::template_url::fetch_as(
+                    &*self.engine,
                     ctx,
                     &crate::state::request_region(ctx.parts()),
                     url,

@@ -180,7 +180,8 @@ fn declared_parameters(properties: &Value) -> Vec<StoredParameter> {
 /// Read HERE, before the store is locked, for the reason the parent's own template is: a
 /// caller-sized object is read outside the lock. A child whose template cannot be read is
 /// simply not expanded — nothing of it is planned, so nothing reports a change set for it.
-pub async fn fetched_children(
+pub async fn fetched_children<Eng: Send + Sync + 'static>(
+    engine: &Eng,
     ctx: &smithy_server_runtime::OperationContext<'_>,
     region: &str,
     declared: Option<&template::Template>,
@@ -201,7 +202,7 @@ pub async fn fetched_children(
                 if children.len() >= MAX_NESTED_CHILDREN {
                     return children;
                 }
-                let Ok(body) = super::template_url::fetch(ctx, region, &url).await else {
+                let Ok(body) = super::template_url::fetch(engine, ctx, region, &url).await else {
                     continue;
                 };
                 let path = child_path(&prefix, &logical_id);

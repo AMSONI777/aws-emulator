@@ -421,6 +421,7 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
             // this create deploys, so a template submitted by reference and the same one
             // submitted inline create the same stack (`crate::state::template_url`).
             (None, Some(url)) => crate::state::template_url::fetch(
+                &*self.engine,
                 ctx,
                 &crate::state::request_region(ctx.parts()),
                 url,
@@ -459,6 +460,7 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         let stack_policy_body = match &input.stack_policy_url {
             Some(url) => Some(
                 crate::state::stack_policy::fetch(
+                    &*self.engine,
                     ctx,
                     &crate::state::request_region(ctx.parts()),
                     "StackPolicyURL",

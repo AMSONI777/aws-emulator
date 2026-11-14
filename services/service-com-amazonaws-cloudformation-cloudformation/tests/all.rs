@@ -313,6 +313,8 @@ mod management_event_recording;
 mod minted_identity_across_updates;
 #[path = "all/nested_resource_outputs.rs"]
 mod nested_resource_outputs;
+#[path = "all/nested_stack_dynamodb_outputs.rs"]
+mod nested_stack_dynamodb_outputs;
 #[path = "all/nested_stack_output_attributes.rs"]
 mod nested_stack_output_attributes;
 #[path = "all/nested_stack_output_values.rs"]
@@ -371,6 +373,8 @@ mod rds_published_name_identity;
 mod rds_refused_resource_sdk_diagnostic;
 #[path = "all/rds_stack_resources.rs"]
 mod rds_stack_resources;
+#[path = "all/reference_read_authorization.rs"]
+mod reference_read_authorization;
 #[path = "all/refusals_name_their_modelled_taxonomy.rs"]
 mod refusals_name_their_modelled_taxonomy;
 #[path = "all/registry_and_scan_read_members.rs"]

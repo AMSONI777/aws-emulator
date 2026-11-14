@@ -10876,6 +10876,7 @@ dependencies = [
  "service-com-amazonaws-sfn-awsstepfunctions",
  "service-com-amazonaws-sns-amazonsimplenotificationservice",
  "service-com-amazonaws-ssm-amazonssm",
+ "service-com-amazonaws-sts-awssecuritytokenservicev20110615",
  "service-common",
  "sha2 0.10.9",
  "tokio",

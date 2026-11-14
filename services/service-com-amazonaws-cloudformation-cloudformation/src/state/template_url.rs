@@ -49,6 +49,11 @@
 //!
 //! ## What the read refuses
 //!
+//! The object is read AS THE CALLER — "CloudFormation uses the credentials you provide" — so a
+//! reference naming an object the calling principal's own policies do not let it read is
+//! refused with the refusal that read would be ([`super::caller_object_access`] decides it),
+//! and nothing is read at all.
+//!
 //! An object Amazon S3 will not hand over is the `ValidationError` CloudFormation answers
 //! for the request's own reference, and WHICH refusal it is decides how that is worded — two
 //! sentences, each CloudFormation's own:
@@ -133,6 +138,14 @@ fn not_a_readable_object(member: &str) -> String {
 /// The error code that stands in for one a refused read did not name: the object was not
 /// read, and nothing on the other end identified the problem.
 const UNIDENTIFIED_FAILURE: &str = "InternalFailure";
+
+/// The code and the message Amazon S3 refuses a read the caller is not permitted to make
+/// with: "`AccessDenied` — Access Denied", from the Amazon S3 error-response list this
+/// service's own refusals point a client at ([`S3_ERROR_REFERENCE`]). They are AMAZON S3's,
+/// which is why they are reported through the same wording as any other refusal of a read
+/// ([`s3_error`]) rather than in a sentence of CloudFormation's own.
+const ACCESS_DENIED_CODE: &str = "AccessDenied";
+const ACCESS_DENIED_MESSAGE: &str = "Access Denied";
 
 /// The refusal for an object AMAZON S3 SAID IS NOT THERE, worded as CloudFormation words
 /// it: the bucket and key the request's own URL addressed, and the code Amazon S3 named.
@@ -272,17 +285,23 @@ pub struct Object {
 ///
 /// `region` is the Region the request is signed for, which is the scope the in-process call
 /// is signed for — the same one [`super::include`] reads a snippet in.
-pub async fn fetch(
+///
+/// `engine` is the handler's own, through which the read is authorized AS THE CALLER
+/// ([`super::caller_object_access`]): the object is fetched with the caller's permissions, so a
+/// principal that may not read it cannot submit it either.
+pub async fn fetch<Eng: Send + Sync + 'static>(
+    engine: &Eng,
     ctx: &smithy_server_runtime::OperationContext<'_>,
     region: &str,
     url: &str,
 ) -> Result<String, String> {
-    fetch_as(ctx, region, url, Refused::AbsenceAsAbsence).await
+    fetch_as(engine, ctx, region, url, Refused::AbsenceAsAbsence).await
 }
 
 /// [`fetch`], in the refusal wording the OPERATION that took the reference carries
 /// ([`Refused`]).
-pub async fn fetch_as(
+pub async fn fetch_as<Eng: Send + Sync + 'static>(
+    engine: &Eng,
     ctx: &smithy_server_runtime::OperationContext<'_>,
     region: &str,
     url: &str,
@@ -290,6 +309,7 @@ pub async fn fetch_as(
 ) -> Result<String, String> {
     let object = object(url)?;
     read_as(
+        engine,
         ctx,
         region,
         &object,
@@ -310,7 +330,8 @@ pub async fn fetch_as(
 ///
 /// `Err(message)` is the `ValidationError` message the operation answers: the URL is the
 /// caller's own, so an object Amazon S3 will not hand over is the REQUEST's problem.
-pub async fn read(
+pub async fn read<Eng: Send + Sync + 'static>(
+    engine: &Eng,
     ctx: &smithy_server_runtime::OperationContext<'_>,
     region: &str,
     object: &Object,
@@ -318,6 +339,7 @@ pub async fn read(
     too_long: &str,
 ) -> Result<String, String> {
     read_as(
+        engine,
         ctx,
         region,
         object,
@@ -330,7 +352,8 @@ pub async fn read(
 
 /// [`read`], in the refusal wording the OPERATION that took the reference carries
 /// ([`Refused`]).
-pub async fn read_as(
+pub async fn read_as<Eng: Send + Sync + 'static>(
+    engine: &Eng,
     ctx: &smithy_server_runtime::OperationContext<'_>,
     region: &str,
     object: &Object,
@@ -338,7 +361,7 @@ pub async fn read_as(
     too_long: &str,
     refused: Refused,
 ) -> Result<String, String> {
-    let body = read_bytes_as(ctx, region, object, max_bytes, too_long, refused).await?;
+    let body = read_bytes_as(engine, ctx, region, object, max_bytes, too_long, refused).await?;
     // What the reference addressed is TEXT; an object that is not valid UTF-8 carries none, so
     // it is not what this reference addressed. The object itself WAS handed over, so this
     // reports the read that could not be served rather than the object's absence.
@@ -351,7 +374,8 @@ pub async fn read_as(
 /// Bounded by the same ceiling, and refused with the same wording, as every other read of a
 /// caller-addressed object: the object is the caller's, so the caller's own purpose for it
 /// says what it may weigh.
-pub async fn read_bytes(
+pub async fn read_bytes<Eng: Send + Sync + 'static>(
+    engine: &Eng,
     ctx: &smithy_server_runtime::OperationContext<'_>,
     region: &str,
     object: &Object,
@@ -359,6 +383,7 @@ pub async fn read_bytes(
     too_long: &str,
 ) -> Result<Vec<u8>, String> {
     read_bytes_as(
+        engine,
         ctx,
         region,
         object,
@@ -371,7 +396,8 @@ pub async fn read_bytes(
 
 /// [`read_bytes`], in the refusal wording the OPERATION that took the reference carries
 /// ([`Refused`]).
-async fn read_bytes_as(
+async fn read_bytes_as<Eng: Send + Sync + 'static>(
+    engine: &Eng,
     ctx: &smithy_server_runtime::OperationContext<'_>,
     region: &str,
     object: &Object,
@@ -381,6 +407,17 @@ async fn read_bytes_as(
 ) -> Result<Vec<u8>, String> {
     use ::aws_smithy_types::error::metadata::ProvideErrorMetadata;
 
+    // The object is read AS THE CALLER, so a principal whose own policies do not let it read
+    // this object is answered the refusal that read would be ([`super::caller_object_access`]):
+    // the read is not made at all, exactly as it is not made for text that addresses no object.
+    if super::caller_object_access::read_is_unauthorized(engine, ctx, object) {
+        return Err(refused_read_message(
+            object,
+            refused,
+            Some(ACCESS_DENIED_CODE),
+            Some(ACCESS_DENIED_MESSAGE),
+        ));
+    }
     let read = super::provisioner::s3_client(ctx, region)
         .get_object()
         .bucket(&object.bucket)

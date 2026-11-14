@@ -518,6 +518,7 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         let from_reference = input.template_url.is_some();
         if let Some(url) = input.template_url.take() {
             let body = crate::state::template_url::fetch(
+                &*self.engine,
                 ctx,
                 &crate::state::request_region(ctx.parts()),
                 &url,
@@ -552,6 +553,7 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         // (`crate::state::stack_policy::fetch`).
         if let Some(url) = input.stack_policy_url.take() {
             let body = crate::state::stack_policy::fetch(
+                &*self.engine,
                 ctx,
                 &crate::state::request_region(ctx.parts()),
                 "StackPolicyURL",
@@ -564,6 +566,7 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         }
         if let Some(url) = input.stack_policy_during_update_url.take() {
             let body = crate::state::stack_policy::fetch(
+                &*self.engine,
                 ctx,
                 &crate::state::request_region(ctx.parts()),
                 "StackPolicyDuringUpdateURL",

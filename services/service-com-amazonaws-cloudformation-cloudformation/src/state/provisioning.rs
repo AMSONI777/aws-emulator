@@ -1593,6 +1593,44 @@ fn custom_resource_cleanup(
     })
 }
 
+/// Read the values the service that owns `resource` publishes for it NOW THAT IT IS UP, and
+/// merge them into the record the stack keeps.
+///
+/// Not every `Fn::GetAtt` return value is known when a create is accepted: some are what the
+/// owning service fills in as it brings the resource up — the outputs the child of a nested
+/// stack publishes, the addresses an instance is assigned, the host a load balancer serves
+/// on. The pass that releases a resource's readiness wait reads them for exactly that reason
+/// ([`advance_stabilisations_in`]), so a resource that service reports READY AS THE CALL
+/// ANSWERS is read the same way: whether a resource was already up when its create answered
+/// or came up a moment later is not what decides which of its values a template can read.
+///
+/// A read that service refuses leaves the record as it stands — one unanswered read is no
+/// evidence about the resource — and the merge is the record's own
+/// ([`super::StoredResource::publish_attributes`]), shared with the pass above, so the ceiling
+/// every resource's attributes are held to lives in one place.
+async fn merge_published_attributes(
+    ctx: &smithy_server_runtime::OperationContext<'_>,
+    region: &str,
+    resource: &mut StoredResource,
+) {
+    let Some(provisioner) = owner_for(&resource.resource_type) else {
+        return;
+    };
+    // BOXED, like every other call this walk makes: the read is another service's whole
+    // handler.
+    let Ok(published) = Box::pin(provisioner.ready_attributes(
+        ctx,
+        region,
+        &resource.resource_type,
+        &resource.physical_resource_id,
+    ))
+    .await
+    else {
+        return;
+    };
+    let _changed = resource.publish_attributes(&published);
+}
+
 /// The `RequestId` the cleanup `Delete` of ONE replaced resource is answered under.
 ///
 /// Derived from what identifies that cleanup — the stack, the resource, the physical
@@ -2130,7 +2168,18 @@ pub async fn reconcile(
                             None => Ok(Readiness::Ready),
                         };
                         match readiness {
-                            Ok(Readiness::Ready) => {}
+                            // The change is in force as the call answered, so the values the
+                            // owning service publishes for the resource now that it is up are
+                            // read here ([`merge_published_attributes`]) — the same read the
+                            // pass that releases a readiness wait makes.
+                            Ok(Readiness::Ready) => {
+                                Box::pin(merge_published_attributes(
+                                    ctx,
+                                    region,
+                                    &mut resource,
+                                ))
+                                .await;
+                            }
                             Ok(Readiness::Pending(state)) => {
                                 outcome.stabilising.push(Stabilising {
                                     awaited: super::stabilising::Awaited::Updated,
@@ -2624,26 +2673,17 @@ pub async fn reconcile(
                 };
                 match readiness {
                     Ok(Readiness::Ready) => {
-                        // The identifiers the owning service publishes only once the
-                        // resource is UP — the address a cluster serves on, the endpoint a
-                        // stream is written to — are read here as well as when a wait
-                        // releases ([`Provisioner::ready_attributes`]): a service that
-                        // reports the resource ready straight away opens no wait, and the
-                        // values it publishes would otherwise never reach this resource's
+                        // That service reports the resource up as the create answered, so the
+                        // identifiers it publishes only for a resource that IS up — the
+                        // address a cluster serves on, the endpoint a stream is written to,
+                        // the outputs a nested stack's child published — are read here as
+                        // well as when a wait releases ([`merge_published_attributes`]): a
+                        // service that reports the resource ready straight away opens no
+                        // wait, and those values would otherwise never reach this resource's
                         // attributes, so an output or a dependent property reading one would
                         // resolve to nothing. A read that service refuses leaves the
                         // attributes as they stand, exactly as it does at a released wait.
-                        if let Some(provisioner) = owner {
-                            let published = Box::pin(provisioner.ready_attributes(
-                                ctx,
-                                region,
-                                &resource.resource_type,
-                                &resource.physical_resource_id,
-                            ))
-                            .await
-                            .unwrap_or_default();
-                            resource.attributes.extend(published);
-                        }
+                        Box::pin(merge_published_attributes(ctx, region, &mut resource)).await;
                         outcome.transitions.push(ResourceTransition::finished(
                             &resource,
                             reporting.completed,

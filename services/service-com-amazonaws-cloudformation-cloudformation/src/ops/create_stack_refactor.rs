@@ -202,7 +202,7 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
                 // the same one submitted inline describe the same stack
                 // (`crate::state::template_url`).
                 (None, Some(url)) => Some(
-                    crate::state::template_url::fetch(ctx, &region, url)
+                    crate::state::template_url::fetch(&*self.engine, ctx, &region, url)
                         .await
                         .map_err(crate::scaffolded::Scaffolded::validation_error)?,
                 ),

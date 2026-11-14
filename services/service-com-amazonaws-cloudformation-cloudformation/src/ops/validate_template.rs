@@ -179,6 +179,7 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         let fetched: Option<String> = match (&input.template_body, &input.template_url) {
             (None, Some(url)) => Some(
                 crate::state::template_url::fetch(
+                    &*self.engine,
                     ctx,
                     &crate::state::request_region(ctx.parts()),
                     url,
