@@ -190,12 +190,20 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         })?;
 
         // A namespace is deleted only once it holds nothing: the tables in it
-        // are what a delete would otherwise orphan. The refusal is stated by the
-        // one fixed sentence this service states that class with.
+        // are what a delete would otherwise orphan. The refusal is the CLIENT's
+        // request error the model's `BadRequestException` (HTTP 400) names
+        // rather than the retryable write conflict of `ConflictException`
+        // ("there is a conflict with a previous write. You can retry the
+        // request") — emptying the namespace is what makes the delete possible,
+        // and no retry of the same request can — and it is stated by the one
+        // fixed sentence this service states that class with, exactly as the
+        // table bucket level states its own.
         if !namespace.tables.is_empty() {
-            return Err(DeleteNamespaceErrorModeled::ConflictException(ConflictException {
-                message: Some(crate::state::NAMESPACE_NOT_EMPTY_MESSAGE.to_string()),
-            })
+            return Err(DeleteNamespaceErrorModeled::BadRequestException(
+                BadRequestException {
+                    message: Some(crate::state::NAMESPACE_NOT_EMPTY_MESSAGE.to_string()),
+                },
+            )
             .into());
         }
 

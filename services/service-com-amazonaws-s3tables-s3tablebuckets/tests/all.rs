@@ -33,6 +33,8 @@ mod list_tables_summary_members;
 mod metrics_configuration_not_found_message;
 #[path = "all/namespace_and_table_lifecycle.rs"]
 mod namespace_and_table_lifecycle;
+#[path = "all/non_empty_container_delete_class.rs"]
+mod non_empty_container_delete_class;
 #[path = "all/record_expiration_configuration_reads.rs"]
 mod record_expiration_configuration_reads;
 #[path = "all/rename_table.rs"]

@@ -921,10 +921,16 @@ async fn a_delete_removes_one_record_and_is_refused_while_children_remain() {
         .delete_namespace(REGION, &bucket_arn, "remove")
         .await;
     assert_eq!(
-        namespace_in_use.status, 409,
+        namespace_in_use.status, 400,
         "a namespace that still holds tables must not be deleted, got {status} {body}",
         status = namespace_in_use.status,
         body = namespace_in_use.body
+    );
+    assert_eq!(
+        namespace_in_use.error_code.as_deref(),
+        Some("BadRequestException"),
+        "the refusal must carry the modeled error code, got {actual:?}",
+        actual = namespace_in_use.error_code
     );
 
     // A version token that is not the table's own is a conflict, and the table

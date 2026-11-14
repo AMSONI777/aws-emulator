@@ -3510,3 +3510,8 @@ mod chime_deleted_meeting_tagging;
 // (A note that landed in this tail as an inner doc comment is `E0753` and compiles no suite
 // of this target, so it stands as an ordinary comment: `all_rs_declares_each_suite_once`
 // checks this file and every service crate's `tests/all.rs`.)
+// (The suite-declaration note two landings appended here is in this crate root's header
+// doc comment, at the top of this file: `//!` is an inner doc comment, so mid-file it is
+// `E0753` and fails every suite in this target.)
+// (And another copy of the same tail line, as an ordinary comment for the same reason:
+// this file and for every service crate's `tests/all.rs`.)

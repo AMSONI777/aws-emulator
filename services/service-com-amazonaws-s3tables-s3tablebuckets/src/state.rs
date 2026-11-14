@@ -1452,8 +1452,10 @@ pub const BUCKET_NOT_EMPTY_MESSAGE: &str = "The bucket that you tried to delete 
 
 /// How this service states a delete of a namespace that still holds tables,
 /// the namespace-level counterpart of [`BUCKET_NOT_EMPTY_MESSAGE`]: the same
-/// fixed form, naming the resource by its class noun and taking nothing from
-/// the request.
+/// client request error the model's `BadRequestException` (HTTP 400) names —
+/// emptying the namespace, not retrying, is what makes the delete possible —
+/// stated in the same fixed form, naming the resource by its class noun and
+/// taking nothing from the request.
 pub const NAMESPACE_NOT_EMPTY_MESSAGE: &str =
     "The namespace that you tried to delete is not empty.";
 

@@ -360,20 +360,19 @@ async fn a_delete_of_a_container_that_still_holds_records_is_refused_with_the_fi
         let namespace_refused = emulator
             .delete_namespace(REGION, &arn, &row.namespace)
             .await;
-        // A namespace that still holds tables is refused as the modelled
-        // conflict this service states it with.
+        // A namespace that still holds tables is the CLIENT's request error,
+        // as a bucket that still holds namespaces is below: emptying it, not
+        // retrying the same request, is what makes the delete possible.
         assert_refusal(
             &namespace_refused,
-            409,
-            "ConflictException",
+            400,
+            "BadRequestException",
             NAMESPACE_NOT_EMPTY,
             &case,
         );
         assert_no_request_values(&namespace_refused, &[&row.namespace, &arn], &case);
 
-        // A bucket that still holds namespaces is the CLIENT's request error:
-        // emptying it, not retrying the same request, is what makes the delete
-        // possible.
+        // And a bucket that still holds namespaces, the same.
         let bucket_refused = emulator.delete_table_bucket(REGION, &arn).await;
         assert_refusal(
             &bucket_refused,
