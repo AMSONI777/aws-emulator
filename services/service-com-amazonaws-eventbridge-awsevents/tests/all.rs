@@ -31,6 +31,8 @@ mod archive_registry;
 mod archive_replay;
 #[path = "all/archive_state_is_settled.rs"]
 mod archive_state_is_settled;
+#[path = "all/array_field_element_matching.rs"]
+mod array_field_element_matching;
 #[path = "all/bus_forward_authorization.rs"]
 mod bus_forward_authorization;
 #[path = "all/bus_forward_failure_accounting.rs"]

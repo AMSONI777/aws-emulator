@@ -2888,3 +2888,4 @@ mod s3_object_read_identity_or_bucket_policy;
 // `codebuild_s3_build_output` is declared ONCE, in the span above: two landings each
 // `cloudformation_domain_endpoint_is_dialled_by_consumers` is declared ONCE, in the span
 // above, for the reason the entry there records.
+// (`zz_probe` is declared ONCE, further up this tail, for the reason recorded there: two

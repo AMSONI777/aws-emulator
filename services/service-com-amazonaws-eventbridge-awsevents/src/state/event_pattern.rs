@@ -1082,7 +1082,7 @@ fn match_term(term: &Value, field: Option<&Value>, budget: &mut Budget) -> bool 
         let Some(value) = field else {
             return false;
         };
-        return any_leaf(value, |leaf| {
+        return any_leaf(budget, value, |budget, leaf| {
             budget.charge(comparison_cost(term, leaf)) && same_value(leaf, term)
         });
     };
@@ -1105,7 +1105,7 @@ fn match_term(term: &Value, field: Option<&Value>, budget: &mut Budget) -> bool 
     let Some(value) = field else {
         return false;
     };
-    any_leaf(value, |leaf| {
+    any_leaf(budget, value, |budget, leaf| {
         // Charged BEFORE the comparison, by the number of bytes the
         // comparison may walk — the argument at every level, and the leaf
         // once per argument tried against it ([`comparison_cost`]) — so the
@@ -1155,14 +1155,49 @@ fn same_value(leaf: &Value, term: &Value) -> bool {
     }
 }
 
-/// Apply `predicate` to `value`, or to any member of it when the event
-/// carries a list: EventBridge matches a pattern term against the MEMBERS
-/// of an array-valued field.
-fn any_leaf<F: FnMut(&Value) -> bool>(value: &Value, mut predicate: F) -> bool {
-    match value {
-        Value::Array(members) => members.iter().any(&mut predicate),
-        leaf => predicate(leaf),
+/// Apply `predicate` to every VALUE the event field `value` carries, and
+/// answer whether one of them held.
+///
+/// A term is compared against the values a field carries rather than against
+/// the lists holding them: a field holding one value offers that value, and a
+/// field holding a list offers the values ITS OWN members carry — so a list
+/// nested inside a list contributes the values at the bottom of it and a list
+/// carrying no value at all offers nothing, which is why an empty list matches
+/// no term. This is what EventBridge's any-element matching over an
+/// array-valued field means, and it is the same reading the `exists` operator
+/// takes of such a field ([`leaf_exists`]).
+///
+/// The values are walked in the order the event writes them, on an EXPLICIT
+/// stack for the reason [`argument_cost`] gives: how deeply an event's field
+/// nests decides how much heap this walk takes and never whether the process
+/// survives it. The DESCENT itself is charged against `budget`, beside what
+/// `predicate` charges for each comparison, so a field nesting many lists that
+/// carry no value cannot demand unbounded walking either.
+fn any_leaf<F: FnMut(&mut Budget, &Value) -> bool>(
+    budget: &mut Budget,
+    value: &Value,
+    mut predicate: F,
+) -> bool {
+    let mut pending: Vec<&Value> = ::std::vec![value];
+    while let Some(value) = pending.pop() {
+        match value {
+            Value::Array(members) => {
+                if !budget.charge(members.len().max(1)) {
+                    return false;
+                }
+                // Reversed, so the members are popped in the order they were
+                // written: which value matched is not observable, but which
+                // the budget was spent on is.
+                pending.extend(members.iter().rev());
+            }
+            leaf => {
+                if predicate(budget, leaf) {
+                    return true;
+                }
+            }
+        }
     }
+    false
 }
 
 /// One operator against one leaf value.
