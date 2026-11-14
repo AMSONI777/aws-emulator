@@ -2,6 +2,10 @@
 
 //! @op ListTagsForResource
 //!
+//! Reports the tags resident on the table bucket or the table its `resourceArn`
+//! addresses. A pure read: the tags come out of the record the write left behind and
+//! nothing in the store is touched.
+//!
 //! ## Shape of an operation
 //!
 //! Each operation is a struct that owns the shared engine and implements
@@ -112,24 +116,21 @@ impl From<ListTagsForResourceErrorModeled> for ListTagsForResourceError {
     }
 }
 
-/// The segment a TABLE's ARN carries after the ARN of the bucket that holds it
-/// ([`crate::state::table_arn`]: the bucket's ARN, then `/table/<table id>`), which
-/// is what tells the two resource kinds `ResourceArn` admits apart — "the tagged
-/// resource can be a table bucket or a table".
-const TABLE_ARN_SEGMENT: &str = "/table/";
-
-/// `NotFoundException` (HTTP 404) — the store holds no resource at the ARN the
-/// request addresses, stated as the class of resource that ARN names.
-fn no_such_resource(resource_arn: &str) -> ListTagsForResourceError {
-    let message = if resource_arn.contains(TABLE_ARN_SEGMENT) {
-        crate::state::TABLE_NOT_FOUND_MESSAGE
-    } else {
-        crate::state::BUCKET_NOT_FOUND_MESSAGE
-    };
-    ListTagsForResourceErrorModeled::NotFoundException(NotFoundException {
-        message: Some(message.to_string()),
-    })
-    .into()
+/// How this operation words a `resourceArn` that reached no resource of the
+/// store: the `NotFoundException` (HTTP 404) it models for a table bucket or a
+/// table the store does not hold — stated as the class of resource that ARN
+/// names, which the one resolution both tagging operations share reads off its
+/// form — and its `BadRequestException` (HTTP 400) for a value that addresses no
+/// taggable resource at all.
+fn unresolved_resource(
+    refusal: crate::state::TaggableResourceRefusal,
+) -> ListTagsForResourceError {
+    let message = Some(refusal.message().to_string());
+    if refusal.is_absent() {
+        return ListTagsForResourceErrorModeled::NotFoundException(NotFoundException { message })
+            .into();
+    }
+    ListTagsForResourceErrorModeled::BadRequestException(BadRequestException { message }).into()
 }
 
 /// The `ListTagsForResource` operation.
@@ -179,27 +180,25 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
 
         // A pure read: the tag set it answers with is the one the addressed
         // resource's own record carries, and nothing in the store is touched.
+        // "The tagged resource can be a table bucket or a table", and which of
+        // the two an ARN names is read off its form by the one resolution both
+        // tagging operations share (`crate::state::resource_tags`), so a deleted
+        // resource's ARN answers as missing rather than as a resource carrying
+        // no tags.
         let store = state.lock();
         let tags = store
-            .table_buckets
-            .get(&input.resource_arn)
-            .map(|bucket| bucket.tags.clone())
-            // "The tagged resource can be a table bucket or a table", and a
-            // table is addressed by its own ARN, which nests inside its
-            // bucket's — so an ARN no bucket is held under is resolved through
-            // the table index before the resource is reported absent.
-            .or_else(|| {
-                store
-                    .table_by_arn(&input.resource_arn)
-                    .map(|table| table.tags.clone())
-            })
-            .ok_or_else(|| no_such_resource(&input.resource_arn))?;
+            .resource_tags(&input.resource_arn)
+            .map_err(unresolved_resource)?;
 
         // The member is the resource's whole tag set, which is EMPTY for a
         // resource nothing ever tagged rather than absent: the resource exists
         // and carries no tags, which is what an empty map says.
         Ok(ListTagsForResourceOutput {
-            tags: Some(tags.into_iter().collect()),
+            tags: Some(
+                tags.iter()
+                    .map(|(key, value)| (key.clone(), value.clone()))
+                    .collect(),
+            ),
         })
     }
 }

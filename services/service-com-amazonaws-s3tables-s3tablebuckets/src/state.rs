@@ -27,6 +27,11 @@ pub use service_managed::*;
 mod maintenance_jobs;
 pub use maintenance_jobs::*;
 
+/// The tagging rules: which resource a `resourceArn` addresses, and which tag
+/// keys this service accepts.
+mod tagging;
+pub use tagging::*;
+
 /// The region a table bucket's ARN carries when the request carries no
 /// parseable SigV4 credential scope to name one.
 pub const DEFAULT_REGION: &str = "us-east-1";

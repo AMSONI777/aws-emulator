@@ -3989,3 +3989,18 @@ mod cloudformation_cloudfront_fronted_rest_api;
 // compiles no suite of this target. The rule it states stands at the head of this file.)
 // (That same header fragment once more, as an ordinary comment: a `//!` line past the first
 // item of this crate root is `E0753`, so it stands as a line comment and the rule it repeats
+// leaving a note here. (A fragment of this file's own header that a merge of two appended
+// tails landed down here; ordinary comments, because an inner doc comment `//!` may only
+// appear before the first item and one in this tail is `E0753`.)
+// this file and for every service crate's `tests/all.rs`. (Ordinary comment for the same
+// reason as the fragment above: a `//!` line in this appended tail is `E0753`.)
+// header a landing appended here; an ordinary comment, because a `//!` line past the first
+// item is `E0753` and compiles no suite of this target.)
+// this file and for every service crate's `tests/all.rs`. (The last line of that same
+// header fragment, an ordinary comment for the same reason.)
+// header; an ordinary comment, since a `//!` line past the first item is `E0753`.)
+// this file and for every service crate's `tests/all.rs`. (The last line of that fragment,
+// an ordinary comment for the same reason.)
+// suite left at the top level of `tests/` fails the build. (A plain comment: a `//!` line
+// in this tail is `E0753`.)
+// this file and for every service crate's `tests/all.rs`. (Plain comment, same reason.)

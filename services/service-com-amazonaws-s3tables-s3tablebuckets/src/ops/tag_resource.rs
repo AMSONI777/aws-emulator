@@ -1,15 +1,11 @@
 // SPDX-License-Identifier: CC0-1.0
 
 //! @op TagResource
-//! SCAFFOLDED, NOT IMPLEMENTED: this operation answers HTTP 501 `NotImplemented` and
-//! asserts NOTHING about `TagResource`'s real behaviour. Implement it here — this is
-//! the ONLY file to touch for this operation.
 //!
-//! A 501 from this operation means "nobody has written it yet", never "the emulator is
-//! broken". Replace the `Err(..)` in [`TagResource::handle`] with real behaviour and
-//! delete the SCAFFOLDED marker line above; that line is the machine-readable record of
-//! which operations are still stubs (`grep -rl '^//! SCAFFOLDED, NOT IMPLEMENTED:' */src/ops/`),
-//! so leaving it on an implemented operation under-reports progress.
+//! Applies the request's tags to the table bucket or the table its `resourceArn`
+//! addresses, once every key is one this service accepts: the tag rules all live in
+//! [`crate::state`]'s tagging module, so the two creates that also carry a `Tags` map
+//! apply the same ones.
 //!
 //! ## Shape of an operation
 //!
@@ -120,6 +116,31 @@ impl From<TagResourceErrorModeled> for TagResourceError {
     }
 }
 
+/// `BadRequestException` (HTTP 400) — "The request is invalid or malformed."
+/// The refusal this operation models for a request the boundary accepted but
+/// the service's own rules reject.
+fn bad_request(message: String) -> TagResourceError {
+    TagResourceErrorModeled::BadRequestException(BadRequestException {
+        message: Some(message),
+    })
+    .into()
+}
+
+/// How this operation words a `resourceArn` that reached no resource of the
+/// store: the `NotFoundException` (HTTP 404) it models for a table bucket or a
+/// table the store does not hold, and its `BadRequestException` (HTTP 400) for a
+/// value that addresses no taggable resource at all.
+fn unresolved_resource(refusal: crate::state::TaggableResourceRefusal) -> TagResourceError {
+    let message = refusal.message().to_string();
+    if refusal.is_absent() {
+        return TagResourceErrorModeled::NotFoundException(NotFoundException {
+            message: Some(message),
+        })
+        .into();
+    }
+    bad_request(message)
+}
+
 /// The `TagResource` operation.
 ///
 /// Owns the shared engine (the constructor seam) and implements
@@ -156,18 +177,64 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         input: Self::Input,
         ctx: &smithy_server_runtime::OperationContext<'_>,
     ) -> Result<Self::Output, Self::Error> {
-        // The engine is reachable from `&self` (constructor-injected); `ctx` carries
-        // request metadata. Both are bound here so an implementer has them in scope.
-        let _ = (&input, ctx, &self.engine);
-        // Implement `TagResource` here, then delete the SCAFFOLDED marker at the top of
-        // this file. Return modeled failures as
-        // `Err(TagResourceErrorModeled::Variant(..).into())` — the `From` impl above lifts it.
-        //
-        // To refuse a bad request this operation models no error for, return
-        // `Err(crate::scaffolded::Scaffolded::validation("..."))` — a 400
-        // `ValidationException`. Do NOT answer 501 for it: 501 means "not written yet",
-        // not "bad request". Modeled constraints are already refused BEFORE this
-        // handler runs, so reaching here means the input satisfies every one of them.
-        Err(crate::scaffolded::Scaffolded::not_implemented("TagResource"))
+        let state = crate::state::service_state(&*self.engine).ok_or_else(|| {
+            TagResourceErrorModeled::InternalServerErrorException(InternalServerErrorException {
+                message: Some("the S3 Tables table bucket store is unavailable".to_string()),
+            })
+        })?;
+
+        // The tags in the order they are stored, which is the order they are
+        // judged in: the modelled map deserializes into a hash map, so a request
+        // carrying more than one unacceptable key would otherwise be refused by
+        // a different one from run to run.
+        let tags: ::std::collections::BTreeMap<String, String> = input.tags.into_iter().collect();
+
+        // Every key is judged BEFORE the resource is resolved and before
+        // anything is written, so a refused request applies no tag at all — not
+        // even the acceptable keys that travelled with the refused one. WHO
+        // asked decides only the reserved namespace: the tags this service's own
+        // control plane sets travel on the in-process path, a caller's do not.
+        let origin = crate::state::tag_key_origin(ctx);
+        if let Some(message) =
+            crate::state::tag_keys_refusal(tags.keys().map(String::as_str), origin)
+        {
+            return Err(bad_request(message.to_string()));
+        }
+
+        let mut store = state.lock();
+
+        // The ARN is resolved against the store rather than trusted: a deleted
+        // table's ARN is still well formed, and only the store can tell it from
+        // a live one.
+        let resident = store
+            .resource_tags_mut(&input.resource_arn)
+            .map_err(unresolved_resource)?;
+
+        // A tag the resource already carries is UPDATED rather than added, so
+        // what the published bound is judged against is the keys the resource
+        // would end up holding — which the tagging rules own.
+        if let Some(message) = crate::state::tag_count_refusal(resident, &tags) {
+            return Err(bad_request(message));
+        }
+
+        resident.extend(tags);
+        let resulting_tags = resident.len();
+        // The lock covers the state change only; everything below is owned.
+        drop(store);
+
+        // The access record for a state-changing operation: who, what and the
+        // outcome. Metadata only — how many tags the resource now carries, never
+        // a tag key or a tag value.
+        ::tracing::info!(
+            target: crate::state::AUDIT_TARGET,
+            operation = Self::NAME,
+            caller = ?crate::state::request_caller(ctx.parts()),
+            resource = %input.resource_arn,
+            tags = resulting_tags,
+            outcome = "tagged",
+            "resource tags applied",
+        );
+
+        Ok(TagResourceOutput {})
     }
 }

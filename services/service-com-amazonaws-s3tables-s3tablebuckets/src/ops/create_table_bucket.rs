@@ -223,6 +223,28 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         let tags: ::std::collections::BTreeMap<String, String> =
             input.tags.into_iter().flatten().collect();
 
+        // A tag applied by a create is the same tag `TagResource` applies — the
+        // operation documents that it needs the `s3tables:TagResource`
+        // permission for it — so the keys are judged by the service's own
+        // well-formedness rule here too, before the bucket is created: a bucket
+        // never ends up carrying a key no tagging call would accept. The
+        // RESERVED namespace is not judged here: a create is the request this
+        // service's own control plane provisions a bucket with, and the tag set
+        // a create carries is read back whole (`tests/all/list_tags_for_resource.rs`).
+        if let Some(message) = crate::state::tag_keys_refusal(
+            tags.keys().map(String::as_str),
+            crate::state::TagKeyOrigin::Service,
+        ) {
+            return Err(bad_request(message.to_string()));
+        }
+        // The bucket this create mints carries no tags yet, so the keys it would
+        // end up holding are the request's own.
+        if let Some(message) =
+            crate::state::tag_count_refusal(&::std::collections::BTreeMap::new(), &tags)
+        {
+            return Err(bad_request(message));
+        }
+
         let mut store = state.lock();
 
         // A table bucket name is unique within an account and Region, and the

@@ -91,6 +91,15 @@ impl Reply {
     }
 }
 
+/// Which path a request arrives on: a client's own, or the in-process callback
+/// one emulated service reaches another through. The two differ by nothing but
+/// the framework's stamp, which is what a handler reads to tell them apart.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Arrival {
+    Client,
+    InProcess,
+}
+
 /// The emulator under test: ONE shared engine with the S3 Tables service mounted
 /// on it, reached the way the production router reaches it.
 pub struct Emulator {
@@ -117,6 +126,33 @@ impl Emulator {
         region: &str,
         body: Option<&Value>,
     ) -> Reply {
+        self.dispatch(method, path, region, body, Arrival::Client)
+            .await
+    }
+
+    /// Call one operation the way another emulated service reaches this one:
+    /// over the in-process callback, which the framework stamps with the
+    /// chain's depth. Everything else about the request is what [`Self::call`]
+    /// sends.
+    pub async fn call_in_process(
+        &self,
+        method: &str,
+        path: &str,
+        region: &str,
+        body: Option<&Value>,
+    ) -> Reply {
+        self.dispatch(method, path, region, body, Arrival::InProcess)
+            .await
+    }
+
+    async fn dispatch(
+        &self,
+        method: &str,
+        path: &str,
+        region: &str,
+        body: Option<&Value>,
+        arrival: Arrival,
+    ) -> Reply {
         let payload = body.map_or_else(Vec::new, |value| {
             serde_json::to_vec(value).expect("a request body serializes")
         });
@@ -124,11 +160,18 @@ impl Emulator {
             "AWS4-HMAC-SHA256 Credential={PRESENTED_AKID}/20260101/{region}/s3tables/aws4_request, \
              SignedHeaders=host;x-amz-date, Signature=0000"
         );
-        let request = http::Request::builder()
+        let mut builder = http::Request::builder()
             .method(method)
             .uri(format!("https://s3tables.{region}.amazonaws.com{path}"))
             .header("authorization", authorization)
-            .header("content-type", "application/json")
+            .header("content-type", "application/json");
+        if arrival == Arrival::InProcess {
+            // The stamp the framework's callback transport puts on every call one
+            // emulated service makes into another. It is a request EXTENSION, so
+            // it cannot arrive from a socket however a client signs.
+            builder = builder.extension(smithy_server_runtime::CallbackRecursionDepth(1));
+        }
+        let request = builder
             .body(bytes::Bytes::from(payload))
             .expect("a well-formed request");
 
@@ -739,6 +782,52 @@ impl Emulator {
                 encode(namespace),
                 encode(name)
             ),
+            region,
+            Some(request),
+        )
+        .await
+    }
+
+    /// `TagResource`: the resource's ARN is the one path label and the tags
+    /// travel as the body's `tags`.
+    pub async fn tag_resource(&self, region: &str, resource_arn: &str, tags: &Value) -> Reply {
+        self.call(
+            "POST",
+            &format!("/tag/{}", encode(resource_arn)),
+            region,
+            Some(&serde_json::json!({ "tags": tags })),
+        )
+        .await
+    }
+
+    /// `TagResource` as another emulated service reaches it while provisioning a
+    /// resource on a caller's behalf.
+    pub async fn tag_resource_in_process(
+        &self,
+        region: &str,
+        resource_arn: &str,
+        tags: &Value,
+    ) -> Reply {
+        self.call_in_process(
+            "POST",
+            &format!("/tag/{}", encode(resource_arn)),
+            region,
+            Some(&serde_json::json!({ "tags": tags })),
+        )
+        .await
+    }
+
+    /// `CreateTable` on that same in-process path.
+    pub async fn create_table_in_process(
+        &self,
+        region: &str,
+        arn: &str,
+        namespace: &str,
+        request: &Value,
+    ) -> Reply {
+        self.call_in_process(
+            "PUT",
+            &format!("/tables/{}/{}", encode(arn), encode(namespace)),
             region,
             Some(request),
         )
