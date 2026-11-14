@@ -1,15 +1,6 @@
 // SPDX-License-Identifier: CC0-1.0
 
 //! @op UpdateTableMetadataLocation
-//! SCAFFOLDED, NOT IMPLEMENTED: this operation answers HTTP 501 `NotImplemented` and
-//! asserts NOTHING about `UpdateTableMetadataLocation`'s real behaviour. Implement it here — this is
-//! the ONLY file to touch for this operation.
-//!
-//! A 501 from this operation means "nobody has written it yet", never "the emulator is
-//! broken". Replace the `Err(..)` in [`UpdateTableMetadataLocation::handle`] with real behaviour and
-//! delete the SCAFFOLDED marker line above; that line is the machine-readable record of
-//! which operations are still stubs (`grep -rl '^//! SCAFFOLDED, NOT IMPLEMENTED:' */src/ops/`),
-//! so leaving it on an implemented operation under-reports progress.
 //!
 //! ## Shape of an operation
 //!
@@ -135,6 +126,16 @@ impl From<UpdateTableMetadataLocationErrorModeled> for UpdateTableMetadataLocati
     }
 }
 
+/// `NotFoundException` (HTTP 404) — the table bucket, the namespace or the table
+/// the request addresses is not in the store, stated by the fixed sentence for
+/// the class that is missing.
+fn not_found(message: &str) -> UpdateTableMetadataLocationError {
+    UpdateTableMetadataLocationErrorModeled::NotFoundException(NotFoundException {
+        message: Some(message.to_string()),
+    })
+    .into()
+}
+
 /// The `UpdateTableMetadataLocation` operation.
 ///
 /// Owns the shared engine (the constructor seam) and implements
@@ -171,18 +172,115 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         input: Self::Input,
         ctx: &smithy_server_runtime::OperationContext<'_>,
     ) -> Result<Self::Output, Self::Error> {
-        // The engine is reachable from `&self` (constructor-injected); `ctx` carries
-        // request metadata. Both are bound here so an implementer has them in scope.
-        let _ = (&input, ctx, &self.engine);
-        // Implement `UpdateTableMetadataLocation` here, then delete the SCAFFOLDED marker at the top of
-        // this file. Return modeled failures as
-        // `Err(UpdateTableMetadataLocationErrorModeled::Variant(..).into())` — the `From` impl above lifts it.
-        //
-        // To refuse a bad request this operation models no error for, return
-        // `Err(crate::scaffolded::Scaffolded::validation("..."))` — a 400
-        // `ValidationException`. Do NOT answer 501 for it: 501 means "not written yet",
-        // not "bad request". Modeled constraints are already refused BEFORE this
-        // handler runs, so reaching here means the input satisfies every one of them.
-        Err(crate::scaffolded::Scaffolded::not_implemented("UpdateTableMetadataLocation"))
+        let state = crate::state::service_state(&*self.engine).ok_or_else(|| {
+            UpdateTableMetadataLocationErrorModeled::InternalServerErrorException(
+                InternalServerErrorException {
+                    message: Some("the S3 Tables table bucket store is unavailable".to_string()),
+                },
+            )
+        })?;
+
+        let account = ::engine::emulator_account_id().to_string();
+        let now = ::std::time::SystemTime::now();
+
+        let mut store = state.lock();
+
+        // The table the request addresses: the bucket, the namespace keyed under
+        // it and the record itself. Any of the three being absent is the
+        // `NotFoundException` the name-addressed table operations model, stated
+        // by the fixed sentence for the class that is missing.
+        let table = store
+            .table_buckets
+            .get(&input.table_bucket_arn)
+            .ok_or_else(|| not_found(crate::state::BUCKET_NOT_FOUND_MESSAGE))?
+            .namespaces
+            .get(&input.namespace)
+            .ok_or_else(|| not_found(crate::state::NAMESPACE_NOT_FOUND_MESSAGE))?
+            .tables
+            .get(&input.name)
+            .ok_or_else(|| not_found(crate::state::TABLE_NOT_FOUND_MESSAGE))?;
+
+        // `versionToken` is the caller's view of the table, and this operation
+        // requires it: one that is not the table's current token means the table
+        // was written since the caller read it, which is the conflict with a
+        // previous write the model's `ConflictException` (HTTP 409) names — the
+        // same rule `DeleteTable` and `RenameTable` apply to the same member.
+        if input.version_token != table.version_token {
+            return Err(UpdateTableMetadataLocationErrorModeled::ConflictException(
+                ConflictException {
+                    message: Some(crate::state::TABLE_VERSION_TOKEN_MISMATCH_MESSAGE.to_string()),
+                },
+            )
+            .into());
+        }
+
+        // A metadata location is a place under the table's own warehouse that
+        // names a metadata file of the table's open table format. A location
+        // outside that is the client request error the model's
+        // `BadRequestException` (HTTP 400) names: there is nothing to retry and
+        // the stored pointer is left where it was.
+        let acceptable = match table.format {
+            crate::state::OpenTableFormat::Iceberg => crate::state::is_iceberg_metadata_location(
+                &input.metadata_location,
+                &table.warehouse_location,
+            ),
+        };
+        if !acceptable {
+            return Err(UpdateTableMetadataLocationErrorModeled::BadRequestException(
+                BadRequestException {
+                    message: Some(crate::state::INVALID_METADATA_LOCATION_MESSAGE.to_string()),
+                },
+            )
+            .into());
+        }
+
+        // The write: the table points at the metadata file the request names,
+        // and a fresh version token names the new state of the table's metadata
+        // — the same thing a catalog commit of a metadata file settles, since
+        // this is the other way the table's metadata pointer moves. The table's
+        // stored metadata document is NOT rewritten: the file this location
+        // names was written by the caller, so what it holds is not this
+        // service's to invent.
+        let version_token = store.mint_version_token();
+        let table = store
+            .table_buckets
+            .get_mut(&input.table_bucket_arn)
+            .and_then(|bucket| bucket.namespaces.get_mut(&input.namespace))
+            .and_then(|namespace| namespace.tables.get_mut(&input.name))
+            .ok_or_else(|| not_found(crate::state::TABLE_NOT_FOUND_MESSAGE))?;
+        table.metadata_location = Some(input.metadata_location.clone());
+        table.version_token = version_token;
+        table.modified_at = now;
+        table.modified_by = account;
+
+        // The answer is read back out of the record that was just written, so a
+        // response a caller sees is one the store can serve again.
+        let output = UpdateTableMetadataLocationOutput {
+            name: table.name.clone(),
+            table_arn: table.table_arn.clone(),
+            namespace: table.namespace.clone(),
+            version_token: table.version_token.clone(),
+            metadata_location: table
+                .metadata_location
+                .clone()
+                .unwrap_or_else(|| input.metadata_location.clone()),
+        };
+        let table_arn = output.table_arn.clone();
+        // The lock covers the state change only; everything below is owned.
+        drop(store);
+
+        // The access record for a state-changing operation: who, what, the
+        // resource it changed and the outcome. Metadata only — the resource is
+        // named by the table's ARN, and the location itself is not logged.
+        ::tracing::info!(
+            target: crate::state::AUDIT_TARGET,
+            operation = Self::NAME,
+            caller = ?crate::state::request_caller(ctx.parts()),
+            resource = ?table_arn,
+            outcome = "updated",
+            "table metadata location updated",
+        );
+
+        Ok(output)
     }
 }

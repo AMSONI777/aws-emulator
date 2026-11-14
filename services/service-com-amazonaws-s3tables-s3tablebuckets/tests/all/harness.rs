@@ -667,6 +667,53 @@ impl Emulator {
             .await
     }
 
+    /// `GetTableMetadataLocation`: the bucket's ARN, the namespace and the
+    /// table's name are path labels.
+    pub async fn get_table_metadata_location(
+        &self,
+        region: &str,
+        arn: &str,
+        namespace: &str,
+        name: &str,
+    ) -> Reply {
+        self.call(
+            "GET",
+            &format!(
+                "/tables/{}/{}/{}/metadata-location",
+                encode(arn),
+                encode(namespace),
+                encode(name)
+            ),
+            region,
+            None,
+        )
+        .await
+    }
+
+    /// `UpdateTableMetadataLocation`: addressed like the read above, with
+    /// `metadataLocation` and the caller's `versionToken` in the body.
+    pub async fn update_table_metadata_location(
+        &self,
+        region: &str,
+        arn: &str,
+        namespace: &str,
+        name: &str,
+        request: &Value,
+    ) -> Reply {
+        self.call(
+            "PUT",
+            &format!(
+                "/tables/{}/{}/{}/metadata-location",
+                encode(arn),
+                encode(namespace),
+                encode(name)
+            ),
+            region,
+            Some(request),
+        )
+        .await
+    }
+
     /// `RenameTable`: the bucket's ARN, the namespace and the table's CURRENT
     /// name are path labels, and the coordinates the table moves to —
     /// `newNamespaceName`, `newName` — travel in the body with the caller's

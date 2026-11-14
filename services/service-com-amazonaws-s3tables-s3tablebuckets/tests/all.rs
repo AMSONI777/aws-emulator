@@ -55,6 +55,8 @@ mod table_bucket_replication;
 mod table_bucket_storage_class;
 #[path = "all/table_maintenance_configuration.rs"]
 mod table_maintenance_configuration;
+#[path = "all/table_metadata_location.rs"]
+mod table_metadata_location;
 #[path = "all/table_record_expiration.rs"]
 mod table_record_expiration;
 #[path = "all/wire_forms.rs"]

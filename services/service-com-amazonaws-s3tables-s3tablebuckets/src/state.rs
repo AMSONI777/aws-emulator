@@ -1313,6 +1313,29 @@ pub fn metadata_location(warehouse_location: &str, version: u32, metadata_id: &s
     format!("{warehouse_location}/metadata/{version:05}-{metadata_id}.metadata.json")
 }
 
+/// The file names an Apache Iceberg table's metadata file may carry, as
+/// `UpdateTableMetadataLocation` documents them: the metadata document itself,
+/// or the same document Gzip-compressed.
+pub const ICEBERG_METADATA_SUFFIXES: [&str; 2] = [".metadata.json", ".metadata.json.gz"];
+
+/// Whether `location` can be where the metadata file of an Apache Iceberg table
+/// whose warehouse is `warehouse_location` lives.
+///
+/// The rule `UpdateTableMetadataLocation` documents, restated structurally: a
+/// metadata location is an S3 URI UNDER the table's warehouse location — the
+/// table's own files live there and nowhere else — and, the table being an
+/// Iceberg one, it names a metadata file ([`ICEBERG_METADATA_SUFFIXES`]).
+pub fn is_iceberg_metadata_location(location: &str, warehouse_location: &str) -> bool {
+    location
+        .strip_prefix(warehouse_location)
+        .and_then(|under| under.strip_prefix('/'))
+        .is_some_and(|under| {
+            ICEBERG_METADATA_SUFFIXES
+                .iter()
+                .any(|suffix| under.ends_with(suffix))
+        })
+}
+
 /// How this service states a table bucket name it will not accept.
 ///
 /// FIXED text: it names the CLASS of the failure and takes nothing from the
@@ -1480,6 +1503,16 @@ pub const COMPACTION_SORT_ORDER_REQUIRED_MESSAGE: &str =
 /// applies. FIXED text — it names the CLASS of the failure and takes nothing
 /// from the request, as [`INVALID_TABLE_BUCKET_NAME_MESSAGE`] does for a name.
 pub const INVALID_METADATA_MESSAGE: &str = "The specified metadata is not valid";
+
+/// How this service states a metadata location it will not accept: one that is
+/// not under the table's warehouse location, or that does not name a metadata
+/// file of the table's open table format — the two rules
+/// `UpdateTableMetadataLocation` documents for the member. FIXED text — it names
+/// the CLASS of the failure and takes neither the location nor the warehouse
+/// from the request, as [`INVALID_METADATA_MESSAGE`] does for a metadata
+/// document.
+pub const INVALID_METADATA_LOCATION_MESSAGE: &str =
+    "The specified metadata location is not valid.";
 
 /// How this service states a request body it cannot read into the operation's
 /// modelled input at all — a member carrying a value of a JSON type the model

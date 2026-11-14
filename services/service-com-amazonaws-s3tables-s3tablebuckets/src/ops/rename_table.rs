@@ -290,16 +290,20 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         // carrying its identity — the table id, and so the `tableARN` and the
         // warehouse location built from it — unchanged, since the id is what
         // identifies the table for the life of the record whatever it is
-        // renamed to. Everything a mutation of a table settles is settled here:
-        // a fresh version token (so a caller holding the older one can tell its
-        // view is stale) and the instant and account the table was last
-        // modified at and by.
+        // renamed to. The instant and the account the table was last modified
+        // at and by are what the move settles.
+        //
+        // `versionToken` is NOT re-minted: it is the caller's precondition over
+        // the table's open-table metadata, and a move changes only the
+        // coordinates the table is addressed by, which live outside that
+        // metadata — so the token a caller holds still describes the table it
+        // read, and the next conditional call it makes with that token is
+        // honoured. The token advances when the table's metadata is committed.
         let mut moved = table.clone();
         let table_arn = moved.table_arn.clone();
         moved.name = target_name.clone();
         moved.namespace = target_namespace_names;
         moved.namespace_id = target_namespace_id;
-        moved.version_token = store.mint_version_token();
         moved.modified_at = now;
         moved.modified_by = account;
 

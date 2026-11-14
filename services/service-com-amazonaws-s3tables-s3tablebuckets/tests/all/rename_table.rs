@@ -13,9 +13,14 @@
 //! `/tables/{tableBucketARN}/{namespace}/{name}/rename`, 204, no output members, so the
 //! move is only observable through the reads).
 //!
-//! RULE 2 — a rename is a MUTATION of the table: it settles a fresh `versionToken` and
-//! the instant the table was last modified at, so a caller holding the older token can
-//! tell its view is stale.
+//! RULE 2 — a rename is a MUTATION of the table's coordinates only: it settles the
+//! instant the table was last modified at and LEAVES `versionToken` as it was. The token
+//! is the caller's precondition over the table's open-table metadata, and a move changes
+//! nothing inside that metadata, so the token a caller read before the move still
+//! describes the table afterwards and the next conditional call carrying it is honoured
+//! (`smithy_query(query="operation", operation="RenameTable")` documents `versionToken`
+//! only as "The version token of the table." and declares no output, so what rotates it
+//! is the service's recorded behaviour: a metadata commit, not a rename).
 //!
 //! RULE 3 — a move the store rules out changes nothing and is refused as its class: a
 //! request naming neither new coordinate is a `BadRequestException` (HTTP 400) because it
@@ -286,15 +291,15 @@ async fn a_rename_moves_the_one_stored_table_to_its_new_coordinates() {
             "case {case:?}: GetTable by ARN reports a different name from the describe"
         );
 
-        // RULE 2: the move is a mutation — a fresh token, and a modification instant at
-        // or after the one the record carried before it.
+        // RULE 2: the move settles a modification instant at or after the one the record
+        // carried before it, and leaves the caller's precondition token untouched.
         let moved_token = after.text("versionToken");
-        assert!(
-            moved_token != version_token,
-            "case {case:?}: expected a fresh versionToken, got the pre-rename \
-             {version_token:?}"
+        assert_eq!(
+            moved_token, version_token,
+            "case {case:?}: expected the pre-rename versionToken {version_token:?}, got \
+             {moved_token:?}"
         );
-        assert_canonical_uuid(&moved_token, "the versionToken a rename settles", case);
+        assert_canonical_uuid(&moved_token, "the versionToken a renamed table carries", case);
         let moved_modified_at = timestamp_seconds(&after.body, "modifiedAt", case);
         assert!(
             moved_modified_at >= modified_at,
@@ -647,9 +652,10 @@ async fn a_refused_rename_states_its_class_and_moves_nothing() {
 }
 
 /// RULES 1 and 2 as an INVARIANT over a chain of moves: however many times a table is
-/// renamed, there is still exactly ONE record, its identity never changes, each move
-/// settles a token no earlier move used, and the coordinates it is reachable at are the
-/// ones the last move named.
+/// renamed, there is still exactly ONE record, its identity never changes, every move
+/// leaves the token the first read reported — so each move can present the token the
+/// caller has held all along — and the coordinates it is reachable at are the ones the
+/// last move named.
 #[tokio::test]
 async fn a_chain_of_renames_keeps_one_record_with_one_identity() {
     // Each step moves the table again: within the namespace, across to the second
@@ -667,7 +673,9 @@ async fn a_chain_of_renames_keeps_one_record_with_one_identity() {
     assert_eq!(first.status, 200, "case {case:?}: GetTable: {first:?}");
     let table_arn = first.text("tableARN");
     let created_at = timestamp_seconds(&first.body, "createdAt", case);
-    let mut tokens = vec![first.text("versionToken")];
+    // The one token the caller holds for the whole chain: no move rotates it, so every
+    // move in the chain presents this same value as its precondition.
+    let version_token = first.text("versionToken");
     let mut at = (SOURCE_NAMESPACE, MOVED_TABLE);
 
     for (namespace, name) in chain {
@@ -681,7 +689,7 @@ async fn a_chain_of_renames_keeps_one_record_with_one_identity() {
                 &json!({
                     "newNamespaceName": namespace,
                     "newName": name,
-                    "versionToken": tokens.last().expect("the chain starts with one token"),
+                    "versionToken": version_token,
                 }),
             )
             .await;
@@ -706,12 +714,11 @@ async fn a_chain_of_renames_keeps_one_record_with_one_identity() {
             "case {case:?}: the move to {namespace}/{name} changed createdAt"
         );
         let token = read.text("versionToken");
-        assert!(
-            !tokens.contains(&token),
-            "case {case:?}: the move to {namespace}/{name} reused the version token \
-             {token:?}"
+        assert_eq!(
+            token, version_token,
+            "case {case:?}: the move to {namespace}/{name} rotated the version token to \
+             {token:?}, expected {version_token:?}"
         );
-        tokens.push(token);
 
         // Exactly one record: the two created tables, no copy left behind at any
         // coordinate the chain passed through.
@@ -729,5 +736,188 @@ async fn a_chain_of_renames_keeps_one_record_with_one_identity() {
             "case {case:?}: the listing row reports a different namespace: {row:?}"
         );
         at = (namespace, name);
+    }
+}
+
+/// One client workflow: the coordinates each of two successive moves names, with the ONE
+/// `versionToken` the client read before the first move presented on both of them and on
+/// the delete that ends the workflow.
+#[derive(Debug, Clone, Copy)]
+struct Workflow {
+    label: &'static str,
+    first_namespace: Option<&'static str>,
+    first_name: Option<&'static str>,
+    second_namespace: Option<&'static str>,
+    second_name: Option<&'static str>,
+}
+
+/// The workflows: they span which coordinate each move names (the name only, the
+/// namespace only, both) and so every order two moves can take.
+const WORKFLOWS: &[Workflow] = &[
+    Workflow {
+        label: "the name, then the namespace",
+        first_namespace: None,
+        first_name: Some("moved_once"),
+        second_namespace: Some(TARGET_NAMESPACE),
+        second_name: None,
+    },
+    Workflow {
+        label: "the namespace, then the name",
+        first_namespace: Some(TARGET_NAMESPACE),
+        first_name: None,
+        second_namespace: None,
+        second_name: Some("moved_twice"),
+    },
+    Workflow {
+        label: "both coordinates, then both again",
+        first_namespace: Some(TARGET_NAMESPACE),
+        first_name: Some("t0"),
+        second_namespace: Some(SOURCE_NAMESPACE),
+        second_name: Some("t1"),
+    },
+    Workflow {
+        label: "the name, then the name again",
+        first_namespace: None,
+        first_name: Some("m"),
+        second_namespace: None,
+        second_name: Some("m_0123456789_renamed"),
+    },
+];
+
+/// RULE 2 end to end: a rename does not invalidate the precondition token the client
+/// holds, so the whole workflow a client runs with the token it read ONCE is honoured —
+/// a second conditional rename, the conditional delete at the coordinates the last move
+/// named, and then the teardown of the namespace the table left and of the bucket.
+#[tokio::test]
+async fn the_token_a_client_read_before_a_rename_still_guards_the_table_afterwards() {
+    for (index, flow) in WORKFLOWS.iter().enumerate() {
+        let case = flow.label;
+        let fixture = Fixture::new(&format!("rename-workflow-{index}"), case).await;
+
+        let before = fixture.read(SOURCE_NAMESPACE, MOVED_TABLE).await;
+        assert_eq!(before.status, 200, "case {case:?}: GetTable: {before:?}");
+        // The one token the client ever reads: everything below presents it.
+        let version_token = before.text("versionToken");
+        let table_arn = before.text("tableARN");
+
+        let first_namespace = flow.first_namespace.unwrap_or(SOURCE_NAMESPACE);
+        let first_name = flow.first_name.unwrap_or(MOVED_TABLE);
+        let mut request = json!({ "versionToken": version_token });
+        if let Some(namespace) = flow.first_namespace {
+            request["newNamespaceName"] = json!(namespace);
+        }
+        if let Some(name) = flow.first_name {
+            request["newName"] = json!(name);
+        }
+        let first = fixture
+            .emulator
+            .rename_table(
+                REGION,
+                &fixture.bucket_arn,
+                SOURCE_NAMESPACE,
+                MOVED_TABLE,
+                &request,
+            )
+            .await;
+        assert_eq!(
+            first.status, 204,
+            "case {case:?}: the first RenameTable: expected 204, got {first:?}"
+        );
+
+        let second_namespace = flow.second_namespace.unwrap_or(first_namespace);
+        let second_name = flow.second_name.unwrap_or(first_name);
+        let mut request = json!({ "versionToken": version_token });
+        if let Some(namespace) = flow.second_namespace {
+            request["newNamespaceName"] = json!(namespace);
+        }
+        if let Some(name) = flow.second_name {
+            request["newName"] = json!(name);
+        }
+        let second = fixture
+            .emulator
+            .rename_table(
+                REGION,
+                &fixture.bucket_arn,
+                first_namespace,
+                first_name,
+                &request,
+            )
+            .await;
+        assert_eq!(
+            second.status, 204,
+            "case {case:?}: the second RenameTable, presenting the token the client read \
+             before the first move: expected 204, got {second:?}"
+        );
+
+        // The table the client has been moving is the one record it created, at the
+        // coordinates the last move named, still carrying that token.
+        let after = fixture.read(second_namespace, second_name).await;
+        assert_eq!(
+            after.status, 200,
+            "case {case:?}: GetTable at {second_namespace}/{second_name}: expected 200, \
+             got {after:?}"
+        );
+        assert_eq!(
+            after.text("tableARN"),
+            table_arn,
+            "case {case:?}: the two moves changed the table's ARN"
+        );
+        assert_eq!(
+            after.text("versionToken"),
+            version_token,
+            "case {case:?}: expected the token the client read, got {after:?}"
+        );
+
+        // The conditional delete the client ends with: its token is the one it read
+        // before either move, so the delete is honoured and the record is gone.
+        let deleted = fixture
+            .emulator
+            .delete_table(
+                REGION,
+                &fixture.bucket_arn,
+                second_namespace,
+                second_name,
+                &[("versionToken", version_token.clone())],
+            )
+            .await;
+        assert_eq!(
+            deleted.status, 204,
+            "case {case:?}: DeleteTable presenting the token the client read: expected \
+             204, got {deleted:?}"
+        );
+        let gone = fixture.read(second_namespace, second_name).await;
+        assert_eq!(
+            gone.status, 404,
+            "case {case:?}: GetTable after the delete: expected 404, got {gone:?}"
+        );
+
+        // Teardown converges: the namespaces the table passed through hold nothing of
+        // it, so each is deletable and so is the bucket.
+        let sibling = fixture
+            .emulator
+            .delete_table(REGION, &fixture.bucket_arn, SOURCE_NAMESPACE, SIBLING_TABLE, &[])
+            .await;
+        assert_eq!(
+            sibling.status, 204,
+            "case {case:?}: DeleteTable of the sibling: {sibling:?}"
+        );
+        for namespace in [SOURCE_NAMESPACE, TARGET_NAMESPACE] {
+            let dropped = fixture
+                .emulator
+                .delete_namespace(REGION, &fixture.bucket_arn, namespace)
+                .await;
+            assert_eq!(
+                dropped.status, 204,
+                "case {case:?}: DeleteNamespace {namespace} after the moves: {dropped:?}"
+            );
+        }
+        let bucket = fixture
+            .emulator
+            .delete_table_bucket(REGION, &fixture.bucket_arn)
+            .await;
+        assert_eq!(
+            bucket.status, 204,
+            "case {case:?}: DeleteTableBucket after the moves: {bucket:?}"
+        );
     }
 }
