@@ -213,3 +213,7 @@ mod server_vended_log_group;
 // writes, and which refusal a request that breaks more than one rule at once gets.
 #[path = "all/agreement_update_write_scope.rs"]
 mod agreement_update_write_scope;
+// `agreement_directory_conflict_message`, likewise appended: WHAT the refusal of an
+// agreement request that configures both directory configurations reports.
+#[path = "all/agreement_directory_conflict_message.rs"]
+mod agreement_directory_conflict_message;

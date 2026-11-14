@@ -568,6 +568,50 @@ pub(crate) fn custom_directories(prefix: &str) -> Value {
     })
 }
 
+/// The five `CustomDirectoriesType` members in MODEL order, each with the
+/// lowerCamelCase label a refusal that reports the structure names it under
+/// (`smithy_query(query="shape",shape="CustomDirectoriesType")` reports
+/// `FailedFilesDirectory`, `MdnFilesDirectory`, `PayloadFilesDirectory`,
+/// `StatusFilesDirectory`, `TemporaryFilesDirectory`, all `@required`).
+pub(crate) const CUSTOM_DIRECTORY_MEMBERS: [(&str, &str); 5] = [
+    ("FailedFilesDirectory", "failedFilesDirectory"),
+    ("MdnFilesDirectory", "mdnFilesDirectory"),
+    ("PayloadFilesDirectory", "payloadFilesDirectory"),
+    ("StatusFilesDirectory", "statusFilesDirectory"),
+    ("TemporaryFilesDirectory", "temporaryFilesDirectory"),
+];
+
+/// The `Message` the service reports for a request that configures BOTH of an
+/// agreement's alternative directory configurations, which `CreateAgreement` and
+/// `UpdateAgreement` both forbid ("Specify either BaseDirectory or CustomDirectories,
+/// but not both. Specifying both causes the command to fail.").
+///
+/// The FIXED parts are written out here — the sentence, the shape name, the five
+/// lowerCamelCase labels in model order and the separators; the VARIABLE parts are the
+/// `base_directory` and the `custom_directories` structure the request carried, so a
+/// suite builds the expectation from its own request rather than from a recorded run.
+/// `agreement_directory_conflict_message.rs` asserts the rule over a table of
+/// conflicts; this is the one place the template lives.
+pub(crate) fn both_directories_configured_message(
+    base_directory: &str,
+    custom_directories: &Value,
+) -> String {
+    let rendered = CUSTOM_DIRECTORY_MEMBERS
+        .iter()
+        .map(|(member, label)| {
+            let value = member_of(custom_directories, member)
+                .as_str()
+                .unwrap_or_default();
+            format!("{label}={value}")
+        })
+        .collect::<Vec<_>>()
+        .join(", ");
+    format!(
+        "Both BaseDirectory and CustomDirectories are configured. \
+         BaseDirectory: {base_directory}, CustomDirectories: CustomDirectoriesType({rendered})"
+    )
+}
+
 /// A `Tags` list on the wire as the key -> value map it denotes.
 ///
 /// An absent member reads as the empty map, as the empty list does — a reader reports

@@ -26,8 +26,8 @@
 use serde_json::{json, Value};
 
 use crate::harness::{
-    assert_members, custom_directories, is_modelled_agreement_id, member_of, Answer, Emulator,
-    ROLE,
+    assert_members, both_directories_configured_message, custom_directories,
+    is_modelled_agreement_id, member_of, Answer, Emulator, ROLE,
 };
 
 /// `AgreementStatusType`'s whole modelled value set
@@ -577,7 +577,11 @@ async fn a_refused_update_persists_nothing() {
         }
     }
     // The documented either/or: "Specify either BaseDirectory or CustomDirectories, but
-    // not both. Specifying both causes the command to fail."
+    // not both. Specifying both causes the command to fail." The refused request's two
+    // configurations are reported back; the whole template is pinned over a table of
+    // conflicts in `agreement_directory_conflict_message.rs`.
+    let both_base = "/amzn-s3-demo-bucket/home/both";
+    let both_custom = custom_directories("/amzn-s3-demo-bucket/as2/both");
     rows.push(Refusal {
         case: "both directory configurations at once".to_string(),
         server_id: partnership.server_id.clone(),
@@ -585,12 +589,12 @@ async fn a_refused_update_persists_nothing() {
         members: with(
             &visible_change,
             json!({
-                "BaseDirectory": "/amzn-s3-demo-bucket/home/both",
-                "CustomDirectories": custom_directories("/amzn-s3-demo-bucket/as2/both"),
+                "BaseDirectory": both_base,
+                "CustomDirectories": both_custom.clone(),
             }),
         ),
         code: "InvalidRequestException",
-        message: "BaseDirectory and CustomDirectories cannot both be specified".to_string(),
+        message: both_directories_configured_message(both_base, &both_custom),
         // `InvalidRequestException` carries `Message` alone, so this row asserts no
         // resource members.
         resource_type: "",

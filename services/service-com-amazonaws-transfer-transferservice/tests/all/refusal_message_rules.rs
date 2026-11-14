@@ -6,12 +6,13 @@
 //! `ValidationException` families; these three are the ones it does not cover.
 //!
 //! 1. A documented either/or member pair ("specify exactly one of A and B") is violated
-//!    in TWO ways, and the refusal states the half the request actually broke: naming
-//!    NEITHER member is told that one of the two is needed, naming BOTH is told the two
-//!    cannot be sent together. One wording per condition, shared by every pair and every
-//!    operation that resolves one. The rows differ along the member pair, the operation
-//!    (create and update), which half of the rule was broken and which other members the
-//!    request carried.
+//!    by naming NEITHER member, or — where the pair's text is fixed for the condition —
+//!    by naming BOTH, and the refusal states the half the request actually broke: one
+//!    wording per condition, shared by every pair and every operation that resolves one.
+//!    The rows differ along the member pair, the operation (create and update), which
+//!    half of the rule was broken and which other members the request carried. (The
+//!    agreement pair's both-half is NOT a row here: it reports the two configurations the
+//!    request carried, which `agreement_directory_conflict_message.rs` pins.)
 //! 2. An access operation addressed at a server whose `IdentityProviderType` is not the
 //!    directory-backed one answers a text fixed for THAT OPERATION and that server's
 //!    modelled type, carrying nothing the caller sent — so two requests refused for the
@@ -31,7 +32,7 @@
 
 use serde_json::{json, Value};
 
-use crate::harness::{custom_directories, member_of, Answer, Emulator, ROLE};
+use crate::harness::{member_of, Answer, Emulator, ROLE};
 
 /// Satisfies `DirectoryId`'s modelled `len 12..12`, pattern `^d-[0-9a-f]{10}$`.
 const DIRECTORY_ID: &str = "d-0123456789";
@@ -97,14 +98,16 @@ fn assert_message(
 const LOCAL_PROFILE: &str = "p-11111111111111111";
 
 /// RULE: a request that names NEITHER member of a documented either/or pair is told that
-/// one of the two is needed; one that names BOTH is told the two cannot be sent
-/// together. The text follows the condition reported, not the whole rule, and names only
-/// the two members.
+/// one of the two is needed; one that names BOTH the connector configurations is told the
+/// two cannot be sent together. The text follows the condition reported, not the whole
+/// rule, and names only the two members.
 ///
 /// The rows differ along the member pair (`As2Config`/`SftpConfig` on a connector,
 /// `BaseDirectory`/`CustomDirectories` on an agreement), the operation that resolves it
 /// (`CreateConnector`, `UpdateConnector`, `CreateAgreement`), which half of the rule was
-/// broken, and the other members the request carried.
+/// broken, and the other members the request carried. The agreement pair's both-half
+/// belongs to `agreement_directory_conflict_message.rs`, which pins the two
+/// configurations it reports.
 #[tokio::test]
 async fn an_either_or_pair_reports_the_half_of_the_rule_the_request_broke() {
     let emulator = Emulator::new();
@@ -212,18 +215,10 @@ async fn an_either_or_pair_reports_the_half_of_the_rule_the_request_broke() {
             with(&agreement_base, json!({"BaseDirectory": ""})),
             "One of BaseDirectory or CustomDirectories must be specified".to_string(),
         ),
-        (
-            "CreateAgreement naming both directory configurations",
-            "CreateAgreement",
-            with(
-                &agreement_base,
-                json!({
-                    "BaseDirectory": "/bucket/base",
-                    "CustomDirectories": custom_directories("/bucket/custom"),
-                }),
-            ),
-            "BaseDirectory and CustomDirectories cannot both be specified".to_string(),
-        ),
+        // The OTHER half on the agreement pair — a request naming BOTH directory
+        // configurations — reports the two configurations it carried rather than a text
+        // fixed for the condition, so it is not a row of this rule:
+        // `agreement_directory_conflict_message.rs` pins it over a table of conflicts.
     ];
 
     for (case, op, request, expected) in cases {

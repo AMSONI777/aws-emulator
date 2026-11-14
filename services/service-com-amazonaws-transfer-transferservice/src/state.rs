@@ -3581,6 +3581,40 @@ pub fn agreement_base_directory(base_directory: Option<&str>) -> Option<String> 
         .map(str::to_string)
 }
 
+/// `CustomDirectoriesType` as a refusal that reports a request's custom directories
+/// renders it: the shape's own name, then its five `@required` members
+/// (`smithy_query(query="shape",shape="CustomDirectoriesType")`) in model order, each
+/// under its lowerCamelCase label and carrying the value the request sent.
+fn rendered_custom_directories(custom_directories: &CustomDirectoriesType) -> String {
+    format!(
+        "CustomDirectoriesType(failedFilesDirectory={}, mdnFilesDirectory={}, \
+         payloadFilesDirectory={}, statusFilesDirectory={}, temporaryFilesDirectory={})",
+        custom_directories.failed_files_directory,
+        custom_directories.mdn_files_directory,
+        custom_directories.payload_files_directory,
+        custom_directories.status_files_directory,
+        custom_directories.temporary_files_directory,
+    )
+}
+
+/// The refusal text for a request that configures BOTH of an agreement's alternative
+/// directory configurations: the condition reported is that two configurations are
+/// configured at once, and the text reports WHICH — the `BaseDirectory` the request
+/// carried and the whole `CustomDirectories` structure beside it — so a caller that
+/// assembled the request out of merged configuration can see both sides and tell which
+/// one to drop. Every value in it comes from the REQUEST; nothing is read from the
+/// store.
+fn both_directories_configured(
+    base_directory: &str,
+    custom_directories: &CustomDirectoriesType,
+) -> String {
+    format!(
+        "Both BaseDirectory and CustomDirectories are configured. \
+         BaseDirectory: {base_directory}, CustomDirectories: {}",
+        rendered_custom_directories(custom_directories)
+    )
+}
+
 /// The documented cross-member requirement an agreement's directory configuration
 /// violates, worded as the refusal states it — `None` when it violates none.
 ///
@@ -3590,11 +3624,16 @@ pub fn agreement_base_directory(base_directory: Option<&str>) -> Option<String> 
 /// members — one of them says where an agreement's AS2 files land, and the second half
 /// of the sentence rules out naming both — so an agreement is written with exactly one
 /// of them and a request naming both, or neither, is refused with the modelled
-/// `InvalidRequestException`. The wording comes from [`either_or_violation`], the one
-/// reading of that requirement this crate has — the same one
-/// [`ConnectorConfig::cross_member_violation`] gives the either/or on `As2Config` and
-/// `SftpConfig` ("You must specify exactly one configuration object") — so the two
-/// cannot drift apart, and each half of the rule is reported as the condition it is.
+/// `InvalidRequestException`.
+///
+/// Each half is reported as the condition it is. Naming NEITHER member is worded as
+/// [`one_of_required`] words it, the one reading this crate gives a documented either/or
+/// that leaves a resource unconfigured — the same condition
+/// [`ConnectorConfig::cross_member_violation`] reports on `As2Config` and `SftpConfig`.
+/// Naming BOTH names them back ([`both_directories_configured`]): which two
+/// configurations the service saw is what the caller has to act on, and both are in the
+/// request, so this half reads the same wherever the check runs —
+/// [`agreement_directory_update_violation`] reports it identically.
 ///
 /// What counts as "specified" for `BaseDirectory` is EMPTINESS, not presence: the
 /// member's pattern `^(|/.*)$` admits the empty string, which names no directory (see
@@ -3608,11 +3647,17 @@ pub fn agreement_directory_violation(
     base_directory: Option<&str>,
     custom_directories: Option<&CustomDirectoriesType>,
 ) -> Option<String> {
-    let based = agreement_base_directory(base_directory).is_some();
-    either_or_violation(
-        ("BaseDirectory", based),
-        ("CustomDirectories", custom_directories.is_some()),
-    )
+    match (
+        agreement_base_directory(base_directory),
+        custom_directories,
+    ) {
+        (Some(base_directory), Some(custom_directories)) => Some(both_directories_configured(
+            &base_directory,
+            custom_directories,
+        )),
+        (None, None) => Some(one_of_required("BaseDirectory", "CustomDirectories")),
+        _ => None,
+    }
 }
 
 /// The documented cross-member requirement an agreement UPDATE's directory
@@ -3629,8 +3674,9 @@ pub fn agreement_directory_violation(
 /// the agreement with the one configuration it was written with — which is why
 /// [`agreement_directory_violation`]'s other half, the one that reports that nothing
 /// configures the resource, cannot apply to an update. The wording of the half that
-/// does apply is [`not_both_of`]'s, so the create and the update report the same
-/// condition the same way.
+/// does apply is [`both_directories_configured`]'s, so the create and the update report
+/// the same condition the same way: the two conflicting configurations the request
+/// carried, named back to the caller.
 ///
 /// What counts as "specified" is EMPTINESS, exactly as at create time
 /// ([`agreement_base_directory`]): a blank `BaseDirectory` names no directory, so it
@@ -3639,9 +3685,9 @@ pub fn agreement_directory_update_violation(
     base_directory: Option<&str>,
     custom_directories: Option<&CustomDirectoriesType>,
 ) -> Option<String> {
-    let based = agreement_base_directory(base_directory).is_some();
-    (based && custom_directories.is_some())
-        .then(|| not_both_of("BaseDirectory", "CustomDirectories"))
+    let base_directory = agreement_base_directory(base_directory)?;
+    custom_directories
+        .map(|custom_directories| both_directories_configured(&base_directory, custom_directories))
 }
 
 impl ComAmazonawsTransferTransferserviceState {

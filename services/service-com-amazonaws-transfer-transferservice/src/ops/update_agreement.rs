@@ -209,7 +209,9 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         // (HTTP 400) the model documents as "thrown when the client submits a malformed
         // request": this operation's own documentation states "Specify either
         // BaseDirectory or CustomDirectories, but not both. Specifying both causes the
-        // command to fail."
+        // command to fail." The refusal reports the two configurations the request
+        // carried, so a caller that assembled the update out of merged configuration can
+        // see both sides (`state::agreement_directory_update_violation`).
         if let Some(message) = st::agreement_directory_update_violation(
             input.base_directory.as_deref(),
             input.custom_directories.as_ref(),
