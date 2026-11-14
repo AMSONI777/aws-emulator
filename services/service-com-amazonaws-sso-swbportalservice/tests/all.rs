@@ -33,6 +33,8 @@ mod portal_session;
 mod route_path_agreement;
 #[path = "all/state_roundtrip.rs"]
 mod state_roundtrip;
+#[path = "all/store_unreachable_refusal.rs"]
+mod store_unreachable_refusal;
 #[path = "all/unauthorized_rejection.rs"]
 mod unauthorized_rejection;
 #[path = "all/user_role_assignment.rs"]

@@ -153,14 +153,12 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
             // UNREACHABLE with the engine the router mounts: `service_state` answers
             // `None` only when the service was built on something that is not the shared
             // `InMemoryEngine`. It is still answered rather than panicked (a panic
-            // renders as a 500 the real service never gives). Of the errors this
-            // operation models, the 429 is the only one that says "not your request's
-            // fault" — the model declares no server-fault error, and a 501 would claim
-            // the operation is unwritten.
+            // renders as a 500 the real service never gives), with the one refusal this
+            // service words for an unreachable store, so every operation and the gate in
+            // `crate::service` answer the same condition identically (see
+            // `crate::state::store_unavailable`).
             return Err(ListAccountsErrorModeled::TooManyRequestsException(
-                TooManyRequestsException {
-                    message: Some("the SSO portal store is unavailable".to_string()),
-                },
+                crate::state::store_unavailable(),
             )
             .into());
         };

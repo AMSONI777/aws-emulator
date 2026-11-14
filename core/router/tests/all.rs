@@ -3351,3 +3351,14 @@ mod cloudformation_s3tables_table_bucket_maintenance;
 // inner doc comment is `E0753` and compiles no suite at all.)
 // doc comment in this appended tail is `E0753` and compiles nothing.)
 // states, for this file and for every service crate's `tests/all.rs`.)
+// (An inner doc comment cannot appear here: `//!` annotates the enclosing crate and is
+// accepted only before any item, so this note — a fragment of the module header at the top
+// of this file that a concurrent landing appended into the tail — is an ordinary comment.)
+// (Another copy of the same header fragment, appended into this tail by a later landing:
+// `//!` is an inner doc comment and is accepted only before any item, so it is an ordinary
+// comment here too.)
+// (A further copy of the same header fragment, appended into this tail by a later landing:
+// an inner doc comment is legal only before the first item, so these lines are ordinary
+// comments here too.)
+// this file and for every service crate's `tests/all.rs`. (Appended here as `//!` by a
+// landing: an ordinary comment, for the reason the note above records.)

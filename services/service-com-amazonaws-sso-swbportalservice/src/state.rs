@@ -23,7 +23,9 @@
 //! This module also owns the rules every handler shares, so none is written twice:
 //! wording the refusal when a token resolves to no sign-in ([`unauthorized_session`], and
 //! [`unauthorized_response`] for the gate in [`crate::service`] that runs before any
-//! handler), stamping an expiry without risking an overflow panic ([`expiry_after`]),
+//! handler), wording the refusal when this store cannot be reached at all
+//! ([`store_unavailable`], and [`store_unavailable_response`] for those same seams),
+//! stamping an expiry without risking an overflow panic ([`expiry_after`]),
 //! ending the minted role credentials the clock has made spent
 //! ([`end_expired_credentials`]), and cutting a sorted listing into a page with an opaque
 //! cursor ([`page_of`]).
@@ -133,6 +135,64 @@ pub fn unauthorized_response(
 
     let refusal = crate::ops::list_accounts::ListAccountsErrorModeled::UnauthorizedException(
         unauthorized_session(),
+    );
+    protocol
+        .serialize_error(
+            refusal.as_serializable(),
+            refusal.variant_schema(),
+            refusal.shape_name(),
+            refusal.http_status(),
+        )
+        .ok()
+}
+
+/// The message this service answers a request with when its own store cannot be reached.
+///
+/// One constant for the whole service, for the same reason [`INVALID_SESSION_MESSAGE`] is
+/// one: every operation and the gate in [`crate::service`] say the same thing about the
+/// same condition, and nothing about the request reaches it.
+pub const STORE_UNAVAILABLE_MESSAGE: &str = "the SSO portal store is unavailable";
+
+/// This service's refusal when [`service_state`] answers `None` — the service was built
+/// on something that is not the shared `InMemoryEngine`, so there is no store to resolve
+/// anything against.
+///
+/// Of the errors every bound operation models, the 429 is the only one that does not blame
+/// the caller: the model declares no server-fault error, a 4xx naming a parameter would
+/// state that the request was read and judged, and a 501 would claim the operation is
+/// unwritten. Every handler returns THIS value — wrapped in its own operation's error enum
+/// — so the answer cannot drift per operation.
+pub fn store_unavailable() -> crate::ops::types::TooManyRequestsException {
+    crate::ops::types::TooManyRequestsException {
+        message: Some(STORE_UNAVAILABLE_MESSAGE.to_string()),
+    }
+}
+
+/// The SAME refusal as [`store_unavailable`], already rendered as a wire response in this
+/// service's own protocol envelope, for the pre-handler seams in [`crate::service`].
+///
+/// A request that reaches no handler is answered through here, so an unreachable store
+/// answers one thing whether the request named an operation or was refused before one was
+/// named. The status and the `__type` come from the model, exactly as in
+/// [`unauthorized_response`]: `TooManyRequestsException` carries its own `@httpError` and
+/// is a common error of all four bound operations.
+///
+/// `None` only if the protocol cannot serialize the error, which it cannot fail to do for
+/// a shape of this service's own model; the caller then leaves the framework's answer in
+/// place rather than inventing one.
+///
+/// `ListAccountsErrorModeled` is an arbitrary carrier, as in [`unauthorized_response`]: the
+/// variant is only how one modelled SHAPE is reached, and every value on the wire — the
+/// status, the `__type` and the message — comes off that shape, so the response is the same
+/// whichever of the four routes the request addressed and nothing about it is
+/// operation-specific.
+pub fn store_unavailable_response(
+    protocol: &dyn smithy_server_runtime::ServerHttpProtocol,
+) -> Option<aws_smithy_runtime_api::http::Response> {
+    use smithy_server_runtime::OperationError;
+
+    let refusal = crate::ops::list_accounts::ListAccountsErrorModeled::TooManyRequestsException(
+        store_unavailable(),
     );
     protocol
         .serialize_error(

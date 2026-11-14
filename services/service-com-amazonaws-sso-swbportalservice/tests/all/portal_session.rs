@@ -195,6 +195,71 @@ pub(crate) fn error_message(response: &Response<Bytes>) -> String {
         .to_string()
 }
 
+/// The whole caller-visible envelope of a response: what a client branches on, plus the
+/// body verbatim. The one reading of "what this response looks like to a client" for every
+/// suite in this target.
+pub(crate) fn envelope(response: &Response<Bytes>) -> (StatusCode, String, String, String) {
+    let header = |name: &str| {
+        response
+            .headers()
+            .get(name)
+            .and_then(|value| value.to_str().ok())
+            .unwrap_or_default()
+            .to_string()
+    };
+    (
+        response.status(),
+        header("content-type"),
+        header("x-amzn-errortype"),
+        body_text(response),
+    )
+}
+
+/// Assert `response` is exactly one modelled refusal and nothing more: the status, the
+/// `__type`, the message, the error-type header, and a body carrying only those two
+/// members — so nothing the request carried can have reached it.
+///
+/// Shared by every suite that pins a pre-handler refusal, so none of them can read the
+/// envelope differently.
+pub(crate) fn assert_refusal(
+    case: &str,
+    response: &Response<Bytes>,
+    status: StatusCode,
+    code: &str,
+    message: &str,
+) {
+    assert_eq!(
+        (
+            response.status(),
+            error_code(response),
+            error_message(response)
+        ),
+        (status, code.to_string(), message.to_string()),
+        "case {case:?}: expected {status} {code} {message:?}, got {} {:?}",
+        response.status(),
+        body_text(response)
+    );
+    assert_eq!(
+        response
+            .headers()
+            .get("x-amzn-errortype")
+            .and_then(|value| value.to_str().ok()),
+        Some(code),
+        "case {case:?}: expected the error-type header {code:?}, got {:?}",
+        response.headers().get("x-amzn-errortype")
+    );
+    let members: Vec<String> = body_json(response)
+        .as_object()
+        .map(|object| object.keys().cloned().collect())
+        .unwrap_or_default();
+    assert!(
+        members.len() == 2
+            && members.iter().any(|key| key == "__type")
+            && members.iter().any(|key| key == "message"),
+        "case {case:?}: the refusal body must carry only __type and message, got {members:?}"
+    );
+}
+
 /// The `id_key` of every item under `items_key`, in the order reported.
 fn item_ids(response: &Response<Bytes>, items_key: &str, id_key: &str) -> Vec<String> {
     let json = body_json(response);

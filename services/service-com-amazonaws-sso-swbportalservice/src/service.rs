@@ -45,7 +45,7 @@
 
 mod session_gate;
 
-use session_gate::SessionGate;
+use session_gate::{PresentedSession, SessionGate};
 use smithy_server_runtime::{http, ErasedOperation, Refusal, Refused, Service};
 use std::sync::Arc;
 
@@ -371,8 +371,13 @@ impl<Eng: Send + Sync + 'static> Service for EmulatedService<Eng> {
             .protocol()
             .routing_key(req)
             .ok()?;
+        //
+        // Anything but a usable session is served by the gate: a request presenting none
+        // is unauthenticated, and a request whose session could not be looked up at all
+        // was never authenticated either, so neither is read. The gate words each of
+        // them (see [`session_gate`]).
         self.entry.routing_table().get(routing_key)?;
-        (!self.session_gate.presents_a_usable_session(req))
+        (self.session_gate.presented_session(req) != PresentedSession::Usable)
             .then_some(&self.session_gate as &dyn ErasedOperation)
     }
 
@@ -383,9 +388,10 @@ impl<Eng: Send + Sync + 'static> Service for EmulatedService<Eng> {
         // `ValidationException`. The status (400) is the protocol's and matches the
         // modelled `@httpError`. Both the code and the message are replaced together.
         //
-        // A request presenting no usable session never reaches this seam: the gate in
-        // `override_operation` above answers it first, so what is left to word here is a
-        // request from an AUTHENTICATED caller that this service will not read.
+        // A request presenting no usable session never reaches this seam, and neither
+        // does one whose session could not be looked up at all: the gate in
+        // `override_operation` above answers both first, so what is left to word here is
+        // a request from an AUTHENTICATED caller that this service will not read.
         if let Refusal::Invalid(violations) = refusal {
             return Some(Refused {
                 code: "InvalidRequestException".to_string(),
@@ -420,8 +426,21 @@ impl<Eng: Send + Sync + 'static> Service for EmulatedService<Eng> {
         // absent member IS the credential: an absent credential is not a malformed
         // parameter, and it is exactly the case no handler's own gate can answer,
         // because the router never selects a route without it.
-        if !self.session_gate.presents_a_usable_session(req) {
-            return crate::state::unauthorized_response(self.entry.protocol());
+        //
+        // And a request whose session could not be looked up AT ALL is not an
+        // authenticated request either: with this service's store unreachable nothing
+        // resolved the credential it presented, so it is answered as every handler
+        // answers that condition — the one modelled error that blames nobody — rather
+        // than being passed on to be refused on its parameters, which would state that
+        // the service read and judged a request it never authenticated.
+        match self.session_gate.presented_session(req) {
+            PresentedSession::NoUsableSession => {
+                return crate::state::unauthorized_response(self.entry.protocol())
+            }
+            PresentedSession::StoreUnreachable => {
+                return crate::state::store_unavailable_response(self.entry.protocol())
+            }
+            PresentedSession::Usable => {}
         }
 
         // The caller is authenticated, so what is left is a missing required parameter,

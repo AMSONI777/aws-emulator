@@ -111,3 +111,37 @@ Test coverage: the absent-credential rule IS pinned, but only on the `InMemoryEn
 3. Observed: the REST router selects no route (the `@required` header is absent), `override_routing_error` runs, `absent_required_members` yields `["accessToken"]`, `presents_a_usable_session` returns `true` from its no-store branch (`src/service.rs:273`), and the service answers 400 `InvalidRequestException` reporting `accessToken` as a missing required member.
 4. Expected per the branch's own comment (`src/service.rs:271-272`, "the gate claims nothing here and the framework's own answer stands") and per `src/state.rs:74-80` (`crate::service` answers the absent-credential case through `unauthorized_response`, so it sees the same refusal as a token naming no usable session): either the framework's own routing answer, or the modelled 401 `UnauthorizedException` "Session token not found or invalid" — never a 400 blaming the caller's parameters.
 5. Contrast the handlers on the same engine: dispatch the same request WITH any bearer-token header, so a route is selected and `Logout::handle` runs — it answers the modelled 429 `TooManyRequestsException` "the SSO portal store is unavailable" (`src/ops/logout.rs:170-178`) instead of proceeding as if the store had answered.
+
+## Resolution
+
+FIXED. The gate's question is now three-valued: `PresentedSession::{Usable, NoUsableSession,
+StoreUnreachable}` (`src/service/session_gate.rs`), so "the store could not be reached" no longer
+has to be spelled as one of two verdicts. A pre-handler gate that cannot resolve the caller's
+identity never reports the request as authenticated: both seams that ask it answer an unreachable
+store with the one modelled error that assigns no fault to the caller (429
+`TooManyRequestsException`, `@httpError` 429, a common error of all four bound operations) — the
+same refusal every handler already gave for that condition — and a request presenting no credential
+at all keeps the modelled 401, because that is decided without the store.
+
+- `src/service.rs`: `override_operation` serves the gate for anything that is not `Usable`;
+  `override_routing_error` answers 401 for `NoUsableSession`, 429 for `StoreUnreachable`, and only
+  reaches its `InvalidRequestException` wording for an authenticated caller.
+- `src/state.rs`: the refusal has one spelling for the whole service —
+  `STORE_UNAVAILABLE_MESSAGE`, `store_unavailable()` and `store_unavailable_response()`, beside the
+  existing `unauthorized_session`/`unauthorized_response` pair — and the four handlers call it
+  instead of repeating the literal, so no response of theirs changes.
+- `tests/all/store_unreachable_refusal.rs` builds the service over a non-`InMemoryEngine` through
+  the crate's public generic constructor and sweeps the four routes × every required query member
+  present / one omitted × a `max_result` at each published bound and one past each × four
+  credential classes, with a control on the shared engine.
+
+Correction to step 3 of the reproduction above: on `POST /logout` with NO credential the gate never
+reached its no-store branch — `presented_access_token` answers `None` first, so the gate already
+returned `false` and the request was answered the modelled 401, not a 400. The contradiction this
+report identifies is real, but it is observable on a request that DOES present a credential: e.g.
+`GET /assignment/roles` with the bearer header and no `account_id` (answered 400
+`InvalidRequestException` "accountId is missing"), or `GET /assignment/accounts?max_result=0` with
+the bearer header (answered the framework's validation 400). Both are now the 429. Of the two
+alternatives step 4 allows, the 429 is the one consistent with this crate's other no-store branches
+and with the report's own point (2): the gate answers a modelled refusal rather than proceeding,
+and it picks the error that does not blame a caller whose credential was never looked up.

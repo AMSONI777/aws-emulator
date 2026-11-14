@@ -20,17 +20,46 @@
 //!
 //! So this module owns both halves of the rule for the whole service:
 //!
-//! - [`SessionGate::presents_a_usable_session`] — the question, asked of a request that
-//!   has reached no handler. [`crate::service`] asks it in both seams that see such a
+//! - [`SessionGate::presented_session`] — the question, asked of a request that has
+//!   reached no handler. [`crate::service`] asks it in both seams that see such a
 //!   request.
 //! - [`SessionGate`] as an [`ErasedOperation`] — the answer for a request the model DOES
 //!   name an operation for, served through
 //!   [`Service::override_operation`](smithy_server_runtime::Service::override_operation),
 //!   which the router consults before it deserializes or validates anything.
+//!
+//! The question has THREE answers, not two ([`PresentedSession`]): a gate that cannot
+//! reach the store cannot authenticate anything, and reporting such a request as
+//! authenticated would hand it on to be refused on its parameters instead — stating that
+//! the service read and judged a request it never authenticated.
 
 use smithy_server_runtime::{BoxFuture, ErasedOperation, OperationContext, Service};
 use std::sync::Arc;
 use std::time::SystemTime;
+
+/// What asking the gate about a request answered.
+///
+/// Three-valued because the question can fail to have an answer at all, which is not the
+/// same as answering "no session": whether a presented token names a sign-in is decided
+/// against this service's store, so with no store to reach, nothing about the token is
+/// known. Each value gets its own answer in [`crate::service`], and none of them is
+/// "authenticated".
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum PresentedSession {
+    /// The request presents a sign-in session this service still serves, so it is an
+    /// authenticated request and the rest of it is read.
+    Usable,
+    /// The request presents no usable session: no access-token header at all, or one
+    /// naming a session that is unknown, logged out or expired. All of them are
+    /// unauthenticated requests and the portal distinguishes none of them.
+    NoUsableSession,
+    /// The store this service resolves a token against could not be reached, so whether
+    /// the request presents a usable session is UNKNOWN. Answered as every handler answers
+    /// the same condition — the one modelled error that does not blame the caller
+    /// ([`crate::state::store_unavailable`]) — never by letting the request through as
+    /// though the check had passed.
+    StoreUnreachable,
+}
 
 /// Resolves the sign-in session a request presents, and serves the portal's one
 /// authentication refusal to a request that presents none.
@@ -50,50 +79,62 @@ impl<Eng: Send + Sync + 'static> SessionGate<Eng> {
         Self { engine }
     }
 
-    /// Whether `req` presents a sign-in session this service still serves at the moment
-    /// it is asked.
+    /// What sign-in session `req` presents, at the moment it is asked.
     ///
-    /// `false` covers every way a request can fail to present one — no access-token
-    /// header at all, or one naming a session that is unknown, logged out or expired —
-    /// because the portal authenticates a caller by that session and distinguishes none
-    /// of them. It is the same question
+    /// [`PresentedSession::NoUsableSession`] covers every way a request can fail to
+    /// present one — no access-token header at all, or one naming a session that is
+    /// unknown, logged out or expired — because the portal authenticates a caller by that
+    /// session and distinguishes none of them. That much is the same question
     /// [`crate::state::ComAmazonawsSsoSwbportalserviceState::signed_in`] answers for a
     /// handler, asked of a request that has not reached one — resolved against the same
     /// two sources, so the gate cannot refuse a token a handler would have served.
     ///
+    /// An absent credential is decided WITHOUT the store, because no store is needed to
+    /// see that a request presents nothing to authenticate; only a presented token has to
+    /// be resolved against one, and when there is none to reach the answer is
+    /// [`PresentedSession::StoreUnreachable`] rather than either verdict.
+    ///
     /// A pure READ: it writes nothing, so asking it cannot change what a later caller
     /// sees, and two identical requests get the identical answer.
-    pub(super) fn presents_a_usable_session(
+    pub(super) fn presented_session(
         &self,
         req: &aws_smithy_runtime_api::http::Request,
-    ) -> bool {
+    ) -> PresentedSession {
         let Some(token) = super::presented_access_token(req) else {
-            return false;
+            return PresentedSession::NoUsableSession;
         };
         let Some(state) = crate::state::service_state(&*self.engine) else {
             // UNREACHABLE with the engine the router mounts (see the note in
             // `ops/list_accounts.rs`): with no store to resolve the token against there
-            // is nothing to authenticate it with, so the gate claims nothing here and
-            // the framework's own answer stands.
-            return true;
+            // is nothing to authenticate it with, so the gate reports that — and the
+            // request is refused as every handler refuses the same condition — rather
+            // than reporting a session it never resolved.
+            return PresentedSession::StoreUnreachable;
         };
         let now = SystemTime::now();
         // Resolved before this store is locked, exactly as a handler does it.
         let federated = crate::state::federated_sign_in(&*self.engine, token, now);
         let state = state.lock();
-        state.signed_in(token, federated.as_ref(), now).is_some()
+        if state.signed_in(token, federated.as_ref(), now).is_some() {
+            PresentedSession::Usable
+        } else {
+            PresentedSession::NoUsableSession
+        }
     }
 }
 
 impl<Eng: Send + Sync + 'static> ErasedOperation for SessionGate<Eng> {
-    /// Answer the portal's one authentication refusal — `UnauthorizedException`, with the
-    /// status and `__type` its model carries and the gate's one message — in the envelope
-    /// of the protocol this request is served in, so it is the same response a handler's
-    /// own gate renders.
+    /// Answer the request [`crate::service`] found no usable session for, in the envelope
+    /// of the protocol it is served in, so it is the same response a handler's own gate
+    /// renders.
     ///
-    /// Reached only for a request [`crate::service`] has already found to present no
-    /// usable session, so there is nothing left of the request to read: the refusal
-    /// derives nothing from it.
+    /// Which refusal is the gate's own reading of the request, never a value of it: the
+    /// portal's one authentication refusal (`UnauthorizedException`, with the status and
+    /// `__type` its model carries and the gate's one message) for a request that presents
+    /// no usable session, and the no-fault refusal every handler gives for an unreachable
+    /// store ([`crate::state::store_unavailable_response`]) when the question had no
+    /// answer at all. Reached only for a request already found not to present a usable
+    /// session, so there is nothing left of the request to read.
     fn run<'r>(
         &'r self,
         svc: &'r dyn Service,
@@ -114,11 +155,26 @@ impl<Eng: Send + Sync + 'static> ErasedOperation for SessionGate<Eng> {
                     SystemTime::now(),
                 );
             }
-            crate::state::unauthorized_response(svc.definition().wire_protocol(req).protocol())
-                // Only if the protocol cannot serialize the error, which it cannot fail
-                // to do for a shape of this service's own model; the framework's own
-                // answer stands rather than an invented one.
-                .unwrap_or_else(|| svc.definition().routing_error_response(req))
+            let protocol = svc.definition().wire_protocol(req).protocol();
+            match self.presented_session(req) {
+                // Nothing resolved the presented token, so the refusal says what is true
+                // — the store could not be reached — instead of blaming the caller for a
+                // session that was never looked up.
+                PresentedSession::StoreUnreachable => {
+                    crate::state::store_unavailable_response(protocol)
+                }
+                // The request presents no usable session. `Usable` cannot arrive here
+                // (the seam asks before it serves this), and a request that became usable
+                // between the two reads is still answered the refusal this operation IS,
+                // never served as the operation it addressed.
+                PresentedSession::NoUsableSession | PresentedSession::Usable => {
+                    crate::state::unauthorized_response(protocol)
+                }
+            }
+            // Only if the protocol cannot serialize the error, which it cannot fail to do
+            // for a shape of this service's own model; the framework's own answer stands
+            // rather than an invented one.
+            .unwrap_or_else(|| svc.definition().routing_error_response(req))
         })
     }
 }

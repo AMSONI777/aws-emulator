@@ -168,11 +168,12 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
     ) -> Result<Self::Output, Self::Error> {
         let Some(state) = crate::state::service_state(&*self.engine) else {
             // UNREACHABLE with the engine the router mounts (see `ListAccounts` for the
-            // full note): answered rather than panicked, and the 429 is the only
-            // modelled error that does not blame the caller.
-            return Err(LogoutErrorModeled::TooManyRequestsException(TooManyRequestsException {
-                message: Some("the SSO portal store is unavailable".to_string()),
-            })
+            // full note): answered rather than panicked, with the one refusal this
+            // service words for an unreachable store
+            // (`crate::state::store_unavailable`).
+            return Err(LogoutErrorModeled::TooManyRequestsException(
+                crate::state::store_unavailable(),
+            )
             .into());
         };
 

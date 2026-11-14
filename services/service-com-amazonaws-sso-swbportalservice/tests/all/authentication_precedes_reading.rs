@@ -25,7 +25,9 @@
 //! pre-handler refusal is an absent required member, which `route_path_agreement.rs`
 //! and `portal_session.rs` pin).
 
-use super::portal_session::{body_json, body_text, error_code, error_message, roles_of, Portal};
+use super::portal_session::{
+    assert_refusal, body_json, body_text, envelope, error_code, roles_of, Portal,
+};
 use bytes::Bytes;
 use http::{Response, StatusCode};
 use service_com_amazonaws_sso_swbportalservice::state::{self, INVALID_SESSION_MESSAGE};
@@ -170,64 +172,16 @@ fn uri_of(route: &str, query: &str) -> String {
     format!("{route}{separator}{query}")
 }
 
-/// The whole caller-visible envelope of a response: what a client branches on, plus the
-/// body verbatim.
-fn envelope(response: &Response<Bytes>) -> (StatusCode, String, String, String) {
-    let header = |name: &str| {
-        response
-            .headers()
-            .get(name)
-            .and_then(|value| value.to_str().ok())
-            .unwrap_or_default()
-            .to_string()
-    };
-    (
-        response.status(),
-        header("content-type"),
-        header("x-amzn-errortype"),
-        body_text(response),
-    )
-}
-
-/// Assert one response is the gate's refusal and nothing more.
+/// Assert one response is the gate's refusal and nothing more: the portal's one
+/// authentication refusal, read through the shared envelope check, so nothing the request
+/// carried can have reached the body.
 fn assert_unauthenticated(case: &str, response: &Response<Bytes>) {
-    assert_eq!(
-        (
-            response.status(),
-            error_code(response),
-            error_message(response)
-        ),
-        (
-            StatusCode::UNAUTHORIZED,
-            "UnauthorizedException".to_string(),
-            INVALID_SESSION_MESSAGE.to_string()
-        ),
-        "case {case:?}: expected 401 UnauthorizedException {INVALID_SESSION_MESSAGE:?}, got \
-         {} {:?}",
-        response.status(),
-        body_text(response)
-    );
-    assert_eq!(
-        response
-            .headers()
-            .get("x-amzn-errortype")
-            .and_then(|value| value.to_str().ok()),
-        Some("UnauthorizedException"),
-        "case {case:?}: expected the error-type header, got {:?}",
-        response.headers().get("x-amzn-errortype")
-    );
-    // The refusal body is the envelope and nothing else: nothing the request carried
-    // reaches it, so nothing of the unreadable value can.
-    let body = body_json(response);
-    let members: Vec<String> = body
-        .as_object()
-        .map(|object| object.keys().cloned().collect())
-        .unwrap_or_default();
-    assert!(
-        members.len() == 2
-            && members.iter().any(|key| key == "__type")
-            && members.iter().any(|key| key == "message"),
-        "case {case:?}: the refusal body must carry only __type and message, got {members:?}"
+    assert_refusal(
+        case,
+        response,
+        StatusCode::UNAUTHORIZED,
+        "UnauthorizedException",
+        INVALID_SESSION_MESSAGE,
     );
 }
 
