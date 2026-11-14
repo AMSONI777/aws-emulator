@@ -13,8 +13,11 @@
 //! `GetAutomatedDiscoveryConfiguration` projects it) and the per-region
 //! findings-publication configuration
 //! (`PutFindingsPublicationConfiguration` writes it,
-//! `GetFindingsPublicationConfiguration` projects it). Nothing a handler answers
-//! with is computed from the request
+//! `GetFindingsPublicationConfiguration` projects it) and the per-region
+//! repository data classification results are stored in
+//! (`PutClassificationExportConfiguration` writes it,
+//! `GetClassificationExportConfiguration` projects it). Nothing a handler
+//! answers with is computed from the request
 //! alone: every member of every response is read back out of here.
 //!
 //! The member plane lives here too: the accounts `CreateMember` associates with
@@ -24,7 +27,7 @@
 use std::collections::BTreeMap;
 use std::time::SystemTime;
 
-use crate::ops::types::SeverityLevel;
+use crate::ops::types::{ClassificationExportConfiguration, S3Destination, SeverityLevel};
 
 /// Region used when a request carries no SigV4 credential scope to read one
 /// from (an unsigned in-process call), matching the emulator's default region.
@@ -333,6 +336,58 @@ impl Default for FindingsPublicationConfiguration {
     }
 }
 
+/// The S3 bucket one account's data classification results are stored in, in
+/// one region, and the encryption settings used when storing them there.
+///
+/// Every member of the modelled `S3Destination` is a field here: `bucketName`
+/// and `kmsKeyArn` are required of a destination, so a stored record always
+/// carries both, while `keyPrefix` and `expectedBucketOwner` are present only
+/// when the write named them.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ClassificationExportDestination {
+    /// The name of the bucket results are stored in.
+    pub bucket_name: String,
+    /// The ARN of the customer managed KMS key the results are encrypted with.
+    pub kms_key_arn: String,
+    /// The path prefix results are stored under, which is `None` when the
+    /// write named none.
+    pub key_prefix: Option<String>,
+    /// The account that owns the bucket, which is `None` when the write named
+    /// none.
+    pub expected_bucket_owner: Option<String>,
+}
+
+impl ClassificationExportDestination {
+    /// This destination, as a response reports it.
+    pub fn s3_destination_output(&self) -> S3Destination {
+        S3Destination {
+            bucket_name: self.bucket_name.clone(),
+            kms_key_arn: self.kms_key_arn.clone(),
+            key_prefix: self.key_prefix.clone(),
+            expected_bucket_owner: self.expected_bucket_owner.clone(),
+        }
+    }
+}
+
+/// The `configuration` a response reports for a region whose stored results
+/// repository is `destination`.
+///
+/// `ClassificationExportConfiguration` is always reported, because the response
+/// states where the account's results are stored; a region with no repository
+/// configured is reported as a configuration carrying no `s3Destination`, which
+/// is what "results are stored nowhere" looks like on the wire.
+/// `PutClassificationExportConfiguration` reports the configuration it wrote
+/// through this projection and `GetClassificationExportConfiguration` reports a
+/// stored one through it too, so the write and the read can never word one
+/// stored record differently.
+pub fn reported_classification_export_configuration(
+    destination: Option<&ClassificationExportDestination>,
+) -> ClassificationExportConfiguration {
+    ClassificationExportConfiguration {
+        s3_destination: destination.map(ClassificationExportDestination::s3_destination_output),
+    }
+}
+
 /// A stored custom data identifier.
 ///
 /// Every member of `GetCustomDataIdentifierResponse` and of
@@ -479,6 +534,14 @@ pub struct ComAmazonawsMacie2Macie2State {
     /// always a key of [`Self::sessions`], for the same reason as
     /// [`Self::automated_discovery`].
     pub findings_publication: BTreeMap<String, FindingsPublicationConfiguration>,
+    /// Where each region's data classification results are stored
+    /// (`PutClassificationExportConfiguration` writes it), which
+    /// `GetClassificationExportConfiguration` reports. A region is absent here
+    /// while no repository is configured for it — which is also what a write
+    /// naming no `s3Destination` leaves behind. A key of this map is always a
+    /// key of [`Self::sessions`], for the same reason as
+    /// [`Self::automated_discovery`].
+    pub classification_export: BTreeMap<String, ClassificationExportDestination>,
     /// Custom data identifiers keyed by id, so an id-addressed read is
     /// O(log n) and an enumeration is in a stable total order.
     pub custom_data_identifiers: BTreeMap<String, CustomDataIdentifier>,
@@ -526,6 +589,15 @@ impl ComAmazonawsMacie2Macie2State {
         self.findings_publication.get(region)
     }
 
+    /// Where `region`'s data classification results are stored, or `None` when
+    /// no repository is configured for it.
+    pub fn classification_export_destination(
+        &self,
+        region: &str,
+    ) -> Option<&ClassificationExportDestination> {
+        self.classification_export.get(region)
+    }
+
     /// The custom data identifier `id` of `region`, soft deleted or not.
     /// `None` when no identifier of that region carries the id, which is what
     /// an id from another region answers too.
@@ -567,6 +639,7 @@ impl ComAmazonawsMacie2Macie2State {
         self.sessions.remove(region);
         self.automated_discovery.remove(region);
         self.findings_publication.remove(region);
+        self.classification_export.remove(region);
         self.custom_data_identifiers
             .retain(|_, identifier| identifier.region != region);
         self.members.retain(|_, member| member.region != region);
