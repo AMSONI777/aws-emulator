@@ -617,7 +617,7 @@ pub const MANAGED_RULE_GROUP_CATALOGUE: &[ManagedRuleGroupDescriptor] = &[
         "Contains rules that block request patterns associated with exploiting \
          vulnerabilities specific to POSIX/POSIX-like OS, including LFI attacks. \
          This can help prevent attacks that expose file contents or execute code \
-         for which the attacker should not have had access.",
+         for which access should not been allowed.",
         "POSIX operating system",
         "Blocks request patterns associated with the exploitation of \
          vulnerabilities specific to POSIX and POSIX-like operating systems.",
@@ -642,10 +642,9 @@ pub const MANAGED_RULE_GROUP_CATALOGUE: &[ManagedRuleGroupDescriptor] = &[
         "php-app",
         100,
         "Contains rules that block request patterns associated with exploiting \
-         vulnerabilities specific to the use of the PHP programming language, \
-         including injection of unsafe PHP functions. This can help prevent \
-         exploits that allow an attacker to remotely execute code or commands for \
-         which they are not authorized.",
+         vulnerabilities specific to the use of the PHP, including injection of \
+         unsafe PHP functions. This can help prevent exploits that allow an \
+         attacker to remotely execute code or commands.",
         "PHP application",
         "Blocks request patterns associated with the exploitation of \
          vulnerabilities specific to the use of the PHP programming language, \
@@ -681,10 +680,10 @@ pub const MANAGED_RULE_GROUP_CATALOGUE: &[ManagedRuleGroupDescriptor] = &[
         "anonymous-ip-list",
         50,
         "This group contains rules that allow you to block requests from services \
-         that permit the obfuscation of viewer identity. This can include \
-         requests originating from VPNs, proxies, Tor nodes, and hosting \
-         providers. This is useful if you want to filter out viewers that may be \
-         trying to hide their identity from your application.",
+         that allow obfuscation of viewer identity. This can include request \
+         originating from VPN, proxies, Tor nodes, and hosting providers. This is \
+         useful if you want to filter out viewers that may be trying to hide \
+         their identity from your application.",
         "Anonymous IP list",
         "Blocks requests from services that permit the obfuscation of viewer \
          identity, such as VPNs, proxies, Tor nodes and hosting providers.",

@@ -33,6 +33,8 @@
 //! [`crate::web_acl_lifecycle`], so what these tests observe is what an SDK
 //! observes.
 
+use std::collections::BTreeMap;
+
 use serde_json::{json, Value};
 use service_com_amazonaws_wafv2_awswaf_20190729::state::MANAGED_RULE_GROUP_CATALOGUE;
 
@@ -43,10 +45,16 @@ use crate::web_acl_lifecycle::Waf;
 ///
 /// Source: WAF's published managed-rule-group catalogue, as a recorded
 /// `ListAvailableManagedRuleGroups` response carries it in
-/// `ManagedRuleGroupSummary$Description`. The first two rows are the sentences the
-/// issue report quotes verbatim; the rest are groups it did not quote, so the table
-/// checks the catalogue against the publisher rather than against the one entry an
-/// example cited.
+/// `ManagedRuleGroupSummary$Description`. Some rows are sentences an issue report
+/// quotes verbatim; the rest are groups no report quoted, so the table checks the
+/// catalogue against the publisher rather than against the one entry an example
+/// cited.
+///
+/// The rows span the forms the publisher's own text takes: a sentence that opens
+/// "Contains rules…" and one that opens "This group contains rules…", a one-sentence
+/// entry and multi-sentence ones, and the PAIR of near-twin OS-family groups whose
+/// sentences differ only in their tails — the publisher states one text per entry,
+/// so neither is a template filled in from the group's name.
 const PUBLISHED_DESCRIPTIONS: &[(&str, &str)] = &[
     (
         "AWSManagedRulesCommonRuleSet",
@@ -79,7 +87,41 @@ const PUBLISHED_DESCRIPTIONS: &[(&str, &str)] = &[
          patterns associated with the exploitation of vulnerabilities specific to \
          WordPress sites.",
     ),
+    (
+        "AWSManagedRulesLinuxRuleSet",
+        "Contains rules that block request patterns associated with exploitation \
+         of vulnerabilities specific to Linux, including LFI attacks. This can \
+         help prevent attacks that expose file contents or execute code for which \
+         the attacker should not have had access.",
+    ),
+    (
+        "AWSManagedRulesUnixRuleSet",
+        "Contains rules that block request patterns associated with exploiting \
+         vulnerabilities specific to POSIX/POSIX-like OS, including LFI attacks. \
+         This can help prevent attacks that expose file contents or execute code \
+         for which access should not been allowed.",
+    ),
+    (
+        "AWSManagedRulesPHPRuleSet",
+        "Contains rules that block request patterns associated with exploiting \
+         vulnerabilities specific to the use of the PHP, including injection of \
+         unsafe PHP functions. This can help prevent exploits that allow an \
+         attacker to remotely execute code or commands.",
+    ),
+    (
+        "AWSManagedRulesAnonymousIpList",
+        "This group contains rules that allow you to block requests from services \
+         that allow obfuscation of viewer identity. This can include request \
+         originating from VPN, proxies, Tor nodes, and hosting providers. This is \
+         useful if you want to filter out viewers that may be trying to hide \
+         their identity from your application.",
+    ),
 ];
+
+/// The two near-twin OS-family groups: their published sentences share an opening
+/// and differ in the tail, which is what a per-group published text looks like and a
+/// generated one does not.
+const NEAR_TWIN_GROUPS: (&str, &str) = ("AWSManagedRulesLinuxRuleSet", "AWSManagedRulesUnixRuleSet");
 
 /// The versions WAF publishes of the core rule set, NEWEST first.
 ///
@@ -133,6 +175,50 @@ async fn summaries(waf: &Waf, scope: &str) -> Vec<Value> {
         .as_array()
         .cloned()
         .unwrap_or_default()
+}
+
+/// Every group's published description, gathered by PAGING the catalogue at
+/// `limit` groups a page: the whole list a caller sees whichever page size it asks
+/// for.
+async fn paged_descriptions(waf: &Waf, scope: &str, limit: Option<usize>) -> BTreeMap<String, String> {
+    let mut gathered = BTreeMap::new();
+    let mut marker: Option<String> = None;
+    let mut terminated = false;
+    // One page per catalogued group, plus the empty page that ends a paginator's
+    // loop, is the most a caller can need; running past that is a paginator that
+    // never ends, which the assertion below reports rather than hiding.
+    for _ in 0..=MANAGED_RULE_GROUP_CATALOGUE.len() + 1 {
+        let mut request = json!({ "Scope": scope });
+        if let Some(limit) = limit {
+            request["Limit"] = json!(limit);
+        }
+        if let Some(marker) = &marker {
+            request["NextMarker"] = json!(marker);
+        }
+        let page = waf.ok("ListAvailableManagedRuleGroups", request).await;
+        for summary in page["ManagedRuleGroups"].as_array().unwrap_or(&vec![]) {
+            gathered.insert(
+                summary["Name"].as_str().unwrap_or_default().to_string(),
+                summary["Description"]
+                    .as_str()
+                    .unwrap_or_default()
+                    .to_string(),
+            );
+        }
+        match page["NextMarker"].as_str() {
+            Some(next) => marker = Some(next.to_string()),
+            None => {
+                terminated = true;
+                break;
+            }
+        }
+    }
+    assert!(
+        terminated,
+        "case {scope:?} at {limit:?} a page: paging must end on a page with no \
+         marker, got {gathered:?}"
+    );
+    gathered
 }
 
 /// The version names a `ListAvailableManagedRuleGroupVersions` response lists, in
@@ -204,6 +290,59 @@ async fn every_group_lists_the_description_its_publisher_states() {
                 json!(expected),
                 "case {case:?}: expected the published description {expected:?}, got \
                  {summary}"
+            );
+        }
+    }
+}
+
+/// Each group's published sentence travels with the GROUP, not with the page it
+/// arrives on: the catalogue paged one group at a time, three at a time and in a
+/// single full page reports the same text per group, byte for byte, in either
+/// scope. And the two near-twin OS-family groups keep their distinct published
+/// tails, so what is served is the publisher's text per entry rather than one
+/// sentence composed from the entry's name.
+///
+/// The rows differ along page size and scope — the dimensions a caller can vary on
+/// a pure catalogue read — and the expectations are the literal published sentences
+/// of [`PUBLISHED_DESCRIPTIONS`], which include groups no report quoted.
+#[tokio::test]
+async fn the_published_description_follows_the_group_through_every_page_size() {
+    let waf = Waf::new();
+    for scope in ["REGIONAL", "CLOUDFRONT"] {
+        let whole = paged_descriptions(&waf, scope, None).await;
+        assert_eq!(
+            whole.len(),
+            MANAGED_RULE_GROUP_CATALOGUE.len(),
+            "case {scope:?}: paging must reach every published group, got {whole:?}"
+        );
+
+        for limit in [1, 3, MANAGED_RULE_GROUP_CATALOGUE.len()] {
+            let paged = paged_descriptions(&waf, scope, Some(limit)).await;
+            assert_eq!(
+                paged, whole,
+                "case {scope:?} at {limit} a page: the published descriptions must \
+                 not depend on the page size, got {paged:?}"
+            );
+
+            for (group, published) in PUBLISHED_DESCRIPTIONS {
+                let case = format!("{scope}/{group} at {limit} a page");
+                let served = paged.get(*group);
+                assert_eq!(
+                    served.map(String::as_str),
+                    Some(*published),
+                    "case {case:?}: expected the publisher's sentence {published:?}, \
+                     got {served:?}"
+                );
+            }
+
+            let (linux, posix) = NEAR_TWIN_GROUPS;
+            assert_ne!(
+                paged.get(linux),
+                paged.get(posix),
+                "case {scope:?} at {limit} a page: each group carries its own \
+                 published sentence, got {:?} and {:?}",
+                paged.get(linux),
+                paged.get(posix)
             );
         }
     }

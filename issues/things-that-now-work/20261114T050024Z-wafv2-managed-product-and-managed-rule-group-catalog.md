@@ -59,3 +59,29 @@ Model evidence (services/service-com-amazonaws-wafv2-awswaf-20190729/smithy-mode
 2. Cause 1: POST the WAFv2 JSON-1.1 operation AWSWAF_20190729.DescribeAllManagedProducts with {"Scope":"REGIONAL"} (and again with {"Scope":"CLOUDFRONT"}). Observe 200 with a ManagedProducts list containing only VendorName 'AWS' entries, no ProductLink member on any entry, and SnsTopicArn values in account 000000000000 — AWS returns a longer list that also contains Amazon Web Services Marketplace vendor products with GUID ProductIds, ProductLink URLs under aws.amazon.com/marketplace/pp/, and SnsTopicArns in the vendors' own accounts.
 3. Cause 2: POST AWSWAF_20190729.ListAvailableManagedRuleGroups with {"Scope":"REGIONAL"} (and with {"Scope":"CLOUDFRONT"}). Observe 200 and compare ManagedRuleGroups[].Description for Name in {AWSManagedRulesUnixRuleSet, AWSManagedRulesPHPRuleSet, AWSManagedRulesAnonymousIpList, AWSManagedRulesACFPRuleSet, AWSManagedRulesATPRuleSet, AWSManagedRulesAntiDDoSRuleSet} against AWS's published text — each is paraphrased.
 4. Or replay the wire corpus: fixtures wafv2-catalog-describe-all-managed-products (task#1) and wafv2-catalog-list-available-managed-rule-groups (task#1), plus their -cloudfront variants, wafv2-managed-rule-group-and-marketplace-product-discovery (task#1) and wafv2-webacl-full-lifecycle-with-managed-rules (task#1).
+
+## Resolution
+
+Cause 2 — FIXED for the three entries whose publisher text is stated here, DECLINED for three
+whose text no available source states. A catalogue entry's `Description` is the sentence the
+group's publisher states for that entry, carried per group and reported verbatim; the catalogue
+in `services/service-com-amazonaws-wafv2-awswaf-20190729/src/state/catalog.rs` now holds the
+publisher's own wording for `AWSManagedRulesUnixRuleSet`, `AWSManagedRulesPHPRuleSet` and
+`AWSManagedRulesAnonymousIpList`, and those three replay keys pass. The near-twin OS-family pair
+(Linux and POSIX) shows the text is per entry rather than composed from the entry's name: the two
+differ only in their tails, and both are pinned. For `AWSManagedRulesACFPRuleSet`,
+`AWSManagedRulesATPRuleSet` and `AWSManagedRulesAntiDDoSRuleSet` the publisher's exact wording is
+DECLINED: neither the Smithy model nor any documentation available here states it, the replay
+withholds the recorded text, and each remains a one-line data change in that catalogue should the
+wording become available.
+
+Cause 1 — DECLINED. `DescribeAllManagedProducts` projects the managed-product catalogue, and the
+half this emulator can publish — the Amazon Web Services Managed Rules rule sets — already follows
+the model: `ProductLink` is "for Amazon Web Services Marketplace managed rule groups only", so an
+Amazon Web Services-vendor product carries none, and the notification topic is minted in this
+emulator's single account like every other ARN the service answers. The missing half is a snapshot
+of third-party Marketplace seller inventory: each listing's seller-assigned product identifier,
+its Marketplace listing URL and a notification topic in the seller's own AWS account. No rule of
+the service produces any of those values, no model member or documentation states them, and the
+emulator owns one account, so the only way to serve the recorded membership and ordering would be
+to copy the recording or invent seller identifiers — neither of which is an implementation.

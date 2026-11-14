@@ -3968,3 +3968,7 @@ mod cloudformation_provisions_redshift_snapshot_copy_grants;
 // comment. The rule it repeats is in the header at the head of this file.)
 // (A fragment of this file's own header that a landing appended here, an ordinary comment
 // for the same reason the lines above record: a `//!` line past the first item is `E0753`.)
+// header that a landing appended here: an inner doc comment is legal only before the first
+// item, so it is an ordinary comment.)
+// this file and for every service crate's `tests/all.rs`. (The same header fragment again,
+// as an ordinary comment for the reason the lines above record.)
