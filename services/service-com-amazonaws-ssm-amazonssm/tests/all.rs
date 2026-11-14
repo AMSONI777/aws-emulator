@@ -73,6 +73,8 @@ mod managed_node_filter_validation;
 mod managed_node_information;
 #[path = "all/node_inventory.rs"]
 mod node_inventory;
+#[path = "all/ops_data_summary.rs"]
+mod ops_data_summary;
 #[path = "all/ops_item_deletion.rs"]
 mod ops_item_deletion;
 #[path = "all/ops_item_events.rs"]

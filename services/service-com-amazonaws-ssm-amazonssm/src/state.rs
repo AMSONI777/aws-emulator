@@ -218,6 +218,11 @@ pub mod ops_items;
 /// it reports them in.
 pub mod ops_item_queries;
 
+/// The operations metadata (OpsData) this service reports a summary of: the data types it
+/// publishes, the attributes each one carries, and the projection of the resources it holds
+/// into the items a summary filters, counts and pages.
+pub mod ops_data;
+
 /// Just-in-time node access: whether an account has the workflow at all, the access
 /// requests it holds and the credentials an approved one is exchanged for.
 pub mod just_in_time_node_access;
