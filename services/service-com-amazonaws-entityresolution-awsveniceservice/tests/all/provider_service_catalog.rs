@@ -208,15 +208,17 @@ async fn every_listed_provider_service_round_trips_through_get() {
         }
 
         // `providerEndpointConfiguration` is modelled @required: a union whose only
-        // member carries the Data Exchange identifiers of the provider service. Each
-        // of the four is a Data Exchange id, and the four are distinct.
+        // member carries the Data Exchange identifiers of the provider service. The
+        // data set, revision and asset are Data Exchange ids; `listingId` is "the
+        // listing ID on Data Exchange", which carries the fixed listing prefix; and
+        // the four are distinct.
         let marketplace = member(
             &case,
             member(&case, &read.body, "providerEndpointConfiguration"),
             "marketplaceConfiguration",
         );
         let mut ids = BTreeSet::new();
-        for id_member in ["dataSetId", "revisionId", "assetId", "listingId"] {
+        for id_member in ["dataSetId", "revisionId", "assetId"] {
             let id = string_member(marketplace, id_member);
             assert!(
                 id.len() == 32
@@ -228,6 +230,13 @@ async fn every_listed_provider_service_round_trips_through_get() {
             );
             ids.insert(id);
         }
+        let listed_listing_id = string_member(marketplace, "listingId");
+        assert!(
+            crate::provider_definition_documents::is_listing_id(&listed_listing_id),
+            "case {case:?}: listingId must be a Data Exchange listing id, got \
+             {listed_listing_id:?}"
+        );
+        ids.insert(listed_listing_id);
         assert_eq!(
             ids.len(),
             4,

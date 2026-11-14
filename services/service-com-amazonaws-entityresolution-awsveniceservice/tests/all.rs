@@ -43,6 +43,8 @@ mod matching_workflow_update;
 mod policy_statements;
 #[path = "all/policy_token_conflict.rs"]
 mod policy_token_conflict;
+#[path = "all/provider_definition_documents.rs"]
+mod provider_definition_documents;
 #[path = "all/provider_service_catalog.rs"]
 mod provider_service_catalog;
 #[path = "all/resource_policy.rs"]
