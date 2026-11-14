@@ -257,7 +257,7 @@ pub(crate) fn loopback_port(case: &str, authority: &str) -> u16 {
 
 /// Dial one announced endpoint. The target is the loopback literal: a case reaches this
 /// emulator's own listener on this machine and nothing else.
-async fn dial(case: &str, authority: &str) -> std::io::Result<TcpStream> {
+pub(crate) async fn dial(case: &str, authority: &str) -> std::io::Result<TcpStream> {
     TcpStream::connect(("127.0.0.1", loopback_port(case, authority))).await
 }
 

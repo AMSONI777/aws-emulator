@@ -3014,7 +3014,6 @@ mod cloudformation_cognito_identity_role_attachment_refusal;
 // leaving a note here. (These five lines are another fragment of this file's own header
 // that a merge of two appended tails landed down here; they are ordinary comments
 // because an inner doc comment may only appear before an item.)
-// A suite left at the top level of `tests/` fails the build. Declare each suite exactly
 // leaving a note here. (Another fragment of this file's own header that a merge of two
 // appended tails landed down here: ordinary comments, because an inner doc comment may
 // only appear before an item.)
@@ -3024,9 +3023,6 @@ mod cloudformation_cognito_identity_role_attachment_refusal;
 // leaving a note here. (Plain comments: see the note above on `//!` in this tail.)
 // leaving a note here. (Plain comments: a `//!` line past the first item is `E0753`.)
 // leaving a note here. (Ordinary comments: appended after items, `//!` is `E0753`.)
-// leaving a note here. (These five lines are another fragment of this file's own header
-// that a merge of two appended tails landed down here; they are ordinary comments
-// because an inner doc comment may only appear before an item.)
 // it was appended here as well while two branches were landing at the same time.)
 // (`redshift_health_alarms_evaluate` is declared ONCE, further up this tail: a module may
 // be declared only once, and two branches landing at once appended it twice.)
@@ -3585,3 +3581,8 @@ mod cloudformation_provisions_appsync_resources;
 // is only legal before the first item.)
 // doc comment is only legal before the first item, so a `//!` line in this appended tail
 // annotates nothing and fails the lint this workspace denies.)
+// (A fragment of this file's own header appended here by a landing: an inner doc comment is
+// legal only before the first item, so this stands as an ordinary comment.)
+// (One more fragment of that same header landed here as an inner doc comment, which is
+// legal only before the first item; the rule it states stands in the module doc at the HEAD
+// of this file.)

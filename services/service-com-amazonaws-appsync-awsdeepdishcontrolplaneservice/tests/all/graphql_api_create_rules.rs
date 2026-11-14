@@ -22,6 +22,7 @@
 
 use serde_json::{json, Value};
 
+use crate::event_api_data_plane::loopback_port;
 use crate::graphql_api_lifecycle::{
     auth_config, call, create_api, merge_members, router, AUTH_TYPES, REGION,
 };
@@ -662,12 +663,13 @@ async fn dns_records_and_uris_name_the_same_hosts() {
         let dns = created["dns"].clone();
         for endpoint in ["GRAPHQL", "REALTIME"] {
             let published = dns[endpoint].as_str().unwrap_or_default().to_string();
-            let (host, port) = published
-                .rsplit_once(':')
-                .map(|(host, port)| (host.to_string(), port.to_string()))
-                .unwrap_or_default();
+            // The reading of an announced address is the Event API plane suite's
+            // (`loopback_port`): the host has to be the one the core binds a resource
+            // listener on, so a value naming any other host — an AWS hostname among them —
+            // fails here rather than passing as "some host:port".
+            let port = loopback_port(&format!("{case} {endpoint}"), &published);
             assert!(
-                !host.is_empty() && port.parse::<u16>().is_ok_and(|port| port > 0),
+                port > 0,
                 "case {case}: dns.{endpoint} must be the host:port the endpoint is served \
                  on, got {published:?}"
             );
