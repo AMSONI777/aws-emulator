@@ -346,12 +346,13 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         if !live_members.is_empty() && !multi_az_cluster {
             return Err(DeleteDBClusterErrorModeled::InvalidDBClusterStateFault(
                 InvalidDBClusterStateFault {
-                    message: Some(format!(
-                        "DB cluster {identifier} can't be deleted because it still has {} DB \
-                         instance(s): {}. Delete them first",
-                        live_members.len(),
-                        live_members.join(", ")
-                    )),
+                    // Amazon RDS states only WHAT blocks the delete — the cluster still
+                    // holds DB instances that are not themselves being deleted, the
+                    // predicate `live_members` is computed from — and names neither the
+                    // cluster nor its members, so the member identifiers stay withheld.
+                    message: Some(
+                        crate::state::CLUSTER_STILL_HAS_MEMBERS_MESSAGE.to_string(),
+                    ),
                 },
             )
             .into());

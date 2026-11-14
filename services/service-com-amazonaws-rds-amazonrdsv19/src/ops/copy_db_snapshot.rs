@@ -320,7 +320,9 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         {
             return Err(CopyDBSnapshotErrorModeled::DBSnapshotAlreadyExistsFault(
                 DBSnapshotAlreadyExistsFault {
-                    message: Some(format!("DB snapshot already exists: {target_key}")),
+                    message: Some(crate::state::db_snapshot_already_exists_message(
+                        &target_key,
+                    )),
                 },
             )
             .into());

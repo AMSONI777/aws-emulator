@@ -423,10 +423,17 @@ async fn an_aurora_cluster_that_still_has_db_instances_is_refused_until_they_are
         "InvalidDBClusterStateFault",
     );
     let message = text(&refused, "Message");
+    // The refusal states only the precondition — the cluster still holds DB instances that
+    // are not themselves being deleted — and withholds the member identifiers.
+    assert_eq!(
+        message, "Cluster cannot be deleted, it still contains DB instances in non-deleting state.",
+        "expected the fixed sentence for a cluster that still contains members, got {message:?}"
+    );
     for member in ["emu-dc-writer", "emu-dc-reader"] {
         assert!(
-            message.contains(member),
-            "the refusal must name the member {member} holding the cluster, got {message:?}"
+            !message.contains(member),
+            "the refusal must not disclose the member {member} holding the cluster, got \
+             {message:?}"
         );
     }
     let untouched = reported_status(&router, "emu-dc-members").await;

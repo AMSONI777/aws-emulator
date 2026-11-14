@@ -41,6 +41,21 @@ pub fn is_multi_tenant_engine(engine: &str) -> bool {
     engine.to_ascii_lowercase().ends_with("-cdb")
 }
 
+/// What a request addressed at a TENANT DATABASE of a DB instance that does not use the
+/// multi-tenant configuration is refused with.
+///
+/// Tenant databases "only appl[y] to RDS for Oracle container database (CDB) engines"
+/// ([`is_multi_tenant_engine`]), so a single-tenant instance holds none at all and the
+/// `TenantDBName` the request carried resolves nothing in it. The sentence is the one the
+/// model publishes for that outcome — `TenantDatabaseNotFoundFault`: "The specified tenant
+/// database wasn't found in the DB instance."
+/// (`smithy_query(query="shape",shape="TenantDatabaseNotFoundFault")`) — so the refusal
+/// reports WHAT the request could not resolve rather than explaining the instance's
+/// architecture. It has no variable part: neither the instance, nor the engine it runs, nor
+/// the tenant name the request carried is in it.
+pub const TENANT_DATABASE_NOT_FOUND_IN_INSTANCE: &str =
+    "The specified tenant database wasn't found in the DB instance.";
+
 /// The second half of a tenant database's store key: the DB instance it lives in and its
 /// own name, so one region's tenant databases are ordered by instance and then by name and
 /// a scan of one instance's tenants is an ordered range.

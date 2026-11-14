@@ -184,21 +184,33 @@ pub fn check_tags_to_write(tags: &[Tag]) -> Result<(), String> {
         if key.is_empty() {
             return Err("Tags.Key is the required name of a tag: it cannot be empty".to_string());
         }
-        check_tag_prefix("Tags.Key", key)?;
+        check_tag_prefix(TAG_KEYS, key)?;
         if let Some(value) = &tag.value {
-            check_tag_prefix("Tags.Value", value)?;
+            check_tag_prefix(TAG_VALUES, value)?;
         }
     }
     Ok(())
 }
 
-/// Refuse a tag key or value carrying one of [`RESERVED_TAG_PREFIXES`], naming the member
-/// and the prefix it broke.
+/// How [`check_tag_prefix`] names the member a reserved prefix was found on: `Tag$Key`.
+const TAG_KEYS: &str = "Tag keys";
+
+/// How [`check_tag_prefix`] names the other one: `Tag$Value`, which documents the same two
+/// reserved prefixes.
+const TAG_VALUES: &str = "Tag values";
+
+/// Refuse a tag key or value carrying one of [`RESERVED_TAG_PREFIXES`].
+///
+/// Amazon RDS words it as one sentence about the member KIND — keys or values, in the plural
+/// and in prose rather than as the modelled member name — and the reserved prefix the
+/// request broke, DOUBLE-quoted and with the colon it ends in, followed by a terminal
+/// period. The offending key or value itself is NOT in it, so nothing of the request is
+/// substituted beyond the prefix it carried.
 fn check_tag_prefix(member: &str, value: &str) -> Result<(), String> {
     for prefix in RESERVED_TAG_PREFIXES {
         if value.starts_with(prefix) {
             return Err(format!(
-                "{member} '{value}' is prefixed with '{prefix}', which Amazon RDS reserves"
+                "{member} cannot start with the reserved prefix \"{prefix}\"."
             ));
         }
     }

@@ -309,18 +309,20 @@ pub fn user_auth_config_to_info(entries: Vec<UserAuthConfig>) -> Vec<UserAuthCon
 }
 
 /// The message a `DBProxyAlreadyExistsFault` carries for a name the region already holds a
-/// proxy under. The sentence is this service's chosen form, carried unchanged from the
-/// create that first answered the fault: it states that a proxy of the requested name
-/// exists, which is what the fault reports ("The specified proxy name must be unique for
-/// all proxies owned by your Amazon Web Services account in the specified Amazon Web
-/// Services Region").
+/// proxy under: the fault reports "The specified proxy name must be unique for all proxies
+/// owned by your Amazon Web Services account in the specified Amazon Web Services Region".
+///
+/// Amazon RDS words it as a statement about the proxy that exists, naming the resource type
+/// as the API spells it (`DBProxy`) with the requested name in SINGLE QUOTES and no terminal
+/// period — the same quoting its not-found sentence uses
+/// ([`db_proxy_not_found_message`]), which is part of the text a caller matches on.
 ///
 /// It lives here rather than in one handler because the create that mints a proxy under a
 /// name and the modification that renames one onto a name answer the same one fault, so
 /// neither can drift from the other. `named` is the value the REQUEST carried, which is the
 /// spelling a proxy is stored under too (`DBProxyName` is not folded).
 pub fn db_proxy_already_exists_message(named: &str) -> String {
-    format!("A DB proxy named {named} already exists")
+    format!("The DBProxy '{named}' already exists")
 }
 
 /// The sentence `RegisterDBProxyTargets` and `DeregisterDBProxyTargets` refuse a request
@@ -359,14 +361,16 @@ pub const DB_PROXY_TARGET_ALREADY_REGISTERED_MESSAGE: &str =
 /// "Currently, this name must be `default`" — each proxy has exactly one target group and
 /// the service names it that, so any other name names no target group of this proxy, which
 /// is what `DBProxyTargetGroupNotFoundFault` reports. `Err` carries the message.
-pub fn check_target_group_name(proxy_name: &str, requested: Option<&str>) -> Result<(), String> {
+///
+/// The RDS proxy API words its not-found refusals as `Requested resource not found - ` plus
+/// the resource TYPE and the identifier the request carried, separated by a colon: nothing
+/// of the store is in it, and the proxy the group was looked for under is not named — the
+/// name the caller has to change is the only variable part.
+pub fn check_target_group_name(requested: Option<&str>) -> Result<(), String> {
     match requested {
         None => Ok(()),
         Some(name) if name == DEFAULT_DB_PROXY_TARGET_GROUP => Ok(()),
-        Some(name) => Err(format!(
-            "DBProxyTargetGroup {name} not found for DB proxy {proxy_name}: a proxy has one \
-             target group, named {DEFAULT_DB_PROXY_TARGET_GROUP}"
-        )),
+        Some(name) => Err(format!("Requested resource not found - TargetGroup: {name}")),
     }
 }
 

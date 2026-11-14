@@ -3433,3 +3433,5 @@ mod chime_deleted_meeting_tagging;
 // reason the block above records.)
 // leaving a note here. (Line comments, for the reason the span above records: an inner
 // doc comment past the first item is `E0753` and compiles no suite of this target.)
+// comment may only appear before an item.)
+// doc comment may only appear before an item, so a `//!` line in this appended tail is

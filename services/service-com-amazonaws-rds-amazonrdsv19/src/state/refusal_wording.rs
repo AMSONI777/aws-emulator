@@ -159,6 +159,21 @@ pub const DELETION_PROTECTED_CLUSTER: &str = "Cluster";
 /// How [`deletion_protection_refusal_message`] names a global cluster.
 pub const DELETION_PROTECTED_GLOBAL_CLUSTER: &str = "Global Cluster";
 
+/// What a delete of a DB cluster that still holds member DB instances is refused with.
+///
+/// An Aurora DB cluster's DB instances are deleted one by one (`DeleteDBInstance`) before
+/// the cluster can go, so a delete that would leave members behind is refused. Amazon RDS
+/// states only the precondition — the cluster still contains DB instances that are not
+/// themselves being deleted, which is the predicate the refusal is decided by — and names
+/// NEITHER the cluster nor the instances that block it, so this is a constant rather than a
+/// `format!` over the request and the store: the member identifiers are not disclosed, and a
+/// caller matching the sentence reads what it has to do.
+///
+/// One wording for every front door of this model that deletes a cluster, so none of them
+/// can drift from the others.
+pub const CLUSTER_STILL_HAS_MEMBERS_MESSAGE: &str =
+    "Cluster cannot be deleted, it still contains DB instances in non-deleting state.";
+
 /// What a delete that names BOTH of its final-snapshot members is refused with.
 ///
 /// Specifying `FinalDBSnapshotIdentifier` "and also skip the creation of a final DB
@@ -180,6 +195,33 @@ pub const ONLY_ONE_FINAL_SNAPSHOT_MEMBER: &str =
 pub const FORCE_FAILOVER_REQUIRES_MULTI_AZ_MESSAGE: &str =
     "ForceFailover cannot be specified since the instance is not configured for either \
      MultiAZ or High Availability";
+
+/// Refuse a `BackupRetentionPeriod` outside the range the addressed resource accepts,
+/// whichever operation carries the member: the creates, the modifications, the restores and
+/// the promotion hold ONE rule, so none of them can drift from the others. `Err` carries the
+/// sentence; `accepted` is the range the resource publishes — a DB cluster's
+/// [`CLUSTER_BACKUP_RETENTION_RANGE`] ("Must be a value from 1 to 35") or a DB instance's
+/// [`BACKUP_RETENTION_RANGE`] ("Must be a value from 0 to 35").
+///
+/// Amazon RDS words it as two sentences: the value the request carried, reported as the
+/// period that is not valid, and then the bounds the engine holds the period to. The member
+/// name is NOT in it — the sentence names the setting in prose ("backup retention period")
+/// — and a caller parses the limits a period has to satisfy out of the second sentence,
+/// which is why the bounds are interpolated from the range rather than written into the text.
+pub fn check_backup_retention_period(
+    period: i32,
+    accepted: &std::ops::RangeInclusive<i32>,
+) -> Result<(), String> {
+    if accepted.contains(&period) {
+        return Ok(());
+    }
+    Err(format!(
+        "Invalid backup retention period: {period}. Retention period must be between {} and \
+         {}.",
+        accepted.start(),
+        accepted.end()
+    ))
+}
 
 /// What a request naming an `EngineMode` the resolved engine VERSION does not run is
 /// refused with.

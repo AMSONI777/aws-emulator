@@ -203,14 +203,11 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         // `BackupRetentionPeriod`: "Must be a value from 0 to 35", the one range every DB
         // instance front door of this service holds the member to.
         if let Some(period) = input.backup_retention_period {
-            if !crate::state::BACKUP_RETENTION_RANGE.contains(&period) {
-                return Err(PromoteReadReplicaError::invalid_parameter_value(format!(
-                    "invalid value {period} for BackupRetentionPeriod: must be a value from {} \
-                     to {}",
-                    crate::state::BACKUP_RETENTION_RANGE.start(),
-                    crate::state::BACKUP_RETENTION_RANGE.end()
-                )));
-            }
+            crate::state::check_backup_retention_period(
+                period,
+                &crate::state::BACKUP_RETENTION_RANGE,
+            )
+            .map_err(PromoteReadReplicaError::invalid_parameter_value)?;
         }
         // `PreferredBackupWindow` is free-form text this call STORES on the instance, so it
         // is bounded here exactly as every other stored free-form member of this service is.

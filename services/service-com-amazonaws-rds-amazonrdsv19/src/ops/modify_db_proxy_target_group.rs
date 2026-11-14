@@ -175,10 +175,9 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
                 .into(),
             );
         };
-        if let Err(message) = crate::state::check_target_group_name(
-            &input.db_proxy_name,
-            Some(&input.target_group_name),
-        ) {
+        if let Err(message) =
+            crate::state::check_target_group_name(Some(&input.target_group_name))
+        {
             return Err(
                 ModifyDBProxyTargetGroupErrorModeled::DBProxyTargetGroupNotFoundFault(
                     DBProxyTargetGroupNotFoundFault {

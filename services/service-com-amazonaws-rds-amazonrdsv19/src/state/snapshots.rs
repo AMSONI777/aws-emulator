@@ -477,6 +477,24 @@ pub fn db_cluster_snapshot_not_found_message(named: &str) -> String {
     format!("DBClusterSnapshot not found: {named}")
 }
 
+/// The sentence the `DBSnapshotAlreadyExistsFault` carries for `named`:
+/// "DBSnapshotIdentifier is already used by an existing snapshot", so the snapshot cannot be
+/// created under it.
+///
+/// Amazon RDS words it as a statement about the snapshot it will NOT create and the
+/// identifier that is taken — the identifier the request carried is the only variable part,
+/// and the sentence carries a terminal period.
+///
+/// One wording for every operation that MINTS a DB snapshot — `CreateDBSnapshot`,
+/// `CopyDBSnapshot` and the final snapshot a `DeleteDBInstance`, a `StopDBInstance` or a
+/// `DeleteTenantDatabase` takes — so no two of them word the same collision differently.
+pub fn db_snapshot_already_exists_message(named: &str) -> String {
+    format!(
+        "Cannot create the snapshot because a snapshot with the identifier {named} already \
+         exists."
+    )
+}
+
 /// The sentence the `DBClusterSnapshotAlreadyExistsFault` carries for `named`: "the user
 /// already has a DB cluster snapshot with the given identifier", worded as the resource
 /// type and the identifier the snapshot would be stored under.

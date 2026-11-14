@@ -350,8 +350,8 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
             if store.db_snapshots.contains_key(&snapshot_key) {
                 return Err(DeleteDBInstanceErrorModeled::DBSnapshotAlreadyExistsFault(
                     DBSnapshotAlreadyExistsFault {
-                        message: Some(format!(
-                            "DB snapshot already exists: {snapshot_identifier}"
+                        message: Some(crate::state::db_snapshot_already_exists_message(
+                            snapshot_identifier,
                         )),
                     },
                 )

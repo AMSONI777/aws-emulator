@@ -319,6 +319,8 @@ mod read_replica_replication_and_promotion;
 mod reboot_db_shard_group;
 #[path = "all/refusal_class_by_cause.rs"]
 mod refusal_class_by_cause;
+#[path = "all/refusal_message_fixed_text.rs"]
+mod refusal_message_fixed_text;
 #[path = "all/refusal_wording_and_input_guards.rs"]
 mod refusal_wording_and_input_guards;
 #[path = "all/requests_aws_refuses.rs"]

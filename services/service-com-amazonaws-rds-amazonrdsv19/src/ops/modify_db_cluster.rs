@@ -379,14 +379,11 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         // The documented constraints of the values this request carries, refused with the
         // Query API error code the real service answers each with.
         if let Some(period) = input.backup_retention_period {
-            if !crate::state::CLUSTER_BACKUP_RETENTION_RANGE.contains(&period) {
-                return Err(ModifyDBClusterError::invalid_parameter_value(format!(
-                    "invalid value {period} for BackupRetentionPeriod: must be a value from \
-                     {} to {}",
-                    crate::state::CLUSTER_BACKUP_RETENTION_RANGE.start(),
-                    crate::state::CLUSTER_BACKUP_RETENTION_RANGE.end()
-                )));
-            }
+            crate::state::check_backup_retention_period(
+                period,
+                &crate::state::CLUSTER_BACKUP_RETENTION_RANGE,
+            )
+            .map_err(ModifyDBClusterError::invalid_parameter_value)?;
         }
         if let Some(port) = input.port {
             if !crate::state::PORT_RANGE.contains(&port) {

@@ -211,11 +211,7 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         };
         if !crate::state::is_multi_tenant_engine(&instance.engine) {
             return Err(DeleteTenantDatabaseError::invalid_parameter_combination(
-                format!(
-                    "DB instance {identifier} runs engine {} and does not use the \
-                     multi-tenant configuration, so it holds no tenant databases",
-                    instance.engine
-                ),
+                crate::state::TENANT_DATABASE_NOT_FOUND_IN_INSTANCE,
             ));
         }
         // An instance already on its way out cannot have a tenant database deleted from
@@ -299,8 +295,8 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
                 return Err(
                     DeleteTenantDatabaseErrorModeled::DBSnapshotAlreadyExistsFault(
                         DBSnapshotAlreadyExistsFault {
-                            message: Some(format!(
-                                "DB snapshot already exists: {snapshot_identifier}"
+                            message: Some(crate::state::db_snapshot_already_exists_message(
+                                snapshot_identifier,
                             )),
                         },
                     )

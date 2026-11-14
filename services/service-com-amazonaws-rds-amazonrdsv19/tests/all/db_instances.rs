@@ -1251,14 +1251,14 @@ async fn documented_constraints_are_refused_at_their_bounds() {
             identifier: "emu-bad-backup-lo",
             extra: params!["BackupRetentionPeriod" => -1].to_vec(),
             code: "InvalidParameterValue",
-            says: "BackupRetentionPeriod",
+            says: "Invalid backup retention period: -1. Retention period must be between 0 and 35.",
         },
         RefusedCase {
             case: "one above the highest BackupRetentionPeriod",
             identifier: "emu-bad-backup-hi",
             extra: params!["BackupRetentionPeriod" => 36].to_vec(),
             code: "InvalidParameterValue",
-            says: "BackupRetentionPeriod",
+            says: "Invalid backup retention period: 36. Retention period must be between 0 and 35.",
         },
         RefusedCase {
             case: "an AvailabilityZone with Multi-AZ",

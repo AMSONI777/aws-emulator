@@ -363,6 +363,21 @@ pub const ACCOUNT_ID_DIGITS: usize = 12;
 /// `SharedSnapshotQuotaExceededFault` that `ModifyDBClusterSnapshotAttribute` declares.
 pub const MAX_SNAPSHOT_SHARED_ACCOUNTS: usize = 20;
 
+/// The sentence the `SharedSnapshotQuotaExceededFault` carries: the answer to a request
+/// that would leave a manual snapshot authorized for more accounts than
+/// [`MAX_SNAPSHOT_SHARED_ACCOUNTS`].
+///
+/// Amazon RDS words it as one statement about the snapshot and the published limit, naming
+/// the accounts it would be shared with as CUSTOMERS; neither the snapshot the request
+/// addressed nor the accounts it named are in it, so the only value substituted is the
+/// quota itself — which is what a caller parses the limit out of.
+///
+/// One wording for every snapshot kind, so the DB snapshot's attribute call and the DB
+/// cluster snapshot's cannot drift apart.
+pub fn shared_snapshot_quota_message() -> String {
+    format!("A snapshot cannot be shared with more than {MAX_SNAPSHOT_SHARED_ACCOUNTS} customers.")
+}
+
 /// The status a cluster snapshot carries while `CopyDBClusterSnapshot` is still copying
 /// it. The operation's own documentation names it: "To cancel the copy operation after it
 /// is in progress, delete the target DB cluster snapshot ... while that DB cluster

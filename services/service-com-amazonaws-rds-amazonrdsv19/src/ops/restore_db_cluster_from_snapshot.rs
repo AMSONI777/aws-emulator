@@ -472,16 +472,11 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         }
         if let Some(period) = input.backup_retention_period {
             // "Must be a value from 1 to 35."
-            if !crate::state::CLUSTER_BACKUP_RETENTION_RANGE.contains(&period) {
-                return Err(
-                    RestoreDBClusterFromSnapshotError::invalid_parameter_value(format!(
-                        "invalid value {period} for BackupRetentionPeriod: must be a value \
-                         from {} to {}",
-                        crate::state::CLUSTER_BACKUP_RETENTION_RANGE.start(),
-                        crate::state::CLUSTER_BACKUP_RETENTION_RANGE.end()
-                    )),
-                );
-            }
+            crate::state::check_backup_retention_period(
+                period,
+                &crate::state::CLUSTER_BACKUP_RETENTION_RANGE,
+            )
+            .map_err(RestoreDBClusterFromSnapshotError::invalid_parameter_value)?;
         }
         if let Some(period) = input.performance_insights_retention_period {
             crate::state::check_performance_insights_retention_period(period)

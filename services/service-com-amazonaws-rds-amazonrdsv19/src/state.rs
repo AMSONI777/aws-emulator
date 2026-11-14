@@ -248,8 +248,9 @@ pub use tags::{
 pub use tenant_databases::{
     is_multi_tenant_engine, mint_tenant_database_resource_id, tenant_database_key,
     tenant_database_master_user_secret_name, TenantDatabaseRecord,
-    TENANT_DATABASE_QUOTA_PER_INSTANCE, TENANT_DATABASE_STATUS_AVAILABLE,
-    TENANT_DATABASE_STATUS_CREATING, TENANT_DATABASE_STATUS_DELETING,
+    TENANT_DATABASE_NOT_FOUND_IN_INSTANCE, TENANT_DATABASE_QUOTA_PER_INSTANCE,
+    TENANT_DATABASE_STATUS_AVAILABLE, TENANT_DATABASE_STATUS_CREATING,
+    TENANT_DATABASE_STATUS_DELETING,
 };
 
 // The DB instance DATA plane: the engine endpoint a client connects to and speaks the

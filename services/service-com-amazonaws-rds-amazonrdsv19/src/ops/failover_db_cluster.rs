@@ -206,9 +206,12 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
             let status = cluster.status.clone();
             return Err(FailoverDBClusterErrorModeled::InvalidDBClusterStateFault(
                 InvalidDBClusterStateFault {
+                    // Amazon RDS words this one compactly, as the resource and the state it
+                    // is in with no space after either colon: the cluster the request
+                    // addressed and the status this service holds it in, which is what a
+                    // caller polls on to decide whether to retry the failover.
                     message: Some(format!(
-                        "DB cluster {identifier} is not available for a failover (status \
-                         {status})"
+                        "DB cluster:{identifier} cannot failover in state:{status}"
                     )),
                 },
             )

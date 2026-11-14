@@ -290,11 +290,7 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
             return Err(
                 ModifyDBClusterSnapshotAttributeErrorModeled::SharedSnapshotQuotaExceededFault(
                     SharedSnapshotQuotaExceededFault {
-                        message: Some(format!(
-                            "a manual DB cluster snapshot cannot be shared with more than {} \
-                             accounts",
-                            crate::state::MAX_SNAPSHOT_SHARED_ACCOUNTS
-                        )),
+                        message: Some(crate::state::shared_snapshot_quota_message()),
                     },
                 )
                 .into(),
