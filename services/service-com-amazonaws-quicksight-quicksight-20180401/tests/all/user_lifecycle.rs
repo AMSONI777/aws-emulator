@@ -34,6 +34,7 @@ use super::data_source_data_set_lifecycle::Harness;
 // path label is percent-encoded over exactly the same bytes a group's is.
 // Source: smithy_query(query="operation", operation="RegisterUser,DescribeUser").
 use super::group_lifecycle::group_label as identity_label;
+use super::identity_type_refusal::identity_type_refusal_message;
 use super::namespace_lifecycle::{create_namespace_in, settle_creation};
 
 /// The account most rows use.
@@ -59,16 +60,6 @@ const COGNITO_PROVIDER_URL: &str = "cognito-identity.amazonaws.com";
 /// member of that enum takes the account's users from somewhere else.
 /// Source: smithy_query(query="shape", shape="AuthenticationMethodOption").
 const IAM_AND_QUICKSIGHT: &str = "IAM_AND_QUICKSIGHT";
-
-/// What a refused registration reads, written out here rather than read from the service
-/// so a change to the wording fails this suite: the sentence the model words the
-/// `AccessDeniedException` class with.
-/// Source: smithy_query(query="doc", shape="AccessDeniedException").
-const ACCESS_DENIED_SENTENCE: &str = "You don't have access to this item. The provided \
-     credentials couldn't be validated. You might not be authorized to carry out the \
-     request. Make sure that your account is authorized to use the Amazon Quick Sight \
-     service, that your policies have the correct permissions, and that you are using \
-     the correct credentials.";
 
 /// `CreateAccountSubscription`: `POST /account/{AwsAccountId}` — how a case gives its
 /// account an identity store of its own.
@@ -1307,10 +1298,11 @@ async fn an_identity_the_account_does_not_manage_cannot_be_registered() {
             json!("AccessDeniedException"),
             "case {case:?}: expected AccessDeniedException, got {body}"
         );
+        let expected = identity_type_refusal_message(account, DEFAULT_NAMESPACE);
         assert_eq!(
             body["Message"],
-            json!(ACCESS_DENIED_SENTENCE),
-            "case {case:?}: the refusal must carry the access-denied wording: {body}"
+            json!(expected),
+            "case {case:?}: expected Message {expected:?}, got {body}"
         );
 
         // The refused registration persisted nothing, and the read answers accordingly.

@@ -135,6 +135,11 @@ pub const IDENTITY_TYPE_IAM: &str = "IAM";
 /// The `QUICKSIGHT` member of the model's `IdentityType` enum.
 pub const IDENTITY_TYPE_QUICKSIGHT: &str = "QUICKSIGHT";
 
+/// How QuickSight writes the name of the `QUICKSIGHT` identity type where a message
+/// reads as prose: the service's own name, not the upper-case enum member
+/// [`IDENTITY_TYPE_QUICKSIGHT`] the wire carries.
+pub const IDENTITY_TYPE_QUICKSIGHT_NAME: &str = "QuickSight";
+
 /// The `IAM_IDENTITY_CENTER` member of the model's `IdentityType` enum.
 pub const IDENTITY_TYPE_IAM_IDENTITY_CENTER: &str = "IAM_IDENTITY_CENTER";
 

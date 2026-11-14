@@ -27,6 +27,8 @@ mod delete_theme;
 mod describe_namespace;
 #[path = "all/iam_policy_assignment_lifecycle.rs"]
 mod iam_policy_assignment_lifecycle;
+#[path = "all/identity_type_refusal.rs"]
+mod identity_type_refusal;
 #[path = "all/mutation_response_status.rs"]
 mod mutation_response_status;
 #[path = "all/namespace_lifecycle.rs"]

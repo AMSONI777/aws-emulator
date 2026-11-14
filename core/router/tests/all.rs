@@ -3414,3 +3414,6 @@ mod eks_kubernetes_api_rbac_audit;
 // duplicate is removed and the first declaration stands.)
 // leaving a note here. (A LINE comment: an inner doc comment is only legal before the
 // first item of a module, so one landing here fails every suite in this target.)
+// leaving a note here. (Ordinary comments, not `//!`: an inner doc comment is legal only
+// at the top of a crate root, and these five lines are a fragment of this file's own
+// header that a merge of two appended tails landed down here.)

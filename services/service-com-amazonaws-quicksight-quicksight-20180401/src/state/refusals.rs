@@ -11,7 +11,9 @@
 //!   is named by that ARN — `"<Kind> <arn> already exists"` for a conflict and
 //!   `"<Kind> <arn> is not found"` for a miss, neither ending in a period;
 //! * a group or a user, which QuickSight's identity path serves, is named by its name
-//!   together with the account it belongs to.
+//!   together with the account it belongs to, and a refusal the account's own
+//!   configuration causes is named by that account too — each of them closed by the
+//!   labelled fields [`identity_scope_fields`] renders.
 //!
 //! A refusal about an allowance names the resource whose allowance ran out, and
 //! that resource is the parent the counted children hang on, not the child the
@@ -85,6 +87,16 @@ pub fn refresh_schedule_limit_message(
     )
 }
 
+/// The labelled fields QuickSight's identity path closes a refusal with: the account
+/// the call addressed, then one field naming what inside that account the refusal is
+/// about, ending in a period and a space.
+///
+/// The sentence before them already ends in its own punctuation, so these fields follow
+/// it directly — the caller joins the two with no separator of its own.
+fn identity_scope_fields(aws_account_id: &str, label: &str, value: &str) -> String {
+    format!("AWS account id: {aws_account_id}, {label}: {value}. ")
+}
+
 /// The conflict `CreateGroup` reports for a group name its namespace already holds.
 ///
 /// QuickSight's identity path names the group rather than an ARN, and reports the
@@ -92,7 +104,30 @@ pub fn refresh_schedule_limit_message(
 /// which ends in a period and a space.
 pub fn group_exists_message(group_name: &str, aws_account_id: &str) -> String {
     format!(
-        "Group {group_name} already exists. AWS account id: {aws_account_id}, groupName: {group_name}. "
+        "Group {group_name} already exists. {}",
+        identity_scope_fields(aws_account_id, "groupName", group_name)
+    )
+}
+
+/// The refusal a registration of an identity type the addressed account's
+/// authentication method holds no identity store for reports.
+///
+/// What forbids the registration is a fact about the ACCOUNT — the authentication
+/// method its QuickSight subscription chose — so the sentence names that account and the
+/// identity type it may not create users of, spelled the way QuickSight writes that
+/// type's name in prose rather than as the enum member
+/// (`IdentityType`, [`super::IDENTITY_TYPE_QUICKSIGHT_NAME`]). The identity path's
+/// labelled fields then report the account again and the namespace the registration
+/// addressed.
+pub fn identity_type_not_authorized_message(
+    aws_account_id: &str,
+    namespace: &str,
+    identity_type_name: &str,
+) -> String {
+    format!(
+        "Account {aws_account_id} is not authorized to create {identity_type_name} \
+         IdentityType user.{}",
+        identity_scope_fields(aws_account_id, "Namespace", namespace)
     )
 }
 
@@ -103,7 +138,8 @@ pub fn group_exists_message(group_name: &str, aws_account_id: &str) -> String {
 /// labelled fields, ending in a period and a space.
 pub fn user_exists_message(user_name: &str, aws_account_id: &str) -> String {
     format!(
-        "User {user_name} already exists. AWS account id: {aws_account_id}, userName: {user_name}. "
+        "User {user_name} already exists. {}",
+        identity_scope_fields(aws_account_id, "userName", user_name)
     )
 }
 

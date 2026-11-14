@@ -316,12 +316,22 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         // identities of its own: the account's authentication method decides where its
         // users come from, and one that takes them from Amazon Web Services identities,
         // an Active Directory or IAM Identity Center holds no QuickSight identity store
-        // to register this user in.
+        // to register this user in. The refusal reports WHY — the account whose
+        // authentication method forbids it, the identity type it may not create and the
+        // namespace this registration addressed — because the error class carries its
+        // reason nowhere else.
         if input.identity_type == crate::state::IDENTITY_TYPE_QUICKSIGHT
             && !store.manages_quicksight_users(&input.aws_account_id)
         {
             return Err(RegisterUserErrorModeled::AccessDeniedException(
-                crate::state::access_denied(&request_id),
+                crate::state::access_denied(
+                    crate::state::identity_type_not_authorized_message(
+                        &input.aws_account_id,
+                        &input.namespace,
+                        crate::state::IDENTITY_TYPE_QUICKSIGHT_NAME,
+                    ),
+                    &request_id,
+                ),
             )
             .into());
         }

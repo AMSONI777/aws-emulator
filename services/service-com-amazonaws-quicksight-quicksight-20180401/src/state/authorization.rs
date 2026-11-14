@@ -2,32 +2,22 @@
 
 //! WHAT a call this account does not authorize reads.
 //!
-//! One template, so every handler that refuses the same error class renders the same
-//! sentence and a client reads the same text whichever operation it called — the reason
-//! the conflict and not-found wordings live together in [`super::refusals`].
-//!
-//! The modelled `AccessDeniedException` (HTTP 401) is the refusal of a call the account
-//! does not authorize, and the model words that class itself: "You don't have access to
-//! this item. The provided credentials couldn't be validated. You might not be authorized
-//! to carry out the request. Make sure that your account is authorized to use the Amazon
-//! Quick Sight service, that your policies have the correct permissions, and that you are
-//! using the correct credentials." The sentence carries no value of its own: what the
-//! caller may do is a fact about the account and its credentials, not about anything the
-//! request named.
+//! QuickSight reuses the modelled `AccessDeniedException` (HTTP 401) for every refusal
+//! an account's own configuration or credentials cause, so the reason a particular call
+//! was refused is carried only in the message: a client that has to tell "this account
+//! holds no identity store for the identity type you asked for" from "your credentials
+//! could not be validated" has nothing else to read. A handler therefore hands this
+//! builder the sentence stating its reason, rendered by the templates in
+//! [`super::refusals`] so every handler refusing for the same reason words it the same
+//! way — the reason the conflict and not-found wordings live there too.
 
 use super::*;
 
-/// The modelled `AccessDeniedException` a call the account does not authorize carries.
-pub fn access_denied(request_id: &str) -> AccessDeniedException {
+/// The modelled `AccessDeniedException` a refused call carries, reporting `message` as
+/// the reason it was refused.
+pub fn access_denied(message: String, request_id: &str) -> AccessDeniedException {
     AccessDeniedException {
-        message: Some(ACCESS_DENIED_MESSAGE.to_string()),
+        message: Some(message),
         request_id: Some(request_id.to_string()),
     }
 }
-
-/// The sentence [`access_denied`] carries, as the model words this error class.
-pub const ACCESS_DENIED_MESSAGE: &str = "You don't have access to this item. The provided \
-     credentials couldn't be validated. You might not be authorized to carry out the \
-     request. Make sure that your account is authorized to use the Amazon Quick Sight \
-     service, that your policies have the correct permissions, and that you are using \
-     the correct credentials.";

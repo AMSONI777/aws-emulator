@@ -12,7 +12,8 @@
 //! own.
 //!
 //! A registration of an identity the account does not manage is refused with the
-//! modelled `AccessDeniedException` ([`super::authorization::access_denied`]).
+//! modelled `AccessDeniedException` ([`super::authorization::access_denied`]), carrying
+//! the reason [`super::refusals::identity_type_not_authorized_message`] words.
 
 use super::*;
 
