@@ -26,6 +26,12 @@ sha2 = { workspace = true }
 # Parses and re-serializes the ActiveMQ XML configuration document a revision
 # stores, so a revision reports the canonical form rather than the bytes sent.
 quick-xml = "0.41"
+# The AMQP 0-9-1 wire format a RabbitMQ broker's clients speak: this crate carries
+# the protocol's frame codec and its generated method and property types, so the
+# broker's data plane parses and writes the real wire rather than a hand-rolled one.
+# `default-features = false` leaves out its client-side TCP/TLS connector, which the
+# core owns here.
+amq-protocol = { version = "10.7", default-features = false }
 # `service-common` carries the ONE reading of the address a client reaches this
 # emulator at, which a broker's published endpoints name, and of the framing an
 # answer that carries no content states (`service_common::no_content_responses`),
@@ -37,6 +43,12 @@ emulator-core-build-support = { workspace = true }
 
 [dev-dependencies]
 hex = { workspace = true }
+# The data-plane suite drives a real AMQP 0-9-1 client against a broker's own socket in
+# ONE process: `rustls` / `tokio-rustls` run the client side of the TLS an `amqps://`
+# endpoint is served over, which the core terminates. Both are the versions this
+# workspace already builds.
+rustls = { workspace = true }
+tokio-rustls = "0.26"
 
 [lints]
 workspace = true

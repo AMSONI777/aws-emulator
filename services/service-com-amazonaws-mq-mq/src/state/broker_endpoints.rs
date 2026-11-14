@@ -17,18 +17,25 @@
 //! The ADDRESS they name is the host this emulator serves on, recorded on the broker
 //! when it was created ([`Broker::published_host`]), so what a broker publishes leads
 //! back to the emulator the client is already talking to rather than to a hostname
-//! nothing here answers. This crate opens no wire listener for a broker: what is
-//! reported is the control plane's record of where the broker is published, which is
-//! what every member of `BrokerInstance` is.
+//! nothing here answers. A broker whose engine this emulator serves a WIRE for is given
+//! a socket of the emulator's own ([`serve_broker`]), and that socket's address is what
+//! its endpoint publishes — so the endpoint is one a client both reaches and is answered
+//! the broker's own protocol on; a broker this emulator opened no socket for publishes
+//! the port Amazon MQ publishes for the protocol on the host it was created on, which is
+//! the control plane's record of where the broker is published.
 
 use super::*;
 
-/// One wire protocol a broker serves: the URI scheme a client dials it with, and the
-/// port Amazon MQ publishes that protocol on.
+/// One wire protocol a broker serves: the URI scheme a client dials it with, the port
+/// Amazon MQ publishes that protocol on, and whether it is the protocol this emulator
+/// opens a socket of its own for.
 #[derive(Debug, Clone, Copy)]
 struct WireProtocol {
     scheme: &'static str,
     port: u16,
+    /// Whether a broker this emulator opened a socket for serves THIS protocol on it, in
+    /// which case the endpoint published for it is that socket's address.
+    served: bool,
 }
 
 impl WireProtocol {
@@ -46,29 +53,36 @@ const ACTIVEMQ_WIRE_PROTOCOLS: &[WireProtocol] = &[
     WireProtocol {
         scheme: "amqp+ssl",
         port: 5_671,
+        served: false,
     },
     WireProtocol {
         scheme: "mqtt+ssl",
         port: 8_883,
+        served: false,
     },
     WireProtocol {
         scheme: "ssl",
         port: 61_617,
+        served: false,
     },
     WireProtocol {
         scheme: "stomp+ssl",
         port: 61_614,
+        served: false,
     },
     WireProtocol {
         scheme: "wss",
         port: 61_619,
+        served: false,
     },
 ];
 
-/// The one protocol a RabbitMQ broker serves: AMQP over TLS.
+/// The one protocol a RabbitMQ broker serves: AMQP over TLS, which is the wire this
+/// emulator opens the broker's own socket for.
 const RABBITMQ_WIRE_PROTOCOLS: &[WireProtocol] = &[WireProtocol {
     scheme: "amqps",
     port: 5_671,
+    served: true,
 }];
 
 /// The port the ActiveMQ Web Console is published on.
@@ -150,9 +164,24 @@ impl Broker {
             endpoints: self
                 .wire_protocols()
                 .iter()
-                .map(|protocol| protocol.endpoint(host))
+                .map(|protocol| self.endpoint_of(*protocol))
                 .collect(),
             ip_address: self.ip_address(),
         }]
+    }
+
+    /// The endpoint URI this broker publishes for `protocol`.
+    ///
+    /// A broker this emulator opened a SOCKET for publishes that socket's own address for
+    /// the protocol the socket serves, because an endpoint is an address the broker
+    /// answers on; every other endpoint names the host the broker is published at and the
+    /// port Amazon MQ publishes that protocol on.
+    fn endpoint_of(&self, protocol: WireProtocol) -> String {
+        match &self.served_amqps {
+            Some(served) if protocol.served => {
+                format!("{}://{}:{}", protocol.scheme, served.host, served.port)
+            }
+            _ => protocol.endpoint(&self.published_host),
+        }
     }
 }

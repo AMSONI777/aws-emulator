@@ -398,6 +398,12 @@ struct PublishedAddresses {
     engine_type: &'static str,
     protocols: &'static [(&'static str, u16)],
     console_port: u16,
+    /// Whether this engine's wire is one THIS EMULATOR opens a socket of its own for.
+    /// The endpoint published for such a protocol names that socket's address, because
+    /// an endpoint is an address the broker ANSWERS on and the port of a core-owned
+    /// socket is the core's to assign; every other endpoint names the port Amazon MQ
+    /// publishes the protocol on.
+    served_by_a_socket: bool,
 }
 
 /// The wire protocols and console port of each engine the model declares.
@@ -417,11 +423,13 @@ const PUBLISHED_PROTOCOLS: &[PublishedAddresses] = &[
             ("wss", 61_619),
         ],
         console_port: 8_162,
+        served_by_a_socket: false,
     },
     PublishedAddresses {
         engine_type: ENGINE_TYPE_RABBITMQ,
         protocols: &[("amqps", 5_671)],
         console_port: 443,
+        served_by_a_socket: true,
     },
 ];
 
@@ -492,16 +500,58 @@ async fn a_running_broker_publishes_its_console_and_one_endpoint_per_protocol() 
         );
 
         let endpoints = strings_at(instance, "/endpoints");
-        let expected: Vec<String> = row
-            .protocols
-            .iter()
-            .map(|(scheme, port)| format!("{scheme}://{host}:{port}"))
-            .collect();
-        assert_eq!(
-            endpoints, expected,
-            "case {case:?}: expected one endpoint per published protocol, in the order \
-             Amazon MQ publishes them {expected:?}, got {endpoints:?}"
-        );
+        if row.served_by_a_socket {
+            // The protocols this emulator answers itself: one endpoint per protocol,
+            // each carrying that protocol's scheme and the address of the socket the
+            // core opened for the broker — which, being an address the broker ANSWERS
+            // on, is dialled here rather than compared against a hostname. The suite
+            // that speaks the protocol on it is `rabbitmq_data_plane`.
+            assert_eq!(
+                endpoints.len(),
+                row.protocols.len(),
+                "case {case:?}: expected one endpoint per published protocol, got \
+                 {endpoints:?}"
+            );
+            for ((scheme, _published_port), endpoint) in row.protocols.iter().zip(&endpoints) {
+                let prefix = format!("{scheme}://");
+                assert!(
+                    endpoint.starts_with(&prefix),
+                    "case {case:?}: expected an endpoint on {prefix:?}, got {endpoint:?}"
+                );
+                let authority = endpoint.trim_start_matches(&prefix);
+                let (endpoint_host, port) = authority.rsplit_once(':').unwrap_or_else(|| {
+                    panic!("case {case:?}: expected the endpoint to name a port, got {endpoint:?}")
+                });
+                let port: u16 = port.parse().unwrap_or_else(|_| {
+                    panic!("case {case:?}: expected the endpoint to name a port, got {endpoint:?}")
+                });
+                // The core binds its listeners on the operator-chosen interface, which
+                // is loopback by default, so the address a broker publishes is this
+                // machine's own — pinned here, and then dialled as that literal.
+                assert_eq!(
+                    endpoint_host, "127.0.0.1",
+                    "case {case:?}: expected the endpoint to name this machine's loopback \
+                     address, got {endpoint:?}"
+                );
+                let dialled = tokio::net::TcpStream::connect(("127.0.0.1", port)).await;
+                assert!(
+                    dialled.is_ok(),
+                    "case {case:?}: the endpoint a running broker publishes must be an address \
+                     it answers on, but {endpoint:?} accepted no connection: {dialled:?}"
+                );
+            }
+        } else {
+            let expected: Vec<String> = row
+                .protocols
+                .iter()
+                .map(|(scheme, port)| format!("{scheme}://{host}:{port}"))
+                .collect();
+            assert_eq!(
+                endpoints, expected,
+                "case {case:?}: expected one endpoint per published protocol, in the order \
+                 Amazon MQ publishes them {expected:?}, got {endpoints:?}"
+            );
+        }
 
         // `BrokerInstance$ipAddress` "Does not apply to RabbitMQ brokers"; where it
         // does apply it is the address the broker is published at, reported only when

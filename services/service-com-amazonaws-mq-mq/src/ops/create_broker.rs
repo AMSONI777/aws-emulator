@@ -519,6 +519,11 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
                 )
             }),
         ]);
+        // The broker's record, and the socket its clients connect to, in that order:
+        // the record is stored under the store's lock, which is released before the
+        // socket is opened because opening one is awaited and a lock is never held
+        // across an await.
+        let (broker_id, broker_arn) = {
         let mut store = state.lock();
 
         // `CreatorRequestId` is the operation's `@idempotencyToken`: repeating the
@@ -666,8 +671,19 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
             // `Broker::data_replication_role` derives, and only a promotion records one.
             data_replication_role: None,
             published_host,
+            // Filled in by the socket this create opens for the broker below, once the
+            // core has told the service which address it answers on.
+            served_amqps: None,
         };
         store.brokers.insert(broker_id.clone(), broker);
+        (broker_id, broker_arn)
+        };
+        // A RabbitMQ broker's `amqps://` endpoint is the address of a socket this
+        // emulator answers AMQP 0-9-1 on, so that socket is opened here and its address
+        // written onto the record (`state::serve_broker`). The answer above publishes no
+        // endpoint — a broker still being provisioned has no instance to report one for
+        // — so the address is published before any reader can see one.
+        state::serve_broker(&*self.engine, &state, &broker_id).await;
 
         Ok(CreateBrokerOutput {
             broker_arn: Some(broker_arn),

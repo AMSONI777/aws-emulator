@@ -29,6 +29,11 @@ mod broker_data_replication;
 mod broker_endpoints;
 /// The values the service decides for a broker rather than echoing from its create.
 mod broker_published_values;
+/// The socket a RabbitMQ broker's clients connect to, and the message broker behind it.
+mod rabbitmq_plane;
+/// The probes of the AMQP data plane's clock-driven readings (tests only).
+#[cfg(test)]
+mod amqp_probe;
 /// Restarting a broker, and the user changes a restart applies.
 mod broker_restart;
 
@@ -37,6 +42,7 @@ pub use broker_data_replication::*;
 pub use broker_endpoints::*;
 pub use broker_restart::*;
 pub use configuration_document::*;
+pub use rabbitmq_plane::*;
 pub use broker_published_values::*;
 
 /// Region used for an ARN when the request carries no SigV4 credential scope to
@@ -366,6 +372,11 @@ pub struct Broker {
     /// time so every read of the broker publishes the one address, whichever host a
     /// later caller reached the emulator on.
     pub published_host: String,
+    /// The address of the socket this emulator OPENED for the broker, when its engine is
+    /// one this emulator serves a wire for ([`serve_broker`]). It is what the broker's
+    /// `amqps://` endpoint publishes, so what a client dials is where the broker really
+    /// answers; `None` for a broker this emulator opened no socket for.
+    pub served_amqps: Option<ServedAddress>,
 }
 
 impl Broker {
@@ -635,6 +646,11 @@ pub struct ComAmazonawsMqMqState {
     /// [`Self::configurations`] so that every operation reading that map still
     /// reports exactly the configurations that exist.
     pub retired_configuration_ids: VecDeque<String>,
+    /// The data plane of every broker this emulator opened a socket for, keyed by
+    /// `BrokerId`: the socket's handle and the exchanges and queues behind it. Dropping
+    /// an entry closes that broker's port, so a broker's entry lives exactly as long as
+    /// the broker does.
+    pub broker_data_planes: BTreeMap<String, BrokerDataPlane>,
 }
 
 impl ComAmazonawsMqMqState {

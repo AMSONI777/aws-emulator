@@ -35,6 +35,8 @@ mod configuration_revision_isolation;
 mod configuration_wire_form;
 #[path = "all/no_content_framing.rs"]
 mod no_content_framing;
+#[path = "all/rabbitmq_data_plane.rs"]
+mod rabbitmq_data_plane;
 #[path = "all/resource_tags.rs"]
 mod resource_tags;
 #[path = "all/state_roundtrip.rs"]
