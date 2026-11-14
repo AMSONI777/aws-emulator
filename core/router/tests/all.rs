@@ -3640,3 +3640,20 @@ mod iam_denial_reason_attribution;
 // doc comment is legal only before the first item of a crate root, so a `//!` line in this
 // tail is `E0753` and compiles no suite of this target.)
 // reason the lines above record: a `//!` line past the first item is `E0753`.)
+// crate's `tests/all.rs`, so check there rather than leaving a note here. (These lines are
+// plain comments: an inner doc comment (`//!`) documents the enclosing item, so one in the
+// middle of this file is `E0753` and compiles nothing. The crate's own doc header is at the
+// top of this file.)
+// (The crate-level guidance a landing appended here belongs to the module header at the top
+// of this file, where it stands: declare each suite exactly ONCE, since this is one crate
+// root and a second `mod` for the same name is `E0428`, which
+// `all/all_rs_declares_each_suite_once.rs` checks for this file and for every service
+// crate's `tests/all.rs`. These are LINE comments: an inner doc comment `//!` may only
+// appear before the first item, so one in this appended tail is `E0753` and compiles
+// nothing.)
+// (The same appended fragment, once more and once more as a LINE comment: the rule it
+// repeats — `all/all_rs_declares_each_suite_once.rs` checks this file and every service
+// crate's `tests/all.rs` — is stated by the module header at the top of this file.)
+// suite left at the top level of `tests/` fails the build. (A line comment: `//!` here is
+// `E0753`, and the header at the top of this file states the paragraph.)
+// this file and for every service crate's `tests/all.rs`. (The same, for the same reason.)

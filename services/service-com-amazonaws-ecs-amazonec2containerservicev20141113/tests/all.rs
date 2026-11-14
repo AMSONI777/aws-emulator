@@ -167,6 +167,8 @@ mod reserved_tag_prefix;
 mod resource_scoping_and_agent_plane;
 #[path = "all/resource_tags.rs"]
 mod resource_tags;
+#[path = "all/service_container_log_delivery.rs"]
+mod service_container_log_delivery;
 #[path = "all/service_delete_drain.rs"]
 mod service_delete_drain;
 #[path = "all/service_deployment_lifecycle_hooks.rs"]
