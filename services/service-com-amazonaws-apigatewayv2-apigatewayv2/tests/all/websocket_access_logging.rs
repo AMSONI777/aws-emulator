@@ -33,7 +33,7 @@ use serde_json::{json, Value};
 use smithy_server_runtime::MultiServiceRouter;
 
 use crate::api_lifecycle::{as_str, call_in_region};
-use crate::http_api_access_logging::{delivered_to, emulator, log_group_arn};
+use crate::http_api_access_logging::{create_log_group, delivered_to, emulator, log_group_arn};
 use crate::http_api_backend_dispatch::given_function;
 use crate::websocket_transport_data_plane::{exchange, handshake_at, ClientSocket};
 
@@ -228,6 +228,10 @@ async fn given_api(
     }
     let mut stage = json!({ "stageName": STAGE });
     if let Some(format) = format {
+        // The destination is a log group of the ACCOUNT's: it exists before the stage is
+        // pointed at it, because a delivery writes into a group that is there and creates
+        // none.
+        create_log_group(router, GROUP).await;
         stage["accessLogSettings"] = json!({
             "destinationArn": group_arn(),
             "format": format,

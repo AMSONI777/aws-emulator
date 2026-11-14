@@ -71,6 +71,12 @@ mod stage_access_logging;
 // Gateway, AWS IAM and Amazon CloudWatch Logs at once.
 #[path = "all/stage_access_log_record_rendering.rs"]
 mod stage_access_log_record_rendering;
+// WHICH destinations that record reaches: the log group CloudWatch Logs already holds, never a
+// destination the account holds no group under — which a delivery does not bring into
+// existence. Declared beside the suites above for the reason the entry at the top of this file
+// records: it spans API Gateway, AWS IAM and Amazon CloudWatch Logs at once.
+#[path = "all/stage_access_log_absent_destination.rs"]
+mod stage_access_log_absent_destination;
 #[path = "all/stage_proxy_run_logs.rs"]
 mod stage_proxy_run_logs;
 #[path = "all/stage_trace_context.rs"]

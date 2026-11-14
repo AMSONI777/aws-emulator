@@ -12,6 +12,10 @@
 //! of the two would tell the caller to add a variable it does not have to add, so the fix it
 //! applies could still be refused.
 //!
+//! The refusal is API Gateway's own sentence, whose only variable part is the REJECTED
+//! format: fixed text naming both variables, then that format between single quotes exactly
+//! as the patch operation carried it ([`refusal`]).
+//!
 //! The rows span what the rule generalises over: WHICH identifier the format names, WHERE in
 //! the format it appears (alone, inside a CLF line, inside a JSON document, both of them),
 //! and the forms that name neither (another context variable, the bare member name without
@@ -38,6 +42,16 @@ const REQUEST_ID: &str = "$context.requestId";
 
 /// See [`REQUEST_ID`].
 const EXTENDED_REQUEST_ID: &str = "$context.extendedRequestId";
+
+/// The whole message API Gateway refuses the format `format` with: the service's own fixed
+/// sentence naming both variables, then the rejected format between single quotes — the one
+/// variable part of it, written exactly as the patch operation carried it.
+fn refusal(format: &str) -> String {
+    format!(
+        "Access Log format must include either {REQUEST_ID} or {EXTENDED_REQUEST_ID} : \
+         '{format}'"
+    )
+}
 
 /// `UpdateStage` replacing the access log destination and format.
 async fn set_access_log(gateway: &Gateway, api: &str, format: &str) -> Answer {
@@ -151,10 +165,10 @@ async fn a_format_naming_either_request_identifier_is_stored() {
         }
         assert_failure(&answer, 400, BAD_REQUEST, case);
         let message = answer.body["message"].as_str().unwrap_or_default();
-        assert!(
-            message.contains(REQUEST_ID) && message.contains(EXTENDED_REQUEST_ID),
-            "case {case:?}: expected the refusal to name both {REQUEST_ID} and \
-             {EXTENDED_REQUEST_ID}, got {message:?}"
+        let expected = refusal(format);
+        assert_eq!(
+            message, expected,
+            "case {case:?}: expected the refusal {expected:?}, got {message:?}"
         );
         // A refused patch leaves the stage exactly as it was: nothing of the settings is
         // stored, not even the destination the same list named.

@@ -334,19 +334,26 @@ const INVALID_THROTTLING_SETTING: &str = "Invalid throttling setting";
 /// place: `$context.extendedRequestId` is the same request's id under the member API
 /// Gateway reports it as on the response, so a format naming it identifies the request the
 /// line is about just as well. A recorded refusal of a format naming neither enumerates
-/// both, which is what [`access_log_identifier_requirement`] words: a caller told to add one
+/// both, which is what [`access_log_format_refused`] words: a caller told to add one
 /// of two variables can satisfy the rule with either, where one told to add a single
 /// variable may apply a fix that is still refused.
 const ACCESS_LOG_REQUEST_IDENTIFIERS: &[&str] =
     &["$context.requestId", "$context.extendedRequestId"];
 
-/// The requirement a refused access log format failed, naming EVERY variable that satisfies
-/// it, in the order [`ACCESS_LOG_REQUEST_IDENTIFIERS`] lists them.
+/// How API Gateway refuses an access log `format` that identifies the request by neither of
+/// [`ACCESS_LOG_REQUEST_IDENTIFIERS`].
 ///
-/// Built from that list rather than written out, so the sentence and the check can never
-/// name different variables.
-fn access_log_identifier_requirement() -> String {
-    ACCESS_LOG_REQUEST_IDENTIFIERS.join(" or ")
+/// The sentence is the service's own, fixed text — "Access Log format must include either
+/// &lt;identifiers&gt; : " — followed by the REJECTED format between single quotes, which is
+/// the only variable part of it: the value the patch operation carried, written out exactly
+/// as the caller wrote it so the caller can see which of its formats was refused. The
+/// variables are named from [`ACCESS_LOG_REQUEST_IDENTIFIERS`] rather than written out, so
+/// the sentence and the check can never name different ones.
+fn access_log_format_refused(format: &str) -> String {
+    format!(
+        "Access Log format must include either {} : '{format}'",
+        ACCESS_LOG_REQUEST_IDENTIFIERS.join(" or ")
+    )
 }
 
 /// Whether `format` names one of [`ACCESS_LOG_REQUEST_IDENTIFIERS`] as a REFERENCE rather
@@ -870,14 +877,11 @@ fn apply_access_log_patch(entry: &mut StageEntry, patch: &Patch) -> Result<(), P
             // $context.requestId." EITHER identifier of the request satisfies it
             // ([`ACCESS_LOG_REQUEST_IDENTIFIERS`]), named as a reference rather than as the
             // prefix of a longer member ([`identifies_the_request`]), and the refusal names
-            // them all, so the caller is told the whole rule rather than one half of it.
+            // them all ([`access_log_format_refused`]), so the caller is told the whole rule
+            // rather than one half of it.
             if let Some(format) = &settings.format {
                 if !identifies_the_request(format) {
-                    return Err(PatchFailure::BadRequest(format!(
-                        "{} must include at least {}",
-                        patch.path,
-                        access_log_identifier_requirement()
-                    )));
+                    return Err(PatchFailure::BadRequest(access_log_format_refused(format)));
                 }
             }
         }

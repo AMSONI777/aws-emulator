@@ -198,6 +198,20 @@ async fn delivered(router: &MultiServiceRouter) -> Option<Vec<String>> {
     delivered_to(router, GROUP).await
 }
 
+/// Create the log group `group` through CloudWatch Logs' own `CreateLogGroup`, which is what
+/// an operator does before pointing a stage's access logging at it: a destination is a log
+/// group of the ACCOUNT's, so API Gateway delivers into one that is there and creates none.
+///
+/// `pub(crate)` for the reason [`emulator`] is: the WEBSOCKET plane's own access-log suite
+/// needs its destination to exist the same way.
+pub(crate) async fn create_log_group(router: &MultiServiceRouter, group: &str) {
+    let (status, created) = logs(router, "CreateLogGroup", json!({ "logGroupName": group })).await;
+    assert_eq!(
+        status, 200,
+        "setup CreateLogGroup {group:?}: expected HTTP 200, got {status} with {created}"
+    );
+}
+
 /// The ARN of the log group `group`, as a stage's `DestinationArn` names one.
 ///
 /// `pub(crate)` for the reason [`emulator`] is.
@@ -281,6 +295,9 @@ fn rows() -> Vec<Row> {
 #[tokio::test]
 async fn a_stage_writes_one_record_per_request_rendered_by_its_own_format() {
     let (router, engine) = emulator();
+    // The destination is a log group of the account's, created before the stage is pointed at
+    // it: a delivery writes into a group that is there and creates none.
+    create_log_group(&router, GROUP).await;
     let function = given_function(
         &router,
         &engine,
@@ -347,6 +364,7 @@ async fn a_stage_writes_one_record_per_request_rendered_by_its_own_format() {
 #[tokio::test]
 async fn a_common_log_format_stage_renders_the_same_call_in_that_format() {
     let (router, engine) = emulator();
+    create_log_group(&router, GROUP).await;
     let function = given_function(
         &router,
         &engine,

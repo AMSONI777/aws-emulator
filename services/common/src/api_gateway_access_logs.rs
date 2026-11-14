@@ -25,9 +25,11 @@
 //! # Where a record is written
 //!
 //! `destinationArn` names a log group, and a record is one log event in it, written through
-//! the in-process transport into the CloudWatch Logs this emulator mounts: the group is
-//! created if the account does not hold it yet (API Gateway provisions the destination it
-//! was pointed at), then the stream, then the event. A destination of another kind — a
+//! the in-process transport into the CloudWatch Logs this emulator mounts: the STREAM is
+//! created and then the event, in the group CloudWatch Logs already holds under that name.
+//! The group itself is NOT created — a destination is a log group of the account's, named by
+//! whoever configured the stage, so a destination naming a group that is not there loses the
+//! record and leaves the account holding no such group. A destination of another kind — a
 //! Kinesis Data Firehose delivery stream — names no log group, so [`destination_log_group`]
 //! resolves none and the caller reports the delivery as one it does not make rather than
 //! writing the record somewhere the client did not ask for.
@@ -111,10 +113,11 @@ fn is_member_path_character(c: char) -> bool {
 
 /// Write one access-log record into `log_group`, in the stream `log_stream`.
 ///
-/// The one vended-logs write this crate holds
-/// ([`crate::cloudwatch_logs::delivered`]): the group and the stream are created
-/// first — API Gateway provisions the destination it was pointed at — and each record is one
-/// log event stamped with the instant it is delivered.
+/// The one vended-logs write this crate holds, in its POINTED-AT form
+/// ([`crate::cloudwatch_logs::delivered_into_held_group`]): the stream is created in the
+/// group CloudWatch Logs already holds, and each record is one log event stamped with the
+/// instant it is delivered. The destination group is a log group of the ACCOUNT's, so a
+/// stage pointed at one that does not exist delivers nothing and creates nothing.
 ///
 /// `true` once the records are in the group, `false` when they could not be written, which
 /// never fails the request the stage already answered. Call it with NO state guard held — it
@@ -126,15 +129,16 @@ pub async fn delivered(
     log_stream: &str,
     records: &[String],
 ) -> bool {
-    crate::cloudwatch_logs::delivered(ctx, region, log_group, log_stream, records).await
+    crate::cloudwatch_logs::delivered_into_held_group(ctx, region, log_group, log_stream, records)
+        .await
 }
 
 /// [`delivered`] for a plane served on a core-owned SOCKET, which holds the in-process
 /// transport itself and no request context (an API Gateway WebSocket api's own endpoint).
 ///
-/// The same write ([`crate::cloudwatch_logs::delivered_over`]), so a stage's record of a
-/// request it answered through the front door and its record of a call carried on a socket
-/// land in the destination alike.
+/// The same write ([`crate::cloudwatch_logs::delivered_into_held_group_over`]), so a stage's
+/// record of a request it answered through the front door and its record of a call carried on
+/// a socket land in the destination alike.
 pub async fn delivered_over(
     callback: &::smithy_server_runtime::EmbeddedEmulator,
     region: &str,
@@ -142,7 +146,10 @@ pub async fn delivered_over(
     log_stream: &str,
     records: &[String],
 ) -> bool {
-    crate::cloudwatch_logs::delivered_over(callback, region, log_group, log_stream, records).await
+    crate::cloudwatch_logs::delivered_into_held_group_over(
+        callback, region, log_group, log_stream, records,
+    )
+    .await
 }
 
 #[cfg(test)]

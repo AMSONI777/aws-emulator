@@ -30,7 +30,11 @@
 //! ways.
 //!
 //! Each stage writes into the destination IT names, so two stages of one api pointed at two
-//! groups never cross: the destination is read off the stage the request reached.
+//! groups never cross: the destination is read off the stage the request reached. The
+//! destination is a log group of the ACCOUNT's — named by whoever configured the stage — so a
+//! stage pointed at a group CloudWatch Logs does not hold delivers nothing and brings no
+//! group into existence; the stage's EXECUTION log group below is the one API Gateway
+//! publishes itself, and that one it provisions.
 //!
 //! # The execution log
 //!
@@ -206,7 +210,10 @@ pub(super) async fn delivered<Eng: Send + Sync + 'static>(
         .await;
     }
     if let Some((group, trace)) = &planned.execution {
-        ::service_common::api_gateway_access_logs::delivered(
+        // The stage's EXECUTION log group is one API Gateway publishes under its own name
+        // ([`execution_log_group`]), so this delivery provisions it; the access-log
+        // destination above is a group of the account's and is never created here.
+        ::service_common::cloudwatch_logs::delivered(
             ctx,
             &planned.region,
             group,

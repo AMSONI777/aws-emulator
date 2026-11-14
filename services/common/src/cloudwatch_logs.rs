@@ -25,6 +25,13 @@
 //! itself ([`delivered`]) — the one path a service delivering records on the account's
 //! behalf puts them in the group through.
 //!
+//! The write comes in the two forms a destination comes in. A group the delivering service
+//! publishes under its OWN name (an API Gateway stage's execution log group) is one it
+//! provisions, so [`delivered`] creates it; a destination the service was merely POINTED AT
+//! (a stage's access-log `destinationArn`) is a group of the account's, so
+//! [`delivered_into_held_group`] writes into the group CloudWatch Logs already holds and
+//! creates none — a destination that is not there loses the records and stays absent.
+//!
 //! `service-com-amazonaws-mediapackage-mediapackage` still carries its own copy of this
 //! reading (`state::is_log_group_name`), inlined before this module existed and pinned by
 //! that service's own refusal suite; it is to be MIGRATED onto this one rather than copied
@@ -186,12 +193,13 @@ pub async fn log_group_is_absent(
 /// Write one log event per entry of `records` into `log_group`, in the stream `log_stream`.
 ///
 /// The VENDED-LOGS write: a service delivering records on the account's behalf — an API
-/// Gateway stage's access log, the record a WAFv2 web ACL logs about a request it decided —
+/// Gateway stage's execution log, the record a WAFv2 web ACL logs about a request it decided —
 /// writes them here, once, so no two of them deliver differently. The group and the stream
-/// are created first, because a service was POINTED at that destination and provisions it,
-/// and a group or stream already there is the one it has been writing to; each record is one
+/// are created first, because the group is one the delivering service publishes itself, and a
+/// group or stream already there is the one it has been writing to; each record is one
 /// log event stamped with the instant it is delivered, which is what keeps it inside
-/// CloudWatch Logs' ingestion window.
+/// CloudWatch Logs' ingestion window. A destination the service was POINTED AT instead is
+/// delivered to by [`delivered_into_held_group`], which creates no group.
 ///
 /// The write goes over the in-process transport into the CloudWatch Logs this emulator
 /// mounts, so a delivered record and `GetLogEvents` / `FilterLogEvents` cannot disagree
@@ -226,29 +234,86 @@ pub async fn delivered_over(
     log_stream: &str,
     records: &[String],
 ) -> bool {
+    write(callback, region, log_group, log_stream, records, true).await
+}
+
+/// [`delivered`] into a destination the service delivering is POINTED AT rather than one it
+/// publishes itself: the records go into the log group CloudWatch Logs already holds under
+/// that name, and no group is created.
+///
+/// A destination named by a caller — an API Gateway stage's `accessLogSettings`
+/// `destinationArn` — is a group of the ACCOUNT's, created by whoever owns it, so a
+/// delivering service writes into it and does not bring it into existence: a destination
+/// naming a group that is not there loses the records and leaves the account holding no such
+/// group, which is what a client reading the destination back sees. The stream inside an
+/// existing group is still created, because the stream is the delivering service's own
+/// ([`delivered`]).
+///
+/// `true` once the records are in the group, `false` when they could not be written —
+/// including the absent destination, which never fails the request the caller has already
+/// been answered. Call it with NO state guard held — it awaits.
+pub async fn delivered_into_held_group(
+    ctx: &::smithy_server_runtime::OperationContext<'_>,
+    region: &str,
+    log_group: &str,
+    log_stream: &str,
+    records: &[String],
+) -> bool {
+    delivered_into_held_group_over(ctx.callback(), region, log_group, log_stream, records).await
+}
+
+/// [`delivered_into_held_group`] for a deliverer that holds the in-process transport ITSELF
+/// rather than a request's context, as [`delivered_over`] is for [`delivered`].
+pub async fn delivered_into_held_group_over(
+    callback: &::smithy_server_runtime::EmbeddedEmulator,
+    region: &str,
+    log_group: &str,
+    log_stream: &str,
+    records: &[String],
+) -> bool {
+    write(callback, region, log_group, log_stream, records, false).await
+}
+
+/// The one vended-logs write both forms above are: the records as log events in
+/// `log_stream` of `log_group`.
+///
+/// `provisions_group` is the ONE difference between them — whether the group itself is
+/// created when CloudWatch Logs does not hold it — so a destination the delivering service
+/// publishes under its own name and one it was merely pointed at cannot otherwise be
+/// delivered to differently.
+async fn write(
+    callback: &::smithy_server_runtime::EmbeddedEmulator,
+    region: &str,
+    log_group: &str,
+    log_stream: &str,
+    records: &[String],
+    provisions_group: bool,
+) -> bool {
     if records.is_empty() {
         return true;
     }
     let client = logs_client(callback, region);
-    match client
-        .create_log_group()
-        .log_group_name(log_group)
-        .send()
-        .await
-    {
-        Ok(_) => {}
-        Err(error)
-            if error
-                .as_service_error()
-                .is_some_and(|service| service.is_resource_already_exists_exception()) => {}
-        Err(error) => {
-            ::tracing::warn!(
-                log_group = %log_group,
-                error = %::aws_smithy_types::error::display::DisplayErrorContext(&error),
-                "the vended-logs destination could not be created, so these records are not \
-                 delivered"
-            );
-            return false;
+    if provisions_group {
+        match client
+            .create_log_group()
+            .log_group_name(log_group)
+            .send()
+            .await
+        {
+            Ok(_) => {}
+            Err(error)
+                if error
+                    .as_service_error()
+                    .is_some_and(|service| service.is_resource_already_exists_exception()) => {}
+            Err(error) => {
+                ::tracing::warn!(
+                    log_group = %log_group,
+                    error = %::aws_smithy_types::error::display::DisplayErrorContext(&error),
+                    "the vended-logs destination could not be created, so these records are not \
+                     delivered"
+                );
+                return false;
+            }
         }
     }
     match client
@@ -263,6 +328,22 @@ pub async fn delivered_over(
             if error
                 .as_service_error()
                 .is_some_and(|service| service.is_resource_already_exists_exception()) => {}
+        Err(error)
+            if error
+                .as_service_error()
+                .is_some_and(|service| service.is_resource_not_found_exception()) =>
+        {
+            // CloudWatch Logs holds no group of that name, and this delivery creates none:
+            // the destination it was pointed at is not there, so the records are lost and
+            // the account still holds no such group.
+            ::tracing::warn!(
+                log_group = %log_group,
+                log_stream = %log_stream,
+                "the vended-logs destination log group does not exist, so these records are \
+                 not delivered"
+            );
+            return false;
+        }
         Err(error) => {
             ::tracing::warn!(
                 log_group = %log_group,

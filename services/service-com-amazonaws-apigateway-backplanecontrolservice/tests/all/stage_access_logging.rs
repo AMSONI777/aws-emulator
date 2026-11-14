@@ -316,6 +316,25 @@ pub(crate) async fn delivered(router: &MultiServiceRouter, group: &str) -> Optio
     )
 }
 
+/// Create the log group `group` through CloudWatch Logs' own `CreateLogGroup`, which is what
+/// an operator does before pointing a stage's access logging at it: a destination is a log
+/// group of the ACCOUNT's, so API Gateway delivers into one that is there and creates none.
+///
+/// `pub(crate)` because every suite that asserts a delivered record needs its destination to
+/// exist first ([`crate::stage_access_log_record_rendering`]).
+pub(crate) async fn create_log_group(router: &MultiServiceRouter, group: &str) {
+    let (status, created) = logs(
+        router,
+        "CreateLogGroup",
+        json!({ "logGroupName": group }),
+    )
+    .await;
+    assert_eq!(
+        status, 200,
+        "setup CreateLogGroup {group:?}: expected HTTP 200, got {status} with {created}"
+    );
+}
+
 /// A .zip deployment package holding `source` as the module the handler names, written in
 /// memory the way a caller uploads one.
 fn package(source: &str) -> Vec<u8> {
@@ -595,6 +614,10 @@ async fn each_stage_writes_one_record_per_request_into_the_destination_it_names(
     let router = emulator();
     let api = deployed(&router).await;
     install_account_role(&router).await;
+    // Each destination is a log group of the account's, created before a stage is pointed at
+    // it: API Gateway delivers into a group that is there and creates none itself.
+    create_log_group(&router, PROD_GROUP).await;
+    create_log_group(&router, DEV_GROUP).await;
     configure_access_logging(&router, &api, PROD, PROD_GROUP, JSON_FORMAT).await;
     configure_access_logging(&router, &api, DEV, DEV_GROUP, CLF_FORMAT).await;
 
@@ -620,8 +643,8 @@ async fn each_stage_writes_one_record_per_request_into_the_destination_it_names(
             }
         }
         for (group, expected) in &counted {
-            // A group nothing has been delivered to yet is one API Gateway has not had to
-            // create, which is no records at all.
+            // A destination nothing has been delivered to yet holds no records; the group
+            // itself is there because the account created it.
             let records = delivered(&router, group).await.unwrap_or_default();
             assert_eq!(
                 records.len(),
@@ -681,16 +704,7 @@ async fn a_stage_with_no_account_cloudwatch_role_delivers_nothing() {
     let router = emulator();
     let api = deployed(&router).await;
     // The destination exists and the stage points at it; only the ACCOUNT step is skipped.
-    let (status, created) = logs(
-        &router,
-        "CreateLogGroup",
-        json!({ "logGroupName": PROD_GROUP }),
-    )
-    .await;
-    assert_eq!(
-        status, 200,
-        "setup CreateLogGroup: expected HTTP 200, got {status} with {created}"
-    );
+    create_log_group(&router, PROD_GROUP).await;
     configure_access_logging(&router, &api, PROD, PROD_GROUP, JSON_FORMAT).await;
 
     let answered = invoke(&router, &api, PROD, "GET", "/echo?id=unlogged").await;

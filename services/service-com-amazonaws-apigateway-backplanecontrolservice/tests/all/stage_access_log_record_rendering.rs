@@ -38,7 +38,7 @@ use crate::execute_api_data_plane::{
     put_method,
 };
 use crate::rest_api_lifecycle::{create_api, gateway_with_iam_and_logs, Gateway};
-use crate::stage_access_logging::{delivered, invoke};
+use crate::stage_access_logging::{create_log_group, delivered, invoke};
 
 /// The Region every ARN below names, which is the one the harness signs and invokes in.
 const REGION: &str = "us-east-1";
@@ -295,6 +295,9 @@ async fn one_record_per_request_renders_the_stages_format_against_that_request()
 
     for row in rows() {
         let case = row.case;
+        // The destination is a log group of the account's: it is created before the stage is
+        // pointed at it, because API Gateway delivers into a group that is there.
+        create_log_group(&gateway.router, row.group).await;
         configure_access_logging(
             &gateway,
             &api,
@@ -318,8 +321,8 @@ async fn one_record_per_request_renders_the_stages_format_against_that_request()
             .clone()
             .unwrap_or_else(|| panic!("case {case:?}: the answer named no request id"));
 
-        // Read back through CloudWatch Logs' own reader: a group API Gateway has not had to
-        // create is a destination nothing was delivered to at all.
+        // Read back through CloudWatch Logs' own reader: a group with no record in it is a
+        // destination nothing was delivered to at all.
         let records = delivered(&gateway.router, row.group)
             .await
             .unwrap_or_else(|| {
@@ -362,6 +365,7 @@ async fn a_reference_with_no_value_renders_the_placeholder_this_emulator_publish
     let api = deployed(&gateway).await;
     let group = "/apigw/access/placeholder";
     let case = "a format naming one member with a value and one without";
+    create_log_group(&gateway.router, group).await;
     configure_access_logging(
         &gateway,
         &api,
@@ -407,6 +411,7 @@ async fn a_stage_whose_logging_configuration_was_removed_delivers_nothing_more()
     let api = deployed(&gateway).await;
     let group = "/apigw/access/removed";
     let case = "the configuration that was then removed";
+    create_log_group(&gateway.router, group).await;
     configure_access_logging(&gateway, &api, case, group, false, JSON_FORMAT).await;
 
     let first = invoke(&gateway.router, &api, STAGE, SERVED_VERB, RESOURCE_PATH).await;
