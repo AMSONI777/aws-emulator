@@ -879,12 +879,18 @@ async fn put_requires_a_query_wrapped_by_a_supported_aggregation_operator() {
     wait_for_due_transition();
 
     let mut held = seed.clone();
-    // Every operator the catalog publishes, plus the aggregation modifiers PromQL's
+    // Every operator the catalog publishes, each written in the call form PromQL gives it
+    // (`quantile` takes its scalar parameter), plus the aggregation modifiers PromQL's
     // `<aggr-op> [by|without (<labels>)] (<expression>)` syntax allows between an
     // operator and its argument list — still a query wrapped by that operator.
     let mut accepted_queries: Vec<String> = RANDOM_CUT_FOREST_AGGREGATION_OPERATORS
         .iter()
-        .map(|operator| format!("{operator}(rate(requests_total[5m]))"))
+        .map(|operator| {
+            crate::anomaly_detector_query_root::aggregation_call(
+                operator,
+                "rate(requests_total[5m])",
+            )
+        })
         .collect();
     accepted_queries.push("sum by (job) (rate(requests_total[5m]))".to_string());
     accepted_queries.push("max without (instance) (up)".to_string());

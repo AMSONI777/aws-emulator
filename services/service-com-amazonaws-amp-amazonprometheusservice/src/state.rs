@@ -2033,43 +2033,18 @@ pub fn published_status_reason(stored: Option<&str>) -> String {
     stored.unwrap_or(NO_FAILURE_STATUS_REASON).to_string()
 }
 
-/// The operator an expression APPLIES outermost, when it leads with one: the identifier
-/// the expression STARTS with, immediately followed by its argument list (`sum(x)`) or by
-/// an aggregation modifier (`sum by (job) (x)`, `sum without (job) (x)`) — the form
-/// PromQL's aggregation syntax takes, `<aggr-op> [by|without (<labels>)] (<expression>)`.
-///
-/// This is how [`RANDOM_CUT_FOREST_AGGREGATION_OPERATORS`] is checked: a Random Cut
-/// Forest query must be WRAPPED by one of those aggregation operators, so the whole
-/// expression has to BE a call to one. `None` when the expression does not lead with a
-/// call at all (a bare selector, a parenthesised or arithmetic expression), which is
-/// exactly the shape that is not wrapped.
-pub fn leading_call_operator(expression: &str) -> Option<&str> {
-    let trimmed = expression.trim_start();
-    let end = trimmed
-        .find(|c: char| !(c.is_ascii_alphanumeric() || c == '_'))
-        .unwrap_or(trimmed.len());
-    let (identifier, rest) = trimmed.split_at(end);
-    // An identifier starts with a letter or `_`, so a leading digit is a number and not
-    // a call at all.
-    if identifier.is_empty() || identifier.starts_with(|c: char| c.is_ascii_digit()) {
-        return None;
-    }
-    let rest = rest.trim_start();
-    let applies = rest.starts_with('(')
-        || ["by", "without"].iter().any(|modifier| {
-            rest.strip_prefix(modifier)
-                .is_some_and(|tail| tail.starts_with('(') || tail.starts_with(char::is_whitespace))
-        });
-    applies.then_some(identifier)
-}
-
 /// Refuse an anomaly detector configuration the model accepts but the service does not.
 ///
 /// `AnomalyDetectorConfiguration` is a union whose only member is `randomCutForest`, and
 /// `RandomCutForestConfiguration$query` requires the query be "wrapped by a supported
-/// PromQL aggregation operator" — so the whole expression must BE a call to one of
-/// [`RANDOM_CUT_FOREST_AGGREGATION_OPERATORS`]. Shared, because the rule is the
-/// configuration's own and every operation that stores one applies it.
+/// PromQL aggregation operator" — a rule about the expression's ROOT: the whole
+/// expression must BE a call to one of [`RANDOM_CUT_FOREST_AGGREGATION_OPERATORS`], so an
+/// aggregation that something else is applied to (an arithmetic or comparison operand, a
+/// parenthesised expression, a function's argument) does not wrap it however early in the
+/// text it is written. The root is read from the PARSED expression
+/// ([`promql::root_aggregation_operator`]), by the one PromQL parser this crate reads a
+/// caller's query with. Shared, because the rule is the configuration's own and every
+/// operation that stores one applies it.
 ///
 /// The refusal is the service's own fixed sentence for this class
 /// ([`RANDOM_CUT_FOREST_QUERY_UNSUPPORTED_MESSAGE`]): the expression is a well-formed
@@ -2082,8 +2057,8 @@ pub fn check_random_cut_forest_configuration(
     let crate::ops::types::AnomalyDetectorConfiguration::randomCutForest(random_cut_forest) =
         configuration;
     let operators = RANDOM_CUT_FOREST_AGGREGATION_OPERATORS;
-    let wrapping = leading_call_operator(&random_cut_forest.query);
-    if wrapping.is_some_and(|operator| operators.contains(&operator)) {
+    let wrapping = promql::root_aggregation_operator(&random_cut_forest.query);
+    if wrapping.is_some_and(|operator| operators.contains(&operator.as_str())) {
         return Ok(());
     }
     Err(request_validation_failed(

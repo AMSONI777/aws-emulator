@@ -23,6 +23,8 @@ mod anomaly_detector_deletion;
 mod anomaly_detector_lifecycle;
 #[path = "all/anomaly_detector_listing.rs"]
 mod anomaly_detector_listing;
+#[path = "all/anomaly_detector_query_root.rs"]
+mod anomaly_detector_query_root;
 #[path = "all/anomaly_detector_update.rs"]
 mod anomaly_detector_update;
 #[path = "all/audit_records.rs"]

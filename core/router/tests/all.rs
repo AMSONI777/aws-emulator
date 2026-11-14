@@ -3636,3 +3636,7 @@ mod iam_denial_reason_attribution;
 // landing at once; it belongs at the head of this file or nowhere, so it is removed.)
 // (One more fragment of that same header landed here as an inner doc comment and is
 // removed; the rule it states stands in the module doc at the HEAD of this file.)
+// suite left at the top level of `tests/` fails the build. (An ordinary comment: an inner
+// doc comment is legal only before the first item of a crate root, so a `//!` line in this
+// tail is `E0753` and compiles no suite of this target.)
+// reason the lines above record: a `//!` line past the first item is `E0753`.)

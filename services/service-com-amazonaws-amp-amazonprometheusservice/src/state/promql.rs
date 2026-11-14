@@ -389,6 +389,31 @@ pub fn plan(expression: &str) -> Result<QueryPlan, QueryError> {
     Ok(plan)
 }
 
+/// The aggregation operator the WHOLE expression is a call to, when it is one — the
+/// operator at the expression's ROOT, as PromQL spells it (`sum`, `max`, `quantile`, …).
+///
+/// This is what "wrapped by an aggregation operator" means: the root of the parsed
+/// expression is an aggregation, so the aggregation is applied LAST, to everything the
+/// expression computes. The answer is `None` for every other root — a selector, a
+/// function call, a binary or unary operation, a subquery, a parenthesised expression —
+/// however deep inside it an aggregation appears, and `None` too for text PromQL does not
+/// parse, which has no root to judge.
+///
+/// The expression is read by the SAME parser [`plan`] evaluates a query with, and under
+/// the same size bound ([`MAX_QUERY_BYTES`], which is what makes handing the text to a
+/// parser safe): one reading of a caller's PromQL, not one per caller. Parameterised
+/// aggregations (`quantile`, `topk`) are roots like any other here — whether this plane
+/// goes on to EVALUATE one is [`plan_of`]'s separate question.
+pub fn root_aggregation_operator(expression: &str) -> Option<String> {
+    if expression.len() > MAX_QUERY_BYTES {
+        return None;
+    }
+    match promql_parser::parser::parse(expression) {
+        Ok(Expr::Aggregate(aggregate)) => Some(aggregate.op.to_string()),
+        _ => None,
+    }
+}
+
 /// How deep `root` is, counted by an ITERATIVE walk with its own worklist: the depth is
 /// the caller's to choose, so measuring it with the call stack is not available.
 ///

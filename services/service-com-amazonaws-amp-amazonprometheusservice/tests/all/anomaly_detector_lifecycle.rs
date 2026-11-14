@@ -487,7 +487,10 @@ async fn create_requires_a_query_wrapped_by_a_supported_aggregation_operator() {
     let workspace_id = amp.active_workspace(region, "queries").await;
 
     for (index, operator) in RANDOM_CUT_FOREST_AGGREGATION_OPERATORS.iter().enumerate() {
-        let query = format!("{operator}(rate(requests_total[5m]))");
+        // Each operator in the call form PromQL gives it: `quantile` is the one published
+        // operator that takes a scalar parameter.
+        let query =
+            crate::anomaly_detector_query_root::aggregation_call(operator, "rate(requests_total[5m])");
         let accepted = create_detector(
             &amp,
             region,
