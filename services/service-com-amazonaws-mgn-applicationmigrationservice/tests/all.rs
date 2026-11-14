@@ -19,6 +19,8 @@ mod application_lifecycle;
 mod empty_output_success_status;
 #[path = "all/network_migration_definition.rs"]
 mod network_migration_definition;
+#[path = "all/network_migration_definition_delete.rs"]
+mod network_migration_definition_delete;
 #[path = "all/network_migration_definition_listing.rs"]
 mod network_migration_definition_listing;
 #[path = "all/network_migration_definition_representation.rs"]

@@ -2786,3 +2786,39 @@ mod cloudformation_provisions_lambda_event_invoke_configs;
 // suites: which app client's token a COGNITO_USER_POOLS authorizer admits spans Amazon
 // Cognito user pools and API Gateway's execute-api data plane. It was appended here as well
 // while two branches were landing at once, which declared it twice and compiled neither.)
+// are declared once, a few lines above this one: two branches each re-added the pair here,
+// and a module declared twice in this file compiles nowhere.)
+// (`cloudformation_provisions_cloudfront_resources` is declared once, in the head region
+// Declared here, in the appended tail, which is where every new suite inserts its lines. Both
+// suites exist under tests/all/, and each is declared exactly once — here: several landings
+// appended their own copy of the pair further down this tail, and a module declared twice
+// loads the same file twice, which does not compile.
+// are declared once, a few lines above this one: several landings each re-added the pair here,
+// (This block was appended by several landings at once; each of its suites is declared ONCE
+// below, because a module declared twice loads the same file twice, which does not compile.)
+// `apigateway_sns_service_integration` are each declared ONCE in the spans above: several
+// landings appended their own copy of this block, and a module declared twice loads the same
+// file twice, which does not compile.)
+// `apigateway_sns_service_integration` are each declared ONCE in the spans above: a module may
+// be declared only once, so the copies several landings appended here are gone.)
+// (`cloudtrail_read_only_api_calls` is declared once, in the sorted block beside the other
+// CloudTrail suites in the head region above: a module may be declared only once.)
+// (`cloudformation_metric_stream_filter_update` and `zz_probe` are each declared ONCE in the
+// spans above: several landings appended their own copy of these lines, and a module declared
+// twice loads the same file twice, which does not compile.)
+// (`redshift_health_alarms_evaluate`, `cloudformation_metric_stream_filter_update` and
+// `zz_probe` are each declared ONCE in the spans above: several landings appended their own
+// copy of these lines, and a module declared twice loads the same file twice.)
+// `apigateway_cognito_authorizer_app_client_audience` are each declared ONCE, in the sorted
+// `cloudformation_scripted_queue_deploy` are each declared ONCE in the spans above: a module
+// The CloudFormation search-estate, domain-endpoint-output, CloudFront-resources and
+// CloudWatch-alarm-OpsItem suites are each declared ONCE, in the spans above: several landings
+// each appended their own copy here, and a module declared twice loads the same file twice,
+// which does not compile.
+// `cloudformation_domain_endpoint_is_dialled_by_consumers` are each declared ONCE in the spans
+// (The CloudFormation search-estate, domain-endpoint-output, CloudFront-resources and
+// CloudWatch-alarm-OpsItem suites, `lambda_signed_write_to_an_aoss_collection_endpoint` and
+// above: several landings each appended their own copy here, and a module declared twice loads
+// the same file twice, which does not compile.)
+// (`lambda_signed_write_to_an_aoss_collection_endpoint` is declared once, a little above this
+// line: a module may be declared only once.)

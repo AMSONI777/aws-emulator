@@ -281,6 +281,8 @@ mod scheduled_query_removal;
 mod scheduled_query_result_delivery;
 #[path = "all/scheduled_query_schedule_expressions.rs"]
 mod scheduled_query_schedule_expressions;
+#[path = "all/scheduled_query_schedule_period.rs"]
+mod scheduled_query_schedule_period;
 #[path = "all/scheduled_query_updates.rs"]
 mod scheduled_query_updates;
 #[path = "all/scratch_queries.rs"]

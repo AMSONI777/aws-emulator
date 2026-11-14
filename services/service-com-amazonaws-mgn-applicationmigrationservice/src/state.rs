@@ -478,6 +478,61 @@ impl ComAmazonawsMgnApplicationmigrationserviceState {
         true
     }
 
+    /// Drop one of `account_id`'s network migration definitions from the store and from
+    /// the creation order, together with the metadata recorded UNDER it — the executions
+    /// of that definition and the jobs those executions ran — answering the removed
+    /// record.
+    ///
+    /// The account key is REQUIRED, exactly as it is on every accessor above: the
+    /// `network_migration_definitions` map is keyed by id alone, so a removal that took
+    /// only the request-controlled `networkMigrationDefinitionID` could destroy another
+    /// account's record. `None` (nothing removed) when the id names no definition of this
+    /// account, and then nothing under it is touched either.
+    pub fn remove_network_migration_definition(
+        &mut self,
+        account_id: &str,
+        definition_id: &str,
+    ) -> Option<NetworkMigrationDefinition> {
+        self.network_migration_definition_of(account_id, definition_id)?;
+
+        // The jobs of the definition's executions, then those executions, then the
+        // definition itself: nothing stays addressable under a record this store no
+        // longer holds.
+        let jobs: Vec<String> = self
+            .network_migration_mapping_jobs
+            .values()
+            .filter(|job| {
+                job.account_id == account_id
+                    && job.network_migration_definition_id == definition_id
+            })
+            .map(|job| job.job_id.clone())
+            .collect();
+        for job_id in &jobs {
+            self.network_migration_mapping_jobs.remove(job_id);
+        }
+        self.network_migration_mapping_job_order
+            .retain(|id| !jobs.contains(id));
+
+        let executions: Vec<String> = self
+            .network_migration_executions
+            .values()
+            .filter(|execution| {
+                execution.account_id == account_id
+                    && execution.network_migration_definition_id == definition_id
+            })
+            .map(|execution| execution.network_migration_execution_id.clone())
+            .collect();
+        for execution_id in &executions {
+            self.network_migration_executions.remove(execution_id);
+        }
+        self.network_migration_execution_order
+            .retain(|id| !executions.contains(id));
+
+        self.network_migration_definition_order
+            .retain(|id| id != definition_id);
+        self.network_migration_definitions.remove(definition_id)
+    }
+
     /// Every execution recorded under the definition `definition_id` names within
     /// `account_id`, in creation order. An execution of another account, or of another
     /// definition, is not part of this selection.

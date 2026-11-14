@@ -166,6 +166,26 @@ impl ComAmazonawsMgnApplicationmigrationserviceState {
             .find(|job| job.is_running(now))
     }
 
+    /// The mapping job still running for any execution of the definition `definition_id`
+    /// names within `account_id` at `now`, or `None` when none is: the work in flight
+    /// that a request to remove the definition conflicts with.
+    pub fn running_network_migration_mapping_job_of_definition(
+        &self,
+        account_id: &str,
+        definition_id: &str,
+        now: SystemTime,
+    ) -> Option<&NetworkMigrationMappingJob> {
+        self.network_migration_mapping_job_order
+            .iter()
+            .filter_map(|id| self.network_migration_mapping_jobs.get(id))
+            .rev()
+            .find(|job| {
+                job.account_id == account_id
+                    && job.network_migration_definition_id == definition_id
+                    && job.is_running(now)
+            })
+    }
+
     /// A fresh `NetworkMigrationJobID` no stored job holds: 32 `[0-9a-f]` characters
     /// grouped 8-4-4-4-12, as the model's `NetworkMigrationJobID` pattern requires.
     pub fn mint_network_migration_job_id(&self) -> String {
@@ -231,6 +251,26 @@ pub fn network_migration_mapping_job_in_progress(
         code: None,
         resource_id: Some(execution_id.to_string()),
         resource_type: Some(NETWORK_MIGRATION_EXECUTION_RESOURCE_TYPE.to_string()),
+        errors: None,
+    }
+}
+
+/// The modelled refusal for a request to remove a network migration definition while a
+/// mapping job of one of its executions is still running: the removal conflicts with the
+/// definition's current state, since the work in flight runs under records the removal
+/// would drop.
+pub fn network_migration_definition_mapping_in_progress(
+    definition_id: &str,
+    job_id: &str,
+) -> ConflictException {
+    ConflictException {
+        message: Some(format!(
+            "Network migration definition {definition_id} cannot be deleted while mapping \
+             job {job_id} is running."
+        )),
+        code: None,
+        resource_id: Some(definition_id.to_string()),
+        resource_type: Some(NETWORK_MIGRATION_DEFINITION_RESOURCE_TYPE.to_string()),
         errors: None,
     }
 }

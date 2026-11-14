@@ -1,15 +1,14 @@
 // SPDX-License-Identifier: CC0-1.0
 
 //! @op DeleteNetworkMigrationDefinition
-//! SCAFFOLDED, NOT IMPLEMENTED: this operation answers HTTP 501 `NotImplemented` and
-//! asserts NOTHING about `DeleteNetworkMigrationDefinition`'s real behaviour. Implement it here — this is
-//! the ONLY file to touch for this operation.
+//! Removes one stored network migration definition, by `networkMigrationDefinitionID`,
+//! together with the metadata recorded under it.
 //!
-//! A 501 from this operation means "nobody has written it yet", never "the emulator is
-//! broken". Replace the `Err(..)` in [`DeleteNetworkMigrationDefinition::handle`] with real behaviour and
-//! delete the SCAFFOLDED marker line above; that line is the machine-readable record of
-//! which operations are still stubs (`grep -rl '^//! SCAFFOLDED, NOT IMPLEMENTED:' */src/ops/`),
-//! so leaving it on an implemented operation under-reports progress.
+//! A mutation: the record the account held is gone, so a later read of the same id is
+//! the modelled `ResourceNotFoundException` (404), and so is a delete of an id the
+//! account holds no record of. While a mapping job of one of the definition's executions
+//! is still running, the removal conflicts with the definition's current state and is
+//! refused with the modelled `ConflictException` (409).
 //!
 //! ## Shape of an operation
 //!
@@ -80,12 +79,19 @@ smithy_macros::smithy_model!("smithy-model/com-amazonaws-mgn-applicationmigratio
 // here — hence the `DeleteNetworkMigrationDefinitionError` alias below. An operation that models no errors
 // generates an UNINHABITED enum here, which is correct and expected: there is nothing
 // to construct until the model says otherwise.
-#[smithy_macros::operation_error("com.amazonaws.mgn#DeleteNetworkMigrationDefinition")]
+// `extra_errors` widens the accepted set with a shape the SERVICE models but this
+// operation does not list: `InternalServerException` (HTTP 500) is the only honest
+// answer when the engine carries no store for this service.
+#[smithy_macros::operation_error(
+    "com.amazonaws.mgn#DeleteNetworkMigrationDefinition",
+    extra_errors = ["InternalServerException"]
+)]
 #[derive(Debug)]
 pub enum DeleteNetworkMigrationDefinitionErrorModeled {
     AccessDeniedException(AccessDeniedException),
     ConflictException(ConflictException),
     ResourceNotFoundException(ResourceNotFoundException),
+    InternalServerException(InternalServerException),
 }
 
 /// This operation's error channel, as the generated `impl Operation` names it
@@ -139,18 +145,77 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         input: Self::Input,
         ctx: &smithy_server_runtime::OperationContext<'_>,
     ) -> Result<Self::Output, Self::Error> {
-        // The engine is reachable from `&self` (constructor-injected); `ctx` carries
-        // request metadata. Both are bound here so an implementer has them in scope.
-        let _ = (&input, ctx, &self.engine);
-        // Implement `DeleteNetworkMigrationDefinition` here, then delete the SCAFFOLDED marker at the top of
-        // this file. Return modeled failures as
-        // `Err(DeleteNetworkMigrationDefinitionErrorModeled::Variant(..).into())` — the `From` impl above lifts it.
-        //
-        // To refuse a bad request this operation models no error for, return
-        // `Err(crate::scaffolded::Scaffolded::validation("..."))` — a 400
-        // `ValidationException`. Do NOT answer 501 for it: 501 means "not written yet",
-        // not "bad request". Modeled constraints are already refused BEFORE this
-        // handler runs, so reaching here means the input satisfies every one of them.
-        Err(crate::scaffolded::Scaffolded::not_implemented("DeleteNetworkMigrationDefinition"))
+        let state = crate::state::service_state(&*self.engine).ok_or_else(|| {
+            DeleteNetworkMigrationDefinitionErrorModeled::InternalServerException(
+                crate::state::state_unavailable(),
+            )
+        })?;
+        // The operation models no `accountID` member, so it removes only the definitions
+        // of the account the request is signed for.
+        let account = crate::state::account_key(None);
+        let definition_id = input.network_migration_definition_id;
+        let now = ::std::time::SystemTime::now();
+        let mut store = state.lock();
+
+        // The removal is keyed by the account AND the id, exactly as every accessor of
+        // this record is: the store is keyed by id alone, so an unscoped removal would
+        // reach another account's definition. An id this account holds no record of names
+        // nothing to remove — including the id of a definition an earlier call already
+        // removed, which is why a repeat of this call answers the not-found refusal
+        // rather than a second success.
+        if store
+            .network_migration_definition_of(&account, &definition_id)
+            .is_none()
+        {
+            crate::state::audit(
+                ctx.parts(),
+                Self::NAME,
+                &account,
+                &definition_id,
+                "refused: ResourceNotFoundException",
+            );
+            return Err(
+                DeleteNetworkMigrationDefinitionErrorModeled::ResourceNotFoundException(
+                    crate::state::network_migration_definition_not_found(&definition_id),
+                )
+                .into(),
+            );
+        }
+
+        // Work in flight under the definition blocks its removal: a mapping job that is
+        // still running runs under an execution of this definition, which this removal
+        // would drop, so the request conflicts with the definition's current state. Once
+        // that job's work is due to have finished nothing is in flight any more and the
+        // removal proceeds.
+        if let Some(running) =
+            store.running_network_migration_mapping_job_of_definition(&account, &definition_id, now)
+        {
+            let job_id = running.job_id.clone();
+            crate::state::audit(
+                ctx.parts(),
+                Self::NAME,
+                &account,
+                &definition_id,
+                "refused: ConflictException",
+            );
+            return Err(
+                DeleteNetworkMigrationDefinitionErrorModeled::ConflictException(
+                    crate::state::network_migration_definition_mapping_in_progress(
+                        &definition_id,
+                        &job_id,
+                    ),
+                )
+                .into(),
+            );
+        }
+
+        // The operation removes the definition AND the metadata recorded under it: the
+        // executions of the definition and the jobs those executions ran go with it, so
+        // nothing stays addressable under a definition the account no longer holds.
+        let removed = store.remove_network_migration_definition(&account, &definition_id);
+        debug_assert!(removed.is_some(), "the record was found above this removal");
+        crate::state::audit(ctx.parts(), Self::NAME, &account, &definition_id, "deleted");
+
+        Ok(DeleteNetworkMigrationDefinitionOutput {})
     }
 }
