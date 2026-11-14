@@ -2060,6 +2060,8 @@ mod cloudformation_metric_stream_filter_update;
 // service crate's test target can create the index and then read the document back out.
 #[path = "all/bedrock_knowledge_base_over_an_aoss_collection.rs"]
 mod bedrock_knowledge_base_over_an_aoss_collection;
+#[path = "all/bedrock_agent_ingestion_populates_its_s3_vectors_index.rs"]
+mod bedrock_agent_ingestion_populates_its_s3_vectors_index;
 // Declared in the appended tail: whether an UpdateStack that changes an AWS::DynamoDB::Table
 // in place is reported complete only once DynamoDB reports that table ACTIVE again spans
 // CloudFormation (which makes the calls) and DynamoDB (which decides the table's status), so
