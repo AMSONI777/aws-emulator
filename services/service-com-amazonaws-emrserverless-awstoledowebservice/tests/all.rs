@@ -17,6 +17,8 @@ mod access_grant_refusals;
 mod application_lifecycle;
 #[path = "all/application_projection.rs"]
 mod application_projection;
+#[path = "all/application_status_gates.rs"]
+mod application_status_gates;
 #[path = "all/effective_configuration_projection.rs"]
 mod effective_configuration_projection;
 #[path = "all/idempotency_and_idle_lifecycle.rs"]

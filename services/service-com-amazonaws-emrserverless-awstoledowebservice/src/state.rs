@@ -477,6 +477,13 @@ pub const DELETABLE_APPLICATION_STATES: &[&str] = &["CREATED", "STOPPED"];
 /// different sentences about it.
 pub const STARTABLE_APPLICATION_STATES: &[&str] = &["CREATED", "STOPPED"];
 
+/// The `ApplicationState` values a start is ALREADY satisfied by: an application that is
+/// running, or on its way there.
+///
+/// `StartApplication` is `@idempotent`, so a start asked for again on one of these leaves
+/// the application exactly as it is rather than starting it a second time.
+pub const RUNNING_APPLICATION_STATES: &[&str] = &["STARTING", "STARTED"];
+
 /// How a status gate renders the statuses it admits: the bracketed, comma-separated
 /// list the service's own refusals carry, built from the gate's own set so the sentence
 /// and the check can never disagree.

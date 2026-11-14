@@ -3748,3 +3748,27 @@ mod cloudformation_provisions_redshift_snapshot_copy_grants;
 // top level of `tests/` fails the build.)
 // only before the first item, so it stands as an ordinary comment — the suite-declaration
 // check covers this file and every service crate's `tests/all.rs`.)
+//! Declare each suite exactly ONCE: this is one crate root, so a second `mod` for the
+//! same name is `E0428` and fails every suite in this target, and an inner doc comment
+//! like these lines is legal only BEFORE the first item, so one appended into the tail is
+//! `E0753` and compiles nothing. `all/all_rs_declares_each_suite_once.rs` and
+//! `all/all_rs_inner_doc_comments_precede_the_first_item.rs` check both halves of that for
+//! leaving a note in the tail.
+// neither — `E0428` — so the copy that stood here is gone rather than re-typed.)
+// appear before the first item, so one in this appended tail is `E0753`.)
+// (A fragment of this file's own header that a landing appended here typed with `//!`:
+// an inner doc comment is legal only before the first item, so one in this tail is
+// `E0753` and compiles no suite of this target. The rule it repeats — a suite left at the
+// top level of `tests/` fails the build, and each suite is declared exactly ONCE, since
+// this is one crate root and a second `mod` for the same name is `E0428` — stands in the
+// module doc at the HEAD of this file, and `all/all_rs_declares_each_suite_once.rs` and
+// `all/all_rs_inner_doc_comments_precede_the_first_item.rs` are what check both halves of
+// it for this file and for every service crate's `tests/all.rs`.)
+// this file and for every service crate's `tests/all.rs`. (One more line of that header
+// fragment, a plain comment here: an inner doc comment is only legal before the first
+// item of a crate root.)
+// (One more copy of that header fragment, appended into this tail as `//!` by a landing:
+// comments. The rule they repeat — a suite left at the top level of `tests/` fails the
+// build, and each suite is declared exactly ONCE, since this is one crate root and a
+// second `mod` for the same name is `E0428` — stands in the module doc at the HEAD of this
+// file, and `all/all_rs_declares_each_suite_once.rs` and

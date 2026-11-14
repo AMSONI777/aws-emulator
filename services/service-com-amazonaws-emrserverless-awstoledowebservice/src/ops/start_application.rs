@@ -153,26 +153,22 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
                 )
             })?;
 
-        match record.application.state.as_str() {
+        // The status gate is judged against the state the application has SETTLED on
+        // (`crate::state::ApplicationRecord::settled_state`), the way every other
+        // lifecycle precondition in this service is: a transition the clock still owes
+        // (a create on its way to `CREATED`, a stop on its way to `STOPPED`) completes
+        // here rather than refusing a start the settled application admits.
+        let application_state = record.settled_state().to_string();
+        match application_state.as_str() {
             // `@idempotent`: an application that is already running, or already on its
             // way there, is left exactly as it is.
-            "STARTING" | "STARTED" => {}
-            // A terminated application is gone for good — there is nothing to start. The
-            // refusal states the statuses a start WOULD be admitted from, which is what
-            // the service's own sentence tells a caller.
-            "TERMINATED" => {
-                return Err(StartApplicationErrorModeled::ValidationException(
-                    ValidationException {
-                        message: crate::state::application_not_startable_message(),
-                    },
-                )
-                .into())
-            }
-            // Otherwise the start is accepted: the application reports `STARTING` to a
-            // caller acting straight away, and the clock owes it `STARTED`. The idle
-            // span its `autoStopConfiguration` bounds runs from this call: an
-            // application only holds capacity once it is running.
-            _ => {
+            state if crate::state::RUNNING_APPLICATION_STATES.contains(&state) => {}
+            // A start is admitted from the statuses the gate's own allowed set names,
+            // and from no other: the application reports `STARTING` to a caller acting
+            // straight away, and the clock owes it `STARTED`. The idle span its
+            // `autoStopConfiguration` bounds runs from this call: an application only
+            // holds capacity once it is running.
+            state if crate::state::STARTABLE_APPLICATION_STATES.contains(&state) => {
                 record.application.state = "STARTING".to_string();
                 record.application.updated_at = crate::state::now_timestamp(now);
                 record.pending = Some(crate::state::PendingState {
@@ -181,6 +177,18 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
                     state_details: None,
                 });
                 record.mark_activity(now);
+            }
+            // Every status outside that set is refused — a terminated application is
+            // gone for good, and there is nothing to start — with the sentence the
+            // service states for the gate: the statuses a start WOULD be admitted from,
+            // rendered from that same set so the check and the sentence cannot disagree.
+            _ => {
+                return Err(StartApplicationErrorModeled::ValidationException(
+                    ValidationException {
+                        message: crate::state::application_not_startable_message(),
+                    },
+                )
+                .into())
             }
         }
 
