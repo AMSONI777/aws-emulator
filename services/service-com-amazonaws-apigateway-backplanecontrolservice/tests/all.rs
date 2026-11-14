@@ -656,6 +656,16 @@ mod test_invoke_authorizer_user_pool_audience;
 // reports its page under once the collection has been emptied.
 #[path = "all/emptied_collection_page_member.rs"]
 mod emptied_collection_page_member;
+// Appended for the reason the note above gives: the STATE Certificate Manager holds the
+// certificate a custom domain name is configured to use in, which spans API Gateway and
+// Certificate Manager on one engine.
+#[path = "all/domain_name_certificate_state.rs"]
+mod domain_name_certificate_state;
+// Appended for the reason the note above gives: the alias target a custom domain name
+// publishes — the hosted zone of the endpoint that serves it, which is the Region's own for a
+// regional record.
+#[path = "all/regional_endpoint_hosted_zone.rs"]
+mod regional_endpoint_hosted_zone;
 // Appended for the reason the note above gives: the two things the api's own resource policy
 // decides that no sibling suite carries — a clause written over the ADDRESS the request came
 // from, and what the refusal of a document that explicitly denies the call reports.

@@ -248,6 +248,19 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         // The store lock is released before the outcome is recorded: the critical section
         // covers the state change only.
         drop(store);
+        // Nothing will present this record's certificates once it is gone, so the references
+        // it held are given up — and the removal is ACCEPTED here rather than finished (the
+        // endpoints still have to be taken down), so each reference stays in use until that
+        // teardown falls due. See `crate::state::certificate_association_directory`.
+        if let Some(associations) =
+            crate::state::certificate_association_directory(&*self.engine)
+        {
+            associations.lock().release_resource(
+                &domain_name_arn,
+                ::std::time::SystemTime::now(),
+                crate::state::DOMAIN_NAME_DELETION_SPAN,
+            );
+        }
         // The access record for a state-changing operation: who, what, and the outcome —
         // the one record `crate::state::AUDIT_TARGET` documents, as the sibling
         // `DeleteUsagePlan` handler emits it. Metadata only; a domain name's tags, policy

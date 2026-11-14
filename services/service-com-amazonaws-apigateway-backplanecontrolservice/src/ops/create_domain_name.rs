@@ -3,7 +3,9 @@
 //! @op CreateDomainName
 //! IMPLEMENTED: stores one custom `DomainName` record — the name, the certificate and
 //! endpoint configuration the request carries, and the endpoint names API Gateway
-//! assigns it — and reports that stored record. Writes.
+//! assigns it — and reports that stored record. The certificates the request names are
+//! resolved against the state Certificate Manager holds them in first, so a domain name
+//! that could never present its certificate is refused instead of stored. Writes.
 //!
 //! ## Shape of an operation
 //!
@@ -295,10 +297,9 @@ impl From<&DomainNameEntry> for CreateDomainNameOutput {
             certificate_arn: entry.certificate_arn.clone(),
             certificate_upload_date: entry.certificate_upload_date,
             regional_domain_name: entry.regional_domain_name.clone(),
-            // The Route 53 hosted zone of the Region's API Gateway endpoint is a
-            // per-Region constant this service's model carries no value for; see
-            // `DomainNameEntry`.
-            regional_hosted_zone_id: None,
+            // The Route 53 hosted zone of the Region's API Gateway endpoint, as the record
+            // was assigned it; see `DomainNameEntry::regional_hosted_zone_id`.
+            regional_hosted_zone_id: entry.regional_hosted_zone_id.clone(),
             regional_certificate_name: entry.regional_certificate_name.clone(),
             regional_certificate_arn: entry.regional_certificate_arn.clone(),
             distribution_domain_name: entry.distribution_domain_name.clone(),
@@ -452,6 +453,29 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         let region = crate::state::request_region(ctx.parts());
         let now = crate::state::now();
 
+        // A custom domain name is configured to PRESENT the certificates its members name, so
+        // each has to be one Certificate Manager has issued — a precondition only the service
+        // that holds the certificate can settle. It is resolved BEFORE the store is reached and
+        // before any socket is opened, so a refused create leaves no domain name and no
+        // listener behind; and it is resolved AFTER `bound_input` above, so a value that is no
+        // certificate ARN at all still earns the unreadable-ARN refusal rather than this one.
+        // See `crate::state::acm_certificate_state`.
+        if let Err(message) = crate::state::acm_certificate_state::resolve_certificates_issued(
+            ctx,
+            &region,
+            [
+                input.certificate_arn.as_deref(),
+                input.regional_certificate_arn.as_deref(),
+                input.ownership_verification_certificate_arn.as_deref(),
+            ]
+            .into_iter()
+            .flatten(),
+        )
+        .await
+        {
+            return Err(bad_request(message));
+        }
+
         // The ADDRESS a REGIONAL domain name answers on, opened BEFORE the store is locked
         // because opening a socket is asynchronous. `regionalDomainName` is the address a
         // client points DNS at and then DIALS, so what is published is the `host:port` this
@@ -532,6 +556,10 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
                 Some(endpoint) => endpoint.authority().to_string(),
                 None => regional_endpoint_domain_name(&endpoint_id, &region),
             }),
+            // The zone an alias record for that address targets, which is the Region's own;
+            // see `crate::state::regional_endpoint_hosted_zone_id`.
+            regional_hosted_zone_id: (regional && !private)
+                .then(|| crate::state::regional_endpoint_hosted_zone_id(&region)),
             regional_certificate_name: input.regional_certificate_name,
             regional_certificate_arn: input.regional_certificate_arn,
             distribution_domain_name: (!regional && !private)
@@ -601,9 +629,27 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
             .get(&key)
             .ok_or_else(crate::state::state_unavailable)?;
         let output = CreateDomainNameOutput::from(stored);
+        let resource_arn = stored.domain_name_arn.clone();
+        let referenced_certificates = stored.referenced_certificate_arns();
         // Everything below is owned, so the store lock is released before the record is
         // formatted: the critical section covers the state change only.
         drop(store);
+        // This record now REFERENCES the certificates its members name, which is a fact the
+        // service holding them has to know: it cannot see this store, and may not let a
+        // certificate be deleted or revoked while a domain name is presenting it. Recorded in
+        // the shared directory keyed by this record's own ARN, so the update and the delete
+        // replace and release exactly these references. See
+        // `crate::state::certificate_association_directory`.
+        if let Some(associations) =
+            crate::state::certificate_association_directory(&*self.engine)
+        {
+            associations.lock().record_resource(
+                &resource_arn,
+                &referenced_certificates,
+                ::std::time::SystemTime::now(),
+                crate::state::DOMAIN_NAME_MIGRATION_SPAN,
+            );
+        }
         // The access record for a state-changing operation: who, what, and the outcome.
         ::tracing::info!(
             target: crate::state::AUDIT_TARGET,

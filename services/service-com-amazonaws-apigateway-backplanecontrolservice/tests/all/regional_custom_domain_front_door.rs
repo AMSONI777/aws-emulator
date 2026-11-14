@@ -84,15 +84,19 @@ fn authority(name: &str) -> Authority {
 }
 
 /// One certificate and its key, in the forms the two sides of a handshake need them.
-struct Identity {
-    certificate_pem: String,
-    private_key_pem: String,
+///
+/// `pub(crate)` with [`leaf`] and [`import_certificate`] below, so the sibling
+/// `domain_name_certificate_state` suite brings a REAL certificate into Certificate Manager
+/// through this one spelling rather than a second copy of it.
+pub(crate) struct Identity {
+    pub(crate) certificate_pem: String,
+    pub(crate) private_key_pem: String,
     der: Vec<u8>,
     key_der: Vec<u8>,
 }
 
 /// A real leaf for `name`, self-signed: what a caller imports into Certificate Manager.
-fn leaf(name: &str) -> Identity {
+pub(crate) fn leaf(name: &str) -> Identity {
     let key = rcgen::KeyPair::generate().expect("a key pair");
     let params =
         rcgen::CertificateParams::new(vec![name.to_string()]).expect("certificate parameters");
@@ -126,7 +130,11 @@ fn client_identity(authority: &Authority, name: &str) -> Identity {
 
 /// Import `identity` through Certificate Manager's OWN `ImportCertificate`, answering the
 /// ARN it was stored under — the ARN a custom domain name then names.
-async fn import_certificate(gateway: &Gateway, case: &str, identity: &Identity) -> String {
+pub(crate) async fn import_certificate(
+    gateway: &Gateway,
+    case: &str,
+    identity: &Identity,
+) -> String {
     let body = json!({
         "Certificate": aws_smithy_types::base64::encode(identity.certificate_pem.as_bytes()),
         "PrivateKey": aws_smithy_types::base64::encode(identity.private_key_pem.as_bytes()),

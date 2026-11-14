@@ -4,7 +4,8 @@
 //! IMPLEMENTED: applies the request's `patchOperations` to the stored `DomainName` record
 //! the `domainName` (and, for a private one, the `domainNameId`) addresses, in request
 //! order, and reports the patched record — the same one a later `GetDomainName` reads
-//! back.
+//! back. A certificate the patch configures is resolved against the state Certificate
+//! Manager holds it in first, by the rule `CreateDomainName` reads the same members by.
 //!
 //! ## Shape of an operation
 //!
@@ -180,6 +181,34 @@ fn endpoint_types(entry: &DomainNameEntry) -> Vec<String> {
         .as_ref()
         .and_then(|configuration| configuration.types.clone())
         .unwrap_or_default()
+}
+
+/// The certificates a patched record would reference that the stored one does not: the three
+/// members of a `DomainName` that name a Certificate Manager certificate, taken where this
+/// update SETS one the record was not already carrying.
+///
+/// What a patch leaves untouched was weighed when it was configured, so an update that
+/// changes something else is not refused for it; what a patch SETS is a certificate this
+/// update configures, and configuring one has the same precondition on either path — see
+/// [`crate::state::acm_certificate_state`].
+fn newly_referenced_certificates(stored: &DomainNameEntry, patched: &DomainNameEntry) -> Vec<String> {
+    [
+        (&stored.certificate_arn, &patched.certificate_arn),
+        (
+            &stored.regional_certificate_arn,
+            &patched.regional_certificate_arn,
+        ),
+        (
+            &stored.ownership_verification_certificate_arn,
+            &patched.ownership_verification_certificate_arn,
+        ),
+    ]
+    .into_iter()
+    .filter_map(|(held, configured)| match configured {
+        Some(configured) if Some(configured) != held.as_ref() => Some(configured.clone()),
+        _ => None,
+    })
+    .collect()
 }
 
 /// Refuse a patched value on a member that names a certificate, by the rule
@@ -405,6 +434,11 @@ fn migrate_endpoint(
             Some(authority) => authority.to_string(),
             None => regional_endpoint_domain_name(endpoint_id, region),
         });
+        // The zone an alias record for that address targets, assigned from the Region the
+        // migrated record is served from — the value `CreateDomainName` assigns a regional
+        // record.
+        entry.regional_hosted_zone_id =
+            Some(crate::state::regional_endpoint_hosted_zone_id(region));
         entry.distribution_domain_name = None;
         entry.distribution_hosted_zone_id = None;
         // The upload date dates "the certificate that was used by edge-optimized endpoint
@@ -415,6 +449,7 @@ fn migrate_endpoint(
         entry.distribution_domain_name = Some(edge_distribution_domain_name(endpoint_id));
         entry.distribution_hosted_zone_id = Some(EDGE_DISTRIBUTION_HOSTED_ZONE_ID.to_string());
         entry.regional_domain_name = None;
+        entry.regional_hosted_zone_id = None;
     }
     // The record is no longer waiting for the endpoint it was created with: what it waits
     // for now is this migration.
@@ -595,26 +630,53 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         let key =
             crate::state::domain_name_key(&input.domain_name, input.domain_name_id.as_deref());
 
-        // Whether this update MOVES the record to a regional endpoint, decided on a COPY
-        // before the store is locked for the update itself: a regional record publishes the
-        // address of a socket of this emulator's own, and opening that socket is
-        // asynchronous, so it cannot be done while the store is held. The probe applies the
-        // same patches to a copy of the stored record and reads the endpoint type they
-        // leave; a list this operation goes on to refuse drops the handle, which closes the
-        // port again.
-        let migrates_to_regional = {
+        // Whether this update MOVES the record to a regional endpoint, and which certificates
+        // it would newly configure — both decided on a COPY before the store is locked for the
+        // update itself: a regional record publishes the address of a socket of this
+        // emulator's own and a configured certificate is resolved against the service that
+        // holds it, and neither opening a socket nor asking another service can be done while
+        // the store is held. The probe applies the same patches to a copy of the stored record
+        // and reads what they leave; a list this operation goes on to refuse drops the socket
+        // handle, which closes the port again.
+        let (migrates_to_regional, configured_certificates) = {
             let store = state.lock();
-            store.domain_names.get(&key).is_some_and(|record| {
-                let mut probe = record.clone();
-                let served_by = endpoint_types(&probe);
-                let applied = patches
-                    .iter()
-                    .try_for_each(|patch| apply_patch(&mut probe, patch));
-                applied.is_ok()
-                    && endpoint_types(&probe) != served_by
-                    && crate::state::is_regional_domain_name(&probe)
-            })
+            match store.domain_names.get(&key) {
+                Some(record) => {
+                    let mut probe = record.clone();
+                    let served_by = endpoint_types(&probe);
+                    let applied = patches
+                        .iter()
+                        .try_for_each(|patch| apply_patch(&mut probe, patch));
+                    match applied {
+                        Ok(()) => (
+                            endpoint_types(&probe) != served_by
+                                && crate::state::is_regional_domain_name(&probe),
+                            newly_referenced_certificates(record, &probe),
+                        ),
+                        // A list that cannot be applied at all is refused below, by the one
+                        // application of it that answers the caller.
+                        Err(_) => (false, Vec::new()),
+                    }
+                }
+                None => (false, Vec::new()),
+            }
         };
+
+        // The same precondition `CreateDomainName` resolves: a certificate this update would
+        // configure the domain name to present has to be one Certificate Manager has issued,
+        // so a record cannot be patched into carrying a certificate a create would have
+        // refused. Resolved before anything is stored, so a refused update leaves the record
+        // as it stood. See `crate::state::acm_certificate_state`.
+        if let Err(message) = crate::state::acm_certificate_state::resolve_certificates_issued(
+            ctx,
+            &region,
+            configured_certificates.iter().map(String::as_str),
+        )
+        .await
+        {
+            return Err(patch_failure(PatchFailure::BadRequest(message)));
+        }
+
         let opened = if migrates_to_regional {
             crate::state::open_custom_domain_endpoint(
                 &*self.engine,
@@ -707,8 +769,24 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
             .get(&key)
             .ok_or_else(crate::state::state_unavailable)?;
         let output = Self::Output::from(CreateDomainNameOutput::from(stored));
+        let resource_arn = stored.domain_name_arn.clone();
+        let referenced_certificates = stored.referenced_certificate_arns();
         // The lock covers the state change only; everything below is owned.
         drop(store);
+        // What this record references NOW replaces what it referenced before: a certificate
+        // the patch pointed it away from stays in use until the endpoint still presenting it
+        // has migrated, which is what the span records. See
+        // `crate::state::certificate_association_directory`.
+        if let Some(associations) =
+            crate::state::certificate_association_directory(&*self.engine)
+        {
+            associations.lock().record_resource(
+                &resource_arn,
+                &referenced_certificates,
+                ::std::time::SystemTime::now(),
+                DOMAIN_NAME_MIGRATION_SPAN,
+            );
+        }
         // The access record for a state-changing operation: who, what, and the outcome.
         // Metadata only — never a patch value or a certificate ARN.
         ::tracing::info!(

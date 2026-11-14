@@ -1399,11 +1399,11 @@ pub fn quota_reached(resources: &str, scope: &str) -> String {
 /// type"), not through a public alias. Whichever it has is assigned by the service when
 /// the record is created and stored, so every later read reports the same values.
 ///
-/// `regionalHostedZoneId` is NOT among them: it is the Route 53 hosted zone of the
-/// Region's API Gateway endpoint, a per-Region constant this service's model carries no
-/// value for (the member's doc points at the AWS General Reference table instead), so a
-/// stored record reports none rather than a zone id this emulator would have to invent.
-/// `distributionHostedZoneId`, whose single value the model DOES state, is stored.
+/// `regionalHostedZoneId` is the Route 53 hosted zone of the REGION's API Gateway
+/// endpoint, so a regional record carries it exactly as an edge-optimized one carries the
+/// single `distributionHostedZoneId` the model states — assigned from the Region the record
+/// is served from when it is created (see [`regional_endpoint_hosted_zone_id`]) and stored,
+/// so every later read reports the same zone.
 #[derive(Debug, Clone, Default)]
 pub struct DomainNameEntry {
     pub domain_name: String,
@@ -1419,6 +1419,9 @@ pub struct DomainNameEntry {
     /// was created, and only for a record created WITH a certificate.
     pub certificate_upload_date: Option<::aws_smithy_types::DateTime>,
     pub regional_domain_name: Option<String>,
+    /// The Region's API Gateway endpoint hosted zone for a regional domain name, absent
+    /// otherwise; see [`regional_endpoint_hosted_zone_id`].
+    pub regional_hosted_zone_id: Option<String>,
     pub regional_certificate_name: Option<String>,
     pub regional_certificate_arn: Option<String>,
     pub distribution_domain_name: Option<String>,
@@ -1496,6 +1499,29 @@ impl DomainNameEntry {
     /// The key this record is stored under; see [`domain_name_key`].
     pub fn key(&self) -> String {
         domain_name_key(&self.domain_name, self.domain_name_id.as_deref())
+    }
+
+    /// Every Certificate Manager certificate this record REFERENCES, in ARN order and each
+    /// once: the certificate its endpoint presents (`certificateArn` for an edge-optimized
+    /// or private one, `regionalCertificateArn` for a regional one) and the certificate that
+    /// validates ownership of its domain.
+    ///
+    /// What the service that HOLDS those certificates has to know about this record; see
+    /// [`certificate_association_directory`].
+    pub fn referenced_certificate_arns(&self) -> Vec<String> {
+        [
+            self.certificate_arn.as_deref(),
+            self.regional_certificate_arn.as_deref(),
+            self.ownership_verification_certificate_arn.as_deref(),
+        ]
+        .into_iter()
+        .flatten()
+        .map(str::trim)
+        .filter(|arn| !arn.is_empty())
+        .map(str::to_string)
+        .collect::<BTreeSet<String>>()
+        .into_iter()
+        .collect()
     }
 
     /// The base paths of this domain name's mappings in creation order: the stable
@@ -1729,6 +1755,82 @@ pub fn edge_distribution_domain_name(id: &str) -> String {
 /// minted and stored the way [`edge_distribution_domain_name`]'s is.
 pub fn regional_endpoint_domain_name(id: &str, region: &str) -> String {
     format!("d-{id}.execute-api.{region}.amazonaws.com")
+}
+
+/// How many characters follow the leading `Z` of a hosted zone id, matching the
+/// fourteen-character ids AWS publishes for its endpoint hosted zones (the published
+/// [`EDGE_DISTRIBUTION_HOSTED_ZONE_ID`] is one).
+const HOSTED_ZONE_ID_CHARS: usize = 13;
+
+/// One Region's hosted zone for API Gateway's regional endpoint: the zone, and the Region
+/// it is the zone OF.
+#[derive(Debug)]
+pub struct RegionalEndpointHostedZone {
+    pub region: &'static str,
+    pub hosted_zone_id: &'static str,
+}
+
+/// The hosted zones AWS PUBLISHES for API Gateway's regional endpoints, one entry per
+/// Region.
+///
+/// SOURCE: the table `DomainName$regionalHostedZoneId`'s own documentation points at ("For
+/// more information, see Set up a Regional Custom Domain Name and AWS Regions and Endpoints
+/// for API Gateway"). AWS ASSIGNS these ids and publishes no formula for them — the same as
+/// the one it publishes for the edge-optimized endpoint
+/// ([`EDGE_DISTRIBUTION_HOSTED_ZONE_ID`]) — so the ids it publishes are CARRIED here rather
+/// than computed, and a Region this table does not name falls back to a derived id (see
+/// [`regional_endpoint_hosted_zone_id`]). A caller writes a Route 53 alias record against
+/// the zone, so carrying the published id is what makes the record they write point at the
+/// endpoint AWS would serve.
+pub const REGIONAL_ENDPOINT_HOSTED_ZONES: &[RegionalEndpointHostedZone] = &[
+    RegionalEndpointHostedZone {
+        region: "us-east-1",
+        hosted_zone_id: "Z1UJRXOUMOOFQ8",
+    },
+    RegionalEndpointHostedZone {
+        region: "us-west-2",
+        hosted_zone_id: "Z2OJLYMUO9EFXC",
+    },
+];
+
+/// The PUBLISHED hosted zone of API Gateway's regional endpoint in `region`, or `None` for
+/// a Region [`REGIONAL_ENDPOINT_HOSTED_ZONES`] carries no published id for.
+pub fn published_regional_endpoint_hosted_zone_id(region: &str) -> Option<&'static str> {
+    REGIONAL_ENDPOINT_HOSTED_ZONES
+        .iter()
+        .find(|zone| zone.region == region)
+        .map(|zone| zone.hosted_zone_id)
+}
+
+/// The `regionalHostedZoneId` of a regional custom domain name: "the region-specific
+/// Amazon Route 53 Hosted Zone ID of the regional endpoint".
+///
+/// It is a fact about the REGION rather than about the record — every regional custom
+/// domain name in one Region is aliased through the same zone, exactly as every
+/// edge-optimized one is aliased through the single published
+/// [`EDGE_DISTRIBUTION_HOSTED_ZONE_ID`] — so it is the Region's own zone and is the same for
+/// every record there and for every read of one.
+///
+/// The id AWS publishes for the Region wherever this service carries it
+/// ([`published_regional_endpoint_hosted_zone_id`]); a Region with no published id carried
+/// here still reports one id of its own, DERIVED from the Region rather than invented afresh
+/// per read, so the member keeps its per-Region invariance and its stability everywhere. The
+/// mixing is [`::service_common::stable_hex_id`], the tree's one derived-id mixer,
+/// reproducible across builds, uppercased and cut to the published LENGTH: a leading `Z` and
+/// [`HOSTED_ZONE_ID_CHARS`] characters, which the mixer renders as uppercase hexadecimal (a
+/// subset of the uppercase alphanumerics AWS's own ids use). The sibling
+/// `service-com-amazonaws-apigatewayv2-apigatewayv2` reports its own endpoints' hosted zones
+/// by the same rule, so the two API Gateway services answer this member alike.
+pub fn regional_endpoint_hosted_zone_id(region: &str) -> String {
+    if let Some(published) = published_regional_endpoint_hosted_zone_id(region) {
+        return published.to_string();
+    }
+    let mixed: String = ::service_common::stable_hex_id(&[REGIONAL_ENDPOINT_TYPE, region])
+        .to_uppercase()
+        .chars()
+        .take(HOSTED_ZONE_ID_CHARS)
+        .collect();
+    format!("Z{mixed}")
 }
 
 /// Complete a request's (possibly absent) `endpointConfiguration` with the values the
@@ -2349,6 +2451,14 @@ pub const DOMAIN_NAME_CREATE_SPAN: ::std::time::Duration =
 /// emulator's own, chosen on the grounds [`DOMAIN_NAME_CREATE_SPAN`] gives: a caller
 /// reading straight after the update still observes the migration.
 pub const DOMAIN_NAME_MIGRATION_SPAN: ::std::time::Duration =
+    ::std::time::Duration::from_millis(500);
+
+/// How long the teardown `DeleteDomainName` accepts takes to complete: the endpoints the
+/// record was served on have to be taken down, so a certificate the removed record presented
+/// is still in use until this span has passed (see [`certificate_association_directory`]).
+/// API Gateway documents no duration for it either, so the span is the emulator's own, on
+/// the grounds [`DOMAIN_NAME_CREATE_SPAN`] gives.
+pub const DOMAIN_NAME_DELETION_SPAN: ::std::time::Duration =
     ::std::time::Duration::from_millis(500);
 
 /// From `Authorizer$authorizerResultTtlInSeconds`'s own documentation: "If this field
@@ -4332,6 +4442,42 @@ pub fn service_state<Eng: Send + Sync + 'static>(
         .map(::engine::InMemoryEngine::state::<ComAmazonawsApigatewayBackplanecontrolserviceState>)
 }
 
+/// WHICH CERTIFICATES THIS ACCOUNT'S CUSTOM DOMAIN NAMES REFERENCE, as the service that
+/// HOLDS the certificates has to see it.
+///
+/// A custom domain name presents the certificate Certificate Manager holds for it, and that
+/// service — which owns the certificates but cannot see this store — has to report those
+/// references (`CertificateDetail$InUseBy`) and refuse to delete or revoke a certificate
+/// while one remains. So a domain name's references are recorded in ONE directory under one
+/// shared type
+/// ([`::service_common::acm_certificate_associations::CertificateAssociationDirectory`]),
+/// written by whichever call creates, changes or removes the record that holds them. The
+/// engine keys state by TYPE, so a copy of its own inside
+/// [`ComAmazonawsApigatewayBackplanecontrolserviceState`] would be invisible to the reader,
+/// and the sibling `service-com-amazonaws-apigatewayv2-apigatewayv2` writes the same
+/// directory for its own domain names.
+///
+/// LOCK ORDER: a writer takes [`service_state`] first and this directory second, and nothing
+/// holds this one while taking another store, so the order cannot invert.
+///
+/// Answer `None` by leaving the directory unwritten: the record is an aid to another
+/// service, never part of this operation's own answer.
+pub fn certificate_association_directory<Eng: Send + Sync + 'static>(
+    engine: &Eng,
+) -> Option<
+    ::engine::ServiceState<
+        ::service_common::acm_certificate_associations::CertificateAssociationDirectory,
+    >,
+> {
+    (engine as &dyn ::std::any::Any)
+        .downcast_ref::<::engine::InMemoryEngine>()
+        .map(
+            ::engine::InMemoryEngine::state::<
+                ::service_common::acm_certificate_associations::CertificateAssociationDirectory,
+            >,
+        )
+}
+
 /// What a cross-service reader of this account's tagged resources reads this service by.
 /// Declared here, at the end of the file, because it is the one surface another crate
 /// uses and nothing in this module depends on it.
@@ -4348,6 +4494,10 @@ pub mod default_models;
 /// The VPC endpoints the account has, as Amazon EC2 reports them — what an access
 /// association's source identifier is resolved against; see that module.
 pub mod vpc_endpoints;
+
+/// The STATE Certificate Manager holds a certificate in, as that service reports it — what
+/// the certificate a custom domain name would present is resolved against; see that module.
+pub mod acm_certificate_state;
 
 /// The usage a usage plan's QUOTA is metered against — the requests each of its API keys
 /// sent on each day, and the daily log of used and remaining quota a read reports from

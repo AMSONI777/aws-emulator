@@ -124,6 +124,14 @@ service-com-amazonaws-iam-awsidentitymanagementv20100508 = { workspace = true }
 # generated client is needed, as the sibling apigatewayv2 service declares it for the same
 # hop.
 aws-sdk-ec2 = { version = "1", default-features = false }
+# A custom domain name PRESENTS the certificate Certificate Manager holds for its
+# `certificateArn`/`regionalCertificateArn`, and only that service knows whether the
+# certificate has been issued yet: the state of a certificate a create or an update names is
+# read from it over the in-process transport before anything is stored
+# (`state::acm_certificate_state`), so this service keeps no second reading of a
+# certificate's lifecycle. Only the generated client is needed, as the sibling apigatewayv2
+# service declares it for the same hop.
+aws-sdk-acm = { version = "1", default-features = false }
 # A private integration is carried over a VPC link, and what that link's load balancers
 # forward to — the target groups and the addresses registered in them — is Elastic Load
 # Balancing's record, read from that service's own store on the one shared engine
