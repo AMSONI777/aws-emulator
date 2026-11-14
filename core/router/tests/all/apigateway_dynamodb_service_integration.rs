@@ -25,8 +25,12 @@
 //! caching on a stage whose cluster is up is answered from that cluster
 //! (`MethodSetting$cachingEnabled`), so the integration is NOT performed again — which is
 //! observable only because the integration's own backend is a table whose counter says how
-//! many times it ran — and a `Cache-Control: max-age=0` ask from a caller that may not
-//! invalidate is answered as `MethodSetting$unauthorizedCacheControlHeaderStrategy` says.
+//! many times it ran. What the cluster holds is the INTEGRATION response, and the integration
+//! response's own mapping is applied to it for every request the entry answers: the counter a
+//! request served from the cluster reads is the entry's, while the request id that same
+//! mapping renders is the id of the request being served — the one the response's own
+//! `x-amzn-RequestId` header carries. A `Cache-Control: max-age=0` ask from a caller that may
+//! not invalidate is answered as `MethodSetting$unauthorizedCacheControlHeaderStrategy` says.
 //!
 //! Only a cross-service suite can pin either: the item and the table are DynamoDB's, the role
 //! and its policies are IAM's, and the api, the stage, its cache cluster and the integration
@@ -128,6 +132,38 @@ impl Answer {
     fn json(&self) -> Value {
         serde_json::from_slice(&self.body).unwrap_or(Value::Null)
     }
+}
+
+/// The header API Gateway names the request a response answers in, lowercased as the wire
+/// carries it.
+const REQUEST_ID_HEADER: &str = "x-amzn-requestid";
+
+/// Assert that the request id `answered`'s body renders is the id of the request that
+/// response answers — the one its own `x-amzn-RequestId` header carries — and answer it.
+///
+/// The invariant holds whether the response came from the integration or from the stage's
+/// cluster: what the cluster holds is the INTEGRATION response, and the integration
+/// response's own mapping template is applied to it per request, so `$context.requestId`
+/// renders the request being served rather than the one that filled the entry.
+fn renders_its_own_request_id(answered: &Answer, case: &str) -> String {
+    let rendered = answered.json()["rid"]
+        .as_str()
+        .unwrap_or_else(|| {
+            panic!(
+                "case {case:?}: expected a rendered rid, got {:?}",
+                answered.text()
+            )
+        })
+        .to_string();
+    let reported = answered
+        .header(REQUEST_ID_HEADER)
+        .unwrap_or_else(|| panic!("case {case:?}: expected a {REQUEST_ID_HEADER} header"));
+    assert_eq!(
+        rendered, reported,
+        "case {case:?}: expected the body's rendered request id to be this response's \
+         {REQUEST_ID_HEADER}, got {rendered} against {reported}"
+    );
+    rendered
 }
 
 /// The three services this rule spans, over ONE engine.
@@ -972,11 +1008,24 @@ async fn the_cached_response_of_a_dynamodb_integration_obeys_the_methods_cache_s
         Some(1),
         "the first request must carry the counter the action wrote, got {held_body:?}"
     );
+    renders_its_own_request_id(&filled, "the first request");
     let hit = invoke(&router, &api, "GET", "/count", &[], Bytes::new()).await;
     assert_eq!(
-        hit.text(),
-        held_body,
-        "the second request must be served the held response, got {:?}",
+        hit.json()["n"].as_i64(),
+        filled.json()["n"].as_i64(),
+        "the second request must be served the counter the held entry carries, got {:?} \
+         against {held_body:?}",
+        hit.text()
+    );
+    // What the cluster holds is the INTEGRATION response, and the integration response's own
+    // mapping is applied to it for this request: the counter is the entry's, the request id
+    // the template renders is THIS request's — the id its own header carries.
+    let hit_id = renders_its_own_request_id(&hit, "the request served from the cluster");
+    assert_ne!(
+        hit_id,
+        renders_its_own_request_id(&filled, "the first request"),
+        "a request served from the cluster must not replay the id of the request that filled \
+         it, got {:?} against {held_body:?}",
         hit.text()
     );
     assert_eq!(
@@ -1094,10 +1143,17 @@ async fn the_cached_response_of_a_dynamodb_integration_obeys_the_methods_cache_s
     );
     let refreshed = invoke(&router, &api, "GET", "/count", &[], Bytes::new()).await;
     assert_eq!(
-        refreshed.text(),
-        reloaded.text(),
+        refreshed.json()["n"].as_i64(),
+        reloaded.json()["n"].as_i64(),
         "case the ask the stage honours: the next request must hit the refreshed entry, got \
          {:?}",
+        refreshed.text()
+    );
+    assert_ne!(
+        renders_its_own_request_id(&refreshed, "the request served the refreshed entry"),
+        renders_its_own_request_id(&reloaded, "the request that refreshed the entry"),
+        "case the ask the stage honours: the refreshed entry must be mapped for the request \
+         it answers, got {:?}",
         refreshed.text()
     );
     assert_eq!(

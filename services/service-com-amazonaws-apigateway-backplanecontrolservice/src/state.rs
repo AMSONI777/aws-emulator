@@ -702,8 +702,8 @@ pub struct StageEntry {
     /// stage; empty until a patch sets one, which is the empty `methodSettings` map a
     /// freshly created stage reports.
     pub method_settings: BTreeMap<String, MethodSetting>,
-    /// The responses this stage's cache cluster is HOLDING, keyed by the cache key the
-    /// data plane builds for one method request
+    /// The INTEGRATION responses this stage's cache cluster is HOLDING, keyed by the cache
+    /// key the data plane builds for one method request
     /// ([`crate::service::invoke`]); empty on a stage nothing has been
     /// cached for, which is every stage whose methods do not enable caching.
     ///
@@ -770,8 +770,8 @@ impl StageEntry {
         }
     }
 
-    /// The response this stage's cache is holding under `key`, or `None` when it holds
-    /// none or the one it holds has stopped being usable.
+    /// The integration response this stage's cache is holding under `key`, or `None` when
+    /// it holds none or the one it holds has stopped being usable.
     ///
     /// A stage only serves from a cache cluster that is up, which is the caller's check,
     /// not this one's: what this answers is what the cluster HOLDS. An entry whose
@@ -786,7 +786,8 @@ impl StageEntry {
             .filter(|held| now < held.expires_at)
     }
 
-    /// Hold `response` under `key`, as the stage's cache cluster holds a served response.
+    /// Hold `response` under `key`, as the stage's cache cluster holds the integration
+    /// response a served request earned.
     ///
     /// Every entry whose TTL has passed is dropped first — nothing else reclaims them —
     /// and a cluster that is at its bound makes room by dropping the entry due to expire
@@ -811,7 +812,7 @@ impl StageEntry {
         self.response_cache.insert(key, response);
     }
 
-    /// Drop every response this stage's cache is holding: what `FlushStageCache` empties,
+    /// Drop every entry this stage's cache is holding: what `FlushStageCache` empties,
     /// and what a cache cluster that is re-provisioned comes up with.
     pub fn flush_response_cache(&mut self) {
         self.response_cache.clear();
@@ -891,26 +892,57 @@ pub struct CachedAuthorizerResult {
     pub expires_at: ::std::time::Instant,
 }
 
-/// One response a stage's cache cluster is holding for a method request, as the
-/// `execute-api` data plane stored it.
+/// One entry a stage's cache cluster is holding for a method request, as the `execute-api`
+/// data plane stored it.
 ///
-/// The WHOLE response is kept, because that is what a cache hit serves: the response the
-/// integration produced, served again, rather than a response derived a second time from
-/// the records.
+/// What is held is the INTEGRATION RESPONSE — what the integration ANSWERED — and not the
+/// method response that answer was mapped to: the integration's own responses map it to a
+/// method response once per request, so a mapping template reading the request being served
+/// (its `$context`, its parameters) renders THAT request's values rather than replaying the
+/// values of the request that filled the entry. See [`IntegrationAnswer`].
 #[derive(Debug, Clone)]
 pub struct CachedResponse {
-    /// The status of the response the integration produced.
-    pub status: u16,
-    /// The media type that response was served under.
-    pub content_type: String,
-    /// Its body, verbatim.
-    pub body: Vec<u8>,
-    /// The other headers it carried, keyed by the header name.
-    pub headers: BTreeMap<String, String>,
+    /// The integration response this entry holds, mapped afresh for every request it
+    /// answers.
+    pub answer: IntegrationAnswer,
     /// When this entry stops being usable: when it was stored plus the method setting's
     /// `cacheTtlInSeconds` ("the time to live (TTL), in seconds, for cached responses").
     /// A read at or after this instant is a MISS; see [`StageEntry::cached_response`].
     pub expires_at: ::std::time::Instant,
+}
+
+/// What an integration ANSWERED one integration request, before the integration's own
+/// responses map that answer to a method response.
+#[derive(Debug, Clone)]
+pub struct IntegrationAnswer {
+    /// Which of the integration's own responses maps this answer.
+    pub mapping: AnswerMapping,
+    /// The media type the answer declared, or `None` when it declared none.
+    pub content_type: Option<String>,
+    /// The payload the answer carries, verbatim: the body an integration response's
+    /// template maps. `None` for an answer carrying no payload a reader can see, which is
+    /// not the same as one carrying an empty payload.
+    pub payload: Option<Vec<u8>>,
+    /// The headers the answer carried, each name with every value it carries. Empty for an
+    /// answer whose response headers the integration's own responses MAP rather than pass
+    /// through.
+    pub headers: BTreeMap<String, Vec<String>>,
+}
+
+/// How an integration's own responses map what it answered to the method response.
+#[derive(Debug, Clone)]
+pub enum AnswerMapping {
+    /// A backend answered this status, and the answer is mapped by the integration response
+    /// `IntegrationResponse$selectionPattern` selects — "the regular expression (regex)
+    /// used to match the HTTP status code of the backend response".
+    Backend(u16),
+    /// A `MOCK`, which has no backend: the status its rendered integration request named is
+    /// the integration response the call maps to, and `None` where it named none.
+    Mock(Option<String>),
+    /// Nothing maps the answer: a proxy integration's own response, and the response of an
+    /// endpoint a request was passed on to, IS the method response, answered with this
+    /// status as it stands.
+    Passed(u16),
 }
 
 /// One stored `VpcLink`: a named set of target ARNs a private integration reaches a VPC

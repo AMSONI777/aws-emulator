@@ -33,29 +33,34 @@
 //!   the invoked method — its own path escaped, its own path with a literal separator, and
 //!   the whole-stage wildcard.
 //!
-//! What makes a cache hit OBSERVABLE: every case serves a `MOCK` method whose response
-//! template is then REWRITTEN through `UpdateIntegrationResponse`. A request answered from
-//! the records carries the rewritten body; one answered from the cluster carries the body
-//! the first request was served. So the two are told apart by what the client reads, not by
-//! anything the test knows about the store.
+//! What makes a cache hit OBSERVABLE: every case serves a `MOCK` method whose own ANSWER —
+//! its rendered integration request, which is what a `MOCK` returns without invoking a
+//! backend, and so what the cluster holds — is then REWRITTEN through `UpdateIntegration` and
+//! redeployed, while the integration response maps that answer through one template that
+//! renders it ([`ECHO_TEMPLATE`]). A request the integration answers carries the rewritten
+//! answer; one answered from the cluster carries the answer the first request was served. So
+//! the two are told apart by what the client reads, not by anything the test knows about the
+//! store — and not by rewriting the response TEMPLATE, which is the MAPPING and is applied
+//! afresh to every request the entry answers (the `stage_cache_hit_mapping` suite pins that).
 
 use std::time::Duration;
 
 use serde_json::{json, Value};
-use service_com_amazonaws_apigateway_backplanecontrolservice::state::{
-    CACHE_CLUSTER_AVAILABLE, CACHE_CLUSTER_CREATE_SPAN, CACHE_CLUSTER_FLUSH_SPAN,
-};
+use service_com_amazonaws_apigateway_backplanecontrolservice::state::CACHE_CLUSTER_AVAILABLE;
 
 use crate::execute_api_data_plane::{
-    deploy, integration_response, invoke, json_template, method_response, mock_resource,
-    put_integration, put_method,
+    deploy, integration_response, invoke, json_template, method_response, put_integration,
+    put_method,
 };
 use crate::flush_stage_cache::{cluster_status, flush_cache};
 use crate::rest_api_lifecycle::{create_api, resource_under, string_member, Answer, Gateway};
 use crate::stage_lifecycle::get_stage;
 
-/// A margin on top of a stored span, so a test waiting one out is not racing it.
-const MARGIN: Duration = Duration::from_millis(150);
+/// How long a poll for a transition the clock owes keeps looking, and how often it looks.
+/// Generous: nothing here is timed, and the deadline is only what stops a test whose
+/// condition will never hold.
+const WAIT: Duration = Duration::from_secs(30);
+const LOOK_AGAIN: Duration = Duration::from_millis(25);
 
 /// The stage every case deploys to.
 const STAGE: &str = "s";
@@ -70,12 +75,94 @@ const REGION: &str = "us-east-1";
 /// The account every emulator-minted ARN names.
 const ACCOUNT: &str = "000000000000";
 
-/// The body the method's integration answers while the cluster is being filled.
+/// The serial the method's integration answers while the cluster is being filled, and the
+/// body that answer maps to through [`ECHO_TEMPLATE`].
+const FIRST: &str = "first";
 const FIRST_BODY: &str = "{\"serial\":\"first\"}";
 
-/// The body it answers once the response template has been rewritten: what a request
-/// answered from the RECORDS reads, and what a request answered from the cluster must not.
+/// The serial it answers once the integration's own answer has been rewritten: what a
+/// request the INTEGRATION answers reads, and what a request answered from the cluster must
+/// not.
+const SECOND: &str = "second";
 const SECOND_BODY: &str = "{\"serial\":\"second\"}";
+
+/// The response template every method of this suite carries: it renders the serial the
+/// INTEGRATION answered, so what a client reads says which answer was mapped — the one the
+/// cluster holds or a fresh one.
+const ECHO_TEMPLATE: &str = "{\"serial\":\"$input.path('$.serial')\"}";
+
+/// The `requestTemplates` of a `MOCK` whose answer carries `serial`: a `MOCK` integration is
+/// "for testing without actually invoking the backend" (`IntegrationType`), so its rendered
+/// integration REQUEST is what it answers, and the `statusCode` that rendering names selects
+/// the integration response that maps it.
+fn answers(serial: &str) -> Value {
+    json!({ "application/json": format!("{{\"statusCode\":200,\"serial\":\"{serial}\"}}") })
+}
+
+/// One `GET` resource under `parent`, on a `MOCK` integration whose answer carries `serial`
+/// and whose integration response maps that answer through [`ECHO_TEMPLATE`].
+///
+/// `namespace` is the integration's `cacheNamespace` where the row groups resources under
+/// one, and `None` leaves it at the per-resource default `PutIntegration` writes.
+async fn echo_resource(
+    gateway: &Gateway,
+    api: &str,
+    parent: &str,
+    path_part: &str,
+    serial: &str,
+    namespace: Option<&str>,
+) -> String {
+    let resource = resource_under(gateway, api, parent, path_part).await;
+    put_method(
+        gateway,
+        api,
+        &resource,
+        "GET",
+        json!({ "authorizationType": "NONE" }),
+    )
+    .await;
+    let mut integration = json!({ "type": "MOCK", "requestTemplates": answers(serial) });
+    if let Some(namespace) = namespace {
+        integration["cacheNamespace"] = json!(namespace);
+    }
+    put_integration(gateway, api, &resource, "GET", integration).await;
+    method_response(gateway, api, &resource, "GET", "200", json!({})).await;
+    integration_response(
+        gateway,
+        api,
+        &resource,
+        "GET",
+        "200",
+        json!({ "responseTemplates": json_template(ECHO_TEMPLATE) }),
+    )
+    .await;
+    resource
+}
+
+/// Look at `api`'s `stage` until its cache cluster reports `AVAILABLE`, which is what "a
+/// cache cluster must be enabled on the stage for responses to be cached"
+/// (`MethodSetting$cachingEnabled`) needs of it.
+///
+/// A cluster coming up, and its return from a flush, are transitions the CLOCK owes, so this
+/// waits for the CONDITION by looking again rather than for a span to pass.
+///
+/// `pub(crate)` for the sibling `stage_cache_hit_mapping` suite, which needs the same settled
+/// cluster before it can fill one.
+pub(crate) async fn settled_cluster(gateway: &Gateway, api: &str, stage: &str, case: &str) {
+    let deadline = std::time::Instant::now() + WAIT;
+    loop {
+        let read = get_stage(gateway, api, stage).await;
+        let status = cluster_status(&read.body, case);
+        if status == CACHE_CLUSTER_AVAILABLE {
+            return;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "case {case}: expected the stage's cache cluster to be up, last saw {status}"
+        );
+        tokio::time::sleep(LOOK_AGAIN).await;
+    }
+}
 
 /// The header a stage states an ignored cache-control header in.
 const WARNING_HEADER: &str = "warning";
@@ -102,7 +189,7 @@ struct Deployed {
 }
 
 impl Deployed {
-    /// Stand up `GET /items` on a `MOCK` integration answering [`FIRST_BODY`], deployed to
+    /// Stand up `GET /items` on a `MOCK` integration answering [`FIRST`], deployed to
     /// [`STAGE`] with `cluster` deciding whether the stage has a cache cluster at all.
     ///
     /// A stage that asked for one is waited out until it reports `AVAILABLE`, because "a
@@ -110,16 +197,7 @@ impl Deployed {
     /// that is still coming up caches nothing, which is a case of its own below.
     async fn stand_up(gateway: &Gateway, name: &str, cluster: bool) -> Self {
         let (api, root) = create_api(gateway, name).await;
-        let resource = mock_resource(
-            gateway,
-            &api,
-            &root,
-            RESOURCE,
-            "GET",
-            "200",
-            json_template(FIRST_BODY),
-        )
-        .await;
+        let resource = echo_resource(gateway, &api, &root, RESOURCE, FIRST, None).await;
         let mut request = json!({ "stageName": STAGE });
         if cluster {
             request["cacheClusterEnabled"] = json!(true);
@@ -134,13 +212,7 @@ impl Deployed {
             deployed.status, deployed.body
         );
         if cluster {
-            tokio::time::sleep(CACHE_CLUSTER_CREATE_SPAN + MARGIN).await;
-            let stage = get_stage(gateway, &api, STAGE).await;
-            assert_eq!(
-                cluster_status(&stage.body, name),
-                CACHE_CLUSTER_AVAILABLE,
-                "case {name}: expected the stage's cache cluster to be up before any invoke"
-            );
+            settled_cluster(gateway, &api, STAGE, name).await;
         }
         Self {
             api,
@@ -149,36 +221,39 @@ impl Deployed {
         }
     }
 
-    /// Rewrite the integration response's `application/json` template to `body` AND REDEPLOY,
-    /// so a request answered from the records reads it and one answered from the cluster does
-    /// not.
+    /// Rewrite what the method's integration ANSWERS to `serial` AND REDEPLOY, so a request
+    /// the integration answers reads it and one answered from the cluster does not.
+    ///
+    /// The answer is the `MOCK`'s own rendered integration request, which is the unit the
+    /// cluster holds — the integration RESPONSE template is the mapping, and rewriting that
+    /// would change what every request reads, held entry or not.
     ///
     /// The redeploy is what makes the edit the stage's: a stage serves the deployment its
     /// `deploymentId` names, so an edit to a method takes effect at the stage only once the
     /// api is deployed again (`crate::execute_api_data_plane`'s own snapshot rows pin that).
     /// It does not empty the cluster — `FlushStageCache` is the call that does — so what the
     /// stage HOLDS is what the rows below are about.
-    async fn rewrite_response(&self, gateway: &Gateway, case: &str, body: &str) {
+    async fn rewrite_answer(&self, gateway: &Gateway, case: &str, serial: &str) {
         let patched = gateway
             .call(
                 "PATCH",
                 &format!(
-                    "/restapis/{api}/resources/{resource}/methods/GET/integration/responses/200",
+                    "/restapis/{api}/resources/{resource}/methods/GET/integration",
                     api = self.api,
                     resource = self.resource
                 ),
                 Some(json!({
                     "patchOperations": [{
                         "op": "replace",
-                        "path": "/responseTemplates/application~1json",
-                        "value": body
+                        "path": "/requestTemplates/application~1json",
+                        "value": answers(serial)["application/json"]
                     }]
                 })),
             )
             .await;
         assert_eq!(
             patched.status, 200,
-            "case {case}: expected 200 from UpdateIntegrationResponse, got {} with {:?}",
+            "case {case}: expected 200 from UpdateIntegration, got {} with {:?}",
             patched.status, patched.body
         );
         deploy(gateway, &self.api, STAGE).await;
@@ -253,31 +328,44 @@ impl Deployed {
         .await
     }
 
-    /// One more `GET` resource under the root, on a `MOCK` integration answering `body` and
-    /// carrying `namespace` as its `cacheNamespace`; deployed, so the stage serves it.
-    async fn second_resource(&self, gateway: &Gateway, body: &str, namespace: Option<&str>) {
-        let resource = resource_under(gateway, &self.api, &self.root, OTHER_RESOURCE).await;
-        put_method(
-            gateway,
-            &self.api,
-            &resource,
-            "GET",
-            json!({ "authorizationType": "NONE" }),
-        )
-        .await;
-        let mut integration = json!({ "type": "MOCK" });
-        if let Some(namespace) = namespace {
-            integration["cacheNamespace"] = json!(namespace);
+    /// Invoke `GET /items` on the stage, carrying `headers`, until the body it answers is
+    /// `expected` — or the deadline passes with it never being.
+    ///
+    /// For the row whose held entry ends by its own `cacheTtlInSeconds` PASSING: that is a
+    /// transition the clock owes, so the test looks again for the condition rather than
+    /// sleeping a span out.
+    async fn invoked_until(
+        &self,
+        gateway: &Gateway,
+        case: &str,
+        headers: &[(&str, &str)],
+        expected: &str,
+    ) -> crate::execute_api_data_plane::Invoked {
+        let deadline = std::time::Instant::now() + WAIT;
+        loop {
+            let answered = self.invoke(gateway, headers).await;
+            if answered.body == expected {
+                return answered;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "case {case}: expected {expected} once the entry ended, last read {:?}",
+                answered.body
+            );
+            tokio::time::sleep(LOOK_AGAIN).await;
         }
-        put_integration(gateway, &self.api, &resource, "GET", integration).await;
-        method_response(gateway, &self.api, &resource, "GET", "200", json!({})).await;
-        integration_response(
+    }
+
+    /// One more `GET` resource under the root, on a `MOCK` integration answering `serial` and
+    /// carrying `namespace` as its `cacheNamespace`; deployed, so the stage serves it.
+    async fn second_resource(&self, gateway: &Gateway, serial: &str, namespace: Option<&str>) {
+        echo_resource(
             gateway,
             &self.api,
-            &resource,
-            "GET",
-            "200",
-            json!({ "responseTemplates": json_template(body) }),
+            &self.root,
+            OTHER_RESOURCE,
+            serial,
+            namespace,
         )
         .await;
         deploy(gateway, &self.api, STAGE).await;
@@ -308,7 +396,7 @@ impl Deployed {
             "case {case}: expected 200 from UpdateIntegration, got {} with {:?}",
             patched.status, patched.body
         );
-        // Deployed, for the reason [`Self::rewrite_response`] gives: the group an edit put
+        // Deployed, for the reason [`Self::rewrite_answer`] gives: the group an edit put
         // the resource in is the stage's once the api is deployed again.
         deploy(gateway, &self.api, STAGE).await;
     }
@@ -413,9 +501,7 @@ async fn the_methods_own_settings_key_caches_it_as_the_whole_stage_key_does() {
             "case {case}: expected the integration's own body first, got {:?}",
             filled.body
         );
-        deployed
-            .rewrite_response(&gateway, case, SECOND_BODY)
-            .await;
+        deployed.rewrite_answer(&gateway, case, SECOND).await;
         let cached = deployed.invoke(&gateway, &[]).await;
         assert_eq!(
             cached.body, FIRST_BODY,
@@ -464,10 +550,8 @@ async fn a_cached_method_is_answered_from_the_cluster_until_the_entry_it_holds_i
             first.body
         );
 
-        // From here the records answer differently, so a cached response is visible.
-        deployed
-            .rewrite_response(&gateway, case, SECOND_BODY)
-            .await;
+        // From here the integration answers differently, so a cached entry is visible.
+        deployed.rewrite_answer(&gateway, case, SECOND).await;
         let cached = deployed.invoke(&gateway, &[]).await;
         assert_eq!(
             cached.body, FIRST_BODY,
@@ -476,8 +560,7 @@ async fn a_cached_method_is_answered_from_the_cluster_until_the_entry_it_holds_i
         );
 
         match ends {
-            Ends::Nothing => {}
-            Ends::Ttl => tokio::time::sleep(Duration::from_secs(1) + MARGIN).await,
+            Ends::Nothing | Ends::Ttl | Ends::Ask => {}
             Ends::Flush => {
                 let flushed = flush_cache(&gateway, &deployed.api, STAGE).await;
                 assert_eq!(
@@ -486,19 +569,26 @@ async fn a_cached_method_is_answered_from_the_cluster_until_the_entry_it_holds_i
                     flushed.status, flushed.body
                 );
                 // A cluster that is being emptied is not one that is up, so it caches
-                // nothing while the flush is outstanding: the row waits it out so that
-                // what the next request reads is the EMPTIED cluster rather than one that
-                // is mid-flush.
-                tokio::time::sleep(CACHE_CLUSTER_FLUSH_SPAN + MARGIN).await;
+                // nothing while the flush is outstanding: the row looks until the cluster is
+                // settled again, so what the next request reads is the EMPTIED cluster
+                // rather than one that is mid-flush.
+                settled_cluster(&gateway, &deployed.api, STAGE, case).await;
             }
-            Ends::Ask => {}
         }
         let headers: &[(&str, &str)] = if *ends == Ends::Ask {
             &[INVALIDATION_ASK]
         } else {
             &[]
         };
-        let after = deployed.invoke(&gateway, headers).await;
+        // The row whose entry ends by its own TTL PASSING waits for that condition by
+        // looking again until the entry is no longer the one served: the expiry is a
+        // transition the clock owes, and an invoke that finds the entry gone is answered by
+        // the integration and fills the cluster with the same answer, so looking again
+        // cannot change what the assertions below read.
+        let after = match ends {
+            Ends::Ttl => deployed.invoked_until(&gateway, case, headers, expected).await,
+            _ => deployed.invoke(&gateway, headers).await,
+        };
         assert_eq!(
             after.status, 200,
             "case {case}: expected 200 after the entry ended, got {} with {:?}",
@@ -517,7 +607,7 @@ async fn a_cached_method_is_answered_from_the_cluster_until_the_entry_it_holds_i
 
         // And the response that followed is cached in its turn: the entry a request filled
         // is the entry the next request reads, whichever request filled it.
-        deployed.rewrite_response(&gateway, case, FIRST_BODY).await;
+        deployed.rewrite_answer(&gateway, case, FIRST).await;
         let again = deployed.invoke(&gateway, &[]).await;
         assert_eq!(
             &again.body, expected,
@@ -570,20 +660,19 @@ async fn a_method_the_settings_do_not_cache_is_answered_by_its_integration_every
             "case {case}: expected the integration's own body, got {:?}",
             first.body
         );
-        deployed
-            .rewrite_response(&gateway, case, SECOND_BODY)
-            .await;
+        deployed.rewrite_answer(&gateway, case, SECOND).await;
         let second = deployed.invoke(&gateway, &[]).await;
         assert_eq!(
             second.body, SECOND_BODY,
-            "case {case}: expected the records to answer again, got {:?}",
+            "case {case}: expected the integration to answer again, got {:?}",
             second.body
         );
     }
 }
 
-/// The body the second resource's own integration answers, which a shared namespace must
-/// hide and a default namespace must not.
+/// The serial the second resource's own integration answers, and the body it maps to: what a
+/// shared namespace must hide and a default namespace must not.
+const OTHER: &str = "other";
 const OTHER_BODY: &str = "{\"serial\":\"other\"}";
 const OTHER_RESOURCE: &str = "others";
 
@@ -606,7 +695,7 @@ async fn the_cache_namespace_decides_which_resources_share_an_entry() {
         // which resource's integration produced it — or that neither did, because the
         // cluster answered.
         deployed
-            .second_resource(&gateway, OTHER_BODY, *namespace)
+            .second_resource(&gateway, OTHER, *namespace)
             .await;
         if let Some(namespace) = namespace {
             // The FIRST resource has to be grouped too: a namespace is shared, so both
@@ -808,9 +897,7 @@ async fn an_unauthorized_cache_control_ask_is_answered_as_the_stages_strategy_sa
             "case {case}: expected the first invoke to be answered by the integration, got {:?}",
             filled.body
         );
-        deployed
-            .rewrite_response(&gateway, case, SECOND_BODY)
-            .await;
+        deployed.rewrite_answer(&gateway, case, SECOND).await;
 
         let ask: Vec<(&str, &str)> = match signed {
             true => vec![INVALIDATION_ASK, ("authorization", SIGNED_CREDENTIAL)],

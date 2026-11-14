@@ -283,53 +283,21 @@ pub(super) fn invalidation_asked(req: &RtRequest) -> bool {
         })
 }
 
-/// The response a cache HIT serves: the response the integration produced, as it was
-/// served.
+/// What the stage's cache is to hold for an integration that ANSWERED `answer`, due to
+/// expire a TTL from now.
 ///
-/// Every header is re-inserted through the FALLIBLE form for the reason
-/// [`served_response`] gives: the entry was built from a response this endpoint already
-/// sent, so a value the wire cannot carry is skipped rather than failing the request.
-pub(super) fn cached_response(held: CachedResponse) -> RtResponse {
-    let mut response = response_with(held.status, &held.content_type, held.body);
-    for (name, value) in held.headers {
-        if let Err(refused) = response.headers_mut().try_insert(name.clone(), value) {
-            tracing::warn!(
-                header = %name,
-                error = %refused,
-                "the cached response's header cannot be sent on the wire and is skipped"
-            );
-        }
-    }
-    response
-}
-
-/// What the stage's cache is to hold for the response `served`, due to expire a TTL from
-/// now — or `None` for a response whose body is not readable as bytes, which is nothing a
-/// later request could be served.
-pub(super) fn cached_entry(served: &RtResponse, ttl: ::std::time::Duration) -> Option<CachedResponse> {
-    let body = served.body().bytes()?.to_vec();
-    let mut headers = BTreeMap::new();
-    let mut content_type = JSON_CONTENT_TYPE.to_string();
-    for (name, value) in served.headers().iter() {
-        if name.eq_ignore_ascii_case("content-type") {
-            content_type = value.to_string();
-            continue;
-        }
-        // `content-length` is computed from the body when the entry is served again
-        // ([`response_with`]), so holding the one this response carried would be a second
-        // copy of a derived value.
-        if name.eq_ignore_ascii_case("content-length") {
-            continue;
-        }
-        headers.insert(name.to_string(), value.to_string());
-    }
-    Some(CachedResponse {
-        status: served.status().as_u16(),
-        content_type,
-        body,
-        headers,
+/// The INTEGRATION response is what is held, not the method response it was mapped to: the
+/// mapping is applied again for every request the entry answers
+/// ([`integration_response::mapped`]), which is what keeps a response template reading the
+/// request being served rather than the one that filled the entry.
+pub(super) fn cached_entry(
+    answer: IntegrationAnswer,
+    ttl: ::std::time::Duration,
+) -> CachedResponse {
+    CachedResponse {
+        answer,
         expires_at: ::std::time::Instant::now() + ttl,
-    })
+    }
 }
 
 /// `response`, stating that the request's cache-control header was ignored when the stage's

@@ -20,8 +20,8 @@
 //! records, and the three things it WRITES are the metering a usage plan's throttle consists
 //! of ([`metered_refusal`]) — the rate a key's requests are admitted at cannot be computed
 //! without recording the ones already admitted — the stage's own RESPONSE CACHE
-//! ([`crate::state::StageEntry::response_cache`]), for the same reason: a cached response
-//! is the response a previous request was served, held and served again ("whether
+//! ([`crate::state::StageEntry::response_cache`]), for the same reason: a cached entry is
+//! the INTEGRATION response a previous request earned, held and mapped again ("whether
 //! responses should be cached and returned for requests",
 //! `MethodSetting$cachingEnabled`), so a method whose settings enable caching cannot
 //! answer from the cache without the serving that filled it — and the stage's AUTHORIZER
@@ -225,10 +225,13 @@
 //!   values serve the request with the header ignored — stating that in the response
 //!   ([`IGNORED_CACHE_CONTROL_WARNING`]) or not, as the value says.
 //!
-//! What is cached is what the INTEGRATION answered. A refusal the api itself produced (a
-//! gateway response for an unroutable path, an unauthorized call or an integration this
-//! emulator cannot perform) is not an integration's answer, so it is never held: the next
-//! request earns its own.
+//! What is cached is the INTEGRATION RESPONSE — what the integration answered, before the
+//! integration's own responses map it — and the mapping is applied afresh to every request
+//! the entry answers ([`integration_response`]), so a response template reading `$context` or
+//! the request's own parameters renders the request being SERVED rather than the one that
+//! filled the entry. A refusal the api itself produced (a gateway response for an unroutable
+//! path, an unauthorized call or an integration this emulator cannot perform) is not an
+//! integration's answer, so it is never held: the next request earns its own.
 //!
 //! # The half `TestInvokeMethod` shares
 //!
@@ -253,6 +256,10 @@ pub mod execute_api_authorization;
 /// What an authorizer's `identitySource` declaration extracts from a request, read the one
 /// way by this data plane and by a SIMULATED request ([`simulated_authorizer`]).
 mod identity_source;
+/// What an integration ANSWERED, and how the integration's own responses map that answer to
+/// the method response — the step applied once per request, including a request the stage's
+/// cache answers.
+pub mod integration_response;
 pub mod lambda_proxy;
 mod onward_endpoint;
 /// Which interface VPC endpoint a request carried over a VPC link arrives at this plane
@@ -290,7 +297,8 @@ use crate::ops::put_method::wire_verb;
 use crate::ops::put_method_response::METHOD_RESPONSE_HEADER_PREFIX;
 use crate::ops::types::{GetIntegrationOutput, GetIntegrationResponseOutput, MethodSetting};
 use crate::state::{
-    ApiKeyEntry, CachedResponse, DeploymentEntry, MethodEntry, RestApiEntry, StageEntry,
+    AnswerMapping, ApiKeyEntry, CachedResponse, DeploymentEntry, IntegrationAnswer, MethodEntry,
+    RestApiEntry, StageEntry,
 };
 
 use ::service_com_amazonaws_wafv2_awswaf_20190729::service::edge as waf_edge;
@@ -2038,28 +2046,6 @@ async fn serving<Eng: Send + Sync + 'static>(
         }
     }
 
-    // The request has got past everything the method declares about it, so now — and only
-    // now — the STAGE'S CACHE is asked, and then, on a miss, the integration is performed.
-    //
-    // A cluster holding an entry for this call answers it with the integration never
-    // performed: that is what caching a response means. A request that asked for the entry
-    // to be reloaded, and that the stage honoured, skips this read, so what it gets is the
-    // integration's own fresh answer.
-    if let Some(plan) = caching.as_ref().filter(|plan| !plan.reload) {
-        let held = {
-            let store = state.lock();
-            store
-                .rest_apis
-                .get(&integration.api_id)
-                .and_then(|api| api.stages.get(&integration.stage))
-                .and_then(|stage| stage.cached_response(&plan.key))
-                .cloned()
-        };
-        if let Some(held) = held {
-            return warned(cached_response(held), plan.warn);
-        }
-    }
-
     // Every outcome an integration this call cannot be performed through earns is rendered
     // the same way: through the api's own gateway response for the refusal, so the records
     // are read again — briefly, and only to render it. The refusal is RECORDED as it is
@@ -2082,6 +2068,39 @@ async fn serving<Eng: Send + Sync + 'static>(
         refusal_response(api, unserved.refusal)
     };
 
+    // The request has got past everything the method declares about it, so now — and only
+    // now — the STAGE'S CACHE is asked, and then, on a miss, the integration is performed.
+    //
+    // A cluster holding an entry for this call answers it with the integration never
+    // performed: that is what caching a response means. What the entry holds is the
+    // INTEGRATION response, so the integration's own responses map it to a method response
+    // for THIS request ([`integration_response::mapped`]) — which is what makes a response
+    // template reading `$context` render the id, identity and path of the request being
+    // served rather than those of the request that filled the entry. A request that asked
+    // for the entry to be reloaded, and that the stage honoured, skips this read, so what it
+    // gets is the integration's own fresh answer.
+    if let Some(plan) = caching.as_ref().filter(|plan| !plan.reload) {
+        let held = {
+            let store = state.lock();
+            store
+                .rest_apis
+                .get(&integration.api_id)
+                .and_then(|api| api.stages.get(&integration.stage))
+                .and_then(|stage| stage.cached_response(&plan.key))
+                .cloned()
+        };
+        if let Some(held) = held {
+            return match integration_response::mapped(
+                integration.method.as_ref(),
+                &integration.call,
+                &held.answer,
+            ) {
+                Ok(mapped) => warned(served_response(mapped), plan.warn),
+                Err(unserved) => refuse(unserved, recorded),
+            };
+        }
+    }
+
     // An integration that PASSES THE REQUEST THROUGH to an endpoint this emulator serves is
     // performed by serving the request it passes on, so the answer is that endpoint's own.
     // It is reached before the api's own records are asked to produce a response, because
@@ -2093,6 +2112,10 @@ async fn serving<Eng: Send + Sync + 'static>(
         .and_then(|record| {
             passed_through(record, req, hop, &integration.call.inputs.path, &integration.api_id)
         });
+    // The INTEGRATION response this call was answered from, which is what the stage's cache
+    // holds: filled by the integration below, and left for the passed-on half to read off
+    // the response the endpoint it reached answered ([`integration_response::served_answer`]).
+    let mut answered = None;
     let served = if let Some(passed_on) = passed_on {
         if let Some(reason) = integration.unusable_connection.clone() {
             return refuse(
@@ -2157,17 +2180,37 @@ async fn serving<Eng: Send + Sync + 'static>(
         )
         .await
         {
-            Ok(served) => served_response(served),
+            // What the integration answered is the INTEGRATION response, and the
+            // integration's own responses map it to the method response — here, for this
+            // request, exactly as they will for every later request the entry answers.
+            Ok(answer) => {
+                let mapped = match integration_response::mapped(
+                    integration.method.as_ref(),
+                    &integration.call,
+                    &answer,
+                ) {
+                    Ok(mapped) => served_response(mapped),
+                    Err(unserved) => return refuse(unserved, recorded),
+                };
+                answered = Some(answer);
+                mapped
+            }
             Err(unserved) => return refuse(unserved, recorded),
         }
     };
 
     // What the integration answered is what the stage's cache now holds, for as long as
     // the method's TTL says — which is how the NEXT request to it is answered without the
-    // integration being performed again. Only an integration's own answer is held: a
-    // refusal the api itself produced returned above, so none of them reaches here.
+    // integration being performed again. What is held is the INTEGRATION response rather
+    // than the response it mapped to, so the mapping is re-applied per request; a request
+    // this plane passed on was answered by another endpoint, whose response nothing maps, so
+    // what is held for it is that response itself. Only an integration's own answer is held:
+    // a refusal the api itself produced returned above, so none of them reaches here.
     if let Some(plan) = &caching {
-        if let Some(entry) = cached_entry(&served, plan.ttl) {
+        if let Some(entry) = answered
+            .or_else(|| integration_response::served_answer(&served))
+            .map(|answer| cached_entry(answer, plan.ttl))
+        {
             let mut store = state.lock();
             if let Some(stage) = store
                 .rest_apis
@@ -3719,10 +3762,12 @@ pub async fn performed_integration(
     region: &str,
     method: Option<&MethodEntry>,
     call: &MethodRequest,
-) -> Result<IntegratedResponse, UnservedIntegration> {
+) -> Result<IntegrationAnswer, UnservedIntegration> {
     if let Some(method) = method {
         if let Some(served) = lambda_proxy::performed(ctx, region, method, call).await {
-            return served;
+            // A proxy integration returns the method response itself, so what it answered is
+            // an integration response nothing maps ([`integration_response::passed_answer`]).
+            return served.map(integration_response::passed_answer);
         }
         if let Some(served) = aws_integration::performed(ctx, region, method, call).await {
             return served;
@@ -3731,16 +3776,15 @@ pub async fn performed_integration(
     perform_integration(method, call)
 }
 
-/// Perform the call through the method's integration, answering the response the API's
-/// records produce for it.
+/// Perform the call through the method's integration, answering the INTEGRATION RESPONSE
+/// the API's records produce for it — which the integration's own responses then map to the
+/// method response, once per request ([`integration_response::mapped`]).
 ///
 /// `MOCK` is the one type that needs no backend, and it is performed in full from those
 /// records: the integration REQUEST template this call selects IS what the integration
 /// returns, and the `statusCode` that template carries names the integration response the
 /// call maps to. A call no template maps is passed through or refused as
-/// `passthroughBehavior` says, and one whose mapping names no stored response maps to the
-/// DEFAULT integration response — the one with no `selectionPattern`, since a `MOCK`
-/// produces no backend response for a pattern to match.
+/// `passthroughBehavior` says.
 ///
 /// Every other type names a backend whose answer is not this api's records to produce: an
 /// `HTTP_PROXY` naming an endpoint of this emulator is served by passing the request on
@@ -3753,7 +3797,7 @@ pub async fn performed_integration(
 pub fn perform_integration(
     method: Option<&MethodEntry>,
     call: &MethodRequest,
-) -> Result<IntegratedResponse, UnservedIntegration> {
+) -> Result<IntegrationAnswer, UnservedIntegration> {
     let Some(integration) = method.and_then(|method| method.integration.as_ref()) else {
         return Err(UnservedIntegration {
             refusal: API_CONFIGURATION_ERROR,
@@ -3813,61 +3857,13 @@ pub fn perform_integration(
             });
         }
     };
-    let selected = mapped_status
-        .and_then(|code| {
-            integration
-                .integration_responses
-                .as_ref()
-                .and_then(|responses| responses.get(&code))
-        })
-        .or_else(|| default_integration_response(integration));
-    let Some(selected) = selected else {
-        return Err(UnservedIntegration {
-            refusal: API_CONFIGURATION_ERROR,
-            reason: "the MOCK integration has no integration response for this call, so it \
-                     maps to no method response"
-                .to_string(),
-        });
-    };
-    let Some(status) = selected
-        .status_code
-        .as_deref()
-        .and_then(|code| code.parse::<u16>().ok())
-    else {
-        return Err(UnservedIntegration {
-            refusal: API_CONFIGURATION_ERROR,
-            reason: "the integration response this call maps to carries no status code the \
-                     response can be sent with"
-                .to_string(),
-        });
-    };
-
-    // The response template is rendered against the same call, with the payload it reads
-    // being the one the INTEGRATION answered rather than the one the client sent.
-    let response_inputs = TemplateInputs {
+    // A `MOCK` carries no response headers and declares no media type of its own: both are
+    // the integration response's own mapping, applied when the answer is mapped.
+    Ok(IntegrationAnswer {
+        mapping: AnswerMapping::Mock(mapped_status),
+        content_type: None,
         payload: integrated_payload,
-        ..call.inputs.clone()
-    };
-    let body = response_body(selected, call, &response_inputs).map_err(|template| {
-        UnservedIntegration {
-            refusal: API_CONFIGURATION_ERROR,
-            reason: format!(
-                "the {} response template of {} bytes is not one this emulator renders: {}",
-                template.content_type, template.bytes, template.reason
-            ),
-        }
-    })?;
-    let mut headers = mapped_response_headers(method, selected, status);
-    // The media type is the method response's own `Content-Type` mapping where it declares
-    // one, and `application/json` otherwise — never the key of the response template the
-    // caller's `Accept` chose, which selects the BODY.
-    let content_type =
-        taken_content_type(&mut headers).unwrap_or_else(|| JSON_CONTENT_TYPE.to_string());
-    Ok(IntegratedResponse {
-        status,
-        content_type,
-        body,
-        headers,
+        headers: BTreeMap::new(),
     })
 }
 

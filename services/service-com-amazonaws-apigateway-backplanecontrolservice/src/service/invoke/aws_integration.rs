@@ -104,10 +104,10 @@ use crate::state::MethodEntry;
 
 use super::super::mapping_template::TemplateInputs;
 use super::{
-    default_integration_response, mapped_response_headers, request_mapping,
-    rendered_mapping_template, response_body, IntegratedResponse, MethodRequest, RequestMapping,
-    UnservedIntegration, API_CONFIGURATION_ERROR, JSON_CONTENT_TYPE, METHOD_REQUEST_HEADER_PREFIX,
-    METHOD_REQUEST_PATH_PREFIX, METHOD_REQUEST_QUERY_PREFIX, UNSUPPORTED_MEDIA_TYPE,
+    default_integration_response, request_mapping, rendered_mapping_template, AnswerMapping,
+    IntegrationAnswer, MethodRequest, RequestMapping, UnservedIntegration,
+    API_CONFIGURATION_ERROR, METHOD_REQUEST_HEADER_PREFIX, METHOD_REQUEST_PATH_PREFIX,
+    METHOD_REQUEST_QUERY_PREFIX, UNSUPPORTED_MEDIA_TYPE,
 };
 
 mod dynamodb;
@@ -359,7 +359,7 @@ pub(super) async fn performed(
     region: &str,
     method: &MethodEntry,
     call: &MethodRequest,
-) -> Option<Result<IntegratedResponse, UnservedIntegration>> {
+) -> Option<Result<IntegrationAnswer, UnservedIntegration>> {
     let integration = method.integration.as_ref()?;
     if integration.r#type.as_deref() != Some(AWS_SERVICE_INTEGRATION_TYPE) {
         return None;
@@ -369,7 +369,7 @@ pub(super) async fn performed(
         Ok(target) => target,
         Err(unserved) => return Some(Err(unserved)),
     };
-    Some(served(ctx, integration, method, call, &target).await)
+    Some(served(ctx, integration, call, &target).await)
 }
 
 /// What `integration`'s `uri` addresses, over the services this module makes calls to, or
@@ -517,15 +517,17 @@ impl ServiceCall {
     }
 }
 
-/// The method response this call earns: the role decides whether the call is made, the
-/// service answers it, and the integration response maps that answer.
+/// The INTEGRATION RESPONSE this call earns: the role decides whether the call is made and
+/// the service answers it. MAPPING that answer to the method response is the step after
+/// this one ([`super::integration_response`]), because it is applied once per request rather
+/// than once per backend answer — which is what the stage's cache holding this answer rests
+/// on.
 async fn served(
     ctx: &OperationContext<'_>,
     integration: &GetIntegrationOutput,
-    method: &MethodEntry,
     call: &MethodRequest,
     target: &ServiceCall,
-) -> Result<IntegratedResponse, UnservedIntegration> {
+) -> Result<IntegrationAnswer, UnservedIntegration> {
     let answered = match authorization(ctx, integration, target).await {
         Authorization::Unassumable(reason) => return Err(unanswered(&reason)),
         Authorization::Withheld => {
@@ -533,7 +535,15 @@ async fn served(
         }
         Authorization::Admitted => target.answered(ctx, call).await?,
     };
-    mapped(method, integration, call, answered)
+    // The STATUS the service answered is what `IntegrationResponse$selectionPattern` is
+    // matched against, so it travels with the answer; the headers the method response
+    // carries are the integration response's own mapping rather than the service's.
+    Ok(IntegrationAnswer {
+        mapping: AnswerMapping::Backend(answered.status),
+        content_type: answered.content_type,
+        payload: Some(answered.body),
+        headers: ::std::collections::BTreeMap::new(),
+    })
 }
 
 /// What the integration's execution role makes of this call.
@@ -1114,85 +1124,13 @@ fn s3_client(ctx: &OperationContext<'_>, region: &str) -> ::aws_sdk_s3::Client {
     ::aws_sdk_s3::Client::from_conf(config)
 }
 
-/// The method response the integration's own responses map `answered` to.
-fn mapped(
-    method: &MethodEntry,
-    integration: &GetIntegrationOutput,
-    call: &MethodRequest,
-    answered: Answered,
-) -> Result<IntegratedResponse, UnservedIntegration> {
-    let Some(selected) = selected_response(integration, answered.status) else {
-        return Err(UnservedIntegration {
-            refusal: API_CONFIGURATION_ERROR,
-            reason: format!(
-                "the integration has no integration response for the {} the backend \
-                 answered, so the call maps to no method response",
-                answered.status
-            ),
-        });
-    };
-    let Some(status) = selected
-        .status_code
-        .as_deref()
-        .and_then(|code| code.parse::<u16>().ok())
-    else {
-        return Err(UnservedIntegration {
-            refusal: API_CONFIGURATION_ERROR,
-            reason: "the integration response this call maps to carries no status code the \
-                     response can be sent with"
-                .to_string(),
-        });
-    };
-    let templated = selected
-        .response_templates
-        .as_ref()
-        .is_some_and(|templates| !templates.is_empty());
-    let mut headers = mapped_response_headers(Some(method), selected, status);
-    // The media type is the method response's own `Content-Type` mapping where it declares
-    // one; see `super::taken_content_type`.
-    let mapped_type = super::taken_content_type(&mut headers);
-    let (content_type, body) = if templated {
-        // The template reads its payload off what the INTEGRATION answered, which is the
-        // only difference between rendering it here and rendering it for a `MOCK`.
-        let inputs = TemplateInputs {
-            payload: Some(answered.body),
-            ..call.inputs.clone()
-        };
-        let body = response_body(selected, call, &inputs).map_err(|template| UnservedIntegration {
-            refusal: API_CONFIGURATION_ERROR,
-            reason: format!(
-                "the {} response template of {} bytes is not one this emulator renders: {}",
-                template.content_type, template.bytes, template.reason
-            ),
-        })?;
-        // A templated response is rendered from the api's own records, so the media type it
-        // is served with is the mapping's, and `application/json` when none is declared —
-        // never the key of the template the caller's `Accept` chose.
-        (
-            mapped_type.unwrap_or_else(|| JSON_CONTENT_TYPE.to_string()),
-            body,
-        )
-    } else {
-        // No template: the backend's own bytes and content type are the method response's,
-        // which is what passing a response through means — unless the method response
-        // declares a `Content-Type` mapping of its own, which overrides it.
-        (
-            mapped_type
-                .or(answered.content_type)
-                .unwrap_or_else(|| JSON_CONTENT_TYPE.to_string()),
-            answered.body,
-        )
-    };
-    Ok(IntegratedResponse {
-        status,
-        content_type,
-        body,
-        headers,
-    })
-}
-
 /// The integration response a backend answer of `status` maps to: the one whose
 /// `selectionPattern` matches that status, and otherwise the one that declares no pattern.
+///
+/// `pub(super)` because the step that MAPS an answer to the method response is applied once
+/// per request, including a request the stage's cache answers, and lives beside this module
+/// ([`super::integration_response`]): one reading of `selectionPattern`, so a held answer
+/// selects the response a fresh one does.
 ///
 /// Several patterned responses matching one status is a configuration the api's records
 /// decide, so the choice is made by status code — the key the responses are stored under —
@@ -1204,7 +1142,7 @@ fn mapped(
 /// `IntegrationResponse$statusCode`, whose `@pattern` is `^[1-5]\d\d$`
 /// (`smithy_query(query="shape",shape="StatusCode")`), so one integration holds at most one
 /// response per HTTP status — and each compile is bounded in turn ([`pattern_matches`]).
-fn selected_response(
+pub(super) fn selected_response(
     integration: &GetIntegrationOutput,
     status: u16,
 ) -> Option<&GetIntegrationResponseOutput> {

@@ -49,7 +49,10 @@ const ROLE: &str = "apigateway-dynamodb";
 const UNGRANTED_ROLE: &str = "apigateway-dynamodb-ungranted";
 
 /// Call one Amazon DynamoDB operation on the same router, as a client's SDK sends it.
-async fn dynamodb(gateway: &Gateway, operation: &str, body: Value) -> (u16, Value) {
+///
+/// `pub(crate)` for the sibling `stage_cache_hit_mapping` suite, which changes a table out of
+/// band to show that a cache hit does not read it again.
+pub(crate) async fn dynamodb(gateway: &Gateway, operation: &str, body: Value) -> (u16, Value) {
     let host = format!("dynamodb.{REGION}.amazonaws.com");
     let request = http::Request::builder()
         .method("POST")
@@ -73,7 +76,10 @@ async fn dynamodb(gateway: &Gateway, operation: &str, body: Value) -> (u16, Valu
 }
 
 /// Create one IAM role API Gateway may assume, carrying `document` as its inline policy.
-async fn given_role(gateway: &Gateway, name: &str, document: Value) -> String {
+///
+/// `pub(crate)` for the sibling `stage_cache_hit_mapping` suite, whose `AWS` integration is
+/// made under the same kind of role.
+pub(crate) async fn given_role(gateway: &Gateway, name: &str, document: Value) -> String {
     let trust = json!({
         "Version": "2012-10-17",
         "Statement": [{

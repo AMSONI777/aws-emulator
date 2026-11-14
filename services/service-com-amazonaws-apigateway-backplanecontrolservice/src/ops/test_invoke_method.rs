@@ -128,9 +128,9 @@ use super::types::*;
 use std::collections::{BTreeMap, HashMap};
 
 use crate::service::invoke::{
-    matched_path_parameters, parameters_refusal, pending_body_check, performed_integration,
-    refusal_rendering, sent_query_parameters, with_stage_variables, MethodRequest,
-    JSON_CONTENT_TYPE,
+    integration_response, matched_path_parameters, parameters_refusal, pending_body_check,
+    performed_integration, refusal_rendering, sent_query_parameters, with_stage_variables,
+    MethodRequest, JSON_CONTENT_TYPE,
 };
 use crate::service::invoke::lambda_proxy::ProxyInputs;
 use crate::service::invoke::simulated_request;
@@ -501,8 +501,16 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
                 // The api's own Region is the endpoint an `AWS` integration naming no Region
                 // of its own is called at.
                 Ok(resolved) => {
+                    // The integration ANSWERS, and the integration's own responses map that
+                    // answer to the method response — the same two steps, in the same order,
+                    // the data plane takes ([`integration_response::mapped`]), so a
+                    // simulated invocation reports what an invoke of the records as they
+                    // stand is served.
                     performed_integration(ctx, api.arn_region(), Some(&resolved), &call)
                         .await
+                        .and_then(|answer| {
+                            integration_response::mapped(Some(&resolved), &call, &answer)
+                        })
                         .map_err(Refused::Integration)
                 }
                 Err(unserved) => Err(Refused::Integration(unserved)),

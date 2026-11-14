@@ -647,15 +647,6 @@ mod rest_validation_refusals;
 // backend's own `aws:SourceVpce` invoke gate.
 #[path = "all/private_proxy_backend_answer.rs"]
 mod private_proxy_backend_answer;
-// Appended for the reason the note above gives: the member that carries ONE PAGE of a
-// `position`/`limit` collection when that page holds no element — a collection emptied of
-// its last element, and a listing narrowed to nothing.
-#[path = "all/collection_empty_page_member.rs"]
-mod collection_empty_page_member;
-// Appended for the reason the note above gives: the member a `position`/`limit` collection
-// reports its page under once the collection has been emptied.
-#[path = "all/emptied_collection_page_member.rs"]
-mod emptied_collection_page_member;
 // Appended for the reason the note above gives: which INVOKE ROLE lets a simulated authorizer
 // execution ask its function at all — the role's trust relationship and the action and resource
 // its permissions allow, each varied on its own, against the resource-policy control.
@@ -666,9 +657,16 @@ mod test_invoke_authorizer_invoke_role;
 // app-client audience its `identityValidationExpression` admits.
 #[path = "all/test_invoke_authorizer_user_pool_audience.rs"]
 mod test_invoke_authorizer_user_pool_audience;
-// (`emptied_collection_page_member` is declared ONCE, in the span above: a module may be
-// declared only once, and branches landing at once each appended their own copy here,
-// which compiled neither.)
+// Appended for the reason the note above gives: the member a `position`/`limit` collection
+// reports its page under once the collection has been emptied.
+#[path = "all/emptied_collection_page_member.rs"]
+mod emptied_collection_page_member;
+// Appended for the reason the note above gives: WHAT a stage's cache cluster holds — the
+// INTEGRATION response — and that the integration response's own mapping is applied to it
+// for every request the entry answers, so a value the mapping derives from the current
+// request renders that request's own.
+#[path = "all/stage_cache_hit_mapping.rs"]
+mod stage_cache_hit_mapping;
 // Appended for the reason the note above gives: the STATE Certificate Manager holds the
 // certificate a custom domain name is configured to use in, which spans API Gateway and
 // Certificate Manager on one engine.
@@ -684,6 +682,14 @@ mod regional_endpoint_hosted_zone;
 // from, and what the refusal of a document that explicitly denies the call reports.
 #[path = "all/stage_resource_policy_source_ip.rs"]
 mod stage_resource_policy_source_ip;
+// Appended for the reason the note above gives: the member that carries ONE PAGE of a
+// `position`/`limit` collection when that page holds no element — a collection emptied of
+// its last element, and a listing narrowed to nothing.
+#[path = "all/collection_empty_page_member.rs"]
+mod collection_empty_page_member;
+// (`emptied_collection_page_member` is declared ONCE, in the span above: a module may be
+// declared only once, and branches landing at once each appended their own copy here,
+// which compiled neither.)
 // Appended for the reason the note above gives: what CAPS and what CONDITIONS an
 // `execute-api` authorization decision — the scope the presented credential was minted with,
 // and the address the request was made from.
