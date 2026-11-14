@@ -10,28 +10,20 @@
 //! told both composes `https://<displayName>.<defaultDomain>/` — the deployed page, the
 //! branch's basic-authorization challenge, or the redirect a rule states.
 //!
-//! That domain exists for a client to FETCH, so the address announced has to be one this
-//! emulator itself answers on, and which address that is follows the endpoint the creating
-//! request reached ([`announced_default_domain`], the shared data-plane reading
-//! `service_common::data_plane_addressing`):
+//! The member is a DNS DOMAIN of the hosting zone Amplify publishes an app's sites under,
+//! and it names the app itself: the app's own id followed by that zone
+//! ([`amplify_zone_default_domain`]). It is derived from the app's minted id alone — never
+//! from the endpoint, the host or the port the creating request happened to reach — so the
+//! value is the same whichever address a client of this emulator is configured with, and a
+//! client that was told it composes a site's host by prefixing a branch's label to it.
 //!
-//! * a request that reached the EMULATOR'S OWN endpoint comes from a client configured with
-//!   that one endpoint and resolving nothing else, so the app's hosting is announced THERE —
-//!   the address that client is already talking to, and the only one it resolves;
-//! * a request that addressed some other host on an emulator that IS served on a port is
-//!   announced that port, the one address this process answers on, so an app created by an
-//!   in-process call of another service is announced where its caller can reach it too;
-//! * a request that addressed one of AWS's own hosts on an emulator served on no port at all
-//!   comes from a client that resolves them, and there is no own address to announce in its
-//!   place, so the app's id under the one zone Amplify hosts apps on stands
-//!   ([`amplify_zone_default_domain`]).
+//! The member is a DOMAIN, so the value is an address and nothing else: no scheme, no path.
+//! What that address cannot carry — which app, and which of its branches — is carried in the
+//! PATH this plane ALSO serves a site under ([`hosted_site_path`]), exactly as the shared
+//! data-plane reading states for a plane served on the emulator's own endpoint, so a client
+//! that resolves nothing but one local endpoint can still fetch the site.
 //!
-//! The member is a DOMAIN, so every form it takes is an address and nothing else: no scheme,
-//! no path. What the address cannot carry — which app, and which of its branches — is carried
-//! in the PATH this plane serves a site under instead ([`hosted_site_path`]), exactly as the
-//! shared data-plane reading states for a plane served on the emulator's own endpoint.
-//!
-//! The choice is made ONCE, when the app is created, and persisted as the app's
+//! The domain is resolved ONCE, when the app is created, and persisted as the app's
 //! `defaultDomain`, so every later read of that app reports the same string whatever it is
 //! addressed at.
 //!
@@ -44,50 +36,12 @@
 //! are written — and the PATH that names the app and the branch for an app announced on this
 //! emulator's own endpoint ([`hosted_site_path`], read back by [`addressed_hosted_site`]).
 
-/// The default domain this service ANNOUNCES for the app `app_id`, resolved once when the
-/// app is created and stored on its record.
-///
-/// See the module docs for the three cases. `parts` is the request that creates the app and
-/// `served_base` the base URL [`::smithy_server_runtime::OperationContext::endpoint`]
-/// reports for this emulator. Every form is inside `DefaultDomain`'s modelled
-/// `length 1..1000` (`smithy_query(query="shape",shape="DefaultDomain")`).
-pub fn announced_default_domain(
-    parts: &::http::request::Parts,
-    served_base: &str,
-    app_id: &str,
-) -> String {
-    reached_emulator_endpoint(parts)
-        .or_else(|| served_endpoint_authority(served_base))
-        .unwrap_or_else(|| amplify_zone_default_domain(app_id))
-}
-
-/// The EMULATOR'S OWN endpoint this request reached — an address or a loopback name, which
-/// is what a client configured with one local endpoint URL sends — and `None` for a request
-/// whose host names a service, which is a client that resolves AWS's own hosts.
-///
-/// The tree's one reading of that question
-/// (`service_common::data_plane_addressing::reached_emulator_endpoint`), so this service
-/// writes no second rule for which host is the emulator's own.
-fn reached_emulator_endpoint(parts: &::http::request::Parts) -> Option<String> {
-    ::service_common::data_plane_addressing::reached_emulator_endpoint(
-        &parts.uri.to_string(),
-        parts
-            .headers
-            .get(::http::header::HOST)
-            .and_then(|value| value.to_str().ok()),
-    )
-}
-
-/// The `host[:port]` this emulator is SERVED at, or `None` for one served on no port at all
-/// — the tree's one reading of that question
-/// (`service_common::data_plane_addressing::served_endpoint_authority`).
-fn served_endpoint_authority(served_base: &str) -> Option<String> {
-    ::service_common::data_plane_addressing::served_endpoint_authority(served_base)
-}
-
 /// The default domain an app of this id carries under Amplify's OWN hosting zone: the value
-/// the shape `App$defaultDomain` documents, derived from the app's minted id alone, which is
-/// what a client that resolves AWS's own hosts is told (see the module docs).
+/// the shape `App$defaultDomain` documents, derived from the app's minted id alone (see the
+/// module docs).
+///
+/// The one form the member takes, and it is inside `DefaultDomain`'s modelled
+/// `length 1..1000` (`smithy_query(query="shape",shape="DefaultDomain")`).
 pub fn amplify_zone_default_domain(app_id: &str) -> String {
     format!("{app_id}.{AMPLIFY_HOSTING_ZONE}")
 }
@@ -98,10 +52,10 @@ const AMPLIFY_HOSTING_ZONE: &str = "amplifyapp.com";
 /// Whether `default_domain` is one Amplify's OWN hosting zone publishes, which is the form
 /// a client prefixes a branch's label to ([`hosted_branch_host`]).
 ///
-/// An app announced on this emulator's own endpoint carries that endpoint's address
-/// instead, which is not a zone a label can be prefixed to — and which every app created
-/// through the same endpoint shares — so such an app's site is addressed by the PATH that
-/// names it ([`hosted_site_path`]) and never host-style.
+/// Every app this service creates carries such a domain ([`amplify_zone_default_domain`]),
+/// so this is the reading that tells a stored domain from a host that is no zone a branch
+/// label could be a label of — an address this emulator is dialled at, which addresses a
+/// site by the PATH that names it ([`hosted_site_path`]) instead.
 pub fn names_the_hosting_zone(default_domain: &str) -> bool {
     hosted_site_host(default_domain).ends_with(&format!(".{AMPLIFY_HOSTING_ZONE}"))
 }
@@ -140,11 +94,10 @@ pub fn hosted_branch_host(display_name: &str, default_domain: &str) -> String {
 /// prefix ([`hosting_plane_prefix`]) and the branch's display name, which is the label that
 /// names the branch wherever a default domain announces one.
 ///
-/// A client told a default domain announced on this emulator's own endpoint cannot prefix a
-/// label to it — that address names no zone a label could be a label of, and it is the same
-/// address for every app created through that endpoint — so the app AND the branch are named
-/// in the path, exactly as the shared data-plane reading states: what the host cannot carry,
-/// the path carries.
+/// A client configured with ONE local endpoint resolves nothing but that address, so it
+/// cannot dial the app's own hosting domain at all: the app AND the branch are named in the
+/// path instead, exactly as the shared data-plane reading states — what the host cannot
+/// carry, the path carries.
 pub fn hosted_site_path(app_id: &str, display_name: &str) -> String {
     format!("{}/{display_name}", hosting_plane_prefix(app_id))
 }
@@ -168,8 +121,8 @@ pub enum HostedSiteAddress<'r> {
     /// The HOST a client composed from a DNS default domain:
     /// `<displayName>.<defaultDomain>`.
     Host(&'r str),
-    /// The PATH a client composed from a default domain announced on this emulator's own
-    /// endpoint: the app the path names and the branch label that follows it.
+    /// The PATH a client that resolves nothing but this emulator's own endpoint composed:
+    /// the app the path names and the branch label that follows it.
     Local {
         /// The `appId` the path names.
         app_id: &'r str,

@@ -73,12 +73,13 @@
 //! A deployed branch is VISITED, at the default domain the control plane reports for it:
 //! `Branch$displayName` "is used as the default domain prefix" and `App$defaultDomain`
 //! is "the default domain for the Amplify app", so the site of a branch answers at
-//! `<displayName>.<defaultDomain>`. An app announced under Amplify's own hosting zone is
-//! therefore addressed by a HOST whose first label names a branch rather than a service, so
-//! the framework resolves no service from it and nothing would claim the request; an app
-//! announced on this emulator's OWN endpoint (`crate::state::announced_default_domain`) is
-//! addressed by the PATH this plane serves its sites under, which names the app and the
-//! branch and binds no modelled operation (`crate::state::hosted_site_path`). Either way [`Service::can_handle`] claims a request
+//! `<displayName>.<defaultDomain>`. Every app carries a domain under Amplify's own hosting
+//! zone (`crate::state::amplify_zone_default_domain`), so such a site is addressed by a HOST
+//! whose first label names a branch rather than a service, and the framework resolves no
+//! service from it, so nothing would claim the request; a client that resolves nothing but
+//! this emulator's OWN endpoint addresses the same site by the PATH this plane serves its
+//! sites under, which names the app and the branch and binds no modelled operation
+//! (`crate::state::hosted_site_path`). Either way [`Service::can_handle`] claims a request
 //! that addresses a branch THIS store holds, and [`Service::override_routing_error`]
 //! answers it with the files that branch's latest successful deployment published
 //! (`crate::state::AmplifyBranch::site`).

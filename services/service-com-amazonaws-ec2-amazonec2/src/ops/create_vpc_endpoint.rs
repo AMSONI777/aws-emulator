@@ -996,7 +996,15 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
                 &service_region,
                 &placements,
                 &hosted_zone_id,
-                private_hosted_zone_id.as_deref(),
+                // The private entry is the SERVICE's own public name, resolved above against
+                // the one catalogue the describe reports from, and the zone minted for it.
+                match (
+                    service_private_dns_name.as_deref(),
+                    private_hosted_zone_id.as_deref(),
+                ) {
+                    (Some(name), Some(zone)) => Some((name, zone)),
+                    _ => None,
+                },
             );
             store.add_stored_bytes(state::dns_entry_list_bytes(&entries));
             if let Some(stored) = store.vpc_endpoints.get_mut(&endpoint_id) {
@@ -1085,22 +1093,24 @@ pub(crate) struct EndpointPlacement {
 /// (`CreateVpcEndpointRequest$PrivateDnsEnabled`) in that zone. Every part is derived: the
 /// endpoint's own id, the service name's labels, and the zones of the stored subnets — never
 /// a value read off a clock or a random source.
+///
+/// `private_dns` is that public name and the zone that answers it, which is the name the
+/// SERVICE publishes ([`crate::state::endpoint_service_private_dns_name`], the one
+/// `DescribeVpcEndpointServices` reports) rather than one rebuilt here, so the zone's record
+/// set and the catalogue cannot disagree about what it resolves.
 pub(crate) fn dns_entries(
     endpoint_id: &str,
     service: &str,
     service_region: &str,
     placements: &[EndpointPlacement],
     hosted_zone_id: &str,
-    private_hosted_zone_id: Option<&str>,
+    private_dns: Option<(&str, &str)>,
 ) -> Vec<DnsEntry> {
     let suffix = crate::state::ENDPOINT_DNS_SUFFIX;
     let mut entries: Vec<DnsEntry> = Vec::with_capacity(placements.len() + 2);
-    if let Some(private_hosted_zone_id) = private_hosted_zone_id {
+    if let Some((private_dns_name, private_hosted_zone_id)) = private_dns {
         entries.push(DnsEntry {
-            dns_name: Some(format!(
-                "{service}.{service_region}.{public}",
-                public = crate::state::SERVICE_DNS_SUFFIX,
-            )),
+            dns_name: Some(private_dns_name.to_string()),
             hosted_zone_id: Some(private_hosted_zone_id.to_string()),
         });
     }

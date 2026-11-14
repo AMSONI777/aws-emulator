@@ -10,21 +10,16 @@
 //! The rule under test: `App$defaultDomain` is "the default domain for the Amplify app"
 //! (`smithy_query(query="doc",shape="App",member="defaultDomain")`) and
 //! `Branch$displayName` "is used as the default domain prefix"
-//! (`(shape="Branch",member="displayName")`), so the member is an address a client FETCHES
-//! a deployed site at — which makes it an address THIS emulator answers on, not a public
-//! AWS name nothing here serves:
+//! (`(shape="Branch",member="displayName")`), so the member is the DNS domain of the zone
+//! Amplify publishes an app's sites under and it names the APP: the app's own minted id
+//! followed by that zone, derived from the id alone and never from the endpoint, host or
+//! port the creating request happened to reach.
 //!
-//! * a create that reached the emulator's own endpoint is announced on that endpoint, the
-//!   one address such a client resolves, and the site of one of its branches is served
-//!   under the path that names the app and the branch;
-//! * a create addressed to one of AWS's own hosts comes from a client that resolves them
-//!   and is announced the app's id under Amplify's hosting zone, the host form in which a
-//!   client prefixes the branch's display name.
-//!
-//! Either way the value is an address and nothing else — no scheme, no path — resolved ONCE
-//! when the app is created, so every later read of that app reports the same string whatever
-//! it is addressed at, and a `GET` of the address composed from it is answered by the site
-//! that branch deployed.
+//! So the value is an address and nothing else — no scheme, no path — resolved ONCE when the
+//! app is created, identical for every endpoint a client of this emulator is configured
+//! with, and a `GET` of `<displayName>.<defaultDomain>` is answered by the site that branch
+//! deployed. A client that resolves nothing but one local endpoint cannot dial that domain,
+//! so the same site is ALSO served under the path that names the app and the branch.
 //!
 //! The table below spans the class that rule generalises over: every spelling of the
 //! emulator's own endpoint a client is configured with (the IPv4 loopback address, the
@@ -53,15 +48,13 @@ const HOSTING_ZONE: &str = "amplifyapp.com";
 /// the service, so the suite pins the address and not the code.
 const LOCAL_MARKER: &str = "/_aws/amplify";
 
-/// One row: the endpoint a client was pointed at, and whether that endpoint is the
-/// EMULATOR'S OWN — which is what decides the form the app's hosting is announced in.
+/// One row: the endpoint a client was pointed at — the class the rule generalises over,
+/// since the domain an app announces is the same for every one of them.
 struct Row {
     /// What the row is, named in every assertion.
     case: &'static str,
     /// The `Host` the control-plane calls address.
     endpoint: &'static str,
-    /// Whether the endpoint names no service, i.e. is this emulator's own address.
-    own_endpoint: bool,
 }
 
 /// The rows: every addressing a client of this emulator uses, and the service's own
@@ -71,27 +64,22 @@ fn rows() -> Vec<Row> {
         Row {
             case: "the IPv4 loopback address with a port",
             endpoint: "127.0.0.1:44285",
-            own_endpoint: true,
         },
         Row {
             case: "the loopback name with another port",
             endpoint: "localhost:9297",
-            own_endpoint: true,
         },
         Row {
             case: "a bracketed IPv6 loopback",
             endpoint: "[::1]:38199",
-            own_endpoint: true,
         },
         Row {
             case: "the loopback address naming no port",
             endpoint: "127.0.0.1",
-            own_endpoint: true,
         },
         Row {
             case: "this service's own published host",
             endpoint: "amplify.us-east-1.amazonaws.com",
-            own_endpoint: false,
         },
     ]
 }
@@ -108,12 +96,14 @@ async fn read_app(emulator: &Emulator, endpoint: &str, app_id: &str) -> Value {
     reply.member("app")
 }
 
-/// Rule: an app's default domain is an address this emulator answers on — the endpoint the
-/// create reached with the app's identity in the path, or the app's id under Amplify's
-/// hosting zone for a client that resolves AWS's own hosts — and the site of a branch of
-/// that app is served at the address a client composes from it.
+/// Rule: an app's default domain is the app's own id under Amplify's hosting zone, whatever
+/// endpoint the create was addressed at, and the site of a branch of that app is served at
+/// the address a client composes from it — host-style for a client that resolves that zone,
+/// and under the path that names the app and the branch for one that resolves only this
+/// emulator's own endpoint.
 #[tokio::test]
-async fn an_app_announces_its_hosting_at_an_address_this_emulator_answers_on() {
+async fn an_app_announces_its_hosting_under_the_hosting_zone_whatever_endpoint_it_was_created_at(
+) {
     for row in rows() {
         let case = row.case;
         let emulator = Emulator::new();
@@ -133,30 +123,23 @@ async fn an_app_announces_its_hosting_at_an_address_this_emulator_answers_on() {
         let app_id = string_member(&app, "appId");
         let reported = string_member(&app, "defaultDomain");
 
-        let expected = if row.own_endpoint {
-            row.endpoint.to_string()
-        } else {
-            format!("{app_id}.{HOSTING_ZONE}")
-        };
+        let expected = format!("{app_id}.{HOSTING_ZONE}");
         assert_eq!(
             reported, expected,
             "case {case:?}: expected the app's domain {expected:?}, got {reported:?}"
         );
-        // The announced value is an ADDRESS and nothing else: it leads back to where the
-        // caller is already talking (an own endpoint) or is a DNS name a branch label can be
-        // prefixed to (AWS's own zone), and carries no scheme and no path either way.
+        // The announced value is an ADDRESS and nothing else: a DNS name a branch label can
+        // be prefixed to, carrying no scheme and no path.
         assert!(
             !reported.contains('/'),
             "case {case:?}: a domain carries no scheme and no path, got {reported:?}"
         );
-        if !row.own_endpoint {
-            assert!(
-                reported.chars().all(|byte| byte.is_ascii_lowercase()
-                    || byte.is_ascii_digit()
-                    || "-.".contains(byte)),
-                "case {case:?}: the domain must be a DNS name, got {reported:?}"
-            );
-        }
+        assert!(
+            reported.chars().all(|byte| byte.is_ascii_lowercase()
+                || byte.is_ascii_digit()
+                || "-.".contains(byte)),
+            "case {case:?}: the domain must be a DNS name, got {reported:?}"
+        );
 
         // The same value is reported by every reader, and by one addressed somewhere
         // else: it is the app's record, resolved once by the create, not a function of the
@@ -196,14 +179,6 @@ async fn an_app_announces_its_hosting_at_an_address_this_emulator_answers_on() {
             &json!({ "branchName": display_name }),
         )
         .await;
-        let (visited_host, visited_path) = if row.own_endpoint {
-            (
-                row.endpoint.to_string(),
-                format!("{LOCAL_MARKER}/{app_id}/{display_name}/"),
-            )
-        } else {
-            (format!("{display_name}.{reported}"), "/".to_string())
-        };
         let body = format!("<html>{case}</html>").into_bytes();
         let status = hosted
             .deploy(case, &[(ROOT_DOCUMENT, body.as_slice())])
@@ -212,38 +187,56 @@ async fn an_app_announces_its_hosting_at_an_address_this_emulator_answers_on() {
             status, SUCCEED,
             "case {case:?}: the deployment must succeed, got {status}"
         );
-        let visited = hosted
-            .visit_host("GET", &visited_host, &visited_path)
-            .await;
-        assert_eq!(
-            visited.status, 200,
-            "case {case:?}: a GET of {visited_host:?}{visited_path:?} must be answered, got \
-             {visited:?}"
-        );
-        assert_eq!(
-            visited.body, body,
-            "case {case:?}: expected the deployed document, got {:?}",
-            String::from_utf8_lossy(&visited.body)
-        );
+        // BOTH addressings answer, whatever endpoint the app was created at: the host a
+        // client that resolves the hosting zone composes, and the path a client that
+        // resolves only this emulator's own endpoint reaches the same site under.
+        let addressings = [
+            (
+                "the host composed from the two members",
+                format!("{display_name}.{reported}"),
+                "/".to_string(),
+                format!("another-branch.{reported}"),
+                "/".to_string(),
+            ),
+            (
+                "the path this plane serves the site under",
+                row.endpoint.to_string(),
+                format!("{LOCAL_MARKER}/{app_id}/{display_name}/"),
+                row.endpoint.to_string(),
+                format!("{LOCAL_MARKER}/{app_id}/another-branch/"),
+            ),
+        ];
+        for (addressing, visited_host, visited_path, other_host, other_path) in addressings {
+            let visited = hosted
+                .visit_host("GET", &visited_host, &visited_path)
+                .await;
+            assert_eq!(
+                visited.status, 200,
+                "case {case:?} via {addressing:?}: a GET of {visited_host:?}{visited_path:?} \
+                 must be answered, got {visited:?}"
+            );
+            assert_eq!(
+                visited.body, body,
+                "case {case:?} via {addressing:?}: expected the deployed document, got {:?}",
+                String::from_utf8_lossy(&visited.body)
+            );
 
-        // And nothing else is served there: a branch label this app has no branch under is
-        // a 404 at the same address, so the edge answers for the branch the address names
-        // rather than for the app.
-        let other_path = if row.own_endpoint {
-            format!("{LOCAL_MARKER}/{app_id}/another-branch/")
-        } else {
-            "/".to_string()
-        };
-        let other_host = if row.own_endpoint {
-            row.endpoint.to_string()
-        } else {
-            format!("another-branch.{reported}")
-        };
-        let missed = hosted.visit_host("GET", &other_host, &other_path).await;
-        assert_eq!(
-            missed.status, 404,
-            "case {case:?}: a branch this app does not have must not be served, got \
-             {missed:?}"
-        );
+            // And nothing else is served there: a branch label this app has no branch
+            // under is not served at all, so the edge answers for the branch the address
+            // names rather than for the app. What such a request earns instead is the
+            // framework's, and depends on the endpoint it was addressed at, so what is
+            // pinned here is that the site was not served.
+            let missed = hosted.visit_host("GET", &other_host, &other_path).await;
+            assert_ne!(
+                missed.status, 200,
+                "case {case:?} via {addressing:?}: a branch this app does not have must not \
+                 be served, got {missed:?}"
+            );
+            assert_ne!(
+                missed.body, body,
+                "case {case:?} via {addressing:?}: a branch this app does not have must not \
+                 answer this site's document"
+            );
+        }
     }
 }

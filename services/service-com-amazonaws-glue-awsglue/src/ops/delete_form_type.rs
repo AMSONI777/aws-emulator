@@ -11,14 +11,16 @@
 //!
 //! Two things this delete does:
 //!
-//! * It removes the form type WHATEVER ELSE REFERENCES IT. The operation's prose says "a
-//!   form type cannot be deleted if it is still referenced by an asset type", and the
-//!   recorded AWS answer for a form type an asset type of the same account declares among
-//!   its forms is `200` with an empty body and the form type gone — so an asset type's (or
-//!   an asset's) declaration of a form type is not a dependency that holds this delete up,
-//!   and the modelled `ConflictException` is not what such a request earns. The reference
-//!   the asset type carries is written by that asset type's own puts and is left as it
-//!   stands ([`crate::state::ComAmazonawsGlueAwsglueState::remove_form_type_by_reference`]).
+//! * It REFUSES a form type an asset type still references. "A form type cannot be deleted
+//!   if it is still referenced by an asset type", so before anything is removed the asset
+//!   type namespace is scanned for a live reference to this form type
+//!   ([`crate::state::ComAmazonawsGlueAwsglueState::asset_types_referencing_form_type`]) and
+//!   a hit earns the modelled `ConflictException`, naming the form type and each asset type
+//!   that holds it ([`crate::state::form_type_in_use_message`]). The check runs BEFORE the
+//!   removal, so a refused delete leaves the store exactly as it was. It is a LIVE reference
+//!   and not a permanent lock: once the referencing asset types are gone the same call is
+//!   served. An ASSET that carries a form of this type is not an asset type and holds the
+//!   delete up no more than it is held up by its own type being deleted.
 //! * It reports no miss. `GetFormType` models `EntityNotFoundException` and this operation
 //!   does not model it at all, so an identifier this account holds no form type under is
 //!   answered as the delete of something already absent: the caller asked for the state the
@@ -174,15 +176,37 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
 
         let mut store = state.lock();
 
-        // Nothing HOLDS THE DELETE UP. A reference from an asset type (or from an asset of
-        // that type) to this form type is not a deletion-blocking dependency: the recorded
-        // AWS answer for a form type an asset type still declares among its forms is `200`
-        // with an empty body and the form type removed, so this surface removes it too
-        // rather than refusing with the modelled `ConflictException`.
-        //
+        // "A form type cannot be deleted if it is still referenced by an asset type": the
+        // asset types the store holds RIGHT NOW are scanned for a reference to this form
+        // type, and the delete is refused with the operation's modelled `ConflictException`
+        // while one stands. Asked before anything is removed, so a refused delete leaves
+        // the store exactly as it was, and the refusal names the form type the request
+        // addressed and every asset type found against it.
+        let dependents = store.asset_types_referencing_form_type(&input.identifier);
+        if !dependents.is_empty() {
+            let named: Vec<String> = dependents
+                .iter()
+                .map(|asset_type| {
+                    crate::state::catalog_dependency_object(
+                        crate::state::DEPENDENCY_TAG_ASSET,
+                        asset_type,
+                    )
+                })
+                .collect();
+            return Err(DeleteFormTypeErrorModeled::ConflictException(ConflictException {
+                message: Some(crate::state::form_type_in_use_message(
+                    &input.identifier,
+                    &named,
+                )),
+            })
+            .into());
+        }
+
         // The record is removed under the name it is keyed by, which is the identifier a
         // client addresses it by. An identifier that resolves to nothing removes nothing
-        // and is still served: this operation models no miss.
+        // and is still served: this operation models no miss. An ASSET that carries a form
+        // of this type keeps the reference its own put wrote
+        // ([`crate::state::ComAmazonawsGlueAwsglueState::remove_form_type_by_reference`]).
         match store.remove_form_type_by_reference(&input.identifier) {
             Some(removed) => ::tracing::info!(
                 operation = "DeleteFormType",

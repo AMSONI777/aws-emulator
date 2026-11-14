@@ -1881,6 +1881,32 @@ pub const ENDPOINT_DNS_SUFFIX: &str = "vpce.amazonaws.com";
 /// (`CreateVpcEndpointRequest$PrivateDnsEnabled`).
 pub const SERVICE_DNS_SUFFIX: &str = "amazonaws.com";
 
+/// The DNS suffix of the default public name of a service whose endpoint service NAME sits
+/// under the `aws.api` or `api.aws` label ([`AWS_API_ENDPOINT_SERVICE_PREFIX`],
+/// [`API_AWS_ENDPOINT_SERVICE_PREFIX`]): those two families are how Amazon Web Services
+/// names the endpoint services of the APIs it serves in the `api.aws` domain, which is the
+/// domain this workspace reads as one of Amazon Web Services' own
+/// (`service_common::data_plane_addressing`) and the one every other service of this
+/// workspace builds such a host under (`<label>.<region>.api.aws`).
+pub const API_SERVICE_DNS_SUFFIX: &str = "api.aws";
+
+/// The DNS suffix the default public name of a service of the catalogue sits under, which is
+/// decided by the FAMILY its endpoint service name belongs to — the prefix that name opens
+/// with ([`AWS_ENDPOINT_SERVICE_PREFIX`], [`AWS_API_ENDPOINT_SERVICE_PREFIX`],
+/// [`API_AWS_ENDPOINT_SERVICE_PREFIX`]).
+///
+/// Every such service HAS a default public name: it is the name a consumer resolves without
+/// an endpoint, and the one an interface endpoint's private hosted zone answers on
+/// ([`endpoint_service_private_dns_name`]), so which domain it sits under is the only
+/// question — and the name family answers it.
+fn public_dns_suffix(prefix: &str) -> &'static str {
+    if prefix == AWS_ENDPOINT_SERVICE_PREFIX {
+        SERVICE_DNS_SUFFIX
+    } else {
+        API_SERVICE_DNS_SUFFIX
+    }
+}
+
 /// `InvalidServiceName` (HTTP 400): the request named something that is not the name of an
 /// endpoint service.
 pub const INVALID_SERVICE_NAME: &str = "InvalidServiceName";
@@ -2381,14 +2407,14 @@ pub fn endpoint_services_in_region(region: &str) -> Vec<EndpointServiceRecord> {
     let zones = availability_zones_in_region(region);
     let record_of = |prefix: &str, service: &AwsEndpointService| -> EndpointServiceRecord {
         let service_name = format!("{prefix}{region}.{}", service.label);
-        // Only a name under `com.amazonaws` says what the service's default public DNS
-        // name is (`<label>.<region>.amazonaws.com`). Nothing in this model or in a request
-        // says which public name a service of another published family answers on, and a
-        // private hosted zone resolves the service's REAL public name or nothing at all, so
-        // such a service reports none here rather than one invented for it — an
-        // acknowledged omission about this catalogue's evidence, not a property of the
-        // family.
-        let publishes_public_name = prefix == AWS_ENDPOINT_SERVICE_PREFIX;
+        // The DOMAIN this service's default public DNS name sits under follows the family
+        // its name belongs to ([`public_dns_suffix`]): `com.amazonaws.<region>.<label>`
+        // answers on `<label>.<region>.amazonaws.com`, and the two families named under the
+        // `aws.api` / `api.aws` labels on `<label>.<region>.api.aws`. Every published
+        // service has such a name — it is what a consumer resolves without an endpoint —
+        // so the private hosted zone an interface endpoint to any of them associates has a
+        // record set to hold.
+        let public_dns_suffix = public_dns_suffix(prefix);
         let interface = service.types.contains(&VPC_ENDPOINT_TYPE_INTERFACE);
         let gateway = service.types.contains(&VPC_ENDPOINT_TYPE_GATEWAY);
         // "The DNS names for the service": the base name an endpoint's own names sit
@@ -2405,7 +2431,7 @@ pub fn endpoint_services_in_region(region: &str) -> Vec<EndpointServiceRecord> {
         }
         if gateway {
             base_endpoint_dns_names.push(format!(
-                "{label}.{region}.{SERVICE_DNS_SUFFIX}",
+                "{label}.{region}.{public_dns_suffix}",
                 label = service.label,
             ));
         }
@@ -2430,8 +2456,8 @@ pub fn endpoint_services_in_region(region: &str) -> Vec<EndpointServiceRecord> {
             // which is the name a private hosted zone resolves inside the VPC — so only an
             // interface endpoint has one, a private hosted zone being an interface
             // endpoint's option.
-            private_dns_name: (interface && publishes_public_name)
-                .then(|| format!("{label}.{region}.{SERVICE_DNS_SUFFIX}", label = service.label)),
+            private_dns_name: interface
+                .then(|| format!("{label}.{region}.{public_dns_suffix}", label = service.label)),
             // "(Interface and gateway endpoints) A policy to attach to the endpoint that
             // controls access to the service" (`CreateVpcEndpointRequest$PolicyDocument`):
             // both kinds of endpoint to a service of this catalog take one.
@@ -2442,7 +2468,7 @@ pub fn endpoint_services_in_region(region: &str) -> Vec<EndpointServiceRecord> {
             acceptance_required: false,
             manages_vpc_endpoints: false,
             payer_responsibility: Some(PAYER_RESPONSIBILITY_SERVICE_OWNER.to_string()),
-            private_dns_name_verification_state: (interface && publishes_public_name)
+            private_dns_name_verification_state: interface
                 .then(|| DNS_NAME_STATE_VERIFIED.to_string()),
             // "The supported IP address types" (`ServiceDetail$SupportedIpAddressTypes`) is
             // about what the SERVICE answers on. An interface endpoint service answers on

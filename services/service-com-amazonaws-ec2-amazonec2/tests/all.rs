@@ -502,6 +502,12 @@ mod delete_volume;
 mod vpc_endpoint_service_name_families;
 #[path = "all/vpc_endpoint_services.rs"]
 mod vpc_endpoint_services;
+// The default public DNS name a published endpoint service carries — the domain of which
+// follows the family its name belongs to — and the private hosted zone an interface endpoint
+// to it associates. Declared beside the two suites above, which cover the rest of the
+// catalogue's report.
+#[path = "all/endpoint_service_private_dns_names.rs"]
+mod endpoint_service_private_dns_names;
 // The `domain-name` attribute of an Elastic IP address: what `ResetAddressAttribute` starts
 // on one address's reverse DNS record, what it refuses, and what the report reads back.
 #[path = "all/address_attribute_reset.rs"]

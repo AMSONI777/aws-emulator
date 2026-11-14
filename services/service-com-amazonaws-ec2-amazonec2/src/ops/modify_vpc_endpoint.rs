@@ -753,6 +753,10 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         // leaves the endpoint's own setting as it was.
         let private_dns_held = endpoint.private_dns_enabled.unwrap_or(false);
         let private_dns_enabled = interface && input.private_dns_enabled.unwrap_or(private_dns_held);
+        // The name the SERVICE publishes, read from the one catalogue the create resolves
+        // against ([`crate::state::endpoint_service_private_dns_name`]), which is what the
+        // private hosted zone's record set holds.
+        let service_private_dns_name = state::endpoint_service_private_dns_name(&store, &service_name);
         if private_dns_enabled && !private_dns_held {
             let attributes = store
                 .vpc_attributes_of(&vpc_id)
@@ -1041,7 +1045,13 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
                 &service_region,
                 &placements,
                 &hosted_zone_id,
-                private_hosted_zone_id.as_deref(),
+                match (
+                    service_private_dns_name.as_deref(),
+                    private_hosted_zone_id.as_deref(),
+                ) {
+                    (Some(name), Some(zone)) => Some((name, zone)),
+                    _ => None,
+                },
             ));
         }
 

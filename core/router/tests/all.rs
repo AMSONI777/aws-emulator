@@ -3122,3 +3122,8 @@ mod ecr_scan_on_push_event_reaches_its_queue_target;
 // `tests/all/` must be declared here and a suite left at the top level of `tests/` fails the
 // build. Declare each suite exactly ONCE: this is one crate root, so a second `mod` for the
 // same name is `E0428` and fails every suite in this target.
+// (A note two branches landed mid-file, where an inner doc comment is `E0753`: a suite
+// left at the top level of `tests/` fails the build, and each suite is declared exactly
+// ONCE, since this is one crate root and a second `mod` for the same name is `E0428` and
+// fails every suite in this target. `all/all_rs_declares_each_suite_once.rs` checks both,
+// for this file and for every service crate's `tests/all.rs`.)

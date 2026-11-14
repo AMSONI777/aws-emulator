@@ -287,19 +287,15 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         let app = App {
             app_arn: ::emulator_server::emulator_arn("amplify", &region, &format!("apps/{app_id}")),
             // `defaultDomain` is the domain the app's hosting is published under — a
-            // client composes the site's address from it and a branch's display name —
-            // and it exists for that client to FETCH, so the address announced is one
-            // this emulator answers on: the endpoint this create reached, and Amplify's
-            // own hosting zone only for a caller that resolves AWS's hosts
-            // (`crate::state::announced_default_domain`, which is also where the path
-            // such an app's sites are served under is spelled). It is resolved once here
-            // and reported unchanged by every later read. The member is @required and
+            // client composes the site's address from it and a branch's display name — and
+            // it names the APP: the app's own minted id under the hosting zone Amplify
+            // publishes apps on (`crate::state::amplify_zone_default_domain`, which is
+            // also where the path a client with one local endpoint reaches those sites
+            // under is spelled). Derived from the id alone, so it is the same value
+            // whatever endpoint, host or port this create was addressed at, resolved once
+            // here and reported unchanged by every later read. The member is @required and
             // never empty.
-            default_domain: crate::state::announced_default_domain(
-                ctx.parts(),
-                ctx.endpoint().as_str(),
-                &app_id,
-            ),
+            default_domain: crate::state::amplify_zone_default_domain(&app_id),
             app_id,
             name: input.name,
             // `tags` is echoed exactly as the request set it: the create response

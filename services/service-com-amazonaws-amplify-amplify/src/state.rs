@@ -46,9 +46,9 @@ pub use custom_headers::{
     MAX_CUSTOM_HEADER_RULES_PER_APP,
 };
 pub use hosting_address::{
-    addressed_hosted_site, amplify_zone_default_domain, announced_default_domain,
-    hosted_branch_host, hosted_site_host, hosted_site_path, hosting_plane_prefix,
-    names_the_hosting_zone, HostedSiteAddress, HOSTING_PLANE_LABEL,
+    addressed_hosted_site, amplify_zone_default_domain, hosted_branch_host, hosted_site_host,
+    hosted_site_path, hosting_plane_prefix, names_the_hosting_zone, HostedSiteAddress,
+    HOSTING_PLANE_LABEL,
 };
 
 /// One Amplify app as this service persists it: the modelled record it hands back,
@@ -1592,9 +1592,8 @@ impl ComAmazonawsAmplifyAmplifyState {
     ///   any port, because a host is;
     /// * by PATH, where the app is named by its id and the branch by that same display name
     ///   ([`hosted_site_path`]) — compared case-insensitively too, because it is the same
-    ///   label. This is how the site of an app announced on this emulator's own endpoint is
-    ///   reached, since that address is one every app created through the same endpoint
-    ///   shares and is not a zone a branch label can be prefixed to.
+    ///   label. This is how a client that resolves nothing but this emulator's own endpoint
+    ///   reaches the site, since such a client cannot dial the app's hosting domain at all.
     fn hosted_branch_at(&self, address: &HostedSiteAddress<'_>) -> Option<(String, String)> {
         match *address {
             HostedSiteAddress::Host(host) => {
