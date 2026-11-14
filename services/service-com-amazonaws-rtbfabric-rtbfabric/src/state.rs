@@ -12,6 +12,17 @@
 use std::collections::HashMap;
 use std::time::{Duration, SystemTime};
 
+/// The `/tags/{resourceArn}` surface's one reading of a caller-supplied ARN and of
+/// the record it addresses.
+mod tagging;
+// Named rather than glob, so this module's public surface stays explicit, and every
+// path a handler uses (`crate::state::…`) keeps resolving.
+pub use tagging::{
+    resource_tags, resource_tags_mut, tagged_resource, tagging_unresolved, TaggedResource,
+    ARN_VENDOR, TAGGING_UNRESOLVED_CODE, TAGGING_UNRESOLVED_MESSAGE, TAGGING_UNRESOLVED_STATUS,
+    TAGS_PER_RESOURCE_QUOTA,
+};
+
 use crate::ops::types::{
     LinkAttributes, LinkLogSettings, ListenerConfig, ManagedEndpointConfiguration,
     ModuleConfiguration, TrustStoreConfiguration,

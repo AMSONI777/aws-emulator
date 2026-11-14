@@ -1984,6 +1984,9 @@ mod cloudformation_metric_stream_estate_is_drainable;
 mod redshift_health_alarms_evaluate;
 // (`cloudwatch_alarm_ssm_ops_item_action` is declared in the head region above: a module may
 // be declared only once.)
+// (The metric-stream filter-update suite is declared ONCE, in the head region above: a module
+// may be declared only once, and two branches landing at once each appended a declaration of
+// it here.)
 // (`zz_probe` is declared once, further up this tail: it was appended here as well while two
 // (The metric-stream filter-update suite is declared ONCE, in the head region above: it was
 // appended here as well while two branches were landing at once.)
@@ -2010,7 +2013,6 @@ mod redshift_health_alarms_evaluate;
 // (`zz_probe` is declared ONCE, further up this tail, for the reason recorded there.)
 // (`cloudformation_metric_stream_filter_update` is declared once, in the sorted head region
 // above: a module may be declared only once, and two branches landing at once each appended
-// it here.)
 // module may be declared only once, and this tail re-declared it.)
 // (`cloudformation_metric_stream_filter_update` is declared ONCE, in the head region of this
 // file: a module may be declared only once.)
@@ -2475,6 +2477,9 @@ mod cloudfront_edge_4xx_share_decides_the_alarm;
 // (`sdb_legacy_query_api_on_the_assembled_router` and `codebuild_s3_build_output` are
 // declared ONCE each, further up this tail: a module may be declared only once.)
 // `cloudformation_domain_endpoint_is_dialled_by_consumers` are declared ONCE each, further
+// (The SESv2 event-destination suite is declared ONCE, further up this tail: a module may be
+// declared only once, and two branches landing at once each appended a declaration of it
+// here.)
 // `cloudformation_metric_stream_estate_is_drainable` are declared in the head region above and
 // in this tail respectively: a module may be declared only once, and the pair was appended
 // here as well while two branches were landing at once, which compiled neither.)
@@ -2595,6 +2600,8 @@ mod cloudformation_kms_encrypted_sns_sqs_pipeline;
 // (`lambda_signed_write_to_an_aoss_collection_endpoint` is declared once, further up this
 // tail: a module may be declared only once, and two landings each appended a copy here.)
 // (`cloudformation_domain_endpoint_is_dialled_by_consumers` is declared ONCE, further up this
+// (The Pricing Plan Manager subscription-eligibility suite is declared ONCE, further up this
+// tail: a module may be declared only once, and two landings each appended a declaration of
 #[path = "all/sfn_relayed_dynamodb_request_id.rs"]
 mod sfn_relayed_dynamodb_request_id;
 // (`cloudtrail_read_only_api_calls` is declared ONCE, in the SORTED block beside the other
@@ -2783,6 +2790,12 @@ mod bedrock_agent_ingestion_populates_its_s3_vectors_index;
 // `cloudformation_scripted_queue_deploy` are each declared once in the sorted spans above: a
 // above: a module may be declared only once, and two branches landing in the same window each
 // declared it here as well.)
+// suite left at the top level of `tests/` fails the build. Declare each suite exactly
+// ONCE: this is one crate root, so a second `mod` for the same name is `E0428` and fails
+// every suite in this target. `all/all_rs_declares_each_suite_once.rs` checks that for
+// this file and for every service crate's `tests/all.rs`, so check there rather than
+// leaving a note here. (Line comments, not `//!`: an inner doc comment is only legal at
+// the head of a crate root, so one in this tail is `E0753` and compiles no suite at all.)
 // (The five lines below arrived as INNER doc comments (`//!`) in this appended tail, where
 // only the crate root's own header may carry them: an inner doc comment past the first item
 // is `E0753` and fails every suite in this target, so they are ordinary comments here. The
@@ -2908,6 +2921,12 @@ mod s3_object_read_identity_or_bucket_policy;
 // `cloudformation_domain_endpoint_is_dialled_by_consumers` is declared ONCE, in the span
 // above, for the reason the entry there records.
 // (`zz_probe` is declared ONCE, further up this tail, for the reason recorded there: two
+// suite left at the top level of `tests/` fails the build. Declare each suite exactly
+// ONCE: this is one crate root, so a second `mod` for the same name is `E0428` and fails
+// every suite in this target. `all/all_rs_declares_each_suite_once.rs` checks that for
+// this file and for every service crate's `tests/all.rs`, so check there rather than
+// leaving a note here. (Line comments: an inner doc comment is only legal at a crate
+// root's head, so one in this tail is `E0753` and compiles no suite at all.)
 // suite's rule — what becomes of the record a client puts on the stream a stack deployed,
 // which only lands in a bucket if CloudFormation, IAM, Firehose and Amazon S3 all agree.
 #[path = "all/cloudformation_firehose_stream_direct_put_delivers.rs"]

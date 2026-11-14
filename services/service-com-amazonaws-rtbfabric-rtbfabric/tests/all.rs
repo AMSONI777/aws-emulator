@@ -19,6 +19,8 @@ mod link_rejection;
 mod requester_gateway_deletion;
 #[path = "all/requester_gateway_listing.rs"]
 mod requester_gateway_listing;
+#[path = "all/resource_tagging.rs"]
+mod resource_tagging;
 #[path = "all/state_roundtrip.rs"]
 mod state_roundtrip;
 #[path = "all/validation_message_wording.rs"]
