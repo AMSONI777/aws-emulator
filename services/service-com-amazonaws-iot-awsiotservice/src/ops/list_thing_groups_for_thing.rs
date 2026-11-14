@@ -1,15 +1,6 @@
 // SPDX-License-Identifier: CC0-1.0
 
 //! @op ListThingGroupsForThing
-//! SCAFFOLDED, NOT IMPLEMENTED: this operation answers HTTP 501 `NotImplemented` and
-//! asserts NOTHING about `ListThingGroupsForThing`'s real behaviour. Implement it here — this is
-//! the ONLY file to touch for this operation.
-//!
-//! A 501 from this operation means "nobody has written it yet", never "the emulator is
-//! broken". Replace the `Err(..)` in [`ListThingGroupsForThing::handle`] with real behaviour and
-//! delete the SCAFFOLDED marker line above; that line is the machine-readable record of
-//! which operations are still stubs (`grep -rl '^//! SCAFFOLDED, NOT IMPLEMENTED:' */src/ops/`),
-//! so leaving it on an implemented operation under-reports progress.
 //!
 //! ## Shape of an operation
 //!
@@ -148,18 +139,91 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         input: Self::Input,
         ctx: &smithy_server_runtime::OperationContext<'_>,
     ) -> Result<Self::Output, Self::Error> {
-        // The engine is reachable from `&self` (constructor-injected); `ctx` carries
-        // request metadata. Both are bound here so an implementer has them in scope.
-        let _ = (&input, ctx, &self.engine);
-        // Implement `ListThingGroupsForThing` here, then delete the SCAFFOLDED marker at the top of
-        // this file. Return modeled failures as
-        // `Err(ListThingGroupsForThingErrorModeled::Variant(..).into())` — the `From` impl above lifts it.
-        //
-        // To refuse a bad request this operation models no error for, return
-        // `Err(crate::scaffolded::Scaffolded::validation("..."))` — a 400
-        // `ValidationException`. Do NOT answer 501 for it: 501 means "not written yet",
-        // not "bad request". Modeled constraints are already refused BEFORE this
-        // handler runs, so reaching here means the input satisfies every one of them.
-        Err(crate::scaffolded::Scaffolded::not_implemented("ListThingGroupsForThing"))
+        let state = crate::state::service_state(&*self.engine).ok_or_else(|| {
+            ListThingGroupsForThingErrorModeled::InternalFailureException(
+                InternalFailureException {
+                    message: Some("the IoT emulator has no state store attached".to_string()),
+                },
+            )
+        })?;
+        let _ = ctx;
+
+        let store = state.lock();
+        // A listing of the groups a thing the registry does not hold belongs to is the
+        // modelled `ResourceNotFoundException` (HTTP 404), never an empty page that looks
+        // like a thing in no group.
+        if !store.things.contains_key(&input.thing_name) {
+            return Err(
+                ListThingGroupsForThingErrorModeled::ResourceNotFoundException(
+                    ResourceNotFoundException {
+                        message: Some(crate::state::missing_thing_message(&input.thing_name)),
+                    },
+                )
+                .into(),
+            );
+        }
+
+        // The groups the thing belongs to are read off the ONE record of the membership
+        // relation the groups themselves hold
+        // ([`crate::state::ComAmazonawsIotAwsiotserviceState::thing_groups_for_thing`]),
+        // so what this listing reports and what `ListThingsInThingGroup` reports are two
+        // views of one relation and cannot disagree.
+        let groups = store.thing_groups_for_thing(&input.thing_name);
+
+        // One page of the listing's total order, resumed after the position the caller's
+        // own token names ([`crate::state::page_of`]) — the same paging every other
+        // `@paginated` listing of this service uses, so a token is read one way. The page
+        // is ordered and paged by the group NAME, which is the group's identity.
+        let scope = format!("thing-groups-for-thing/{}", input.thing_name);
+        let resume_after = match input.next_token.as_deref() {
+            None => None,
+            Some(token) => {
+                let Some(resume_after) = crate::state::decode_page_marker(token, &scope) else {
+                    return Err(
+                        ListThingGroupsForThingErrorModeled::InvalidRequestException(
+                            InvalidRequestException {
+                                message: Some(
+                                    "nextToken is not a token this listing issued".to_string(),
+                                ),
+                            },
+                        )
+                        .into(),
+                    );
+                };
+                Some(resume_after)
+            }
+        };
+        // The page is at most what the listing admits; the clamp is defensive rather
+        // than load-bearing, keeping the page inside the modelled `maxResults` range
+        // without depending on a validation performed outside this module.
+        let page_size = input
+            .max_results
+            .map_or(crate::state::MAX_LIST_PAGE_SIZE, |max_results| {
+                max_results.clamp(1, crate::state::MAX_LIST_PAGE_SIZE)
+            }) as usize;
+        let names: Vec<String> = groups
+            .iter()
+            .map(|(group_name, _group_arn)| group_name.clone())
+            .collect();
+        let (page, next_token) =
+            crate::state::page_of(names, &scope, resume_after.as_deref(), page_size);
+
+        Ok(ListThingGroupsForThingOutput {
+            thing_groups: Some(
+                page.into_iter()
+                    .map(|group_name| {
+                        let group_arn = groups
+                            .iter()
+                            .find(|(name, _arn)| *name == group_name)
+                            .map(|(_name, arn)| arn.clone());
+                        GroupNameAndArn {
+                            group_name: Some(group_name),
+                            group_arn,
+                        }
+                    })
+                    .collect(),
+            ),
+            next_token,
+        })
     }
 }

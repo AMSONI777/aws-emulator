@@ -282,14 +282,21 @@ pub const FIELD_TYPE_BOOLEAN: &str = "Boolean";
 /// (`smithy_query(query="doc",shape="ThingIndexingConfiguration",member="managedFields")`),
 /// which is also why a caller's own `managedFields` list is dropped on an update: the
 /// service decides them. They are the registry's own members every thing has, so an
-/// aggregation may name one without the account declaring anything; any OTHER field —
-/// a thing attribute, a shadow member — is aggregatable only once the account declares
-/// it as a custom field of the index.
+/// aggregation may name one without the account declaring anything; only a field the
+/// CALLER supplies the values of — a thing attribute, `attributes.<name>` — is
+/// aggregatable once the account declares it as a custom field of the index.
+///
+/// The catalog is the managed-field table AWS IoT fleet indexing publishes: the two
+/// registry identity members every thing carries, the `registry.` members the registry
+/// section of the index holds for it (its type, the groups it belongs to and its
+/// registry version), and the `connectivity.` members the connectivity section holds.
 pub const MANAGED_THING_FIELDS: &[(&str, &str)] = &[
     ("thingId", FIELD_TYPE_STRING),
     ("thingName", FIELD_TYPE_STRING),
     ("thingTypeName", FIELD_TYPE_STRING),
     ("registry.version", FIELD_TYPE_NUMBER),
+    ("registry.thingTypeName", FIELD_TYPE_STRING),
+    ("registry.thingGroupNames", FIELD_TYPE_STRING),
     ("connectivity.connected", FIELD_TYPE_BOOLEAN),
     ("connectivity.timestamp", FIELD_TYPE_NUMBER),
     ("connectivity.disconnectReason", FIELD_TYPE_STRING),

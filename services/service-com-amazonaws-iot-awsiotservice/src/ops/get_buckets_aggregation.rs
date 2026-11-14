@@ -1,15 +1,6 @@
 // SPDX-License-Identifier: CC0-1.0
 
 //! @op GetBucketsAggregation
-//! SCAFFOLDED, NOT IMPLEMENTED: this operation answers HTTP 501 `NotImplemented` and
-//! asserts NOTHING about `GetBucketsAggregation`'s real behaviour. Implement it here — this is
-//! the ONLY file to touch for this operation.
-//!
-//! A 501 from this operation means "nobody has written it yet", never "the emulator is
-//! broken". Replace the `Err(..)` in [`GetBucketsAggregation::handle`] with real behaviour and
-//! delete the SCAFFOLDED marker line above; that line is the machine-readable record of
-//! which operations are still stubs (`grep -rl '^//! SCAFFOLDED, NOT IMPLEMENTED:' */src/ops/`),
-//! so leaving it on an implemented operation under-reports progress.
 //!
 //! ## Shape of an operation
 //!
@@ -161,18 +152,206 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         input: Self::Input,
         ctx: &smithy_server_runtime::OperationContext<'_>,
     ) -> Result<Self::Output, Self::Error> {
-        // The engine is reachable from `&self` (constructor-injected); `ctx` carries
-        // request metadata. Both are bound here so an implementer has them in scope.
-        let _ = (&input, ctx, &self.engine);
-        // Implement `GetBucketsAggregation` here, then delete the SCAFFOLDED marker at the top of
-        // this file. Return modeled failures as
-        // `Err(GetBucketsAggregationErrorModeled::Variant(..).into())` — the `From` impl above lifts it.
+        let state = crate::state::service_state(&*self.engine).ok_or_else(|| {
+            GetBucketsAggregationErrorModeled::InternalFailureException(InternalFailureException {
+                message: Some("the IoT emulator has no state store attached".to_string()),
+            })
+        })?;
+        let _ = ctx;
+        let now = ::std::time::SystemTime::now();
+
+        // A name outside the set of indexes this service recognises is a request it
+        // cannot act on at all, which is a different refusal from an index the account
+        // does not have: the modelled `InvalidRequestException` ahead of any lookup.
+        let index_name = input
+            .index_name
+            .clone()
+            .unwrap_or_else(|| crate::state::THING_INDEX_NAME.to_string());
+        if !crate::state::FLEET_INDEX_NAMES.contains(&index_name.as_str()) {
+            return Err(
+                GetBucketsAggregationErrorModeled::InvalidRequestException(
+                    InvalidRequestException {
+                        message: Some(crate::state::unrecognized_index_name_message(&index_name)),
+                    },
+                )
+                .into(),
+            );
+        }
+
+        // The aggregation is over the documents a QUERY selects, so a string that is not
+        // a query is refused with the modelled `InvalidQueryException` ("The query is
+        // invalid", HTTP 400).
+        if let Err(rejection) = crate::state::validate_query_string(&input.query_string) {
+            return Err(
+                GetBucketsAggregationErrorModeled::InvalidQueryException(InvalidQueryException {
+                    message: Some(rejection.message()),
+                })
+                .into(),
+            );
+        }
+
+        // "Performs an aggregation that will return a list of buckets": the bucket
+        // aggregation is what shapes the response, so a request naming none asks for no
+        // aggregation at all — the modelled `InvalidAggregationException` ("The
+        // aggregation is invalid", HTTP 400).
+        let Some(terms) = input.buckets_aggregation_type.terms_aggregation.as_ref() else {
+            return Err(
+                GetBucketsAggregationErrorModeled::InvalidAggregationException(
+                    InvalidAggregationException {
+                        message: Some(
+                            "bucketsAggregationType must specify a termsAggregation".to_string(),
+                        ),
+                    },
+                )
+                .into(),
+            );
+        };
+        // "The number of buckets to return in the response. Default to 10". The clamp is
+        // defensive rather than load-bearing, keeping the count inside the modelled
+        // `MaxBuckets` range 1..10000 without depending on a validation performed outside
+        // this module.
+        let max_buckets = terms.max_buckets.map_or(
+            crate::state::DEFAULT_MAX_BUCKETS,
+            |max_buckets| max_buckets.clamp(1, 10_000) as usize,
+        );
+
+        // The index's own state and the documents it holds are read under ONE lock, and
+        // the guard is released before anything is matched: the scan below is CPU-bound
+        // work whose size the request chooses, so it must not hold the store every other
+        // caller reads.
+        let documents = {
+            let store = state.lock();
+
+            // The index the aggregation reads decides whether it can be answered at all:
+            // an account whose configuration has no such index has nothing to aggregate
+            // (the modelled `ResourceNotFoundException`, HTTP 404), and one whose index is
+            // still being built has the index but not yet its contents (the modelled
+            // `IndexNotReadyException`, HTTP 400).
+            match store.fleet_index_availability(&index_name, now) {
+                crate::state::FleetIndexAvailability::Missing => {
+                    return Err(
+                        GetBucketsAggregationErrorModeled::ResourceNotFoundException(
+                            ResourceNotFoundException {
+                                message: Some(
+                                    crate::state::missing_fleet_index_for_aggregation_message(
+                                        &index_name,
+                                    ),
+                                ),
+                            },
+                        )
+                        .into(),
+                    );
+                }
+                crate::state::FleetIndexAvailability::Building => {
+                    return Err(
+                        GetBucketsAggregationErrorModeled::IndexNotReadyException(
+                            IndexNotReadyException {
+                                message: Some(crate::state::index_not_ready_message(
+                                    &index_name,
+                                    store.fleet_index_status(&index_name, now),
+                                )),
+                            },
+                        )
+                        .into(),
+                    );
+                }
+                crate::state::FleetIndexAvailability::Ready => {}
+            }
+
+            // The FIELD aggregated has to be one the index carries: the fields the service
+            // manages plus the custom fields the account declared. That is the same rule —
+            // in the same wording — a fleet metric's aggregation field is read under, so
+            // the two cannot drift.
+            if store
+                .indexed_field_type(&index_name, &input.aggregation_field)
+                .is_none()
+            {
+                let rejection = crate::state::AggregationFieldRejection::NotIndexed {
+                    aggregation_field: input.aggregation_field.clone(),
+                    index_name: index_name.clone(),
+                };
+                return Err(
+                    GetBucketsAggregationErrorModeled::InvalidRequestException(
+                        InvalidRequestException {
+                            message: Some(rejection.message()),
+                        },
+                    )
+                    .into(),
+                );
+            }
+
+            store.indexed_documents(&index_name)
+        };
+
+        // The answer is COMPUTED over the account's own records: the query selects the
+        // documents of the index ([`crate::state::documents_matching`]) and the
+        // aggregation counts the values they hold for one field
+        // ([`crate::state::terms_buckets`]). `totalCount` is "The total number of things
+        // that fit the query string criteria", so it counts the documents selected —
+        // including the ones carrying no value for the aggregated field, which are in no
+        // bucket.
         //
-        // To refuse a bad request this operation models no error for, return
-        // `Err(crate::scaffolded::Scaffolded::validation("..."))` — a 400
-        // `ValidationException`. Do NOT answer 501 for it: 501 means "not written yet",
-        // not "bad request". Modeled constraints are already refused BEFORE this
-        // handler runs, so reaching here means the input satisfies every one of them.
-        Err(crate::scaffolded::Scaffolded::not_implemented("GetBucketsAggregation"))
+        // Matching every document against the query is CPU-bound work whose size the
+        // request chooses, so it runs on the blocking pool: `spawn_blocking(..).await` is
+        // a real await point, so one aggregation cannot starve the worker that serves
+        // every other request, and the scan's own budget bounds what it may cost at all.
+        let query_string = input.query_string.clone();
+        let aggregation_field = input.aggregation_field.clone();
+        let scanned = ::tokio::task::spawn_blocking(move || {
+            let selected = crate::state::documents_matching(documents, &query_string)?;
+            let buckets =
+                crate::state::terms_buckets(&selected, &aggregation_field, max_buckets);
+            Ok::<(usize, Vec<(String, usize)>), crate::state::ScanRefusal>((
+                selected.len(),
+                buckets,
+            ))
+        })
+        .await;
+        let (total_count, buckets) = match scanned {
+            Ok(Ok(scanned)) => scanned,
+            // A request that would cost more than this emulator evaluates for one
+            // aggregation is refused with the modelled `InvalidRequestException` naming
+            // the bound it exceeded, rather than answered from a partial scan.
+            Ok(Err(refusal)) => {
+                return Err(
+                    GetBucketsAggregationErrorModeled::InvalidRequestException(
+                        InvalidRequestException {
+                            message: Some(refusal.message()),
+                        },
+                    )
+                    .into(),
+                );
+            }
+            // A panic or a cancellation on the pool says nothing about the request, so it
+            // is reported as the server fault it is rather than as an empty aggregation.
+            Err(error) => {
+                ::tracing::error!(
+                    operation = Self::NAME,
+                    error = %error,
+                    "the bucket aggregation did not complete"
+                );
+                return Err(
+                    GetBucketsAggregationErrorModeled::InternalFailureException(
+                        InternalFailureException {
+                            message: Some("the aggregation could not be computed".to_string()),
+                        },
+                    )
+                    .into(),
+                );
+            }
+        };
+
+        Ok(GetBucketsAggregationOutput {
+            total_count: i32::try_from(total_count).unwrap_or(i32::MAX),
+            buckets: Some(
+                buckets
+                    .into_iter()
+                    .map(|(key_value, count)| Bucket {
+                        key_value: Some(key_value),
+                        count: i32::try_from(count).unwrap_or(i32::MAX),
+                    })
+                    .collect(),
+            ),
+        })
     }
 }

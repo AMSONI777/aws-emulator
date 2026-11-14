@@ -46,6 +46,11 @@ pub const AUDIT_TASK_IN_PROGRESS: &str = "IN_PROGRESS";
 /// The status an audit that has run every check it targeted holds.
 pub const AUDIT_TASK_COMPLETED: &str = "COMPLETED";
 
+/// The status an audit a caller cancelled holds: `AuditTaskStatus`'s cancelled value
+/// ([`crate::ops::types::AUDIT_TASK_STATUS_VALUES`]). A cancel is what
+/// `CancelAuditTask` records, and the audit never leaves it.
+pub const AUDIT_TASK_CANCELED: &str = "CANCELED";
+
 /// The `AuditTaskType` of an audit a caller started: "one of ON_DEMAND_AUDIT_TASK or
 /// SCHEDULED_AUDIT_TASK", and `StartOnDemandAuditTask` starts the on-demand kind.
 pub const ON_DEMAND_AUDIT_TASK_TYPE: &str = "ON_DEMAND_AUDIT_TASK";
@@ -59,6 +64,10 @@ pub const CHECK_COMPLETED_COMPLIANT: &str = "COMPLETED_COMPLIANT";
 
 /// The `AuditCheckRunStatus` of a check that ran and found a non-compliant resource.
 pub const CHECK_COMPLETED_NON_COMPLIANT: &str = "COMPLETED_NON_COMPLIANT";
+
+/// The `AuditCheckRunStatus` of a check the cancel of its audit stopped before it was
+/// reported.
+pub const CHECK_CANCELED: &str = "CANCELED";
 
 /// Most audit tasks the account's store holds.
 ///
@@ -244,6 +253,13 @@ pub struct AuditTask {
     /// What each targeted check amounted to, keyed by check name. `BTreeMap` so two reads
     /// of one task report the checks in one stable order.
     pub checks: BTreeMap<String, AuditCheckRun>,
+    /// When the audit was CANCELLED, for a task a caller cancelled before the clock made
+    /// its completion due, and `None` for one nobody cancelled.
+    ///
+    /// A cancel is the only thing that takes an audit out of the run the clock owes it,
+    /// so the instant is recorded rather than the status: what a reader reports is still
+    /// derived from this record and the clock.
+    pub canceled_at: Option<SystemTime>,
 }
 
 impl AuditTask {
@@ -261,18 +277,54 @@ impl AuditTask {
             started_at,
             completed_at: started_at + AUDIT_SPAN,
             checks,
+            canceled_at: None,
         }
+    }
+
+    /// Whether the audit was cancelled.
+    pub fn canceled(&self) -> bool {
+        self.canceled_at.is_some()
+    }
+
+    /// Record that the audit was CANCELLED at `now`.
+    ///
+    /// Only an audit still in progress can be cancelled — `CancelAuditTask` "Cancels an
+    /// audit that is in progress [...] If the audit isn't in progress, an
+    /// "InvalidRequestException" occurs" — so a caller checks
+    /// [`Self::cancellation_refusal`] first and this records the cancel it admitted.
+    pub fn cancel(&mut self, now: SystemTime) {
+        self.canceled_at = Some(now);
+    }
+
+    /// Why the audit cannot be cancelled at `now`, or `None` when it can be.
+    ///
+    /// An audit the clock has already completed, and one a caller already cancelled, are
+    /// both audits that are not in progress: the status they have reached is the one they
+    /// keep, and the cancel is refused with the modelled `InvalidRequestException`
+    /// naming the task and that status.
+    pub fn cancellation_refusal(&self, now: SystemTime) -> Option<String> {
+        let status = self.status_at(now);
+        if status == AUDIT_TASK_IN_PROGRESS {
+            return None;
+        }
+        Some(format!(
+            "Task {} is now in {status} status and cannot be canceled",
+            self.task_id
+        ))
     }
 
     /// Whether the audit this task was answered in the middle of is still owed at `now`.
     pub fn running_at(&self, now: SystemTime) -> bool {
-        now < self.completed_at
+        !self.canceled() && now < self.completed_at
     }
 
     /// "The status of the audit" at `now`: the non-terminal status it was answered in until
-    /// the clock makes its completion due, and the terminal one from that instant on.
+    /// the clock makes its completion due, and the terminal one from that instant on — or
+    /// the cancelled status, for an audit a caller stopped before either.
     pub fn status_at(&self, now: SystemTime) -> &'static str {
-        if self.running_at(now) {
+        if self.canceled() {
+            AUDIT_TASK_CANCELED
+        } else if self.running_at(now) {
             AUDIT_TASK_IN_PROGRESS
         } else {
             AUDIT_TASK_COMPLETED
@@ -290,6 +342,20 @@ impl AuditTask {
         let running = self.running_at(now);
         let total = self.checks.len();
         let compliant = self.checks.values().filter(|run| run.compliant()).count();
+        // A cancelled audit ran none of its checks to a verdict: every check it targeted
+        // is counted as cancelled and none as compliant or not, which is what the cancel
+        // left behind.
+        if self.canceled() {
+            return TaskStatistics {
+                total_checks: Some(check_count(total)),
+                in_progress_checks: Some(0),
+                waiting_for_data_collection_checks: Some(0),
+                compliant_checks: Some(0),
+                non_compliant_checks: Some(0),
+                failed_checks: Some(0),
+                canceled_checks: Some(check_count(total)),
+            };
+        }
         TaskStatistics {
             total_checks: Some(check_count(total)),
             in_progress_checks: Some(check_count(if running { total } else { 0 })),
@@ -304,6 +370,7 @@ impl AuditTask {
     /// This task as the response a reader hands back at `now`.
     pub fn description_at(&self, now: SystemTime) -> DescribeAuditTaskOutput {
         let running = self.running_at(now);
+        let canceled = self.canceled();
         DescribeAuditTaskOutput {
             task_status: Some(self.status_at(now).to_string()),
             task_type: Some(self.task_type.clone()),
@@ -313,7 +380,17 @@ impl AuditTask {
             audit_details: Some(
                 self.checks
                     .iter()
-                    .map(|(check_name, run)| (check_name.clone(), run.details(running)))
+                    .map(|(check_name, run)| {
+                        let details = if canceled {
+                            AuditCheckDetails {
+                                check_run_status: Some(CHECK_CANCELED.to_string()),
+                                ..AuditCheckDetails::default()
+                            }
+                        } else {
+                            run.details(running)
+                        };
+                        (check_name.clone(), details)
+                    })
                     .collect(),
             ),
         }

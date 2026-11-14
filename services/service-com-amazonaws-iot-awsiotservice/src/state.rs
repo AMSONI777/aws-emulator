@@ -2906,10 +2906,11 @@ pub mod certificates;
 pub use certificates::{
     active_certificate_deletion_message, attached_policies_deletion_message, certificate_arn,
     certificate_id, internal_certificate_status_message, mint_keys_and_certificate,
-    missing_certificate_message, CertificateDeletionRefusal, CertificateStatusUpdateRefusal,
-    MintedKeysAndCertificate, RegisteredCertificate, CERTIFICATE_MODE_DEFAULT,
-    CERTIFICATE_STATUS_ACTIVE, CERTIFICATE_STATUS_INACTIVE, CERTIFICATE_STATUS_REVOKED,
-    FIRST_CERTIFICATE_CUSTOMER_VERSION, INTERNAL_CERTIFICATE_STATUSES, MAX_CERTIFICATES,
+    mint_keys_and_certificate_valid_until, missing_certificate_message,
+    CertificateDeletionRefusal, CertificateStatusUpdateRefusal, MintedKeysAndCertificate,
+    RegisteredCertificate, CERTIFICATE_MODE_DEFAULT, CERTIFICATE_STATUS_ACTIVE,
+    CERTIFICATE_STATUS_INACTIVE, CERTIFICATE_STATUS_REVOKED, FIRST_CERTIFICATE_CUSTOMER_VERSION,
+    INTERNAL_CERTIFICATE_STATUSES, MAX_CERTIFICATES, PROVISIONING_CLAIM_VALIDITY,
 };
 
 // WHICH POLICIES are attached to which target — what a policy target is, how one is
@@ -2975,8 +2976,8 @@ pub use audit_configuration::{
 pub mod audit_tasks;
 pub use audit_tasks::{
     run_checks, targetable_checks, too_many_audit_tasks_message, AuditCheckRun, AuditTask,
-    AuditTaskRefusal, AUDIT_SPAN, AUDIT_TASK_COMPLETED, AUDIT_TASK_IN_PROGRESS, MAX_AUDIT_TASKS,
-    ON_DEMAND_AUDIT_TASK_TYPE,
+    AuditTaskRefusal, AUDIT_SPAN, AUDIT_TASK_CANCELED, AUDIT_TASK_COMPLETED,
+    AUDIT_TASK_IN_PROGRESS, MAX_AUDIT_TASKS, ON_DEMAND_AUDIT_TASK_TYPE,
 };
 
 // How a request that named a resource this service does not hold is REFUSED — the fixed
@@ -3000,6 +3001,15 @@ pub use not_found::{
 pub mod fleet_query;
 pub use fleet_query::{validate_query_string, QueryStringRejection, UNPARSABLE_QUERY_MESSAGE};
 
+// WHICH documents of a fleet index a query SELECTS, and what a bucket aggregation over
+// one of their fields amounts to, lives in `state/fleet_search.rs`, beside the reader of
+// the query string it evaluates.
+pub mod fleet_search;
+pub use fleet_search::{
+    documents_matching, terms_buckets, IndexedDocument, ScanRefusal, ATTRIBUTE_FIELD_PREFIX,
+    DEFAULT_MAX_BUCKETS, MAX_MATCH_STEPS, MAX_SCANNED_DOCUMENTS, MAX_WALK_DEPTH,
+};
+
 // What a FLEET METRIC is — the record one holds, the aggregation it is configured with,
 // and where the index it aggregates over stands — lives in `state/fleet_metrics.rs`.
 pub mod fleet_metrics;
@@ -3022,8 +3032,10 @@ pub use thing_group_membership::{
 // `state/domain_configurations.rs`.
 pub mod domain_configurations;
 pub use domain_configurations::{
-    domain_configuration_arn, missing_domain_configuration_message,
-    missing_server_certificate_message, RegisteredDomainConfiguration, MAX_DOMAIN_CONFIGURATIONS,
+    acm_certificates, chains_to_a_certificate_authority, domain_configuration_arn,
+    missing_domain_configuration_message, missing_server_certificate_message,
+    RegisteredDomainConfiguration, MAX_DOMAIN_CONFIGURATIONS,
+    UNVALIDATED_SERVER_CERTIFICATE_MESSAGE,
 };
 
 // What a CERTIFICATE PROVIDER is — the record one holds and which provider holds an
@@ -3077,8 +3089,9 @@ pub use authorizers::{
 // they hang off.
 pub mod policy_versions;
 pub use policy_versions::{
-    missing_policy_default_version_message, missing_policy_version_message,
-    policy_versions_limit_message, MAX_POLICY_VERSIONS,
+    default_policy_version_deletion_message, missing_policy_default_version_message,
+    missing_policy_version_message, policy_versions_limit_message, PolicyVersionDeletionRefusal,
+    MAX_POLICY_VERSIONS,
 };
 
 // What holds the DELETE of a policy back — the versions it still holds and the targets

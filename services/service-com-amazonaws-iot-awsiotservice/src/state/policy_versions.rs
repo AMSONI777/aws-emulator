@@ -58,6 +58,85 @@ pub fn missing_policy_default_version_message() -> String {
     "Policy default version not found".to_string()
 }
 
+/// How a delete refuses the version that is currently the policy's DEFAULT one.
+///
+/// `DeletePolicyVersion` documents the rule: "You cannot delete the default version of
+/// a policy using this action. To delete the default version of a policy, use
+/// DeletePolicy" (`smithy_query(query="doc",shape="DeletePolicyVersion")`). The fixed
+/// text is the class's, and the variable parts are the policy and the version the
+/// request addressed, named the `name=` way this crate's other policy delete conflicts
+/// name them ([`super::policy_deletion::non_default_versions_deletion_message`]).
+pub fn default_policy_version_deletion_message(
+    policy_name: &str,
+    policy_version_id: &str,
+) -> String {
+    format!("Cannot delete a default policy version (name={policy_name}, versionId={policy_version_id})")
+}
+
+/// Why a version of a policy was NOT deleted.
+///
+/// Each variant names the modelled error class the refusal answers with
+/// (`smithy_query(query="operation",operation="DeletePolicyVersion")`), so the handler
+/// chooses the status from the state rather than restating the rule.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PolicyVersionDeletionRefusal {
+    /// A policy, or a version of it, the account does not hold:
+    /// `ResourceNotFoundException` (HTTP 404). Carries the message.
+    NotFound(String),
+    /// The version the request named is the one in effect: `DeleteConflictException`
+    /// (HTTP 409). Carries the message.
+    DefaultVersion(String),
+}
+
+impl PolicyVersionDeletionRefusal {
+    /// The message the refusal states, whichever class it names.
+    pub fn message(&self) -> &str {
+        match self {
+            Self::NotFound(message) | Self::DefaultVersion(message) => message,
+        }
+    }
+}
+
+impl super::ComAmazonawsIotAwsiotserviceState {
+    /// Delete the version `policy_version_id` of the policy `policy_name`, or answer the
+    /// reason this account's state held it back.
+    ///
+    /// The guard is read under the same lock as the write, so a version that becomes the
+    /// default between the check and the removal cannot be deleted. The version in
+    /// effect is NOT deletable — it goes with the policy, through `DeletePolicy` — and
+    /// every other version is removed from the record the policy's versions live on, so
+    /// every later reader of them stops reporting it while the policy itself is left
+    /// standing.
+    pub fn delete_policy_version(
+        &mut self,
+        policy_name: &str,
+        policy_version_id: &str,
+        now: SystemTime,
+    ) -> Result<(), PolicyVersionDeletionRefusal> {
+        let Some(policy) = self.policies.get_mut(policy_name) else {
+            return Err(PolicyVersionDeletionRefusal::NotFound(
+                super::missing_policy_message(policy_name),
+            ));
+        };
+        let Some(version_id) = policy_version_id.parse::<u32>().ok().filter(|version_id| {
+            policy.versions.contains_key(version_id)
+        }) else {
+            return Err(PolicyVersionDeletionRefusal::NotFound(
+                missing_policy_version_message(policy_name, policy_version_id),
+            ));
+        };
+        if version_id == policy.default_version_id {
+            return Err(PolicyVersionDeletionRefusal::DefaultVersion(
+                default_policy_version_deletion_message(policy_name, policy_version_id),
+            ));
+        }
+        policy.versions.remove(&version_id);
+        policy.last_modified_date = now;
+        policy.generation_id = super::fresh_uuid();
+        Ok(())
+    }
+}
+
 impl super::RegisteredPolicy {
     /// Add `document` as a new version, making it the default when the request asked
     /// for that, and answer the id it was given — or `None` when the policy is

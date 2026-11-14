@@ -1,15 +1,6 @@
 // SPDX-License-Identifier: CC0-1.0
 
 //! @op AssociateTargetsWithJob
-//! SCAFFOLDED, NOT IMPLEMENTED: this operation answers HTTP 501 `NotImplemented` and
-//! asserts NOTHING about `AssociateTargetsWithJob`'s real behaviour. Implement it here — this is
-//! the ONLY file to touch for this operation.
-//!
-//! A 501 from this operation means "nobody has written it yet", never "the emulator is
-//! broken". Replace the `Err(..)` in [`AssociateTargetsWithJob::handle`] with real behaviour and
-//! delete the SCAFFOLDED marker line above; that line is the machine-readable record of
-//! which operations are still stubs (`grep -rl '^//! SCAFFOLDED, NOT IMPLEMENTED:' */src/ops/`),
-//! so leaving it on an implemented operation under-reports progress.
 //!
 //! ## Shape of an operation
 //!
@@ -162,18 +153,179 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         input: Self::Input,
         ctx: &smithy_server_runtime::OperationContext<'_>,
     ) -> Result<Self::Output, Self::Error> {
-        // The engine is reachable from `&self` (constructor-injected); `ctx` carries
-        // request metadata. Both are bound here so an implementer has them in scope.
-        let _ = (&input, ctx, &self.engine);
-        // Implement `AssociateTargetsWithJob` here, then delete the SCAFFOLDED marker at the top of
-        // this file. Return modeled failures as
-        // `Err(AssociateTargetsWithJobErrorModeled::Variant(..).into())` — the `From` impl above lifts it.
-        //
-        // To refuse a bad request this operation models no error for, return
-        // `Err(crate::scaffolded::Scaffolded::validation("..."))` — a 400
-        // `ValidationException`. Do NOT answer 501 for it: 501 means "not written yet",
-        // not "bad request". Modeled constraints are already refused BEFORE this
-        // handler runs, so reaching here means the input satisfies every one of them.
-        Err(crate::scaffolded::Scaffolded::not_implemented("AssociateTargetsWithJob"))
+        let _ = ctx;
+        let unavailable = || -> AssociateTargetsWithJobError {
+            AssociateTargetsWithJobErrorModeled::ServiceUnavailableException(
+                ServiceUnavailableException {
+                    message: Some("the IoT emulator has no job store attached".to_string()),
+                },
+            )
+            .into()
+        };
+        let Some(state) = crate::state::service_state(&*self.engine) else {
+            return Err(unavailable());
+        };
+        let Some(jobs) = crate::state::job_store(&*self.engine) else {
+            return Err(unavailable());
+        };
+        let Some(executions) = crate::state::job_execution_store(&*self.engine) else {
+            return Err(unavailable());
+        };
+
+        let invalid = |message: String| -> AssociateTargetsWithJobError {
+            AssociateTargetsWithJobErrorModeled::InvalidRequestException(InvalidRequestException {
+                message: Some(message),
+            })
+            .into()
+        };
+        let over_limit = |message: String| -> AssociateTargetsWithJobError {
+            AssociateTargetsWithJobErrorModeled::LimitExceededException(LimitExceededException {
+                message: Some(message),
+            })
+            .into()
+        };
+        // How a refusal of the targets is answered: one wording and one status per
+        // reason, shared with every other operation that targets devices with a job.
+        let refused = |refusal: crate::state::JobTargetsRefusal| -> AssociateTargetsWithJobError {
+            match refusal {
+                crate::state::JobTargetsRefusal::Invalid(message) => invalid(message),
+                crate::state::JobTargetsRefusal::NotFound(message) => {
+                    AssociateTargetsWithJobErrorModeled::ResourceNotFoundException(
+                        ResourceNotFoundException {
+                            message: Some(message),
+                        },
+                    )
+                    .into()
+                }
+                crate::state::JobTargetsRefusal::OverLimit(message) => over_limit(message),
+            }
+        };
+
+        // Which DEVICES the request names: a thing target names one, a thing-group
+        // target names its members. Read BEFORE any lock is taken, so a malformed request
+        // never reaches the stores, and bounded by `MAX_JOB_TARGETS` before the walk.
+        let fanout = crate::state::resolve_job_targets(&input.targets).map_err(refused)?;
+
+        let now = ::service_common::iot_job_executions::now_epoch_seconds();
+        // LOCK ORDER: this service's store first, the shared jobs store second, the
+        // shared execution store third, as `crate::state::job_store` documents.
+        let store = state.lock();
+        let mut registry = jobs.lock();
+
+        let Some(job) = registry.job(&input.job_id) else {
+            return Err(
+                AssociateTargetsWithJobErrorModeled::ResourceNotFoundException(
+                    ResourceNotFoundException {
+                        message: Some(crate::state::missing_job_message(&input.job_id)),
+                    },
+                )
+                .into(),
+            );
+        };
+
+        // The two criteria this operation documents on the JOB: "The job must have been
+        // created with the targetSelection field set to CONTINUOUS" — a snapshot job is
+        // complete once the things it was created for are done, so nothing joins it later
+        // — and "The job status must currently be IN_PROGRESS", which is the status the
+        // job's own lifecycle holds and a cancelled or completed job has left.
+        let is_continuous = job.target_selection.as_deref()
+            == Some(::service_common::iot_jobs::TARGET_SELECTION_CONTINUOUS);
+        if !is_continuous {
+            return Err(invalid(
+                "The job must have been created with the targetSelection field set to CONTINUOUS"
+                    .to_string(),
+            ));
+        }
+        let job_status =
+            crate::state::job_progress(job, &executions.lock()).status;
+        if job_status != ::service_common::iot_jobs::JOB_STATUS_IN_PROGRESS {
+            return Err(invalid(format!(
+                "The job status must currently be IN_PROGRESS; job {} is in status {job_status}",
+                job.job_id
+            )));
+        }
+
+        // A group target is EXPANDED into the things the group holds, exactly as the
+        // create expands one: a group the registry does not hold, or a dynamic group whose
+        // members are the things its query selects, is refused rather than answered with a
+        // 200 that reports group-targeted work as rolled out while queueing nothing.
+        let mut targeted_things = fanout.things.clone();
+        for group_name in &fanout.groups {
+            if let Some(refusal) = store.thing_group_target_refusal(group_name) {
+                return Err(refused(refusal));
+            }
+            for thing_name in store.things_in_thing_group(group_name) {
+                if !targeted_things.contains(&thing_name) {
+                    targeted_things.push(thing_name);
+                }
+            }
+        }
+
+        // "The total number of targets associated with a job must not exceed 100": the
+        // ceiling is on the targets the job ends up with, so a target it already carries
+        // costs nothing and the refusal past the limit leaves the job's existing target
+        // list exactly as it was rather than truncating it.
+        let mut targets = job.targets.clone();
+        for target in &input.targets {
+            if !targets.contains(target) {
+                targets.push(target.clone());
+            }
+        }
+        if targets.len() > crate::state::MAX_JOB_TARGETS {
+            return Err(over_limit(format!(
+                "Target list exceeds size limit {}.",
+                crate::state::MAX_JOB_TARGETS
+            )));
+        }
+
+        // Targeting a thing with a job IS creating that thing's job execution, so the
+        // things newly named by this call get one — QUEUED, carrying the job's document
+        // and in-progress timeout. A thing the job already has an execution for is
+        // already targeted, so it gets no second execution.
+        let mut pending = executions.lock();
+        let document = job
+            .document
+            .as_deref()
+            .map(|document| {
+                crate::state::resolve_job_document(document, &job.document_parameters)
+                    .unwrap_or_else(|_length| document.to_string())
+            });
+        let in_progress_timeout_minutes = job.in_progress_timeout_minutes;
+        let fresh: Vec<String> = targeted_things
+            .into_iter()
+            .filter(|thing_name| {
+                !pending
+                    .executions_for(thing_name)
+                    .iter()
+                    .any(|record| record.job_id == input.job_id)
+            })
+            .collect();
+        if let Err(quota) = crate::state::queue_job_executions(
+            &mut pending,
+            &input.job_id,
+            document.as_deref(),
+            in_progress_timeout_minutes,
+            &fresh,
+            now,
+        ) {
+            return Err(over_limit(quota));
+        }
+        drop(pending);
+
+        // The job record is written only once every criterion held, so a refused request
+        // leaves the job pointed at exactly the targets it was pointed at before.
+        let Some(job) = registry.job_mut(&input.job_id) else {
+            return Err(unavailable());
+        };
+        job.targets = targets;
+        job.last_updated_at = now;
+        if input.comment.is_some() {
+            job.comment = input.comment.clone();
+        }
+        Ok(AssociateTargetsWithJobOutput {
+            job_arn: Some(job.job_arn.clone()),
+            job_id: Some(job.job_id.clone()),
+            description: job.description.clone(),
+        })
     }
 }

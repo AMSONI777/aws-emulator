@@ -444,8 +444,34 @@ pub fn mint_keys_and_certificate(
     set_as_active: bool,
     now: SystemTime,
 ) -> Option<MintedKeysAndCertificate> {
-    let key_pair = RsaKeyPairDer::generate()?;
     let not_after = UNIX_EPOCH + Duration::from_secs(CERTIFICATE_NOT_AFTER_EPOCH_SECONDS);
+    mint_keys_and_certificate_valid_until(region, owned_by, set_as_active, now, not_after)
+}
+
+/// How long the certificate `CreateProvisioningClaim` issues is valid for.
+///
+/// AWS IoT documents the provisioning claim certificate as a TEMPORARY one: "Provisioning
+/// claim certificates expire 1 hour after they are created", which is also what the
+/// operation's `expiration` member reports — so the certificate's `notAfter` and the
+/// reported expiration are one instant, this span after the call that minted them.
+pub const PROVISIONING_CLAIM_VALIDITY: Duration = Duration::from_secs(60 * 60);
+
+/// Mint the key pair and certificate above, valid from `now` until `not_after`.
+///
+/// The validity is the CALLER's because it is the certificate's purpose that decides it:
+/// a device certificate is the device's identity for its whole life, and a provisioning
+/// claim certificate is a temporary credential that expires
+/// ([`PROVISIONING_CLAIM_VALIDITY`]). Everything else about the minting — the key pair,
+/// the signature, the id derived from the certificate's own DER — is the same, so there
+/// is one issuer and not two that could drift.
+pub fn mint_keys_and_certificate_valid_until(
+    region: &str,
+    owned_by: &str,
+    set_as_active: bool,
+    now: SystemTime,
+    not_after: SystemTime,
+) -> Option<MintedKeysAndCertificate> {
+    let key_pair = RsaKeyPairDer::generate()?;
 
     let subject_public_key_info = SubjectPublicKeyInfoOwned::from_der(&key_pair.public_key_spki)
         .ok()?;

@@ -1,15 +1,6 @@
 // SPDX-License-Identifier: CC0-1.0
 
 //! @op RemoveThingFromThingGroup
-//! SCAFFOLDED, NOT IMPLEMENTED: this operation answers HTTP 501 `NotImplemented` and
-//! asserts NOTHING about `RemoveThingFromThingGroup`'s real behaviour. Implement it here — this is
-//! the ONLY file to touch for this operation.
-//!
-//! A 501 from this operation means "nobody has written it yet", never "the emulator is
-//! broken". Replace the `Err(..)` in [`RemoveThingFromThingGroup::handle`] with real behaviour and
-//! delete the SCAFFOLDED marker line above; that line is the machine-readable record of
-//! which operations are still stubs (`grep -rl '^//! SCAFFOLDED, NOT IMPLEMENTED:' */src/ops/`),
-//! so leaving it on an implemented operation under-reports progress.
 //!
 //! ## Shape of an operation
 //!
@@ -144,18 +135,97 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         input: Self::Input,
         ctx: &smithy_server_runtime::OperationContext<'_>,
     ) -> Result<Self::Output, Self::Error> {
-        // The engine is reachable from `&self` (constructor-injected); `ctx` carries
-        // request metadata. Both are bound here so an implementer has them in scope.
-        let _ = (&input, ctx, &self.engine);
-        // Implement `RemoveThingFromThingGroup` here, then delete the SCAFFOLDED marker at the top of
-        // this file. Return modeled failures as
-        // `Err(RemoveThingFromThingGroupErrorModeled::Variant(..).into())` — the `From` impl above lifts it.
-        //
-        // To refuse a bad request this operation models no error for, return
-        // `Err(crate::scaffolded::Scaffolded::validation("..."))` — a 400
-        // `ValidationException`. Do NOT answer 501 for it: 501 means "not written yet",
-        // not "bad request". Modeled constraints are already refused BEFORE this
-        // handler runs, so reaching here means the input satisfies every one of them.
-        Err(crate::scaffolded::Scaffolded::not_implemented("RemoveThingFromThingGroup"))
+        let state = crate::state::service_state(&*self.engine).ok_or_else(|| {
+            RemoveThingFromThingGroupErrorModeled::InternalFailureException(
+                InternalFailureException {
+                    message: Some("the IoT emulator has no state store attached".to_string()),
+                },
+            )
+        })?;
+        let _ = ctx;
+
+        // "You must specify either a thingGroupArn or a thingGroupName to identify the
+        // thing group and either a thingArn or a thingName to identify the thing": the
+        // name inside the ARN is the resource's identity, so both forms become one
+        // request ([`crate::state::named_thing_group`]), and a request that names
+        // neither end asks about no membership at all — the modelled
+        // `InvalidRequestException` (HTTP 400).
+        let Some(thing_group_name) = crate::state::named_thing_group(
+            input.thing_group_name.as_deref(),
+            input.thing_group_arn.as_deref(),
+        ) else {
+            return Err(
+                RemoveThingFromThingGroupErrorModeled::InvalidRequestException(
+                    InvalidRequestException {
+                        message: Some(
+                            "either thingGroupName or thingGroupArn must name the thing group to \
+                             remove the thing from"
+                                .to_string(),
+                        ),
+                    },
+                )
+                .into(),
+            );
+        };
+        let Some(thing_name) =
+            crate::state::named_thing(input.thing_name.as_deref(), input.thing_arn.as_deref())
+        else {
+            return Err(
+                RemoveThingFromThingGroupErrorModeled::InvalidRequestException(
+                    InvalidRequestException {
+                        message: Some(
+                            "either thingName or thingArn must name the thing to remove from the \
+                             thing group"
+                                .to_string(),
+                        ),
+                    },
+                )
+                .into(),
+            );
+        };
+
+        // One membership deletion
+        // ([`crate::state::ComAmazonawsIotAwsiotserviceState::remove_thing_from_thing_group`]),
+        // the inverse of the one write `AddThingToThingGroup` makes: a missing end is the
+        // modelled `ResourceNotFoundException` (HTTP 404), a group whose membership is
+        // its query's the modelled `InvalidRequestException` (HTTP 400), and a thing that
+        // is not in the group removes nothing and succeeds.
+        let refusal = state
+            .lock()
+            .remove_thing_from_thing_group(&thing_group_name, &thing_name);
+        match refusal {
+            Ok(()) => Ok(RemoveThingFromThingGroupOutput {}),
+            Err(
+                refusal @ (crate::state::MembershipRefusal::MissingThing(_)
+                | crate::state::MembershipRefusal::MissingThingGroup(_)),
+            ) => Err(
+                RemoveThingFromThingGroupErrorModeled::ResourceNotFoundException(
+                    ResourceNotFoundException {
+                        message: Some(refusal.message()),
+                    },
+                )
+                .into(),
+            ),
+            Err(crate::state::MembershipRefusal::DynamicThingGroup(dynamic_group)) => Err(
+                RemoveThingFromThingGroupErrorModeled::InvalidRequestException(
+                    InvalidRequestException {
+                        message: Some(
+                            crate::state::thing_group_membership::dynamic_group_removal_message(
+                                &dynamic_group,
+                            ),
+                        ),
+                    },
+                )
+                .into(),
+            ),
+            Err(refusal) => Err(
+                RemoveThingFromThingGroupErrorModeled::InvalidRequestException(
+                    InvalidRequestException {
+                        message: Some(refusal.message()),
+                    },
+                )
+                .into(),
+            ),
+        }
     }
 }

@@ -17,6 +17,8 @@ mod authorization_decision;
 mod authorizer_registry;
 #[path = "all/authorizer_teardown.rs"]
 mod authorizer_teardown;
+#[path = "all/audit_task_cancellation.rs"]
+mod audit_task_cancellation;
 #[path = "all/bulk_thing_registration.rs"]
 mod bulk_thing_registration;
 #[path = "all/bulk_thing_registration_reports.rs"]
@@ -49,6 +51,8 @@ mod effective_policies;
 mod endpoint_discovery_reachability;
 #[path = "all/fleet_index_description.rs"]
 mod fleet_index_description;
+#[path = "all/fleet_indexing_aggregation.rs"]
+mod fleet_indexing_aggregation;
 #[path = "all/fleet_metrics.rs"]
 mod fleet_metrics;
 #[path = "all/indexing_configuration.rs"]
@@ -67,6 +71,8 @@ mod job_execution_listing_for_thing;
 mod job_execution_read;
 #[path = "all/job_targeting.rs"]
 mod job_targeting;
+#[path = "all/job_target_association.rs"]
+mod job_target_association;
 #[path = "all/not_found_wording.rs"]
 mod not_found_wording;
 #[path = "all/on_demand_audit_task.rs"]
@@ -91,8 +97,12 @@ mod policy_attachments;
 mod policy_deletion;
 #[path = "all/policy_registry.rs"]
 mod policy_registry;
+#[path = "all/policy_version_deletion.rs"]
+mod policy_version_deletion;
 #[path = "all/policy_versions.rs"]
 mod policy_versions;
+#[path = "all/provisioning_claim.rs"]
+mod provisioning_claim;
 #[path = "all/provisioning_templates.rs"]
 mod provisioning_templates;
 #[path = "all/role_alias_deletion.rs"]
@@ -109,6 +119,8 @@ mod streams;
 mod thing_group_hierarchy;
 #[path = "all/thing_group_membership.rs"]
 mod thing_group_membership;
+#[path = "all/thing_group_membership_listings.rs"]
+mod thing_group_membership_listings;
 #[path = "all/thing_group_update.rs"]
 mod thing_group_update;
 #[path = "all/thing_listing.rs"]

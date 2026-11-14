@@ -53,6 +53,13 @@ sqlparser = "0.59"
 # engine, read through its own accessors rather than through a second copy of them.
 service-com-amazonaws-iam-awsidentitymanagementv20100508 = { workspace = true }
 
+# The Certificate Manager store a domain configuration's server certificate is resolved
+# against (`state::domain_configurations`): whether a certificate exists, and whether a
+# public authority ISSUED it or the account imported it, is the holder's answer — read
+# through that service's own state struct in the SAME shared engine rather than through a
+# second copy of it.
+service-com-amazonaws-acm-certificatemanager = { workspace = true }
+
 # The Amazon S3 client a bulk thing provisioning task reads its input file object through
 # (`state::thing_registration`), over the in-process callback into this same emulator (no
 # network client feature: the transport is the emulator's own).
@@ -88,8 +95,7 @@ emulator-core-build-support = { workspace = true }
 
 [dev-dependencies]
 # `tokio::time` drives the tests' wait past a stream's activation transition.
-tokio = { workspace = true, features = ["time"] }
-# The rules-engine tests observe a rule's action where a client observes it, so the
+tokio = { workspace = true, features = ["time"] }# The rules-engine tests observe a rule's action where a client observes it, so the
 # services a `kinesis` action reaches are mounted beside IoT on one engine: the data plane
 # a message is published through, the stream the record is written to, and the IAM store
 # the action's role lives in.

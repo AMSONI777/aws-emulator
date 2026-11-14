@@ -1,15 +1,6 @@
 // SPDX-License-Identifier: CC0-1.0
 
 //! @op CreateProvisioningClaim
-//! SCAFFOLDED, NOT IMPLEMENTED: this operation answers HTTP 501 `NotImplemented` and
-//! asserts NOTHING about `CreateProvisioningClaim`'s real behaviour. Implement it here — this is
-//! the ONLY file to touch for this operation.
-//!
-//! A 501 from this operation means "nobody has written it yet", never "the emulator is
-//! broken". Replace the `Err(..)` in [`CreateProvisioningClaim::handle`] with real behaviour and
-//! delete the SCAFFOLDED marker line above; that line is the machine-readable record of
-//! which operations are still stubs (`grep -rl '^//! SCAFFOLDED, NOT IMPLEMENTED:' */src/ops/`),
-//! so leaving it on an implemented operation under-reports progress.
 //!
 //! ## Shape of an operation
 //!
@@ -151,18 +142,136 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         input: Self::Input,
         ctx: &smithy_server_runtime::OperationContext<'_>,
     ) -> Result<Self::Output, Self::Error> {
-        // The engine is reachable from `&self` (constructor-injected); `ctx` carries
-        // request metadata. Both are bound here so an implementer has them in scope.
-        let _ = (&input, ctx, &self.engine);
-        // Implement `CreateProvisioningClaim` here, then delete the SCAFFOLDED marker at the top of
-        // this file. Return modeled failures as
-        // `Err(CreateProvisioningClaimErrorModeled::Variant(..).into())` — the `From` impl above lifts it.
-        //
-        // To refuse a bad request this operation models no error for, return
-        // `Err(crate::scaffolded::Scaffolded::validation("..."))` — a 400
-        // `ValidationException`. Do NOT answer 501 for it: 501 means "not written yet",
-        // not "bad request". Modeled constraints are already refused BEFORE this
-        // handler runs, so reaching here means the input satisfies every one of them.
-        Err(crate::scaffolded::Scaffolded::not_implemented("CreateProvisioningClaim"))
+        let Some(state) = crate::state::service_state(&*self.engine) else {
+            return Err(
+                CreateProvisioningClaimErrorModeled::InternalFailureException(
+                    InternalFailureException {
+                        message: Some("the IoT emulator has no state store attached".to_string()),
+                    },
+                )
+                .into(),
+            );
+        };
+
+        let region = crate::state::request_region(ctx.parts());
+        let now = ::std::time::SystemTime::now();
+
+        // A claim is a credential for ONE provisioning template — "The name of the
+        // provisioning template to use" — so a name this account holds no template under
+        // is the modelled `ResourceNotFoundException` (HTTP 404), in the sentence every
+        // operation addressing one template states a miss with, and nothing is minted.
+        {
+            let store = state.lock();
+            if !store.provisioning_templates.contains_key(&input.template_name) {
+                return Err(
+                    CreateProvisioningClaimErrorModeled::ResourceNotFoundException(
+                        ResourceNotFoundException {
+                            message: Some(
+                                crate::state::missing_provisioning_template_message(
+                                    &input.template_name,
+                                ),
+                            ),
+                        },
+                    )
+                    .into(),
+                );
+            }
+            // The emulator holds every certificate in memory, so it stops issuing them at
+            // its own ceiling instead of growing without bound on request. Read BEFORE
+            // the key pair is generated, so a request past it costs no CPU either.
+            if store.certificates.len() >= crate::state::MAX_CERTIFICATES {
+                return Err(
+                    CreateProvisioningClaimErrorModeled::ServiceUnavailableException(
+                        ServiceUnavailableException {
+                            message: Some(format!(
+                                "this emulator stores at most {} certificates",
+                                crate::state::MAX_CERTIFICATES
+                            )),
+                        },
+                    )
+                    .into(),
+                );
+            }
+        }
+
+        // The claim is a TEMPORARY certificate: it expires
+        // [`crate::state::PROVISIONING_CLAIM_VALIDITY`] after this call, and that one
+        // instant is both the certificate's own `notAfter` and the `expiration` this
+        // response reports — so a caller reading the certificate and a caller reading the
+        // response see the same expiry.
+        let expiration = now + crate::state::PROVISIONING_CLAIM_VALIDITY;
+        // Generating the key pair and signing the certificate is hundreds of milliseconds
+        // of CPU, so it runs on the blocking pool with no lock held: `spawn_blocking(..)
+        // .await` is a real await point, so one key pair cannot starve the worker that
+        // serves every other request.
+        let minted = ::tokio::task::spawn_blocking(move || {
+            crate::state::mint_keys_and_certificate_valid_until(
+                &region,
+                ::engine::emulator_account_id(),
+                true,
+                now,
+                expiration,
+            )
+        })
+        .await;
+        let issuance_failed = || -> CreateProvisioningClaimError {
+            CreateProvisioningClaimErrorModeled::InternalFailureException(
+                InternalFailureException {
+                    message: Some(
+                        "the provisioning claim key pair and certificate could not be issued"
+                            .to_string(),
+                    ),
+                },
+            )
+            .into()
+        };
+        let minted = match minted {
+            Ok(Some(minted)) => minted,
+            Ok(None) => return Err(issuance_failed()),
+            // A panic or a cancellation on the pool says nothing about the request, so it
+            // is reported as the server fault it is rather than as a claim nothing issued.
+            Err(error) => {
+                ::tracing::error!(
+                    operation = Self::NAME,
+                    error = %error,
+                    "the provisioning claim key pair and certificate did not complete"
+                );
+                return Err(issuance_failed());
+            }
+        };
+
+        // The response is built from the record that is about to be persisted, so what
+        // this call reports and what the next `DescribeCertificate` reads are one value.
+        // The key pair is the one member that is NOT persisted: this call is the only
+        // place it exists.
+        let output = CreateProvisioningClaimOutput {
+            certificate_id: Some(minted.certificate.certificate_id.clone()),
+            certificate_pem: Some(minted.certificate.certificate_pem.clone()),
+            key_pair: Some(minted.key_pair),
+            expiration: Some(::aws_smithy_types::DateTime::from(
+                minted.certificate.not_after,
+            )),
+        };
+
+        let mut store = state.lock();
+        // Re-read under the write lock: another request may have filled the store while
+        // this one was generating its key pair.
+        if store.certificates.len() >= crate::state::MAX_CERTIFICATES {
+            return Err(
+                CreateProvisioningClaimErrorModeled::ServiceUnavailableException(
+                    ServiceUnavailableException {
+                        message: Some(format!(
+                            "this emulator stores at most {} certificates",
+                            crate::state::MAX_CERTIFICATES
+                        )),
+                    },
+                )
+                .into(),
+            );
+        }
+        store
+            .certificates
+            .insert(minted.certificate.certificate_id.clone(), minted.certificate);
+        Ok(output)
     }
 }

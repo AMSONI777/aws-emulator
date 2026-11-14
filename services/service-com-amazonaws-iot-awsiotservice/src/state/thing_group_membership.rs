@@ -85,6 +85,19 @@ pub fn dynamic_group_membership_message(thing_group_name: &str) -> String {
     )
 }
 
+/// How this service states the same rule to a request that asked to REMOVE a thing
+/// from a DYNAMIC thing group.
+///
+/// One rule, two directions: a dynamic group's membership is its query's, so neither a
+/// write nor a deletion of one is a caller's to make. The fixed text names the
+/// direction the request asked for, since that is what the caller has to stop doing.
+pub fn dynamic_group_removal_message(thing_group_name: &str) -> String {
+    format!(
+        "Cannot remove a thing from the dynamic thing group {thing_group_name}: a dynamic thing \
+         group's membership is defined by its query"
+    )
+}
+
 /// How this service states that the things a DYNAMIC thing group holds are not known.
 ///
 /// A dynamic group's members are the things its query selects, and this emulator does
@@ -234,6 +247,58 @@ impl super::ComAmazonawsIotAwsiotserviceState {
             .filter(|group| group.members.contains(thing_name))
             .map(|group| group.thing_group_name.clone())
             .collect()
+    }
+
+    /// Those same groups as the `(groupName, groupArn)` pairs a listing of the groups
+    /// ONE thing belongs to reports, in registry order.
+    ///
+    /// Read off the same one record of the relation
+    /// ([`Self::static_thing_groups_of`]), so what a reader of the thing's groups
+    /// reports and what a reader of a group's things reports cannot disagree.
+    pub fn thing_groups_for_thing(&self, thing_name: &str) -> Vec<(String, String)> {
+        self.thing_groups
+            .values()
+            .filter(|group| group.members.contains(thing_name))
+            .map(|group| {
+                (
+                    group.thing_group_name.clone(),
+                    group.thing_group_arn.clone(),
+                )
+            })
+            .collect()
+    }
+
+    /// Remove the membership of the thing `thing_name` in the thing group
+    /// `thing_group_name`: the ONE membership deletion, the inverse of
+    /// [`Self::add_thing_to_thing_group`].
+    ///
+    /// Both ends have to EXIST, for the same reason the write requires it, and the
+    /// group has to be a STATIC one, since a dynamic group's membership is its
+    /// query's. A thing that is not in the group removes nothing and succeeds:
+    /// `RemoveThingFromThingGroup` names no identity, so the relation is the same one
+    /// membership-free relation afterwards however often it is called.
+    pub fn remove_thing_from_thing_group(
+        &mut self,
+        thing_group_name: &str,
+        thing_name: &str,
+    ) -> Result<(), MembershipRefusal> {
+        if !self.things.contains_key(thing_name) {
+            return Err(MembershipRefusal::MissingThing(thing_name.to_string()));
+        }
+        let Some(group) = self.thing_groups.get(thing_group_name) else {
+            return Err(MembershipRefusal::MissingThingGroup(
+                thing_group_name.to_string(),
+            ));
+        };
+        if group.dynamic_query.is_some() {
+            return Err(MembershipRefusal::DynamicThingGroup(
+                thing_group_name.to_string(),
+            ));
+        }
+        if let Some(group) = self.thing_groups.get_mut(thing_group_name) {
+            group.members.remove(thing_name);
+        }
+        Ok(())
     }
 
     /// How a THING GROUP target of work that runs on the devices a group names is

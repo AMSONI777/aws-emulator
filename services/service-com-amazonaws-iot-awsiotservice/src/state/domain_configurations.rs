@@ -30,7 +30,7 @@ use std::time::SystemTime;
 
 use crate::ops::types::{
     AuthorizerConfig, ClientCertificateConfig, DescribeDomainConfigurationOutput,
-    ServerCertificateConfig, ServerCertificateSummary, TlsConfig,
+    DomainConfigurationSummary, ServerCertificateConfig, ServerCertificateSummary, TlsConfig,
 };
 
 /// How many domain configurations this emulator keeps for the account.
@@ -101,11 +101,17 @@ pub fn domain_configuration_arn(region: &str, domain_configuration_name: &str) -
 /// The message every operation that addresses ONE domain configuration refuses a name
 /// the account holds none under with.
 ///
-/// The fixed text is the family's, with the name the request asked about bracketed the
-/// way the neighbouring configuration families state a name they report back (see
-/// [`super::missing_certificate_provider_message`]).
+/// The DOMAIN CONFIGURATION family words a miss after the two things that identify a
+/// configuration — the account it would belong to and the name the request asked about
+/// — rather than after the name alone, which is the fixed text AWS states this family's
+/// miss with. The account id is this emulator's own ([`engine::emulator_account_id`]),
+/// the account every record this service holds belongs to.
 pub fn missing_domain_configuration_message(domain_configuration_name: &str) -> String {
-    format!("Domain configuration with name [{domain_configuration_name}] not found")
+    format!(
+        "Could not find domain configuration for given account ID and domain configuration \
+         name, AccountId: {}, DomainConfigurationName: {domain_configuration_name}",
+        ::engine::emulator_account_id()
+    )
 }
 
 /// How this service refuses a `serverCertificateArn` that names no certificate.
@@ -115,6 +121,64 @@ pub fn missing_domain_configuration_message(domain_configuration_name: &str) -> 
 /// the request named.
 pub fn missing_server_certificate_message(certificate_arn: &str) -> String {
     format!("Certificate {certificate_arn} does not exist.")
+}
+
+/// How this service refuses a custom-domain configuration whose server certificate is
+/// not one a device can establish trust in.
+///
+/// AWS IoT presents the server certificate to a device, which chains it to a
+/// certificate authority its own trust store holds; a certificate that chains to no CA
+/// proves nothing about the domain on its own, so the configuration has to carry the
+/// `validationCertificateArn` — "The certificate used to validate the server
+/// certificate and prove domain name ownership. This certificate must be signed by a
+/// public certificate authority" — instead. The sentence is the fixed text AWS states
+/// the refusal with, verbatim: it states the rule and echoes nothing of the request.
+pub const UNVALIDATED_SERVER_CERTIFICATE_MESSAGE: &str =
+    "Must provide validation certificate when using server certificates not signed by trusted \
+     CA or not within";
+
+/// Whether a device presented the certificate `certificate_arn` can chain it to a
+/// certificate authority its own trust store holds, as Certificate Manager's own record
+/// of that certificate says.
+///
+/// `cert_type` is what decides it: a certificate ACM ISSUED is signed by a public
+/// authority a device already trusts, and one the account IMPORTED is signed by whatever
+/// authority the account used, which is none of them. So a configuration presenting an
+/// imported certificate has to prove ownership of the domain another way — the
+/// `validationCertificateArn` — while one presenting an ACM-issued certificate needs
+/// nothing further.
+///
+/// `None` for an ARN the holder has no certificate under: that is a certificate this
+/// service cannot present at all, which its caller refuses first.
+pub fn chains_to_a_certificate_authority(
+    certificate: &::service_com_amazonaws_acm_certificatemanager::state::Certificate,
+) -> bool {
+    !certificate.is_imported()
+}
+
+/// Certificate Manager's OWN record of this account's certificates, in the shared
+/// engine: call it with a handler's `&*self.engine`.
+///
+/// Whether a `serverCertificateArn` names a certificate at all, and what kind of
+/// certificate it is, is the HOLDER's answer and not this service's — "The ARNs of the
+/// certificates that IoT passes to the device during the TLS handshake"
+/// (`CreateDomainConfiguration$serverCertificateArns`) — so it is read from that
+/// service's own store in this one shared engine rather than from a copy of its own
+/// here: the engine keys state by TYPE, so a copy here would be invisible to the holder
+/// and a certificate the holder has would address nothing.
+///
+/// LOCK ORDER: take [`super::service_state`] first and this one second, which is the
+/// order every other reader of another service's store takes.
+///
+/// Answer `None` with a modelled server error, never with a fresh engine.
+pub fn acm_certificates<Eng: Send + Sync + 'static>(
+    engine: &Eng,
+) -> Option<
+    ::engine::ServiceState<
+        ::service_com_amazonaws_acm_certificatemanager::state::ComAmazonawsAcmCertificatemanagerState,
+    >,
+> {
+    ::service_com_amazonaws_acm_certificatemanager::state::service_state(engine)
 }
 
 /// The SHARED record of each Certificate Manager certificate's serving material, in
@@ -192,6 +256,17 @@ pub struct RegisteredDomainConfiguration {
 }
 
 impl RegisteredDomainConfiguration {
+    /// The record as one entry of the `DomainConfigurationSummary` list a LISTING hands
+    /// back: the subset of members that shape declares, projected from the same stored
+    /// record a single-configuration reader projects, so the two cannot drift.
+    pub fn to_summary(&self) -> DomainConfigurationSummary {
+        DomainConfigurationSummary {
+            domain_configuration_name: Some(self.domain_configuration_name.clone()),
+            domain_configuration_arn: Some(self.domain_configuration_arn.clone()),
+            service_type: Some(self.service_type.clone()),
+        }
+    }
+
     /// The record as `DescribeDomainConfiguration` reports it — every member of the
     /// stored record, so the read and the create cannot drift.
     pub fn to_description(&self) -> DescribeDomainConfigurationOutput {

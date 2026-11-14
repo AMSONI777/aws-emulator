@@ -1,14 +1,13 @@
 Issue-Severity: HIGH
 Issue-Corpus: simparity-behavioral-aws-v1
 Issue-Corpus-Kind: behavioral
-Issue-Trace-Ids: iot.create-domain-configuration-invalid-certificate-rejected iot.domain-configuration-lifecycle iot.domain-configuration-lifecycle-transitions iot.telemetry-fleet-metric-lifecycle-and-aggregation iot.add-remove-thing-from-group iot.role-alias-lifecycle-and-delete-conflict iot.cancel-completed-audit-task-rejected iot.delete-default-policy-version-fails iot.job-targets-limit-exceeded-rejected iot.negative-fleet-metric-index-not-ready-blocked iot.provisioning-claim-unknown-template-rejected
+Issue-Trace-Ids: iot.create-domain-configuration-invalid-certificate-rejected iot.domain-configuration-lifecycle iot.domain-configuration-lifecycle-transitions iot.telemetry-fleet-metric-lifecycle-and-aggregation iot.add-remove-thing-from-group iot.cancel-completed-audit-task-rejected iot.delete-default-policy-version-fails iot.job-targets-limit-exceeded-rejected iot.negative-fleet-metric-index-not-ready-blocked iot.provisioning-claim-unknown-template-rejected
 Issue-Shape-Id: com.amazonaws.iot#AWSIotService
 Issue-Key: iot.create-domain-configuration-invalid-certificate-rejected|_error#11|AssertionError|raise AssertionError(f"expected a ClientError, but the call SUCCEEDED and returned {result!r}")
 Issue-Key: iot.domain-configuration-lifecycle|_error_code_and_message#17|AssertionError|raise AssertionError(f"expected a rejection, but the call SUCCEEDED and returned {result!r}")
 Issue-Key: iot.domain-configuration-lifecycle-transitions|_error_code_and_message#8|AssertionError|raise AssertionError(f"expected a rejection, but the call SUCCEEDED and returned {result!r}")
 Issue-Key: iot|CreateFleetMetric|InvalidRequestException
 Issue-Key: iot.add-remove-thing-from-group|_eventually#11|Timeout|time.sleep(interval_s)
-Issue-Key: iot.role-alias-lifecycle-and-delete-conflict|_fetch_role_alias_credentials#31|Timeout|time.sleep(3)
 Issue-Key: iot.cancel-completed-audit-task-rejected|run#7|AssertionError|assert code == "InvalidRequestException", f"expected InvalidRequestException, got {code!r}"
 Issue-Key: iot.delete-default-policy-version-fails|run#9|AssertionError|assert code == "DeleteConflictException", f"expected DeleteConflictException, got {code}"
 Issue-Key: iot.job-targets-limit-exceeded-rejected|run#16|AssertionError|assert code == "LimitExceededException", f"expected LimitExceededException, got {code}"
@@ -48,11 +47,15 @@ Cause 3 of 9: thing-group membership is never observable after AddThingToThingGr
   Traces: iot.add-remove-thing-from-group.
 
 Cause 4 of 9: the published iot:CredentialProvider endpoint serves no mTLS credential exchange.
-  AWS: recorded behavior only (the credentials provider is not in the Smithy model). DescribeEndpoint(endpointType='iot:CredentialProvider') returns an address that serves GET /role-aliases/{roleAlias}/credentials over mutual TLS, authenticated by the device certificate, and answers 200 with a JSON body whose credentials object carries accessKeyId, secretAccessKey and sessionToken.
-  Emulator: the request never succeeds — the check retries the mTLS GET every 3 s for up to 90 s and is killed at the harness's 60 s cap, so the role-alias lifecycle (describe/update round trip of credentialDurationSeconds, the attached-policy DeleteConflictException, the ACTIVE-certificate CertificateStateException, DeleteRoleAlias and the post-delete refusals) never reaches a verdict.
-  Why: the IoT credentials provider is how a device exchanges its certificate for AWS credentials; nothing that uses a role alias can be exercised against the emulator.
-  Fix: the published iot:CredentialProvider endpoint must be an address the emulator serves, and it must handle GET /role-aliases/{roleAlias}/credentials with client-certificate authentication. Related open issues: 20261111T093215Z-iot-3-net-new-causes-the-published-endpoint.md and 20261110T222008Z-iot-the-published-data-plane-address-serves-no.md describe the same endpoint family but do not carry this check's replay key.
-  Traces: iot.role-alias-lifecycle-and-delete-conflict.
+  SPLIT OUT AND STILL OPEN, not fixed here: it is filed on its own as
+  `issues/things-that-do-not-work/20261114T082236Z-iot-credential-provider-mtls-exchange-is-vendor-blocked.md`,
+  which carries this cause's trace and replay key. The exchange is authenticated by the device's
+  TLS CLIENT CERTIFICATE, and the core builds its one rustls server configuration
+  `with_no_client_auth()` (vendor/server/src/tls_certificate_authority.rs:91-99, the read-only
+  vendor tree), so no client certificate reaches a handler and there is no principal to
+  authorise `iot:AssumeRoleWithCertificate` against. Nothing was changed for this cause: no
+  endpoint, status or error was added or re-worded for it.
+  Traces: iot.role-alias-lifecycle-and-delete-conflict (see the split-out record).
 
 Cause 5 of 9: CancelAuditTask answers 501 NotImplemented.
   AWS: Smithy: CancelAuditTask -> PUT /audit/tasks/{taskId}/cancel, output empty, modeled errors InvalidRequestException (400), ResourceNotFoundException (404), InternalFailureException, ThrottlingException. Recorded behavior: cancelling a task that has already reached COMPLETED is refused with InvalidRequestException and the task's status stays COMPLETED; cancelling a freshly started task is accepted (or refused naming the terminal state it already reached).
@@ -98,7 +101,7 @@ Cause 2 — iot.telemetry-fleet-metric-lifecycle-and-aggregation [error]:
 
 Cause 3 — iot.add-remove-thing-from-group [mismatch]: "Check timed out after 60.0s". The check creates a thing group and a thing, calls AddThingToThingGroup, then polls ListThingsInThingGroup(thingGroupName=G) for the thing and ListThingGroupsForThing(thingName=T) for the group every 3 s; neither predicate is ever satisfied, so the 60 s harness cap is hit before the remove leg is reached.
 
-Cause 4 — iot.role-alias-lifecycle-and-delete-conflict [mismatch]: "Check timed out after 60.0s". The only long-poll in the check is the mTLS GET to DescribeEndpoint(endpointType='iot:CredentialProvider') + "/role-aliases/<roleAlias>/credentials", retried every 3 s and expecting status 200 with body.credentials containing accessKeyId/secretAccessKey/sessionToken.
+Cause 4 — iot.role-alias-lifecycle-and-delete-conflict [mismatch]: "Check timed out after 60.0s". Split out and still open (see the record named under Cause 4 above); the only long-poll in the check is the mTLS GET to DescribeEndpoint(endpointType='iot:CredentialProvider') + "/role-aliases/<roleAlias>/credentials", retried every 3 s and expecting status 200 with body.credentials containing accessKeyId/secretAccessKey/sessionToken.
 
 Cause 5 — iot.cancel-completed-audit-task-rejected [mismatch]: AssertionError: expected InvalidRequestException, got 'NotImplemented' (CancelAuditTask on a COMPLETED audit task).
 Cause 6 — iot.delete-default-policy-version-fails [mismatch]: AssertionError: expected DeleteConflictException, got NotImplemented (DeletePolicyVersion on the policy's default version).

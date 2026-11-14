@@ -19,16 +19,23 @@
 //!   so exercises both answers. A certificate nothing is held for is refused
 //!   `InvalidRequestException` (400) with the fixed `Certificate <arn> does not
 //!   exist.` and nothing created, which is what makes the following read a 404;
+//! * a custom-domain configuration may only present a server certificate a device can
+//!   establish trust in — one that chains to a certificate authority — or else carry
+//!   the `validationCertificateArn` that proves domain ownership; a configuration for a
+//!   domain of the caller's own that presents no certificate at all, and one whose
+//!   certificate chains to no authority and carries no validation certificate, are each
+//!   refused `InvalidRequestException` (400) and create nothing;
 //! * a created configuration is read back member for member, and the name is its
-//!   identity, so a second create under it is a conflict.
+//!   identity, so a second create under it is a conflict;
+//! * the listing reports every configuration the account holds, filtered by
+//!   `serviceType` when the request names one and paged by `pageSize`.
 
 use std::sync::Arc;
+use std::time::SystemTime;
 
 use bytes::Bytes;
 use serde_json::{json, Value};
-use service_common::acm_certificate_key_material::{
-    CertificateKeyMaterial, CertificateKeyMaterialDirectory,
-};
+use service_com_amazonaws_acm_certificatemanager::EmulatedService as CertificateManager;
 use service_com_amazonaws_iot_awsiotservice::EmulatedService;
 use smithy_server_runtime::MultiServiceRouter;
 
@@ -37,9 +44,9 @@ const ACCOUNT_ID: &str = "000000000000";
 /// The region this suite signs for; the ARN assertions read it back.
 const REGION: &str = "eu-central-1";
 
-/// One emulator: the shared engine plus a router with this service mounted.
+/// One emulator: the shared engine plus a router with this service and the certificate
+/// holder it resolves a server certificate against mounted on it.
 struct Emulator {
-    engine: Arc<engine::InMemoryEngine>,
     router: MultiServiceRouter,
 }
 
@@ -49,7 +56,11 @@ impl Emulator {
         let mut router = MultiServiceRouter::new();
         router.set_request_authentication(false);
         router.register_service(EmulatedService::new(Arc::clone(&engine)));
-        Self { engine, router }
+        // Certificate Manager HOLDS the certificates a domain configuration presents, so
+        // it is mounted on the same engine: every certificate a case names is one the
+        // holder's own API created, not a record written into the test.
+        router.register_service(CertificateManager::new(engine));
+        Self { router }
     }
 
     async fn dispatch(&self, method: &str, path: &str, body: Option<&Value>) -> Reply {
@@ -87,23 +98,104 @@ impl Emulator {
             .await
     }
 
-    /// Record `certificate_arn` as a certificate the holder has serving material for —
-    /// the write Certificate Manager makes when a caller brings a certificate into it,
-    /// which is the record this service reads a certificate's existence from.
-    fn hold_certificate(&self, certificate_arn: &str, domain_name: &str) {
-        let directory = self.engine.state::<CertificateKeyMaterialDirectory>();
-        directory.lock().record(
-            certificate_arn,
-            CertificateKeyMaterial {
-                certificate_pem: "-----BEGIN CERTIFICATE-----\nheld\n-----END CERTIFICATE-----\n"
-                    .to_string(),
-                certificate_chain_pem: None,
-                private_key_pem: "-----BEGIN PRIVATE KEY-----\nheld\n-----END PRIVATE KEY-----\n"
-                    .to_string(),
-                domain_names: vec![domain_name.to_string()],
-            },
-        );
+    async fn list_configurations(&self, query: &str) -> Reply {
+        self.dispatch("GET", &format!("/domainConfigurations?{query}"), None)
+            .await
     }
+
+    /// Call one Certificate Manager operation, so a case's certificates are the ones the
+    /// HOLDER's own API created.
+    async fn certificate_manager(&self, operation: &str, body: &Value) -> Reply {
+        let request = http::Request::builder()
+            .method("POST")
+            .uri("/")
+            .header("content-type", "application/x-amz-json-1.1")
+            .header("x-amz-target", format!("CertificateManager.{operation}"))
+            .header(
+                "authorization",
+                format!(
+                    "AWS4-HMAC-SHA256 Credential=AKIDEXAMPLE/20260101/{REGION}/acm/aws4_request, \
+                     SignedHeaders=host;x-amz-target, Signature=0123456789abcdef"
+                ),
+            )
+            .body(Bytes::from(body.to_string()))
+            .expect("the certificate request is well formed");
+        Reply::of(self.router.dispatch(request).await)
+    }
+
+    /// IMPORT one certificate and its key into the holder, answering the ARN it was
+    /// stored under: a certificate the ACCOUNT brought in, which no public authority
+    /// signed.
+    async fn import_certificate(
+        &self,
+        case: &str,
+        certificate_pem: &str,
+        private_key_pem: &str,
+    ) -> String {
+        let reply = self
+            .certificate_manager(
+                "ImportCertificate",
+                &json!({
+                    "Certificate": aws_smithy_types::base64::encode(certificate_pem.as_bytes()),
+                    "PrivateKey": aws_smithy_types::base64::encode(private_key_pem.as_bytes()),
+                }),
+            )
+            .await;
+        assert_eq!(
+            reply.status,
+            200,
+            "case {case}: expected ImportCertificate to answer 200, got {} body {}",
+            reply.status,
+            reply.text()
+        );
+        reply.json()["CertificateArn"]
+            .as_str()
+            .unwrap_or_else(|| panic!("case {case}: no CertificateArn in {}", reply.text()))
+            .to_string()
+    }
+
+    /// REQUEST one certificate for `domain_name` from the holder, answering the ARN it
+    /// was stored under: a certificate Certificate Manager issues itself, so a public
+    /// authority signs it.
+    async fn request_certificate(&self, case: &str, domain_name: &str) -> String {
+        let reply = self
+            .certificate_manager(
+                "RequestCertificate",
+                &json!({ "DomainName": domain_name, "ValidationMethod": "DNS" }),
+            )
+            .await;
+        assert_eq!(
+            reply.status,
+            200,
+            "case {case}: expected RequestCertificate to answer 200, got {} body {}",
+            reply.status,
+            reply.text()
+        );
+        reply.json()["CertificateArn"]
+            .as_str()
+            .unwrap_or_else(|| panic!("case {case}: no CertificateArn in {}", reply.text()))
+            .to_string()
+    }
+}
+
+/// A certificate and the private key that matches it: the material a case imports into
+/// the holder. Minted by this service's own issuer, so the key really matches the
+/// certificate — the holder refuses a pair that does not.
+fn minted_certificate() -> (String, String) {
+    let minted = service_com_amazonaws_iot_awsiotservice::state::mint_keys_and_certificate(
+        REGION,
+        ACCOUNT_ID,
+        true,
+        SystemTime::now(),
+    )
+    .expect("the suite can mint a certificate");
+    (
+        minted.certificate.certificate_pem,
+        minted
+            .key_pair
+            .private_key
+            .expect("the minted key pair carries its private half"),
+    )
 }
 
 /// A dispatched response, reduced to what the assertions read.
@@ -149,12 +241,22 @@ fn certificate_arn(index: usize) -> String {
     format!("arn:aws:acm:{REGION}:{ACCOUNT_ID}:certificate/cert-{index:06}")
 }
 
+/// The ARN of the publicly signed certificate a configuration proves domain ownership
+/// with — `CreateDomainConfiguration$validationCertificateArn`, which the model binds
+/// to the ACM certificate ARN pattern.
+fn validation_certificate_arn() -> String {
+    certificate_arn(99)
+}
+
 /// RULE: a created configuration is read back member for member, and which KIND of
 /// domain it configures follows from whether it carries a domain name of its own.
 #[tokio::test]
 async fn a_created_domain_configuration_is_read_back_member_for_member() {
     let emulator = Emulator::new();
-    emulator.hold_certificate(&certificate_arn(1), "iot.example.com");
+    let (certificate_pem, private_key_pem) = minted_certificate();
+    let held = emulator
+        .import_certificate("read back", &certificate_pem, &private_key_pem)
+        .await;
 
     // The rows span which optional members the request carries, and both kinds of
     // domain: one without a `domainName` (the AWS-managed domain, for which
@@ -185,7 +287,8 @@ async fn a_created_domain_configuration_is_read_back_member_for_member() {
             "customer_managed-1",
             json!({
                 "domainName": "iot.example.com",
-                "serverCertificateArns": [certificate_arn(1)],
+                "serverCertificateArns": [held.clone()],
+                "validationCertificateArn": validation_certificate_arn(),
                 "applicationProtocol": "SECURE_MQTT",
                 "authenticationType": "AWS_X509",
                 "tlsConfig": { "securityPolicy": "IoTSecurityPolicy_TLS13_1_2_2022_10" },
@@ -270,7 +373,7 @@ async fn a_created_domain_configuration_is_read_back_member_for_member() {
         if let Some(certificate) = certificates.first() {
             assert_eq!(
                 certificate["serverCertificateArn"],
-                json!(certificate_arn(1)),
+                json!(held.clone()),
                 "case {case}: the read must report the resolved certificate, got {described}"
             );
             assert_eq!(
@@ -356,7 +459,10 @@ async fn a_created_domain_configuration_is_read_back_member_for_member() {
 #[tokio::test]
 async fn a_certificate_the_holder_does_not_have_is_refused() {
     let emulator = Emulator::new();
-    emulator.hold_certificate(&certificate_arn(1), "iot.example.com");
+    let (certificate_pem, private_key_pem) = minted_certificate();
+    let held = emulator
+        .import_certificate("refusals", &certificate_pem, &private_key_pem)
+        .await;
 
     // The rows span the forms a certificate the holder does not have takes: another
     // account's certificate, another region's, one whose id nothing was recorded
@@ -416,7 +522,8 @@ async fn a_certificate_the_holder_does_not_have_is_refused() {
             "accepted",
             &json!({
                 "domainName": "iot.example.com",
-                "serverCertificateArns": [certificate_arn(1)],
+                "serverCertificateArns": [held.clone()],
+                "validationCertificateArn": validation_certificate_arn(),
             }),
         )
         .await;
@@ -427,4 +534,337 @@ async fn a_certificate_the_holder_does_not_have_is_refused() {
         accepted.status,
         accepted.text()
     );
+}
+
+/// RULE: a configuration for a domain of the caller's OWN has to present a server
+/// certificate a device can chain to a certificate authority — one Certificate Manager
+/// ISSUED — or else carry the `validationCertificateArn` that proves domain ownership;
+/// a create with neither is refused with nothing created.
+#[tokio::test]
+async fn an_unchainable_server_certificate_needs_a_validation_certificate() {
+    /// Which kind of certificate the holder has for a row: one the ACCOUNT brought in,
+    /// which no public authority signed, or one Certificate Manager issued itself.
+    enum Held {
+        Imported,
+        Issued,
+        /// The row presents no server certificate at all.
+        None,
+    }
+    /// What the create answers a row with: a record, or the refusal whose message
+    /// begins with the text given.
+    enum Expected {
+        Created,
+        Refused(&'static str),
+    }
+    /// The fixed text of the refusal of a server certificate whose trust is not
+    /// established.
+    const UNTRUSTED: &str = "Must provide validation certificate when using server certificates \
+                             not signed by trusted CA or not within";
+
+    // The rows span what the rule generalises over: which kind of certificate the holder
+    // has for the one the request names, whether the request carries a validation
+    // certificate, and whether it names a domain of its own at all.
+    struct Case {
+        label: &'static str,
+        held: Held,
+        domain_name: bool,
+        validation_certificate: bool,
+        expected: Expected,
+    }
+    let cases = [
+        Case {
+            label: "an imported certificate with no validation certificate",
+            held: Held::Imported,
+            domain_name: true,
+            validation_certificate: false,
+            expected: Expected::Refused(UNTRUSTED),
+        },
+        Case {
+            label: "an imported certificate with a validation certificate",
+            held: Held::Imported,
+            domain_name: true,
+            validation_certificate: true,
+            expected: Expected::Created,
+        },
+        Case {
+            label: "a certificate the holder issued, with no validation certificate",
+            held: Held::Issued,
+            domain_name: true,
+            validation_certificate: false,
+            expected: Expected::Created,
+        },
+        Case {
+            label: "a certificate the holder issued, with a validation certificate",
+            held: Held::Issued,
+            domain_name: true,
+            validation_certificate: true,
+            expected: Expected::Created,
+        },
+        Case {
+            label: "an imported certificate on the AWS-managed domain, which proves no \
+                    ownership",
+            held: Held::Imported,
+            domain_name: false,
+            validation_certificate: false,
+            expected: Expected::Created,
+        },
+        Case {
+            label: "the AWS-managed domain, which presents no certificate at all",
+            held: Held::None,
+            domain_name: false,
+            validation_certificate: false,
+            expected: Expected::Created,
+        },
+    ];
+
+    for (index, case) in cases.iter().enumerate() {
+        let emulator = Emulator::new();
+        let certificate = match case.held {
+            Held::Imported => {
+                let (certificate_pem, private_key_pem) = minted_certificate();
+                Some(
+                    emulator
+                        .import_certificate(case.label, &certificate_pem, &private_key_pem)
+                        .await,
+                )
+            }
+            Held::Issued => Some(
+                emulator
+                    .request_certificate(case.label, "iot.example.com")
+                    .await,
+            ),
+            Held::None => None,
+        };
+        let mut body = json!({});
+        if case.domain_name {
+            body["domainName"] = json!("iot.example.com");
+        }
+        if let Some(certificate) = certificate.as_ref() {
+            body["serverCertificateArns"] = json!([certificate]);
+        }
+        if case.validation_certificate {
+            body["validationCertificateArn"] = json!(validation_certificate_arn());
+        }
+
+        let name = format!("trust-{index}");
+        let created = emulator.create_configuration(&name, &body).await;
+        let refusal = match case.expected {
+            Expected::Created => {
+                assert_eq!(
+                    created.status,
+                    200,
+                    "case {}: expected 200, got {} body {}",
+                    case.label,
+                    created.status,
+                    created.text()
+                );
+                let read = emulator.describe_configuration(&name).await;
+                assert_eq!(
+                    read.status,
+                    200,
+                    "case {}: the accepted configuration must read back, got {} body {}",
+                    case.label,
+                    read.status,
+                    read.text()
+                );
+                continue;
+            }
+            Expected::Refused(refusal) => refusal,
+        };
+        assert_eq!(
+            created.status,
+            400,
+            "case {}: expected 400, got {} body {}",
+            case.label,
+            created.status,
+            created.text()
+        );
+        assert_eq!(
+            created.error_code(),
+            "InvalidRequestException",
+            "case {}: got {}",
+            case.label,
+            created.text()
+        );
+        assert!(
+            created.error_message().starts_with(refusal),
+            "case {}: the refusal must state the rule {refusal:?}, got {:?}",
+            case.label,
+            created.error_message()
+        );
+        // Nothing was created, which is what makes the following read a 404 and keeps the
+        // configuration out of the account's listing.
+        let described = emulator.describe_configuration(&name).await;
+        assert_eq!(
+            described.status,
+            404,
+            "case {}: a refused create must leave no configuration behind, got {} body {}",
+            case.label,
+            described.status,
+            described.text()
+        );
+        assert_eq!(
+            described.error_message(),
+            format!(
+                "Could not find domain configuration for given account ID and domain \
+                 configuration name, AccountId: {ACCOUNT_ID}, DomainConfigurationName: {name}"
+            ),
+            "case {}: the read must state the miss by account and name, got {}",
+            case.label,
+            described.text()
+        );
+        let listed = emulator.list_configurations("").await;
+        assert_eq!(
+            listed.status,
+            200,
+            "case {}: expected the listing to answer 200, got {} body {}",
+            case.label,
+            listed.status,
+            listed.text()
+        );
+        assert!(
+            !listed
+                .json()["domainConfigurations"]
+                .as_array()
+                .unwrap_or_else(|| panic!("no domainConfigurations in {}", listed.text()))
+                .iter()
+                .any(|summary| summary["domainConfigurationName"] == json!(name)),
+            "case {}: a refused create must leave the name out of the listing, got {}",
+            case.label,
+            listed.text()
+        );
+    }
+}
+
+/// RULE: the listing reports every configuration the account holds, projected from the
+/// same record the reader projects, filtered by `serviceType` when the request names
+/// one, and paged by `pageSize` with its own marker.
+#[tokio::test]
+async fn the_listing_reports_the_configurations_the_account_holds() {
+    let emulator = Emulator::new();
+    let (certificate_pem, private_key_pem) = minted_certificate();
+    let held = emulator
+        .import_certificate("listing", &certificate_pem, &private_key_pem)
+        .await;
+
+    // The rows span the service types a configuration may deliver
+    // (`smithy_query(query="shape",shape="ServiceType")`: CREDENTIAL_PROVIDER, DATA,
+    // JOBS) and both kinds of domain.
+    let rows = [
+        ("data-managed", json!({ "serviceType": "DATA" })),
+        ("jobs-managed", json!({ "serviceType": "JOBS" })),
+        (
+            "credentials-managed",
+            json!({ "serviceType": "CREDENTIAL_PROVIDER" }),
+        ),
+        (
+            "data-custom",
+            json!({
+                "serviceType": "DATA",
+                "domainName": "iot.example.com",
+                "serverCertificateArns": [held.clone()],
+                "validationCertificateArn": validation_certificate_arn(),
+            }),
+        ),
+    ];
+    for (name, body) in &rows {
+        let created = emulator.create_configuration(name, body).await;
+        assert_eq!(
+            created.status,
+            200,
+            "case {name}: the configuration must be creatable, got {} body {}",
+            created.status,
+            created.text()
+        );
+    }
+
+    let listed = emulator.list_configurations("").await;
+    let summaries = listed.json()["domainConfigurations"]
+        .as_array()
+        .unwrap_or_else(|| panic!("no domainConfigurations in {}", listed.text()))
+        .clone();
+    assert_eq!(
+        summaries.len(),
+        rows.len(),
+        "case the whole listing: expected {} configurations, got {}",
+        rows.len(),
+        listed.text()
+    );
+    for summary in &summaries {
+        let name = summary["domainConfigurationName"]
+            .as_str()
+            .unwrap_or_default()
+            .to_string();
+        let read = emulator.describe_configuration(&name).await;
+        assert_eq!(
+            summary["domainConfigurationArn"], read.json()["domainConfigurationArn"],
+            "case {name}: the summary must carry the ARN the reader reports, got {summary}"
+        );
+        assert_eq!(
+            summary["serviceType"], read.json()["serviceType"],
+            "case {name}: the summary must carry the stored service type, got {summary}"
+        );
+    }
+
+    // A listing filtered by service type reports the configurations of that type and no
+    // other.
+    for (service_type, expected) in [
+        ("DATA", vec!["data-custom", "data-managed"]),
+        ("JOBS", vec!["jobs-managed"]),
+        ("CREDENTIAL_PROVIDER", vec!["credentials-managed"]),
+    ] {
+        let filtered = emulator
+            .list_configurations(&format!("serviceType={service_type}"))
+            .await;
+        let names: Vec<String> = filtered.json()["domainConfigurations"]
+            .as_array()
+            .unwrap_or_else(|| panic!("no domainConfigurations in {}", filtered.text()))
+            .iter()
+            .map(|summary| {
+                summary["domainConfigurationName"]
+                    .as_str()
+                    .unwrap_or_default()
+                    .to_string()
+            })
+            .collect();
+        assert_eq!(
+            names, expected,
+            "case serviceType={service_type}: expected {expected:?}, got {names:?}"
+        );
+    }
+
+    // The listing pages over that order, a page at a time, and its own marker resumes
+    // exactly where the page stopped.
+    for page_size in [1usize, 3, 10] {
+        let mut seen: Vec<String> = Vec::new();
+        let mut query = format!("pageSize={page_size}");
+        loop {
+            let page = emulator.list_configurations(&query).await;
+            let names: Vec<String> = page.json()["domainConfigurations"]
+                .as_array()
+                .unwrap_or_else(|| panic!("no domainConfigurations in {}", page.text()))
+                .iter()
+                .map(|summary| {
+                    summary["domainConfigurationName"]
+                        .as_str()
+                        .unwrap_or_default()
+                        .to_string()
+                })
+                .collect();
+            assert!(
+                names.len() <= page_size,
+                "case pageSize={page_size}: a page must hold at most {page_size}, got {names:?}"
+            );
+            seen.extend(names);
+            match page.json()["nextMarker"].as_str() {
+                Some(marker) => query = format!("pageSize={page_size}&marker={marker}"),
+                None => break,
+            }
+        }
+        assert_eq!(
+            seen.len(),
+            rows.len(),
+            "case pageSize={page_size}: expected every configuration once, got {seen:?}"
+        );
+    }
 }

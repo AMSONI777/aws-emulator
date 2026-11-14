@@ -1,15 +1,6 @@
 // SPDX-License-Identifier: CC0-1.0
 
 //! @op ListFleetMetrics
-//! SCAFFOLDED, NOT IMPLEMENTED: this operation answers HTTP 501 `NotImplemented` and
-//! asserts NOTHING about `ListFleetMetrics`'s real behaviour. Implement it here — this is
-//! the ONLY file to touch for this operation.
-//!
-//! A 501 from this operation means "nobody has written it yet", never "the emulator is
-//! broken". Replace the `Err(..)` in [`ListFleetMetrics::handle`] with real behaviour and
-//! delete the SCAFFOLDED marker line above; that line is the machine-readable record of
-//! which operations are still stubs (`grep -rl '^//! SCAFFOLDED, NOT IMPLEMENTED:' */src/ops/`),
-//! so leaving it on an implemented operation under-reports progress.
 //!
 //! ## Shape of an operation
 //!
@@ -147,18 +138,65 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         input: Self::Input,
         ctx: &smithy_server_runtime::OperationContext<'_>,
     ) -> Result<Self::Output, Self::Error> {
-        // The engine is reachable from `&self` (constructor-injected); `ctx` carries
-        // request metadata. Both are bound here so an implementer has them in scope.
-        let _ = (&input, ctx, &self.engine);
-        // Implement `ListFleetMetrics` here, then delete the SCAFFOLDED marker at the top of
-        // this file. Return modeled failures as
-        // `Err(ListFleetMetricsErrorModeled::Variant(..).into())` — the `From` impl above lifts it.
-        //
-        // To refuse a bad request this operation models no error for, return
-        // `Err(crate::scaffolded::Scaffolded::validation("..."))` — a 400
-        // `ValidationException`. Do NOT answer 501 for it: 501 means "not written yet",
-        // not "bad request". Modeled constraints are already refused BEFORE this
-        // handler runs, so reaching here means the input satisfies every one of them.
-        Err(crate::scaffolded::Scaffolded::not_implemented("ListFleetMetrics"))
+        let state = crate::state::service_state(&*self.engine).ok_or_else(|| {
+            ListFleetMetricsErrorModeled::InternalFailureException(InternalFailureException {
+                message: Some("the IoT emulator has no state store attached".to_string()),
+            })
+        })?;
+        let _ = ctx;
+
+        let store = state.lock();
+        // The registry IS the store keyed by metric name, so the listing is that order:
+        // `@paginated`, and a page boundary is only meaningful over a stable one.
+        let names: Vec<String> = store.fleet_metrics.keys().cloned().collect();
+
+        // One page of that order, resumed after the position the caller's own token
+        // names ([`crate::state::page_of`]) — the same paging every other `@paginated`
+        // listing of this service uses, so a token is read one way.
+        let scope = "fleet-metrics";
+        let resume_after = match input.next_token.as_deref() {
+            None => None,
+            Some(token) => {
+                let Some(resume_after) = crate::state::decode_page_marker(token, scope) else {
+                    return Err(ListFleetMetricsErrorModeled::InvalidRequestException(
+                        InvalidRequestException {
+                            message: Some(
+                                "nextToken is not a token this listing issued".to_string(),
+                            ),
+                        },
+                    )
+                    .into());
+                };
+                Some(resume_after)
+            }
+        };
+        // The page is at most what the listing admits; the clamp is defensive rather
+        // than load-bearing, keeping the page inside the modelled `maxResults` range
+        // without depending on a validation performed outside this module.
+        let page_size = input
+            .max_results
+            .map_or(crate::state::MAX_LIST_PAGE_SIZE, |max_results| {
+                max_results.clamp(1, crate::state::MAX_LIST_PAGE_SIZE)
+            }) as usize;
+        let (page, next_token) =
+            crate::state::page_of(names, scope, resume_after.as_deref(), page_size);
+
+        // Each entry is projected from the stored record, so what a listing reports and
+        // what `DescribeFleetMetric` reports cannot drift.
+        Ok(ListFleetMetricsOutput {
+            fleet_metrics: Some(
+                page.into_iter()
+                    .filter_map(|metric_name| {
+                        store.fleet_metrics.get(&metric_name).map(|metric| {
+                            FleetMetricNameAndArn {
+                                metric_name: Some(metric.metric_name.clone()),
+                                metric_arn: Some(metric.metric_arn.clone()),
+                            }
+                        })
+                    })
+                    .collect(),
+            ),
+            next_token,
+        })
     }
 }

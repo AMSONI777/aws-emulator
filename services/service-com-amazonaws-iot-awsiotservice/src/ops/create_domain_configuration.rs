@@ -220,20 +220,29 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
             .collect();
 
         let server_certificate_arns = input.server_certificate_arns.unwrap_or_default();
+        // "The certificate used to validate the server certificate and prove domain name
+        // ownership": a value that names no certificate validates nothing, so a blank one
+        // counts as none.
+        let validation_certificate_arn = input
+            .validation_certificate_arn
+            .filter(|arn| !arn.trim().is_empty());
 
         let mut store = state.lock();
 
+        // Whether this configuration is for a domain of the CALLER's own, which is what
+        // decides whether a device has to be given something to establish trust in: a
+        // configuration carrying no `domainName` configures the AWS-managed domain the
+        // account's endpoint already serves, whose certificates AWS issues itself.
+        let custom_domain = input.domain_name.is_some();
+
         // The certificate a configuration presents belongs to Certificate Manager, so
         // whether it exists is the holder's answer and not this service's: it is read
-        // from the one shared record of a certificate's serving material that holder
-        // writes. A certificate nothing is held for cannot be passed to a device, so the
-        // configuration is refused — the modelled `InvalidRequestException` (HTTP 400) —
-        // and nothing is written, which is what makes the following
-        // `DescribeDomainConfiguration` a 404.
+        // from that service's own record of the account's certificates. A certificate the
+        // holder does not have cannot be passed to a device, so the configuration is
+        // refused — the modelled `InvalidRequestException` (HTTP 400) — and nothing is
+        // written, which is what makes the following `DescribeDomainConfiguration` a 404.
         if !server_certificate_arns.is_empty() {
-            let Some(material) =
-                crate::state::domain_configurations::certificate_key_material(&*self.engine)
-            else {
+            let Some(certificates) = crate::state::acm_certificates(&*self.engine) else {
                 return Err(
                     CreateDomainConfigurationErrorModeled::InternalFailureException(
                         InternalFailureException {
@@ -245,9 +254,9 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
                     .into(),
                 );
             };
-            let held = material.lock();
+            let held = certificates.lock();
             for certificate_arn in &server_certificate_arns {
-                if held.material(certificate_arn).is_none() {
+                let Some(presented) = held.certificates.get(certificate_arn.trim()) else {
                     return Err(
                         CreateDomainConfigurationErrorModeled::InvalidRequestException(
                             InvalidRequestException {
@@ -255,6 +264,31 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
                                     crate::state::missing_server_certificate_message(
                                         certificate_arn,
                                     ),
+                                ),
+                            },
+                        )
+                        .into(),
+                    );
+                };
+                // A device dialling the caller's OWN domain is presented this
+                // certificate and has to establish trust in it: a certificate that chains
+                // to no authority proves nothing on its own, so such a configuration
+                // takes a `validationCertificateArn` — the publicly signed certificate
+                // that proves ownership of the domain — instead. Without either, the
+                // create is refused with the modelled `InvalidRequestException` (HTTP 400)
+                // and nothing is written. A configuration for the AWS-managed domain
+                // proves no ownership of anything: that domain is the account's own
+                // endpoint, so the rule does not reach it.
+                if custom_domain
+                    && validation_certificate_arn.is_none()
+                    && !crate::state::chains_to_a_certificate_authority(presented)
+                {
+                    return Err(
+                        CreateDomainConfigurationErrorModeled::InvalidRequestException(
+                            InvalidRequestException {
+                                message: Some(
+                                    crate::state::UNVALIDATED_SERVER_CERTIFICATE_MESSAGE
+                                        .to_string(),
                                 ),
                             },
                         )
@@ -317,7 +351,7 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
             domain_configuration_arn,
             domain_name: input.domain_name,
             server_certificate_arns,
-            validation_certificate_arn: input.validation_certificate_arn,
+            validation_certificate_arn,
             authorizer_config: input.authorizer_config,
             service_type: input
                 .service_type

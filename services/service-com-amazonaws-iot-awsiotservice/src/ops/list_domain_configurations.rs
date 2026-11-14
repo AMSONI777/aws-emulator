@@ -1,15 +1,6 @@
 // SPDX-License-Identifier: CC0-1.0
 
 //! @op ListDomainConfigurations
-//! SCAFFOLDED, NOT IMPLEMENTED: this operation answers HTTP 501 `NotImplemented` and
-//! asserts NOTHING about `ListDomainConfigurations`'s real behaviour. Implement it here — this is
-//! the ONLY file to touch for this operation.
-//!
-//! A 501 from this operation means "nobody has written it yet", never "the emulator is
-//! broken". Replace the `Err(..)` in [`ListDomainConfigurations::handle`] with real behaviour and
-//! delete the SCAFFOLDED marker line above; that line is the machine-readable record of
-//! which operations are still stubs (`grep -rl '^//! SCAFFOLDED, NOT IMPLEMENTED:' */src/ops/`),
-//! so leaving it on an implemented operation under-reports progress.
 //!
 //! ## Shape of an operation
 //!
@@ -151,18 +142,84 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         input: Self::Input,
         ctx: &smithy_server_runtime::OperationContext<'_>,
     ) -> Result<Self::Output, Self::Error> {
-        // The engine is reachable from `&self` (constructor-injected); `ctx` carries
-        // request metadata. Both are bound here so an implementer has them in scope.
-        let _ = (&input, ctx, &self.engine);
-        // Implement `ListDomainConfigurations` here, then delete the SCAFFOLDED marker at the top of
-        // this file. Return modeled failures as
-        // `Err(ListDomainConfigurationsErrorModeled::Variant(..).into())` — the `From` impl above lifts it.
-        //
-        // To refuse a bad request this operation models no error for, return
-        // `Err(crate::scaffolded::Scaffolded::validation("..."))` — a 400
-        // `ValidationException`. Do NOT answer 501 for it: 501 means "not written yet",
-        // not "bad request". Modeled constraints are already refused BEFORE this
-        // handler runs, so reaching here means the input satisfies every one of them.
-        Err(crate::scaffolded::Scaffolded::not_implemented("ListDomainConfigurations"))
+        let state = crate::state::service_state(&*self.engine).ok_or_else(|| {
+            ListDomainConfigurationsErrorModeled::InternalFailureException(
+                InternalFailureException {
+                    message: Some("the IoT emulator has no state store attached".to_string()),
+                },
+            )
+        })?;
+        let _ = ctx;
+
+        let store = state.lock();
+        // `serviceType` is "The type of service delivered by the endpoint", so a request
+        // naming one asks about the configurations of THAT type and a request naming none
+        // about every one the account holds. The store IS the registry keyed by name, so
+        // the listing is that order: `@paginated`, and a page boundary is only meaningful
+        // over a stable one.
+        let names: Vec<String> = store
+            .domain_configurations
+            .values()
+            .filter(|configuration| {
+                input
+                    .service_type
+                    .as_deref()
+                    .is_none_or(|service_type| configuration.service_type == service_type)
+            })
+            .map(|configuration| configuration.domain_configuration_name.clone())
+            .collect();
+
+        // One page of that order, resumed after the position the caller's own marker
+        // names ([`crate::state::page_of`]) — the same paging every other `@paginated`
+        // listing of this service uses, so a token is read one way. The scope carries the
+        // filter, so a marker from one filtered listing does not resume another.
+        let scope = format!(
+            "domain-configurations/{}",
+            input.service_type.as_deref().unwrap_or("")
+        );
+        let resume_after = match input.marker.as_deref() {
+            None => None,
+            Some(marker) => {
+                let Some(resume_after) = crate::state::decode_page_marker(marker, &scope) else {
+                    return Err(
+                        ListDomainConfigurationsErrorModeled::InvalidRequestException(
+                            InvalidRequestException {
+                                message: Some(
+                                    "marker is not a marker this listing issued".to_string(),
+                                ),
+                            },
+                        )
+                        .into(),
+                    );
+                };
+                Some(resume_after)
+            }
+        };
+        // The page is at most what the listing admits; the clamp is defensive rather
+        // than load-bearing, keeping the page inside the modelled `pageSize` range
+        // without depending on a validation performed outside this module.
+        let page_size = input
+            .page_size
+            .map_or(crate::state::MAX_LIST_PAGE_SIZE, |page_size| {
+                page_size.clamp(1, crate::state::MAX_LIST_PAGE_SIZE)
+            }) as usize;
+        let (page, next_marker) =
+            crate::state::page_of(names, &scope, resume_after.as_deref(), page_size);
+
+        // Each entry is projected from the stored record, so what a listing reports and
+        // what `DescribeDomainConfiguration` reports cannot drift.
+        Ok(ListDomainConfigurationsOutput {
+            domain_configurations: Some(
+                page.into_iter()
+                    .filter_map(|name| {
+                        store
+                            .domain_configurations
+                            .get(&name)
+                            .map(crate::state::RegisteredDomainConfiguration::to_summary)
+                    })
+                    .collect(),
+            ),
+            next_marker,
+        })
     }
 }

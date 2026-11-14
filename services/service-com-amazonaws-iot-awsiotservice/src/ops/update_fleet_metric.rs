@@ -1,15 +1,6 @@
 // SPDX-License-Identifier: CC0-1.0
 
 //! @op UpdateFleetMetric
-//! SCAFFOLDED, NOT IMPLEMENTED: this operation answers HTTP 501 `NotImplemented` and
-//! asserts NOTHING about `UpdateFleetMetric`'s real behaviour. Implement it here — this is
-//! the ONLY file to touch for this operation.
-//!
-//! A 501 from this operation means "nobody has written it yet", never "the emulator is
-//! broken". Replace the `Err(..)` in [`UpdateFleetMetric::handle`] with real behaviour and
-//! delete the SCAFFOLDED marker line above; that line is the machine-readable record of
-//! which operations are still stubs (`grep -rl '^//! SCAFFOLDED, NOT IMPLEMENTED:' */src/ops/`),
-//! so leaving it on an implemented operation under-reports progress.
 //!
 //! ## Shape of an operation
 //!
@@ -193,18 +184,180 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         input: Self::Input,
         ctx: &smithy_server_runtime::OperationContext<'_>,
     ) -> Result<Self::Output, Self::Error> {
-        // The engine is reachable from `&self` (constructor-injected); `ctx` carries
-        // request metadata. Both are bound here so an implementer has them in scope.
-        let _ = (&input, ctx, &self.engine);
-        // Implement `UpdateFleetMetric` here, then delete the SCAFFOLDED marker at the top of
-        // this file. Return modeled failures as
-        // `Err(UpdateFleetMetricErrorModeled::Variant(..).into())` — the `From` impl above lifts it.
-        //
-        // To refuse a bad request this operation models no error for, return
-        // `Err(crate::scaffolded::Scaffolded::validation("..."))` — a 400
-        // `ValidationException`. Do NOT answer 501 for it: 501 means "not written yet",
-        // not "bad request". Modeled constraints are already refused BEFORE this
-        // handler runs, so reaching here means the input satisfies every one of them.
-        Err(crate::scaffolded::Scaffolded::not_implemented("UpdateFleetMetric"))
+        let state = crate::state::service_state(&*self.engine).ok_or_else(|| {
+            UpdateFleetMetricErrorModeled::InternalFailureException(InternalFailureException {
+                message: Some("the IoT emulator has no state store attached".to_string()),
+            })
+        })?;
+        let _ = ctx;
+        let now = ::std::time::SystemTime::now();
+
+        // A name outside the set of indexes this service recognises is a request it
+        // cannot act on at all, read ahead of any lookup — the same rule, in the same
+        // wording, the create reads its `indexName` under.
+        if !crate::state::FLEET_INDEX_NAMES.contains(&input.index_name.as_str()) {
+            return Err(UpdateFleetMetricErrorModeled::InvalidRequestException(
+                InvalidRequestException {
+                    message: Some(crate::state::unrecognized_index_name_message(
+                        &input.index_name,
+                    )),
+                },
+            )
+            .into());
+        }
+
+        let mut store = state.lock();
+
+        // An update addresses an EXISTING metric — "The name of the fleet metric to
+        // update" — so a name the account holds none under is the modelled
+        // `ResourceNotFoundException` (HTTP 404).
+        let Some(existing) = store.fleet_metrics.get(&input.metric_name) else {
+            return Err(UpdateFleetMetricErrorModeled::ResourceNotFoundException(
+                ResourceNotFoundException {
+                    message: Some(crate::state::missing_fleet_metric_message(
+                        &input.metric_name,
+                    )),
+                },
+            )
+            .into());
+        };
+
+        // `expectedVersion` is the version the caller believes the metric is at, so a
+        // request naming a different one is acting on a record someone else has moved:
+        // the modelled `VersionConflictException` (HTTP 409), and nothing is written —
+        // the same rule, in the same wording, the delete reads it under.
+        if let Some(expected_version) = input.expected_version {
+            if expected_version != existing.version {
+                return Err(UpdateFleetMetricErrorModeled::VersionConflictException(
+                    VersionConflictException {
+                        message: Some(format!(
+                            "Version {expected_version} of fleet metric {} does not match the \
+                             current version {}",
+                            existing.metric_name, existing.version
+                        )),
+                    },
+                )
+                .into());
+            }
+        }
+
+        // What the metric is configured with afterwards: every member the request
+        // carries replaces the stored one, and every member it leaves out keeps the value
+        // the last write recorded — so an update of the aggregation alone does not drop
+        // the query the metric was created with.
+        let mut configuration = existing.configuration.clone();
+        if let Some(query_string) = input.query_string.clone() {
+            configuration.query_string = query_string;
+        }
+        if let Some(aggregation_type) = input.aggregation_type.clone() {
+            configuration.aggregation_name = aggregation_type.name;
+            configuration.aggregation_values = aggregation_type.values.unwrap_or_default();
+        }
+        if let Some(period) = input.period {
+            configuration.period = period;
+        }
+        if let Some(aggregation_field) = input.aggregation_field.clone() {
+            configuration.aggregation_field = aggregation_field;
+        }
+        if input.description.is_some() {
+            configuration.description = input.description.clone();
+        }
+        if input.query_version.is_some() {
+            configuration.query_version = input.query_version.clone();
+        }
+        if input.unit.is_some() {
+            configuration.unit = input.unit.clone();
+        }
+        configuration.index_name = input.index_name.clone();
+
+        // The configuration an update records has to be one this service can compute,
+        // read under exactly the rules the create reads its own under: the aggregation
+        // and its values, the query string, and the field over the account's indexing
+        // configuration — so what a metric may be updated to and what it may be created
+        // as cannot drift.
+        let aggregation = AggregationType {
+            name: configuration.aggregation_name.clone(),
+            values: Some(configuration.aggregation_values.clone()),
+        };
+        if let Err(rejection) = crate::state::validate_aggregation(
+            &aggregation,
+            configuration.period,
+            configuration.unit.as_deref(),
+        ) {
+            return Err(UpdateFleetMetricErrorModeled::InvalidRequestException(
+                InvalidRequestException {
+                    message: Some(rejection.message()),
+                },
+            )
+            .into());
+        }
+        if let Err(rejection) = crate::state::validate_query_string(&configuration.query_string) {
+            return Err(UpdateFleetMetricErrorModeled::InvalidQueryException(
+                InvalidQueryException {
+                    message: Some(rejection.message()),
+                },
+            )
+            .into());
+        }
+
+        // The index the metric reads decides whether it can be configured at all: no such
+        // index is the modelled `ResourceNotFoundException` (HTTP 404) and one still
+        // building the modelled `IndexNotReadyException` (HTTP 400).
+        match store.fleet_index_availability(&input.index_name, now) {
+            crate::state::FleetIndexAvailability::Missing => {
+                return Err(UpdateFleetMetricErrorModeled::ResourceNotFoundException(
+                    ResourceNotFoundException {
+                        message: Some(
+                            crate::state::missing_fleet_index_for_aggregation_message(
+                                &input.index_name,
+                            ),
+                        ),
+                    },
+                )
+                .into());
+            }
+            crate::state::FleetIndexAvailability::Building => {
+                return Err(UpdateFleetMetricErrorModeled::IndexNotReadyException(
+                    IndexNotReadyException {
+                        message: Some(crate::state::index_not_ready_message(
+                            &input.index_name,
+                            store.fleet_index_status(&input.index_name, now),
+                        )),
+                    },
+                )
+                .into());
+            }
+            crate::state::FleetIndexAvailability::Ready => {}
+        }
+        if let Err(rejection) = store.validate_aggregation_field(
+            &input.index_name,
+            &configuration.aggregation_field,
+            &aggregation,
+        ) {
+            return Err(UpdateFleetMetricErrorModeled::InvalidRequestException(
+                InvalidRequestException {
+                    message: Some(rejection.message()),
+                },
+            )
+            .into());
+        }
+
+        // The write: the record carries the new configuration, is one version further on
+        // — which is what the next `expectedVersion` has to name — and records when it
+        // last changed, so the next `DescribeFleetMetric` reports exactly this.
+        let Some(metric) = store.fleet_metrics.get_mut(&input.metric_name) else {
+            return Err(UpdateFleetMetricErrorModeled::ResourceNotFoundException(
+                ResourceNotFoundException {
+                    message: Some(crate::state::missing_fleet_metric_message(
+                        &input.metric_name,
+                    )),
+                },
+            )
+            .into());
+        };
+        metric.configuration = configuration;
+        metric.last_modified_date = now;
+        metric.version = metric.version.saturating_add(1);
+        Ok(UpdateFleetMetricOutput)
     }
 }

@@ -1,15 +1,6 @@
 // SPDX-License-Identifier: CC0-1.0
 
 //! @op CancelAuditTask
-//! SCAFFOLDED, NOT IMPLEMENTED: this operation answers HTTP 501 `NotImplemented` and
-//! asserts NOTHING about `CancelAuditTask`'s real behaviour. Implement it here — this is
-//! the ONLY file to touch for this operation.
-//!
-//! A 501 from this operation means "nobody has written it yet", never "the emulator is
-//! broken". Replace the `Err(..)` in [`CancelAuditTask::handle`] with real behaviour and
-//! delete the SCAFFOLDED marker line above; that line is the machine-readable record of
-//! which operations are still stubs (`grep -rl '^//! SCAFFOLDED, NOT IMPLEMENTED:' */src/ops/`),
-//! so leaving it on an implemented operation under-reports progress.
 //!
 //! ## Shape of an operation
 //!
@@ -139,18 +130,45 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         input: Self::Input,
         ctx: &smithy_server_runtime::OperationContext<'_>,
     ) -> Result<Self::Output, Self::Error> {
-        // The engine is reachable from `&self` (constructor-injected); `ctx` carries
-        // request metadata. Both are bound here so an implementer has them in scope.
-        let _ = (&input, ctx, &self.engine);
-        // Implement `CancelAuditTask` here, then delete the SCAFFOLDED marker at the top of
-        // this file. Return modeled failures as
-        // `Err(CancelAuditTaskErrorModeled::Variant(..).into())` — the `From` impl above lifts it.
-        //
-        // To refuse a bad request this operation models no error for, return
-        // `Err(crate::scaffolded::Scaffolded::validation("..."))` — a 400
-        // `ValidationException`. Do NOT answer 501 for it: 501 means "not written yet",
-        // not "bad request". Modeled constraints are already refused BEFORE this
-        // handler runs, so reaching here means the input satisfies every one of them.
-        Err(crate::scaffolded::Scaffolded::not_implemented("CancelAuditTask"))
+        let state = crate::state::service_state(&*self.engine).ok_or_else(|| {
+            CancelAuditTaskErrorModeled::InternalFailureException(InternalFailureException {
+                message: Some("the IoT emulator has no state store attached".to_string()),
+            })
+        })?;
+        let _ = ctx;
+
+        let now = ::std::time::SystemTime::now();
+        let mut store = state.lock();
+        // A cancel of an audit this account never started names no task at all: the
+        // modelled `ResourceNotFoundException` (HTTP 404), in the sentence every reader of
+        // an audit task states a miss with.
+        let Some(task) = store.audit_tasks.get_mut(&input.task_id) else {
+            return Err(
+                CancelAuditTaskErrorModeled::ResourceNotFoundException(ResourceNotFoundException {
+                    message: Some(crate::state::missing_audit_task_message(&input.task_id)),
+                })
+                .into(),
+            );
+        };
+
+        // "Cancels an audit that is in progress [...] If the audit isn't in progress, an
+        // "InvalidRequestException" occurs": the status the task has reached is read from
+        // the record and the clock, so an audit the clock already completed — and one a
+        // caller already cancelled — is refused with the modelled
+        // `InvalidRequestException` (HTTP 400) and KEEPS the status it reached.
+        if let Some(message) = task.cancellation_refusal(now) {
+            return Err(
+                CancelAuditTaskErrorModeled::InvalidRequestException(InvalidRequestException {
+                    message: Some(message),
+                })
+                .into(),
+            );
+        }
+
+        // The cancel is the write: from here the task reports the cancelled status and
+        // every check it targeted is one the cancel stopped, which is what the next
+        // `DescribeAuditTask` reads.
+        task.cancel(now);
+        Ok(CancelAuditTaskOutput {})
     }
 }

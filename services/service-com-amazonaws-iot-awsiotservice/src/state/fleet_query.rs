@@ -105,8 +105,12 @@ impl QueryStringRejection {
 }
 
 /// One piece of a query, as the single pass below reads it.
+///
+/// Read by the evaluator beside this reader ([`super::fleet_search`]), which decides
+/// one indexed document against these tokens — so the query is PARSED once, here, and
+/// what an aggregation accepts and what a fleet metric accepts cannot drift.
 #[derive(Debug, PartialEq, Eq)]
-enum Token {
+pub(crate) enum Token {
     /// A `(` or a `)`.
     GroupOpen,
     /// The closing half of the above.
@@ -137,7 +141,7 @@ pub fn validate_query_string(query: &str) -> Result<(), QueryStringRejection> {
 
 /// Split `query` into [`Token`]s, refusing the delimiter faults a single pass sees:
 /// an unterminated quote, an unclosed range and parentheses that do not balance.
-fn tokenize(query: &str) -> Result<Vec<Token>, QueryStringRejection> {
+pub(crate) fn tokenize(query: &str) -> Result<Vec<Token>, QueryStringRejection> {
     let mut tokens = Vec::new();
     let mut pending = String::new();
     let mut depth = 0usize;

@@ -3286,3 +3286,5 @@ mod all_rs_inner_doc_comments_precede_the_first_item;
 // first item, so a `//!` line in this appended tail is `E0753` and compiles nothing.)
 // this file and for every service crate's `tests/all.rs`. (An ordinary comment, for the
 // reason the lines above record.)
+// leaving a note here. (Mid-file, so a plain comment: an inner doc comment is only
+// accepted before the first item of a module.)
