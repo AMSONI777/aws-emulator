@@ -31,12 +31,13 @@
 use serde_json::{json, Value};
 
 use super::data_source_attachment_authorization::{given_policy, given_principals, Principal};
-use super::data_source_attachments::application;
 use super::data_source_registry::created_domain;
 use super::domain_lifecycle::{
     error_code, string_member, Answer, Emulator, PREFIX, RECORDED_NOT_FOUND_STATUS, REGION,
 };
 use super::index_authorization::{allow, assert_refused, Refusal};
+use super::package_associations::PACKAGE_CONTENT;
+use super::saved_object_migrations::active_application;
 
 /// The operations addressed by PACKAGE id, which this service's IAM actions decide
 /// against the account's DOMAIN resource: a package is not a domain, and its content is
@@ -69,7 +70,7 @@ const DOMAIN: &str = "package-authz-domain";
 
 /// The data source a started migration exports from: the search-collection ARN
 /// `StartMigration` validates a source against.
-const MIGRATION_SOURCE: &str = "arn:aws:aoss:us-east-1:123456789012:collection/authzobjects";
+const MIGRATION_SOURCE: &str = "arn:aws:aoss:us-east-1:000000000000:collection/authzobjects";
 
 /// A `PackageID` of the modelled form that names no package of this account
 /// (`PackageID`'s pattern is `^([FG][0-9]+)$|^(pkg-[a-f0-9]+)$`).
@@ -116,6 +117,10 @@ async fn surface_call(
     application_id: &str,
 ) -> Answer {
     let source = json!({ "S3BucketName": "my-package-bucket", "S3Key": "packages/authz.zip" });
+    // The object a create or an update IMPORTS is put at that location first: an import
+    // whose Amazon S3 location holds no object is refused, and what these rows are about is
+    // the AUTHORIZATION decision.
+    emulator.given_object("my-package-bucket", "packages/authz.zip", PACKAGE_CONTENT);
     match operation {
         "CreatePackage" => {
             emulator
@@ -279,7 +284,12 @@ impl Fixture {
         let emulator = Emulator::new();
         given_principals(&emulator);
         created_domain(&emulator, DOMAIN).await;
-        let application_id = application(&emulator, "packageauthz").await;
+        let application_id = active_application(&emulator, "packageauthz").await;
+        emulator.given_object(
+            "my-package-bucket",
+            &format!("packages/{package_name}.txt"),
+            PACKAGE_CONTENT,
+        );
         let created = emulator
             .call(
                 "POST",

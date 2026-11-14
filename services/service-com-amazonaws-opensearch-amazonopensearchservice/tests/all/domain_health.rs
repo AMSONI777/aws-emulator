@@ -33,7 +33,9 @@ use std::collections::BTreeSet;
 
 use serde_json::{json, Value};
 
-use super::domain_lifecycle::{error_code, string_member, Answer, Emulator, PREFIX, SETTLE_WAIT};
+use super::domain_lifecycle::{
+    error_code, settled_domain, string_member, Answer, Emulator, PREFIX, SETTLE_WAIT,
+};
 
 /// The Region the test requests are signed for — the one the domains' Availability
 /// Zones are named from.
@@ -264,25 +266,25 @@ fn cluster_shapes() -> Vec<Row> {
             zones: vec![],
         },
         Row {
-            case: "seven data nodes over three zones",
+            case: "nine data nodes over three zones",
             cluster: json!({
-                "InstanceCount": 7,
+                "InstanceCount": 9,
                 "ZoneAwarenessEnabled": true,
                 "ZoneAwarenessConfig": { "AvailabilityZoneCount": 3 },
             }),
             zone_count: "3",
             active_zone_count: "3",
             standby_zone_count: "0",
-            data_node_count: "7",
+            data_node_count: "9",
             dedicated_master: false,
-            master_eligible_node_count: "7",
+            master_eligible_node_count: "9",
             warm_node_count: "0",
-            // An uneven count spreads as evenly as it can: the remainder goes to the
-            // first zones.
+            // The count divides by the number of zones, which is what a zone-aware
+            // cluster's count does: each zone holds the same number of data nodes.
             zones: vec![
                 zone("us-east-1a", "Active", "3"),
-                zone("us-east-1b", "Active", "2"),
-                zone("us-east-1c", "Active", "2"),
+                zone("us-east-1b", "Active", "3"),
+                zone("us-east-1c", "Active", "3"),
             ],
         },
         Row {
@@ -323,35 +325,11 @@ fn cluster_shapes() -> Vec<Row> {
 }
 
 /// A zone count past each published bound of `ZoneAwarenessConfig$AvailabilityZoneCount`
-/// ("Valid values are `2` and `3`"), and the largest one a caller can even send.
-///
-/// None of them names a supported number of zones, so each reports the modelled
-/// `NotAvailable` and no zone information — which is also what keeps the answer
-/// bounded, since the count is a request field the model puts no range on.
+/// ("Valid values are `2` and `3`") is REFUSED by both write paths, which
+/// [`super::documented_request_rules`] asserts — so no domain runs one and this suite has no
+/// row for it.
 fn out_of_range_zone_counts() -> Vec<Row> {
-    [
-        ("one zone", 1),
-        ("four zones", 4),
-        ("the largest integer count", i32::MAX),
-    ]
-    .into_iter()
-    .map(|(case, zones)| Row {
-        case,
-        cluster: json!({
-            "InstanceCount": 2,
-            "ZoneAwarenessEnabled": true,
-            "ZoneAwarenessConfig": { "AvailabilityZoneCount": zones },
-        }),
-        zone_count: NOT_AVAILABLE,
-        active_zone_count: NOT_AVAILABLE,
-        standby_zone_count: "0",
-        data_node_count: "2",
-        dedicated_master: false,
-        master_eligible_node_count: "2",
-        warm_node_count: "0",
-        zones: vec![],
-    })
-    .collect()
+    Vec::new()
 }
 
 #[tokio::test]
@@ -614,6 +592,12 @@ async fn the_reported_zones_account_for_every_configured_data_node() {
 
     for nodes in node_counts {
         for zones in zone_counts {
+            // Zone awareness spreads a cluster's data nodes EVENLY across the zones it is
+            // placed in, so a count that does not divide by the zone count describes a
+            // deployment the service does not provision: the sweep names the counts it does.
+            if zones > 1 && nodes % zones != 0 {
+                continue;
+            }
             let name = format!("sweep-{nodes}-{zones}");
             let case = format!("{nodes} data node(s) over {zones} zone(s)");
             let cluster = if zones == 1 {
@@ -629,7 +613,11 @@ async fn the_reported_zones_account_for_every_configured_data_node() {
             cases.push((case, name, nodes, zones));
         }
     }
-    tokio::time::sleep(SETTLE_WAIT).await;
+    // Each domain's health is read once its cluster is up, which is the CONDITION this
+    // polls for rather than a stretch of time it waits out.
+    for (_, name, _, _) in &cases {
+        settled_domain(&emulator, name).await;
+    }
 
     for (case, name, nodes, zones) in &cases {
         let body = health_body(&emulator, case, name).await;

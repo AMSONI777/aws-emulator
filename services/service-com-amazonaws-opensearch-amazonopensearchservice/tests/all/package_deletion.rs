@@ -37,7 +37,9 @@ use service_com_amazonaws_opensearch_amazonopensearchservice::state::{
 };
 
 use super::domain_lifecycle::{create_baseline, error_code, Answer, Emulator, PREFIX, SETTLE_WAIT};
-use super::package_associations::{member, PACKAGE_TYPES, SERVICE_PACKAGE_ID, UNKNOWN_PACKAGE_ID};
+use super::package_associations::{
+    member, PACKAGE_CONTENT, PACKAGE_TYPES, SERVICE_PACKAGE_ID, UNKNOWN_PACKAGE_ID,
+};
 use super::package_dissociation::{associate, dissociate_many, listed_status, with_associations};
 
 /// `DeletePackage`: `DELETE /2021-01-01/packages/{PackageID}`.
@@ -50,7 +52,17 @@ async fn delete(emulator: &Emulator, package_id: &str) -> Answer {
 /// `CreatePackage`: `POST /2021-01-01/packages`. The table varies the description,
 /// which the sibling suites' fixed-shape helper does not carry, so this suite posts the
 /// body it builds.
+///
+/// The object the create IMPORTS is put at the Amazon S3 location the body names first
+/// ([`Emulator::given_object`]): a create whose location holds no object is refused, and
+/// what these rows are about is the DELETE rather than the content.
 async fn create(emulator: &Emulator, body: Value) -> Answer {
+    if let (Some(bucket), Some(key)) = (
+        body["PackageSource"]["S3BucketName"].as_str(),
+        body["PackageSource"]["S3Key"].as_str(),
+    ) {
+        emulator.given_object(bucket, key, PACKAGE_CONTENT);
+    }
     emulator
         .call("POST", &format!("{PREFIX}/packages"), Some(body))
         .await
@@ -60,6 +72,7 @@ async fn create(emulator: &Emulator, body: Value) -> Answer {
 /// version of a package's content, so a row can delete a package with a longer version
 /// history than the create left it with.
 async fn update(emulator: &Emulator, package_id: &str, case: &str) {
+    emulator.given_object("my-package-bucket", "next.txt", PACKAGE_CONTENT);
     let answer = emulator
         .call(
             "POST",

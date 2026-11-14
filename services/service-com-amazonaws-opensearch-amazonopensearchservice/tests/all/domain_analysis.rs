@@ -26,8 +26,8 @@
 //! second copy of one.
 
 use serde_json::{json, Value};
+use service_com_amazonaws_opensearch_amazonopensearchservice::state;
 use service_com_amazonaws_opensearch_amazonopensearchservice::state::PACKAGE_TYPE_TXT_DICTIONARY;
-use service_com_amazonaws_s3_amazons3::state as s3;
 
 use super::domain_lifecycle::{Answer, Emulator, REGION, SETTLE_WAIT};
 use super::domain_rest_data_plane::{error_type, rest_prefixed};
@@ -44,21 +44,36 @@ const PACKAGED_FIELD: &str = "pkg_text";
 const CONTROL_FIELD: &str = "plain_text";
 
 /// Put `content` at the S3 location the create of the package `name` imports from, as
-/// `s3:PutObject` records an object.
+/// `s3:PutObject` records an object — through the ONE store write this crate's suites share
+/// ([`Emulator::given_object`]).
 fn given_dictionary(emulator: &Emulator, name: &str, content: &str) {
-    let store = s3::service_state(&**emulator.engine()).expect("the S3 store");
+    emulator.given_object(PACKAGE_BUCKET, &package_key(name), content);
+}
+
+/// Put the index `index` of `domain` into the store carrying `schema`, the way a handler
+/// reaches it.
+///
+/// For the state no create path reaches any more: an index whose analysis settings name a
+/// chain the cluster cannot build is refused by `CreateIndex` and by the cluster's own REST
+/// create alike, so a suite about what the ANALYZE and SEARCH paths answer for such an index
+/// writes the record itself — the same seam a suite uses for any state no implemented
+/// operation can reach.
+fn given_index(emulator: &Emulator, domain: &str, index: &str, schema: &Value) {
+    let store = emulator.store();
     let mut guard = store.lock();
-    let _ = guard.create_bucket(PACKAGE_BUCKET, REGION);
-    let written = guard.put_object(
-        PACKAGE_BUCKET,
-        &package_key(name),
-        s3::Object::stored(content.as_bytes().to_vec(), Some("text/plain".to_string())),
-    );
-    assert!(
-        written.is_some(),
-        "case \"the package's own content\": expected S3 to hold the object at \
-         {PACKAGE_BUCKET}/{}, got {written:?}",
-        package_key(name)
+    let held = guard
+        .domains
+        .get_mut(domain)
+        .unwrap_or_else(|| panic!("case the stored index {index}: expected the domain {domain}"));
+    held.indexes.insert(
+        index.to_string(),
+        state::Index {
+            index_name: index.to_string(),
+            schema: state::document_from_json(schema),
+            documents: std::collections::BTreeMap::new(),
+            aliases: std::collections::BTreeMap::new(),
+            next_seq_no: 0,
+        },
     );
 }
 
@@ -816,26 +831,44 @@ async fn a_chain_the_engine_cannot_build_is_refused_by_both_the_analyze_api_and_
     ];
     for (case, analyzer, definition, reason) in rows {
         let index = format!("index-{analyzer}");
-        created_index(
+        let schema = json!({
+            "settings": {
+                "analysis": {
+                    "tokenizer": {
+                        "odd_pattern": { "type": "pattern", "pattern": "[-_]" },
+                    },
+                    "analyzer": { *analyzer: definition },
+                },
+            },
+            "mappings": {
+                "properties": { PACKAGED_FIELD: { "type": "text", "analyzer": analyzer } },
+            },
+        });
+        // The index is put into the store the way a handler reaches it, because NEITHER
+        // create path stores a chain the cluster cannot build any more — the control plane's
+        // `CreateIndex` and the cluster's own REST create both refuse these settings. What
+        // these rows are about is what the ANALYZE and SEARCH paths answer for an index that
+        // CARRIES such a chain, which is the state this seam reaches.
+        given_index(&emulator, domain, &index, &schema);
+
+        // The create path refuses the same settings, which is where that rule is asserted
+        // ([`super::documented_request_rules`]): the chain under test is the stored one.
+        let refused_create = rest_prefixed(
             &emulator,
             domain,
-            &index,
-            &json!({
-                "settings": {
-                    "analysis": {
-                        "tokenizer": {
-                            "odd_pattern": { "type": "pattern", "pattern": "[-_]" },
-                        },
-                        "analyzer": { *analyzer: definition },
-                    },
-                },
-                "mappings": {
-                    "properties": { PACKAGED_FIELD: { "type": "text", "analyzer": analyzer } },
-                },
-            }),
-            case,
+            "PUT",
+            &format!("/{index}-create"),
+            Some(schema.clone()),
         )
         .await;
+        assert_eq!(
+            (refused_create.status, error_type(&refused_create)),
+            (400, "illegal_argument_exception".to_string()),
+            "case {case:?}: expected the cluster's own create to refuse the chain, got {} with \
+             {:?}",
+            refused_create.status,
+            refused_create.body
+        );
 
         // The analyze API refuses it...
         let analyzed = analyze(

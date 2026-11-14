@@ -38,7 +38,7 @@ use serde_json::{json, Value};
 
 use super::application_updates::{create_application, get_application};
 use super::domain_lifecycle::{
-    error_code, string_member, Answer, Emulator, DEFAULT_ACCESS_KEY_ID, PREFIX,
+    error_code, poll_until, string_member, Answer, Emulator, DEFAULT_ACCESS_KEY_ID, PREFIX,
     RECORDED_NOT_FOUND_STATUS, SETTLE_WAIT,
 };
 use super::migration_listing::list_migrations;
@@ -156,7 +156,7 @@ async fn start_migration(emulator: &Emulator, application_id: &str) -> Answer {
                 "migrationOptions": {
                     "source": {
                         "datasourceArn":
-                            "arn:aws:aoss:us-east-1:123456789012:collection/identityprobe",
+                            "arn:aws:aoss:us-east-1:000000000000:collection/identityprobe",
                     },
                     "workspace": { "workspaceId": "ws-identity" },
                 },
@@ -430,6 +430,12 @@ async fn a_migration_into_an_application_this_account_does_not_hold_states_that_
     // to be served for an id that resolves.
     let created = create_application(&emulator, json!({ "name": "migration-identity-ui" })).await;
     let held = string_member(&created.body, "id", "the held application");
+    // A migration is started INTO an application's workspace, so the start is taken only on
+    // an application that is ACTIVE: the condition is polled for rather than waited out.
+    poll_until("the held application becoming active", || async {
+        get_application(&emulator, &held).await.body["status"].as_str() == Some("ACTIVE")
+    })
+    .await;
     let served = start_migration(&emulator, &held).await;
     assert_eq!(
         served.status, 200,

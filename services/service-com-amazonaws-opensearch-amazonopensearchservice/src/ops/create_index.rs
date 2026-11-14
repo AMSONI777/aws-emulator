@@ -303,6 +303,22 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
             .into());
         }
 
+        // And an analyzer the settings DEFINE has to be one the cluster can BUILD: a
+        // definition naming a tokenizer, a token filter or a built-in analyzer this engine
+        // registers none of cannot be assembled, so an index carrying it could analyze no
+        // text through it. It is refused with the engine's own sentence for what could not
+        // be resolved ([`crate::state::analysis::Unresolved::message`]) — the same sentence
+        // the analyze API answers the same chain with — and nothing is stored.
+        if let Some((_, unresolved)) =
+            crate::state::analysis::IndexAnalysis::of(&input.index_schema)
+                .unbuildable_analyzer(&crate::state::analysis::PackageFiles::default())
+        {
+            return Err(CreateIndexErrorModeled::ValidationException(ValidationException {
+                message: Some(unresolved.message(false)),
+            })
+            .into());
+        }
+
         domain.indexes.insert(
             input.index_name.clone(),
             Index {

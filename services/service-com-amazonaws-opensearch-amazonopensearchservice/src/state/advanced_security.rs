@@ -56,6 +56,38 @@ const NODE_TO_NODE_ENCRYPTION_REQUIRED: &str =
 const ENFORCE_HTTPS_REQUIRED: &str =
     "You must enable EnforceHTTPS in the domain endpoint options to use advanced security.";
 
+/// What the service answers a request that switches the internal user database on without
+/// the credentials that database's master user is created from.
+///
+/// `MasterUserOptions$MasterUserName` and `$MasterUserPassword` are each documented "only
+/// specify if `InternalUserDatabaseEnabled` is `true`", so they are exactly what that
+/// database needs: the sentence names both members rather than the one that happens to be
+/// missing, because the pair is what has to be supplied.
+const MASTER_USER_CREDENTIALS_REQUIRED: &str =
+    "You must specify a master user name and password in MasterUserOptions when the internal \
+     user database is enabled.";
+
+/// What the service answers a request that switches fine-grained access control on with the
+/// internal user database OFF and no master user ARN.
+///
+/// `MasterUserOptions$MasterUserARN` is documented "only specify if
+/// `InternalUserDatabaseEnabled` is `false`": with that database off the master user IS an
+/// IAM principal, so the ARN naming it is what has to be supplied.
+const MASTER_USER_ARN_REQUIRED: &str =
+    "You must specify a master user ARN in MasterUserOptions when the internal user database \
+     is not enabled.";
+
+/// What the service answers a request that names an IAM master user AND the internal user
+/// database — two different master users for one domain.
+const MASTER_USER_ARN_NOT_WITH_INTERNAL_DATABASE: &str =
+    "MasterUserARN can only be specified when the internal user database is not enabled.";
+
+/// What the service answers a request that names internal-database credentials while that
+/// database is off — the mirror of [`MASTER_USER_ARN_NOT_WITH_INTERNAL_DATABASE`].
+const MASTER_USER_CREDENTIALS_NOT_WITHOUT_INTERNAL_DATABASE: &str =
+    "MasterUserName and MasterUserPassword can only be specified when the internal user \
+     database is enabled.";
+
 /// What the service answers a master user ARN that names something no principal can
 /// authenticate as.
 ///
@@ -171,6 +203,55 @@ pub fn master_user_arn_refusal(
     }
     Some(ValidationException {
         message: Some(MASTER_USER_ARN_NOT_A_PRINCIPAL.to_string()),
+    })
+}
+
+/// Whether the master user the request names is the one the configuration it asks for is
+/// served by, and the refusal naming what is missing or what cannot be named otherwise.
+///
+/// A domain reached through fine-grained access control has exactly ONE master user, and
+/// which KIND of master user it is follows from `AdvancedSecurityOptionsInput$
+/// InternalUserDatabaseEnabled`: `MasterUserOptions$MasterUserName` and `$MasterUserPassword`
+/// are each documented "only specify if `InternalUserDatabaseEnabled` is `true`" and
+/// `$MasterUserARN` "only specify if `InternalUserDatabaseEnabled` is `false`". So a request
+/// that switches the boundary on either supplies the internal database's credentials or the
+/// ARN of the IAM principal that is the master — never neither, and never the pair that
+/// belongs to the other kind, which would name two master users for one domain.
+///
+/// Judged on the container the REQUEST carried, like the two rules above it: the stored shape
+/// keeps no `MasterUserOptions` at all (the password is never held), so the request is the
+/// whole of what a call says about the master user. `None` where the request switches the
+/// boundary on for nothing — a container that leaves `Enabled` out or false asks for no
+/// boundary, so it needs no master user.
+pub fn master_user_refusal(
+    options: Option<&AdvancedSecurityOptionsInput>,
+) -> Option<ValidationException> {
+    if !requested_enabled(options) {
+        return None;
+    }
+    let options = options?;
+    let master_user = options.master_user_options.as_ref();
+    let named = |member: Option<&String>| member.is_some_and(|value| !value.is_empty());
+    let arn = named(master_user.and_then(|master| master.master_user_arn.as_ref()));
+    let credentials = named(master_user.and_then(|master| master.master_user_name.as_ref()))
+        && named(master_user.and_then(|master| master.master_user_password.as_ref()));
+    let any_credential = named(master_user.and_then(|master| master.master_user_name.as_ref()))
+        || named(master_user.and_then(|master| master.master_user_password.as_ref()));
+    let message = if switched_on(options.internal_user_database_enabled) {
+        match (credentials, arn) {
+            (_, true) => MASTER_USER_ARN_NOT_WITH_INTERNAL_DATABASE,
+            (false, false) => MASTER_USER_CREDENTIALS_REQUIRED,
+            (true, false) => return None,
+        }
+    } else {
+        match (arn, any_credential) {
+            (_, true) => MASTER_USER_CREDENTIALS_NOT_WITHOUT_INTERNAL_DATABASE,
+            (false, false) => MASTER_USER_ARN_REQUIRED,
+            (true, false) => return None,
+        }
+    };
+    Some(ValidationException {
+        message: Some(message.to_string()),
     })
 }
 

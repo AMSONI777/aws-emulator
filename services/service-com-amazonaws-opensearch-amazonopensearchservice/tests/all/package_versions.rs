@@ -42,9 +42,24 @@ use service_com_amazonaws_opensearch_amazonopensearchservice::state::{
 };
 
 use super::domain_lifecycle::{error_code, Answer, Emulator, PREFIX, SETTLE_WAIT};
+use super::package_associations::PACKAGE_CONTENT;
+
+/// The object every create and update of this suite IMPORTS is put at the Amazon S3
+/// location the body names first ([`Emulator::given_object`]): an import whose location
+/// holds no object is refused, and what these rows are about is the version SEQUENCE rather
+/// than the content of a version.
+fn given_source(emulator: &Emulator, body: &Value) {
+    if let (Some(bucket), Some(key)) = (
+        body["PackageSource"]["S3BucketName"].as_str(),
+        body["PackageSource"]["S3Key"].as_str(),
+    ) {
+        emulator.given_object(bucket, key, PACKAGE_CONTENT);
+    }
+}
 
 /// `CreatePackage`: `POST /2021-01-01/packages`.
 async fn create(emulator: &Emulator, body: Value) -> Answer {
+    given_source(emulator, &body);
     emulator
         .call("POST", &format!("{PREFIX}/packages"), Some(body))
         .await
@@ -52,6 +67,7 @@ async fn create(emulator: &Emulator, body: Value) -> Answer {
 
 /// `UpdatePackage`: `POST /2021-01-01/packages/update`.
 async fn update(emulator: &Emulator, body: Value) -> Answer {
+    given_source(emulator, &body);
     emulator
         .call("POST", &format!("{PREFIX}/packages/update"), Some(body))
         .await

@@ -63,6 +63,10 @@ pub mod cognito_authentication;
 /// log group that exists — the check the create path and the update path share.
 pub mod log_destinations;
 
+/// What an ARN handed to this service as a data source has to name: whose resource it is,
+/// and which kinds of resource can be one at all.
+pub mod data_source_arns;
+
 /// Whether the custom endpoint a domain's endpoint options name is a fully qualified
 /// domain name — the one input constraint of those options the request boundary cannot
 /// apply, so the create path and the update path apply it before they resolve anything.

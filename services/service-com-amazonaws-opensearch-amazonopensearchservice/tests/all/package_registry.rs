@@ -37,9 +37,20 @@ use service_com_amazonaws_opensearch_amazonopensearchservice::state::{
 };
 
 use super::domain_lifecycle::{error_code, poll_until, Answer, Emulator, PREFIX};
+use super::package_associations::PACKAGE_CONTENT;
 
 /// `CreatePackage`: `POST /2021-01-01/packages`.
+///
+/// The object the create IMPORTS is put at the Amazon S3 location the body names first
+/// ([`Emulator::given_object`]): a create whose location holds no object is refused, and
+/// what these rows are about is the package record rather than its content.
 async fn create(emulator: &Emulator, body: Value) -> Answer {
+    if let (Some(bucket), Some(key)) = (
+        body["PackageSource"]["S3BucketName"].as_str(),
+        body["PackageSource"]["S3Key"].as_str(),
+    ) {
+        emulator.given_object(bucket, key, PACKAGE_CONTENT);
+    }
     emulator
         .call("POST", &format!("{PREFIX}/packages"), Some(body))
         .await

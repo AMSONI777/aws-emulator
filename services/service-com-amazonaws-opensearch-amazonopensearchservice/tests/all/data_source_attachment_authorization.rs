@@ -447,8 +447,9 @@ async fn an_attach_is_decided_by_the_policies_in_force_on_the_principal() {
             let case = format!("{} with {case}", principal.case());
             given_policy(&fixture.emulator, principal, policy.as_ref());
             // Each row attaches a data source of its own, so what a row is answered
-            // depends on its policy rather than on what an earlier row attached.
-            let data_source_arn = format!("arn:aws:glue:{REGION}:{account}:catalog/decide{index}");
+            // depends on its policy rather than on what an earlier row attached. A domain
+            // of this account, which is a KIND of data source this service attaches.
+            let data_source_arn = format!("arn:aws:es:{REGION}:{account}:domain/decide{index}");
             let answer = attachment_call(
                 &fixture.emulator,
                 principal.access_key_id(),
@@ -506,7 +507,7 @@ async fn a_grant_on_the_users_group_decides_its_request() {
         given_policy(&fixture.emulator, Principal::User, None);
         given_group_policy(&fixture.emulator, document);
         let data_source_arn = format!(
-            "arn:aws:glue:{REGION}:{}:catalog/group{index}",
+            "arn:aws:es:{REGION}:{}:domain/group{index}",
             ::engine::emulator_account_id()
         );
         let answer = attachment_call(

@@ -45,7 +45,8 @@ use service_com_amazonaws_opensearch_amazonopensearchservice::state::{
 };
 
 use super::domain_lifecycle::{
-    error_code, string_member, Answer, Emulator, PREFIX, RECORDED_NOT_FOUND_STATUS, SETTLE_WAIT,
+    error_code, poll_until, settled_domain, string_member, Answer, Emulator, PREFIX,
+    RECORDED_NOT_FOUND_STATUS, SETTLE_WAIT,
 };
 
 /// `AttachDataSource`: `POST /2021-01-01/opensearch/application/{id}/attachDataSource`.
@@ -670,13 +671,19 @@ async fn an_attach_of_a_data_source_this_account_does_not_hold_is_accepted_then_
     let emulator = Emulator::new();
     let id = application(&emulator, "absent-src-ui").await;
     let held = domain(&emulator, "absent-src-held").await;
-    tokio::time::sleep(SETTLE_WAIT).await;
+    // The held data source has to be ACTIVE for the row about it to be about its state
+    // rather than about its provisioning: the condition is polled for, not waited out.
+    settled_domain(&emulator, "absent-src-held").await;
 
-    // Every row has ARN syntax and satisfies `ARN`'s `@length(20..2048)`, and resolves
-    // to no data source this account holds. They differ in WHY it resolves to nothing —
-    // the resource name, the Region, the account, the service — and one sits at the
-    // published upper length bound, so the acceptance is not a property of one value.
-    let stem = "arn:aws:es:us-east-1:123456789012:domain/";
+    // Every row has ARN syntax and satisfies `ARN`'s `@length(20..2048)`, names a KIND of
+    // resource this service attaches, is held by the account this emulator serves, and
+    // resolves to no data source that account holds. They differ in WHY it resolves to
+    // nothing — the resource name, the Region, the resource type of this service — and one
+    // sits at the published upper length bound, so the acceptance is not a property of one
+    // value. An ARN of another ACCOUNT, or of a resource type that is no data source at
+    // all, is refused instead of attached ([`super::documented_request_rules`]).
+    let account = ::engine::emulator_account_id();
+    let stem = format!("arn:aws:es:us-east-1:{account}:domain/");
     let absent: Vec<(&str, String)> = vec![
         (
             "a resource name this account holds no domain under",
@@ -684,15 +691,11 @@ async fn an_attach_of_a_data_source_this_account_does_not_hold_is_accepted_then_
         ),
         (
             "a domain of this name in another Region",
-            "arn:aws:es:ap-southeast-2:123456789012:domain/absent-src-held".to_string(),
+            format!("arn:aws:es:ap-southeast-2:{account}:domain/absent-src-held"),
         ),
         (
-            "a domain of this name in another account",
-            "arn:aws:es:us-east-1:210987654321:domain/absent-src-held".to_string(),
-        ),
-        (
-            "another service's resource",
-            "arn:aws:s3:::a-bucket-that-is-no-domain".to_string(),
+            "a direct query data source this account holds none of",
+            format!("arn:aws:es:us-east-1:{account}:datasource/absent-src-datasource"),
         ),
         (
             "the longest value the length constraint allows",
@@ -743,8 +746,15 @@ async fn an_attach_of_a_data_source_this_account_does_not_hold_is_accepted_then_
     // Nothing asks for the move: the span the clock owed each attachment passes, and
     // every attachment whose data source this account does not hold has failed —
     // "attachment timed out or encountered a non-retryable error" — while the one that
-    // resolved stays attached.
-    tokio::time::sleep(SETTLE_WAIT).await;
+    // resolved stays attached. The CONDITION is polled for: no attachment of this
+    // application is pending any more.
+    poll_until("every attachment the clock owed a move landing", || async {
+        whole_set(&emulator, &id, "an attach that resolves to nothing")
+            .await
+            .iter()
+            .all(|entry| entry.status != ATTACHMENT_STATUS_PENDING)
+    })
+    .await;
     let settled = whole_set(&emulator, &id, "an attach that resolves to nothing").await;
     assert_eq!(
         settled.len(),

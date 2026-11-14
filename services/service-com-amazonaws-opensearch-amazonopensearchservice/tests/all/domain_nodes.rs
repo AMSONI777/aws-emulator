@@ -32,7 +32,9 @@ use std::collections::BTreeSet;
 use serde_json::{json, Value};
 use service_com_amazonaws_opensearch_amazonopensearchservice::state::NODE_INFORMATION_UNAVAILABLE;
 
-use super::domain_lifecycle::{error_code, Answer, Emulator, PREFIX, SETTLE_WAIT};
+use super::domain_lifecycle::{
+    error_code, settled_domain, Answer, Emulator, PREFIX, SETTLE_WAIT,
+};
 
 /// The Region the test requests are signed for — the one the domains' Availability
 /// Zones are named from.
@@ -78,8 +80,6 @@ enum Placement {
     /// How many of them sit in each of the domain's Availability Zones, in zone
     /// order; the last [`Case::standby_zones`] of those zones are the standby ones.
     Zones(&'static [i64]),
-    /// How many of them the configuration names no Availability Zone for.
-    Unzoned(i64),
 }
 
 /// One role's expected census: the `NodeType` it is reported under, where its nodes
@@ -216,11 +216,6 @@ fn expected(case: &Case) -> Vec<Node> {
                     }
                 }
             }
-            Placement::Unzoned(count) => {
-                for _ in 0..count {
-                    push(None, NOT_AVAILABLE);
-                }
-            }
         }
     }
     expected.sort();
@@ -341,13 +336,13 @@ fn cases() -> Vec<Case> {
             )],
         },
         Case {
-            // Three zones: the upper published value, with a count that does not
-            // divide evenly, so the first zones carry the remainder.
-            case: "three zones, an uneven spread, no EBS options",
+            // Three zones: the upper published value, with a count that divides by it, so
+            // each zone carries the same number of data nodes.
+            case: "three zones, an even spread over the upper published count",
             domain: "nodes-three-zones",
             cluster: json!({
                 "InstanceType": "c5.xlarge.search",
-                "InstanceCount": 5,
+                "InstanceCount": 6,
                 "ZoneAwarenessEnabled": true,
                 "ZoneAwarenessConfig": { "AvailabilityZoneCount": 3 },
             }),
@@ -356,7 +351,7 @@ fn cases() -> Vec<Case> {
             roles: vec![on_instance_storage(
                 "Data",
                 "c5.xlarge.search",
-                Placement::Zones(&[2, 2, 1]),
+                Placement::Zones(&[2, 2, 2]),
             )],
         },
         Case {
@@ -454,49 +449,6 @@ fn cases() -> Vec<Case> {
             roles: vec![],
         },
         Case {
-            // One past the upper published value of AvailabilityZoneCount: the
-            // configuration names no supported number of zones, so no node has a zone.
-            case: "zone awareness with a zone count above the published values",
-            domain: "nodes-zones-above",
-            cluster: json!({
-                "InstanceType": "r5.large.search",
-                "InstanceCount": 4,
-                "ZoneAwarenessEnabled": true,
-                "ZoneAwarenessConfig": { "AvailabilityZoneCount": 4 },
-            }),
-            ebs: Value::Null,
-            standby_zones: 0,
-            roles: vec![ExpectedRole {
-                node_type: "Data",
-                placement: Placement::Unzoned(4),
-                instance_type: Some("r5.large.search"),
-                storage_type: "instance",
-                storage_volume_type: None,
-                storage_size: None,
-            }],
-        },
-        Case {
-            // One below the lower published value.
-            case: "zone awareness with a zone count below the published values",
-            domain: "nodes-zones-below",
-            cluster: json!({
-                "InstanceType": "r5.xlarge.search",
-                "InstanceCount": 2,
-                "ZoneAwarenessEnabled": true,
-                "ZoneAwarenessConfig": { "AvailabilityZoneCount": 1 },
-            }),
-            ebs: Value::Null,
-            standby_zones: 0,
-            roles: vec![ExpectedRole {
-                node_type: "Data",
-                placement: Placement::Unzoned(2),
-                instance_type: Some("r5.xlarge.search"),
-                storage_type: "instance",
-                storage_volume_type: None,
-                storage_size: None,
-            }],
-        },
-        Case {
             // A count a caller sends may not size the answer past the census bound.
             case: "a node count past the census bound",
             domain: "nodes-past-bound",
@@ -554,13 +506,23 @@ fn cases() -> Vec<Case> {
             ],
         },
         Case {
-            // A data-node count of zero is a count, so the cluster has no data node.
-            case: "a data node count of zero",
-            domain: "nodes-zero-count",
-            cluster: json!({ "InstanceType": "t3.small.search", "InstanceCount": 0 }),
+            // A cluster whose only node is its DEDICATED MASTER: the data-node count is
+            // absent, so the cluster has no data node to report.
+            case: "no data node count at all",
+            domain: "nodes-no-count",
+            cluster: json!({
+                "InstanceType": "t3.small.search",
+                "DedicatedMasterEnabled": true,
+                "DedicatedMasterType": "c5.large.search",
+                "DedicatedMasterCount": 3,
+            }),
             ebs: Value::Null,
             standby_zones: 0,
-            roles: vec![],
+            roles: vec![on_instance_storage(
+                "Master",
+                "c5.large.search",
+                Placement::Zones(&[3]),
+            )],
         },
     ]
 }
@@ -626,7 +588,8 @@ async fn the_node_census_follows_the_record_through_an_update() {
         "case {case}: expected CreateDomain to answer 200, got {} with {:?}",
         answer.status, answer.body
     );
-    tokio::time::sleep(SETTLE_WAIT).await;
+    // The census is read once the cluster is up, which is the CONDITION this polls for.
+    settled_domain(&emulator, domain).await;
 
     let before = reported(
         &node_list(&describe_nodes(&emulator, domain).await, case),
@@ -652,7 +615,7 @@ async fn the_node_census_follows_the_record_through_an_update() {
             json!({
                 "ClusterConfig": {
                     "InstanceType": "r6g.xlarge.search",
-                    "InstanceCount": 3,
+                    "InstanceCount": 4,
                     "ZoneAwarenessEnabled": true,
                     "ZoneAwarenessConfig": { "AvailabilityZoneCount": 2 },
                 },
@@ -665,7 +628,9 @@ async fn the_node_census_follows_the_record_through_an_update() {
         "case {case}: expected UpdateDomainConfig to answer 200, got {} with {:?}",
         answer.status, answer.body
     );
-    tokio::time::sleep(SETTLE_WAIT).await;
+    // The census is read once the change has landed and nothing is in flight, which is the
+    // CONDITION this polls for.
+    settled_domain(&emulator, domain).await;
 
     let after = reported(
         &node_list(&describe_nodes(&emulator, domain).await, case),
@@ -680,7 +645,7 @@ async fn the_node_census_follows_the_record_through_an_update() {
         storage_volume_type: Some("gp3".to_string()),
         storage_size: Some("50".to_string()),
     };
-    let mut want_after = vec![node('a'), node('a'), node('b')];
+    let mut want_after = vec![node('a'), node('a'), node('b'), node('b')];
     want_after.sort();
     assert_eq!(
         after, want_after,

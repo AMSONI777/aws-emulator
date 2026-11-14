@@ -39,7 +39,7 @@ use service_com_amazonaws_opensearch_amazonopensearchservice::state::{
 };
 
 use super::domain_lifecycle::{error_code, Answer, Emulator, PREFIX, SETTLE_WAIT};
-use super::package_associations::UNKNOWN_PACKAGE_ID;
+use super::package_associations::{PACKAGE_CONTENT, UNKNOWN_PACKAGE_ID};
 
 /// Three accounts a package can be shared with. `PackageUser` is `@length(min: 6,
 /// max: 12)` with pattern `^[0-9]{12}$|^GLOBAL$`, so a named user is a 12-digit
@@ -99,6 +99,14 @@ async fn created_package(
     if let Some(enabled) = vending {
         body["PackageVendingOptions"] = json!({ "VendingEnabled": enabled });
     }
+    // The object the create IMPORTS is put at the location the body names first: a create
+    // whose Amazon S3 location holds no object is refused, and these rows are about the
+    // package's SCOPE rather than its content.
+    emulator.given_object(
+        "my-package-bucket",
+        &format!("packages/{name}"),
+        PACKAGE_CONTENT,
+    );
     let answer = emulator
         .call("POST", &format!("{PREFIX}/packages"), Some(body))
         .await;

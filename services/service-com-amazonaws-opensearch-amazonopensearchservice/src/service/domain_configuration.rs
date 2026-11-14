@@ -322,6 +322,39 @@ pub fn apply_server_defaults(domain: &mut Domain) {
     );
 }
 
+/// Why the access policy document a request carries is not one the service can hold, or
+/// `None` for one it can — the ONE statement of that rule, so the create path and the
+/// update path judge the same document alike.
+///
+/// `CreateDomainRequest$AccessPolicies` is the "Identity and Access Management (IAM) policy
+/// document specifying the access policies for the new domain", and a policy document is
+/// read as JSON: a body that is not JSON denotes no policy at all, so nothing later read or
+/// enforced from it could be the policy the caller meant. The request is refused rather than
+/// a domain being created or changed around a document nothing can parse, with the
+/// service's own sentence for such a document ([`INVALID_POLICY_JSON`]).
+///
+/// A request that carries no document asks for no policy, and a BLANK one names none
+/// either — the value the service itself defaults the member to
+/// ([`apply_server_defaults`]) — so neither is refused.
+pub fn access_policies_refusal(document: Option<&str>) -> Option<ValidationException> {
+    let document = document?;
+    if document.trim().is_empty() {
+        return None;
+    }
+    ::serde_json::from_str::<Value>(document)
+        .err()
+        .map(|_| ValidationException {
+            message: Some(INVALID_POLICY_JSON.to_string()),
+        })
+}
+
+/// What the service answers an access policy document that is not JSON.
+///
+/// Fully FIXED text, with no variable part and no closing full stop: it states the
+/// condition and echoes neither the document nor the member, which is how the service words
+/// it.
+const INVALID_POLICY_JSON: &str = "This policy contains invalid Json";
+
 /// The access policy document as the service HOLDS it: the tokens the caller wrote, in
 /// the order they were written, with the whitespace BETWEEN them — which denotes
 /// nothing — dropped, so what a caller reads back is the service's own rendering of the

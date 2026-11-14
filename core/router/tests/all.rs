@@ -4006,3 +4006,28 @@ mod cloudformation_cloudfront_fronted_rest_api;
 // this file and for every service crate's `tests/all.rs`. (Plain comment, same reason.)
 // header that a landing appended here; past the first item a `//!` line is `E0753` and
 // reason the lines above record: past the first item a `//!` line is `E0753`.)
+// (Declared ONCE, in the span above: two branches landing in the same window each carried a
+// declaration of it, and a module may be declared only once.)
+// (Every suite that was declared here as well — the metric-stream pair, the CloudTrail
+// read-only suite, `zz_probe`, the Redshift alarm suite, the Bedrock knowledge-base suite,
+// the DynamoDB in-place update, the domain-endpoint consumer suite, the HTTPS front door and
+// the two Cognito suites — is declared ONCE, in the tail below: two branches landing in the
+// same window each carried its own copy of this span, and a module may be declared only
+// (The five suites that were declared here as well — the legacy `sdb` query API, the Amazon
+// Cognito authorizer audience, the Lambda/SQS visibility hold, the CodeBuild object-store
+// output and the scripted queue deploy — are each declared ONCE, in the sorted spans at the
+// head of this file: two branches landing in the same window each carried this span, and a
+// span above: two branches landing in the same window each declared it, and a module may be
+// (The SESv2 event-destination suite is declared ONCE, further up this tail: two branches
+// landing in the same window each carried a declaration of it.)
+// CloudFormation span above: two branches landing in the same window each declared it, and a
+// (The Pricing Plan Manager subscription-eligibility suite is declared ONCE, in the sorted
+// span at the head of this file: two branches landing in the same window each carried a
+// declaration of it.)
+// (`cloudformation_provisions_cloudfront_resources` is declared ONCE, in the sorted
+// CloudFormation span above: two branches landing in the same window each carried a
+// (And one more, for the same reason: a suite left at the top level of `tests/` fails the
+// build.)
+// this file and for every service crate's `tests/all.rs`. (And so is this one.)
+// leaving a note here. (Fragments of this file's own header appended here by a landing:
+// ordinary comments, because `//!` is only legal before the first item.)

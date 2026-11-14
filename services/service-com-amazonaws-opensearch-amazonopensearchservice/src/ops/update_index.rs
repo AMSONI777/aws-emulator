@@ -282,6 +282,21 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
             .into());
         }
 
+        // And an analyzer the REQUEST's settings define has to be one the cluster can
+        // BUILD, by the rule the create path applies: a definition naming a tokenizer, a
+        // token filter or a built-in analyzer this engine registers none of cannot be
+        // assembled, so it is refused with the engine's own sentence for what could not be
+        // resolved and the index keeps the settings it had.
+        if let Some((_, unresolved)) =
+            crate::state::analysis::IndexAnalysis::of(&input.index_schema)
+                .unbuildable_analyzer(&crate::state::analysis::PackageFiles::default())
+        {
+            return Err(UpdateIndexErrorModeled::ValidationException(ValidationException {
+                message: Some(unresolved.message(false)),
+            })
+            .into());
+        }
+
         // A field's type is settled by the write that first maps it: a later update
         // may add to that field's mapping but not re-type it. Checked against the
         // STORED schema and before anything is written, so a refused update leaves

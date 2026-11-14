@@ -382,6 +382,60 @@ pub fn imported_content<Eng: Send + Sync + 'static>(
     }
 }
 
+/// Whether the Amazon S3 location `source` names content this service can import, and
+/// the refusal naming the location otherwise.
+///
+/// `CreatePackage` and `UpdatePackage` IMPORT the package's content from the bucket and key
+/// the request names ("the Amazon S3 location to import the package from"), so a location
+/// naming no object is a location nothing can be imported from: the request is refused at
+/// submit time rather than leaving a package COPYING content that will never arrive. A
+/// location that names no bucket or no key names no object either, so it is refused the
+/// same way.
+///
+/// The object is resolved in the Amazon S3 service's own store — the store `s3:PutObject`
+/// writes — through the same read the import itself goes through ([`imported_content`]), so
+/// a create this admits is a create whose content the package really holds. `None` when the
+/// engine hands out no Amazon S3 store at all: a caller that cannot reach the store cannot
+/// tell a missing object from a missing store, and refusing an import on the strength of a
+/// store that was never readable would reject a location that does hold the object — the
+/// same rule [`super::log_destinations::log_publishing_destination_refusal`] applies to a
+/// log group.
+///
+/// Reads ANOTHER service's store, so it is called before this service's own store is
+/// locked: no call holds two service stores at once.
+pub fn package_source_refusal<Eng: Send + Sync + 'static>(
+    engine: &Eng,
+    source: &PackageSource,
+) -> Option<ValidationException> {
+    let bucket = source
+        .s3_bucket_name
+        .as_deref()
+        .filter(|bucket| !bucket.is_empty());
+    let key = source.s3_key.as_deref().filter(|key| !key.is_empty());
+    let unreadable = || ValidationException {
+        message: Some(PACKAGE_FILE_NOT_ACCESSIBLE.to_string()),
+    };
+    let (Some(bucket), Some(key)) = (bucket, key) else {
+        return Some(unreadable());
+    };
+    let objects = ::service_com_amazonaws_s3_amazons3::state::service_state(engine)?;
+    let held = objects
+        .lock()
+        .bucket(bucket)
+        .and_then(|held| held.object(key))
+        .is_some();
+    (!held).then(unreadable)
+}
+
+/// What the service answers an import whose Amazon S3 location it cannot read the object
+/// at.
+///
+/// Fully FIXED text: it states what could not be done and what to check, and echoes neither
+/// the bucket nor the key — the caller sent both, and WHICH of the two is missing is not
+/// what the service states.
+const PACKAGE_FILE_NOT_ACCESSIBLE: &str = "Package file not accessible. Please validate that you \
+     have access to the S3 object and S3 bucket is present in the same region.";
+
 /// The `PackageID` a create mints.
 ///
 /// `PackageID` is pattern `^([FG][0-9]+)$|^(pkg-[a-f0-9]+)$`: the `[FG][0-9]+` form

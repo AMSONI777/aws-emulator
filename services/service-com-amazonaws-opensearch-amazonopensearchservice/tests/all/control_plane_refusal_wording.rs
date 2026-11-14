@@ -101,7 +101,7 @@ async fn start_migration(emulator: &Emulator, id: &str) -> Answer {
                 "migrationOptions": {
                     "source": {
                         "datasourceArn":
-                            "arn:aws:aoss:us-east-1:123456789012:collection/wordingsource",
+                            "arn:aws:aoss:us-east-1:000000000000:collection/wordingsource",
                     },
                     "workspace": { "workspaceId": "ws-1" },
                 },

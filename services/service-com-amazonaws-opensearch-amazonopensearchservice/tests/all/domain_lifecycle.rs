@@ -199,6 +199,39 @@ impl Emulator {
         &self.engine
     }
 
+    /// Put `content` at the Amazon S3 location `bucket`/`key`, in the Amazon S3 service's
+    /// OWN store — the store `s3:PutObject` writes and this service's package import reads.
+    ///
+    /// A package's content is IMPORTED from that location, so a create or an update naming
+    /// one that holds no object is refused: a suite that expects its package to be created
+    /// puts the object there first, the way [`Emulator::created_log_group`] brings a log
+    /// group into being before a domain publishes to it.
+    ///
+    /// A location that already holds an object keeps it, so a suite that is about a
+    /// package's CONTENT decides that content and a helper that only needs the location to
+    /// hold something does not overwrite it.
+    pub(crate) fn given_object(&self, bucket: &str, key: &str, content: &str) {
+        let store = service_com_amazonaws_s3_amazons3::state::service_state(&*self.engine)
+            .expect("the shared engine holds the Amazon S3 store");
+        let mut guard = store.lock();
+        let _ = guard.create_bucket(bucket, REGION);
+        if guard.bucket(bucket).and_then(|held| held.object(key)).is_some() {
+            return;
+        }
+        let written = guard.put_object(
+            bucket,
+            key,
+            service_com_amazonaws_s3_amazons3::state::Object::stored(
+                content.as_bytes().to_vec(),
+                Some("text/plain".to_string()),
+            ),
+        );
+        assert!(
+            written.is_some(),
+            "case the object at {bucket}/{key}: expected Amazon S3 to hold it, got {written:?}"
+        );
+    }
+
     pub(crate) async fn call(&self, method: &str, uri: &str, body: Option<Value>) -> Answer {
         self.call_as(DEFAULT_ACCESS_KEY_ID, method, uri, body).await
     }

@@ -1539,6 +1539,170 @@ pub fn warm_instance_type_refusal(cluster: Option<&ClusterConfig>) -> Option<Val
     })
 }
 
+/// The fewest data nodes a cluster runs: one. `ClusterConfig$InstanceCount` is the "number
+/// of data nodes in the cluster", and a cluster with no data node holds no data and serves
+/// no request, so a count below this configures no cluster at all.
+const DATA_NODES_MINIMUM: i32 = 1;
+
+/// Whether `cluster` runs any data node at all, and the refusal stating that floor
+/// otherwise.
+///
+/// `InstanceCount` is "number of data nodes in the cluster": a count of zero — or a
+/// negative one, which is no count — describes a cluster the service cannot provision,
+/// whatever else the configuration asks for, so it is refused before the zone rule below
+/// judges how those nodes would be spread. A cluster that names no count asks for the
+/// service's own default rather than for none, so there is nothing to refuse.
+///
+/// The sentence is FIXED and names the member rather than the value: what a caller has to
+/// fix is the count, which it sent itself.
+pub fn data_node_count_refusal(cluster: Option<&ClusterConfig>) -> Option<ValidationException> {
+    let nodes = cluster?.instance_count?;
+    if nodes >= DATA_NODES_MINIMUM {
+        return None;
+    }
+    Some(ValidationException {
+        message: Some("Instance Count should be greater than 0.".to_string()),
+    })
+}
+
+/// The numbers of Availability Zones a zone-aware cluster's data nodes are spread across,
+/// as words, for the sentence a refusal states: `ZoneAwarenessConfig$AvailabilityZoneCount`
+/// publishes "valid values are `2` and `3`", and the service names the count in words
+/// rather than in digits where it says how many nodes such a deployment takes.
+const ZONE_COUNT_WORDS: [(i32, &str, &str); 2] =
+    [(2, "two", "an even number of"), (3, "three", "a multiple of three")];
+
+/// How many Availability Zones a cluster asking for zone awareness is placed in, for the
+/// rules below: the count it names, and the SMALLEST supported count where it names none —
+/// `ZoneAwarenessConfig` is "only required if `ZoneAwarenessEnabled` is `true`", so a
+/// configuration that leaves it out is placed in the fewest zones multiple zones can mean.
+///
+/// `None` where the cluster asks for no zone awareness, and where the count it names is
+/// outside [`super::ZONE_COUNT_RANGE`] — such a count names no supported number of zones,
+/// which [`zone_count_refusal`] refuses before the spread below is judged.
+fn requested_zone_count(cluster: &ClusterConfig) -> Option<i32> {
+    if cluster.zone_awareness_enabled != Some(true) {
+        return None;
+    }
+    let zones = cluster
+        .zone_awareness_config
+        .as_ref()
+        .and_then(|config| config.availability_zone_count)
+        .unwrap_or(*super::ZONE_COUNT_RANGE.start());
+    super::ZONE_COUNT_RANGE.contains(&zones).then_some(zones)
+}
+
+/// Whether the number of Availability Zones `cluster` asks to be placed in is one the
+/// service places a cluster in, and the refusal naming the supported counts otherwise.
+///
+/// `ZoneAwarenessConfig$AvailabilityZoneCount` is "the number of Availability Zones for the
+/// domain to use with `ZoneAwarenessEnabled`" and publishes "valid values are `2` and `3`"
+/// ([`super::ZONE_COUNT_RANGE`], the one place that set is stated): a zone-aware cluster
+/// asking for any other number describes a placement the service does not provision, so the
+/// request is refused rather than stored. The member carries no range in the model, so this
+/// is the service's own statement of it, in the shape it states an unsupported enumerated
+/// value in.
+///
+/// `None` for a cluster that asks for no zone awareness — the count configures no placement
+/// then — and for one that names no count, which asks for the service's own default.
+pub fn zone_count_refusal(cluster: Option<&ClusterConfig>) -> Option<ValidationException> {
+    let cluster = cluster?;
+    if cluster.zone_awareness_enabled != Some(true) {
+        return None;
+    }
+    let zones = cluster
+        .zone_awareness_config
+        .as_ref()?
+        .availability_zone_count?;
+    if super::ZONE_COUNT_RANGE.contains(&zones) {
+        return None;
+    }
+    let supported: Vec<String> = super::ZONE_COUNT_RANGE
+        .clone()
+        .map(|count| count.to_string())
+        .collect();
+    Some(ValidationException {
+        message: Some(format!(
+            "Unsupported AvailabilityZoneCount: {zones}, allowed values are: [{}]",
+            supported.join(", ")
+        )),
+    })
+}
+
+/// Whether the data nodes `cluster` runs can be spread across the Availability Zones it
+/// asks to be placed in, and the refusal naming the count that deployment takes otherwise.
+///
+/// `ClusterConfig$ZoneAwarenessEnabled` "indicates whether multiple Availability Zones are
+/// enabled", and the service spreads the cluster's data nodes EVENLY across those zones
+/// ([`super::nodes_per_zone`]) — so a zone-aware cluster runs a number of data nodes that
+/// divides by the number of zones it is placed in, and one that does not describes a
+/// deployment the service cannot provision. The request is refused rather than stored, with
+/// the sentence the service states for that number of zones ([`ZONE_COUNT_WORDS`]).
+///
+/// `InstanceCount` is "number of data nodes in the cluster", so it is the count judged.
+/// `None` for a cluster that asks for no zone awareness (one zone holds any number of
+/// nodes), for one whose zone count is not a supported one ([`zone_count_refusal`] refuses
+/// that count itself), and for one that names no data-node count at all — that names no
+/// number of nodes to spread, and the member's absence is not this rule's to refuse.
+pub fn zone_awareness_refusal(cluster: Option<&ClusterConfig>) -> Option<ValidationException> {
+    let cluster = cluster?;
+    let zones = requested_zone_count(cluster)?;
+    let nodes = cluster.instance_count?;
+    if nodes > 0 && nodes % zones == 0 {
+        return None;
+    }
+    let (_, zones_word, nodes_word) = ZONE_COUNT_WORDS
+        .into_iter()
+        .find(|(count, _, _)| *count == zones)?;
+    Some(ValidationException {
+        message: Some(format!(
+            "You must choose {nodes_word} data nodes for a {zones_word} Availability Zone \
+             deployment"
+        )),
+    })
+}
+
+/// The fewest dedicated master nodes a cluster that runs them is configured with, and the
+/// count between that floor and the next one the service does not configure.
+///
+/// `ClusterConfig$DedicatedMasterCount` is documented "this number must be greater than 2
+/// and not 4, otherwise you receive a validation exception": a master quorum needs an ODD
+/// number of voting nodes, so the service configures three or five of them and never an
+/// even count that cannot break a tie.
+const DEDICATED_MASTER_COUNT_MINIMUM: i32 = 3;
+const DEDICATED_MASTER_COUNT_REFUSED: i32 = 4;
+
+/// Whether the dedicated master nodes `cluster` asks for are a quorum the service
+/// configures, and the refusal naming the count otherwise.
+///
+/// The rule is the member's own documentation (see [`DEDICATED_MASTER_COUNT_MINIMUM`]), so
+/// a cluster asking for one or two master nodes, or for four, describes a master quorum the
+/// service does not provision and the request is refused rather than stored.
+///
+/// `None` for a cluster whose dedicated master nodes are not turned on
+/// (`DedicatedMasterEnabled` "true if the cluster will use a dedicated master node") — the
+/// count then configures no node — and for one that names no count, which names no number
+/// of master nodes to judge.
+pub fn dedicated_master_count_refusal(
+    cluster: Option<&ClusterConfig>,
+) -> Option<ValidationException> {
+    let cluster = cluster?;
+    if cluster.dedicated_master_enabled != Some(true) {
+        return None;
+    }
+    let masters = cluster.dedicated_master_count?;
+    if masters >= DEDICATED_MASTER_COUNT_MINIMUM && masters != DEDICATED_MASTER_COUNT_REFUSED {
+        return None;
+    }
+    Some(ValidationException {
+        message: Some(format!(
+            "DedicatedMasterCount must be greater than {} and not {DEDICATED_MASTER_COUNT_REFUSED}: \
+             {masters}",
+            DEDICATED_MASTER_COUNT_MINIMUM - 1
+        )),
+    })
+}
+
 /// Whether every log-publishing option in `options` names the destination its logs go
 /// to, and the refusal naming the first log type that does not otherwise.
 ///

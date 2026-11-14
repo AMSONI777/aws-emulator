@@ -189,6 +189,16 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         // before this one is locked: no call holds two service stores at once.
         let content = crate::state::imported_content(&*self.engine, &input.package_source);
 
+        // And a location that holds no object is nothing to import FROM, by the rule the
+        // create path applies ([`crate::state::package_source_refusal`]): the call is
+        // refused and the package keeps the content and the version it already had,
+        // rather than resting in a copy that would never arrive. Read here, before this
+        // store is locked — no call holds two service stores at once — and stated below,
+        // after the package the request names has been resolved, so an id that names no
+        // package is still answered as the bad value it is.
+        let source_refused =
+            crate::state::package_source_refusal(&*self.engine, &input.package_source);
+
         let mut store = state.lock();
 
         // The record this call changes is first brought to the status the clock already
@@ -202,6 +212,12 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         let package = store.packages.get_mut(&input.package_id).ok_or_else(|| {
             UpdatePackageErrorModeled::ValidationException(package_not_found())
         })?;
+
+        // The location the content comes from, judged for the package this call resolved
+        // (read above, before the store was locked).
+        if let Some(refusal) = source_refused {
+            return Err(UpdatePackageErrorModeled::ValidationException(refusal).into());
+        }
 
         // An update replaces the package's content, which the service does by COPYING
         // the new content out of the Amazon S3 location named: a package whose previous

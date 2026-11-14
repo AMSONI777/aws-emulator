@@ -193,6 +193,16 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         // account holds no object at.
         let content = crate::state::imported_content(&*self.engine, &input.package_source);
 
+        // And a location that holds no object is nothing to import FROM: the create is
+        // refused at submit time ([`crate::state::package_source_refusal`]) rather than
+        // minting a package left COPYING content that would never arrive, so a caller has
+        // a refusal to act on instead of a status that never moves.
+        if let Some(refusal) =
+            crate::state::package_source_refusal(&*self.engine, &input.package_source)
+        {
+            return Err(CreatePackageErrorModeled::ValidationException(refusal).into());
+        }
+
         // `EngineVersion` is "the version of the Amazon OpenSearch Service engine for
         // which is compatible with the package", and it "can only be specified for
         // package type ZIP-PLUGIN": a package of any other type has no engine to be

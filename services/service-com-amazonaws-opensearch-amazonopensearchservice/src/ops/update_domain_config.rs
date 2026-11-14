@@ -459,6 +459,13 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
             crate::state::custom_endpoint::custom_endpoint_refusal(
                 input.domain_endpoint_options.as_ref(),
             ),
+            // And an `AccessPolicies` document that is not JSON denotes no access policy
+            // at all: it is refused by the rule the create path applies
+            // ([`crate::service::domain_configuration::access_policies_refusal`]) rather
+            // than merged into the domain as a policy nothing could read or enforce.
+            crate::service::domain_configuration::access_policies_refusal(
+                input.access_policies.as_deref(),
+            ),
         ]
         .into_iter()
         .flatten()
@@ -503,6 +510,35 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
             &crate::state::request_region(ctx.parts()),
             input.vpc_options.as_ref(),
             crate::state::vpc_network::DOMAIN_PLACEMENT,
+        );
+
+        // Every other refusal that resolves a resource of ANOTHER service is read here for
+        // the same reason, and stated below where it was: the certificate a custom endpoint
+        // is served under (Certificate Manager), the log groups an enabled log-publishing
+        // option delivers into (CloudWatch Logs), the user pool a Cognito authentication
+        // configuration names (Amazon Cognito) and the key an enabled encryption-at-rest
+        // configuration is provisioned through (KMS). Reading them before this service's
+        // store is locked is what keeps ONE lock order: no call holds two service stores at
+        // once, so no pair of services can hold each other's.
+        let custom_endpoint_refused =
+            crate::state::custom_endpoint::custom_endpoint_certificate_refusal(
+                &*self.engine,
+                &crate::state::request_region(ctx.parts()),
+                input.domain_endpoint_options.as_ref(),
+            );
+        let log_destination_refused =
+            crate::state::log_destinations::log_publishing_destination_refusal(
+                &*self.engine,
+                input.log_publishing_options.iter().flatten(),
+            );
+        let cognito_refused = crate::state::cognito_authentication::cognito_options_refusal(
+            &*self.engine,
+            input.cognito_options.as_ref(),
+        );
+        let kms_key_refused = crate::state::encryption_at_rest::kms_key_refusal(
+            &*self.engine,
+            &crate::state::request_region(ctx.parts()),
+            input.encryption_at_rest_options.as_ref(),
         );
 
         let mut store = state.lock();
@@ -560,6 +596,17 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
             return Err(UpdateDomainConfigErrorModeled::ValidationException(refusal).into());
         }
 
+        // And a change that switches fine-grained access control on names the ONE master
+        // user that boundary grants everything to, by the rule the create path applies
+        // ([`crate::state::advanced_security::master_user_refusal`]). Checked on the
+        // REQUEST for the same reason: the stored record keeps no `MasterUserOptions` at
+        // all, so what a call says about the master user is what it carried.
+        if let Some(refusal) =
+            crate::state::advanced_security::master_user_refusal(input.advanced_security_options.as_ref())
+        {
+            return Err(UpdateDomainConfigErrorModeled::ValidationException(refusal).into());
+        }
+
         // Fine-grained access control and node-to-node encryption are ONE-WAY: the
         // service cannot take back a boundary the domain already runs behind, so a
         // request asking either to be switched off is refused and the setting stays
@@ -594,11 +641,8 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         // carries IS the configuration this change would leave the domain with, and a
         // request that carries none changes nothing about the domain's sign-in path. A
         // dry run is refused too — it reports what applying the change would do, and
-        // this change cannot be applied.
-        if let Some(refusal) = crate::state::cognito_authentication::cognito_options_refusal(
-            &*self.engine,
-            input.cognito_options.as_ref(),
-        ) {
+        // this change cannot be applied. (Resolved above, before this store was locked.)
+        if let Some(refusal) = cognito_refused {
             return Err(UpdateDomainConfigErrorModeled::ValidationException(refusal).into());
         }
 
@@ -609,10 +653,7 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         // change would leave the domain publishing to, and a request that carries none
         // changes nothing about where its logs go. A dry run is refused too — it reports
         // what applying the change would do, and this change cannot be applied.
-        if let Some(refusal) = crate::state::log_destinations::log_publishing_destination_refusal(
-            &*self.engine,
-            input.log_publishing_options.iter().flatten(),
-        ) {
+        if let Some(refusal) = log_destination_refused {
             return Err(UpdateDomainConfigErrorModeled::ValidationException(refusal).into());
         }
 
@@ -627,11 +668,7 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         // changes nothing about the key its data is encrypted under. A dry run is refused
         // too — it reports what applying the change would do, and this change cannot be
         // applied.
-        if let Some(refusal) = crate::state::encryption_at_rest::kms_key_refusal(
-            &*self.engine,
-            &crate::state::request_region(ctx.parts()),
-            input.encryption_at_rest_options.as_ref(),
-        ) {
+        if let Some(refusal) = kms_key_refused {
             return Err(UpdateDomainConfigErrorModeled::ValidationException(refusal).into());
         }
 
@@ -646,11 +683,7 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         // answering on, and a request carrying none changes nothing about it. A dry run is
         // refused too — it reports what applying the change would do, and this change
         // cannot be applied.
-        if let Some(refusal) = crate::state::custom_endpoint::custom_endpoint_certificate_refusal(
-            &*self.engine,
-            &crate::state::request_region(ctx.parts()),
-            input.domain_endpoint_options.as_ref(),
-        ) {
+        if let Some(refusal) = custom_endpoint_refused {
             return Err(UpdateDomainConfigErrorModeled::ValidationException(refusal).into());
         }
 
@@ -700,6 +733,17 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         // the change would do, and this change cannot be applied.
         if let Some(refusal) = [
             crate::state::warm_storage_refusal(Some(&merged.cluster_config)),
+            // ... and the data nodes of a cluster placed in multiple Availability Zones
+            // are spread across them, so a change that would leave the domain asking for
+            // zone awareness with fewer data nodes than the service places zones is
+            // refused for the same reason the create path refuses it — judged on the
+            // MERGED record, so a change that only raises the zone count is checked
+            // against the node count the domain keeps. A master quorum the service does
+            // not configure is refused the same way.
+            crate::state::data_node_count_refusal(Some(&merged.cluster_config)),
+            crate::state::zone_count_refusal(Some(&merged.cluster_config)),
+            crate::state::zone_awareness_refusal(Some(&merged.cluster_config)),
+            crate::state::dedicated_master_count_refusal(Some(&merged.cluster_config)),
             // ... and against the warm-storage capability of the hot-tier instance type
             // the merged cluster runs on, so a change that would leave the domain with a
             // warm tier on an instance type that offers none is refused for the same
@@ -840,13 +884,23 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         // moves the grant, and one that switches it off gives the permission back
         // ([`crate::state::encryption_grant`]). Reached only here, past the dry-run return
         // above: a dry run applies nothing, so it changes no permission either.
-        crate::state::encryption_grant::settle_domain_grant(
-            &*self.engine,
-            &merged.region,
-            &merged.arn,
-            merged.encryption_at_rest_options.as_ref(),
+        //
+        // The grant lives in ANOTHER service's store, so it is settled once THIS store has
+        // been released: the record is stored first and the guard dropped, by the one lock
+        // order this handler keeps — no call holds two service stores at once.
+        let (region, arn, encryption) = (
+            merged.region.clone(),
+            merged.arn.clone(),
+            merged.encryption_at_rest_options.clone(),
         );
         store.domains.insert(name, merged);
+        drop(store);
+        crate::state::encryption_grant::settle_domain_grant(
+            &*self.engine,
+            &region,
+            &arn,
+            encryption.as_ref(),
+        );
         Ok(UpdateDomainConfigOutput {
             domain_config,
             // A dry run was not asked for, so there are no dry-run results to report.

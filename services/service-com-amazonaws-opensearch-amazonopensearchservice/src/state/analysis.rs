@@ -116,6 +116,29 @@ const MAX_EXAMINED_SYNONYMS: usize = 100_000;
 /// analysis walks.
 const MAX_FILTERS: usize = 32;
 
+/// The longest term, in characters, a dictionary contributes: a word in a stop-word list and
+/// a term in a synonym rule.
+///
+/// The emulator's OWN bound beside the bounds on how MANY terms a dictionary contributes: a
+/// stored synonym is cloned into the stream once per token that matches the term it stands
+/// for, so without a bound on the term's LENGTH a one-character input term paired with a
+/// very long output term would let one request's bytes size what the analysis materialises,
+/// however few tokens the stream is capped at. A term past it is left out of the dictionary
+/// rather than truncated: a truncated term is a different word, which would stand for
+/// something the caller did not write.
+const MAX_TERM_LENGTH: usize = 256;
+
+/// The most components one index's analysis settings may DEFINE: analyzers, token filters,
+/// tokenizers and character filters together.
+///
+/// The emulator's OWN bound beside [`MAX_FILTERS`], which bounds ONE chain: the settings are
+/// a document a caller wrote, and every definition in them is a chain this engine assembles
+/// when the settings are judged ([`IndexAnalysis::unbuildable_analyzer`]) — each of which may
+/// ingest a dictionary of its own. Without this bound the work one index create causes would
+/// be sized by the number of definitions the request happened to carry rather than by these
+/// constants, so a document past it is refused and nothing is built from it.
+pub const MAX_ANALYSIS_DEFINITIONS: usize = 100;
+
 /// One token of an analyzed text, as the analyze API reports it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Token {
@@ -602,12 +625,19 @@ pub enum Unresolved {
     Tokenizer(String),
     /// No token filter of that name, or one whose own type nothing registers.
     Filter(String),
+    /// No character filter of that name: the engine registers none under it
+    /// ([`BUILT_IN_CHAR_FILTERS`]).
+    CharFilter(String),
     /// The mappings map no such field, so there is no field analyzer to use.
     Field(String),
     /// More token filters than one chain may name ([`MAX_FILTERS`]) — the emulator's own
     /// bound on the chain one analysis walks, so the request is refused rather than
     /// answered from part of the chain it asked for.
     TooManyFilters(usize),
+    /// More components than one index's analysis settings may define
+    /// ([`MAX_ANALYSIS_DEFINITIONS`]) — the emulator's own bound on how many chains one
+    /// document has it assemble, so the settings are refused rather than walked.
+    TooManyDefinitions(usize),
     /// A tokenizer or filter whose TYPE this engine registers but whose CONFIGURATION it
     /// cannot run, so no chain is built from it rather than one built from another
     /// configuration — which would answer tokens the caller's own chain never produced.
@@ -632,10 +662,17 @@ impl Unresolved {
             Self::Analyzer(name) => format!("failed to find {scope}analyzer [{name}]"),
             Self::Tokenizer(name) => format!("failed to find {scope}tokenizer under [{name}]"),
             Self::Filter(name) => format!("failed to find {scope}token filter under [{name}]"),
+            Self::CharFilter(name) => {
+                format!("failed to find {scope}char filter under [{name}]")
+            }
             Self::Field(name) => format!("failed to find field [{name}]"),
             Self::TooManyFilters(named) => format!(
                 "a chain may name at most {MAX_FILTERS} token filters, and this one names \
                  {named}"
+            ),
+            Self::TooManyDefinitions(defined) => format!(
+                "analysis settings may define at most {MAX_ANALYSIS_DEFINITIONS} components, \
+                 and these define {defined}"
             ),
             Self::Configuration {
                 kind,
@@ -648,6 +685,20 @@ impl Unresolved {
 
 /// The member an analysis section defines its token filters under.
 const ANALYSIS_FILTERS: &str = "filter";
+
+/// The member a chain lists the CHARACTER filters its text passes through before it is
+/// tokenized.
+const ANALYSIS_CHAR_FILTERS: &str = "char_filter";
+
+/// The character filters the engine registers under a TYPE: the ones it ships ready to name
+/// (`html_strip`, `mapping`, `pattern_replace` — the engine's own documented built-in
+/// character filters), which is also what an index's own `analysis.char_filter` definition
+/// has to configure one of.
+///
+/// Sorted, so a reader can see what it holds. The engine applies no character filter to the
+/// text it analyzes, which is a gap of the ANALYSIS and not of this catalog: what this
+/// states is which names a chain may carry at all.
+const BUILT_IN_CHAR_FILTERS: [&str; 3] = ["html_strip", "mapping", "pattern_replace"];
 
 /// The member an analysis section defines its tokenizers under.
 const ANALYSIS_TOKENIZERS: &str = "tokenizer";
@@ -692,6 +743,7 @@ pub struct IndexAnalysis {
     analyzers: Map<String, Value>,
     filters: Map<String, Value>,
     tokenizers: Map<String, Value>,
+    char_filters: Map<String, Value>,
     mappings: Map<String, Value>,
 }
 
@@ -707,6 +759,7 @@ impl IndexAnalysis {
                 (ANALYSIS_ANALYZERS, &mut analysis.analyzers),
                 (ANALYSIS_FILTERS, &mut analysis.filters),
                 (ANALYSIS_TOKENIZERS, &mut analysis.tokenizers),
+                (ANALYSIS_CHAR_FILTERS, &mut analysis.char_filters),
             ] {
                 if let Some(Value::Object(defined)) = members.get(member) {
                     for (name, definition) in defined {
@@ -750,11 +803,59 @@ impl IndexAnalysis {
         if kind != CUSTOM_ANALYZER_TYPE {
             return built_in(kind).ok_or_else(|| Unresolved::Analyzer(name.to_string()));
         }
+        // The CHARACTER filters a custom analyzer puts in front of its tokenizer are part
+        // of the chain the cluster assembles, so one nothing registers leaves the chain
+        // unbuildable just as an unknown tokenizer does ([`Self::char_filter`]).
+        if let Some(unresolved) = self.unregistered_char_filter(definition.get(ANALYSIS_CHAR_FILTERS))
+        {
+            return Err(unresolved);
+        }
         self.composed(
             definition.get(ANALYSIS_TOKENIZERS),
             definition.get(ANALYSIS_FILTERS),
             files,
         )
+    }
+
+    /// The first character filter `listed` names that nothing registers, as the refusal for
+    /// it — or `None` where every one it names resolves.
+    ///
+    /// A character filter is NAMED (a string) or configured inline (an object carrying its
+    /// `type`), the two forms a token filter may take as well. A NAME is resolved against
+    /// this index's own `analysis.char_filter` definitions first and then against the
+    /// engine's catalog, exactly as a named tokenizer and a named token filter are
+    /// ([`Self::composed`]) — and a definition is itself held to that catalog by the `type`
+    /// it configures, so a definition of a type nothing registers is refused under its own
+    /// name. A list of either form is walked in order, so one chain naming two unregistered
+    /// filters is refused for the same one however it was written.
+    fn unregistered_char_filter(&self, listed: Option<&Value>) -> Option<Unresolved> {
+        let registered = |kind: &str| BUILT_IN_CHAR_FILTERS.contains(&kind);
+        let unresolved = |one: &Value| -> Option<String> {
+            match one {
+                // A name this index defines is resolved through its definition's own type.
+                Value::String(name) => match self.char_filters.get(name.as_str()) {
+                    Some(definition) => {
+                        let kind = definition
+                            .get(DEFINITION_TYPE)
+                            .and_then(Value::as_str)
+                            .unwrap_or(name.as_str());
+                        (!registered(kind)).then(|| name.clone())
+                    }
+                    None => (!registered(name)).then(|| name.clone()),
+                },
+                // One the chain configures inline, which names its kind itself.
+                Value::Object(_) => match one.get(DEFINITION_TYPE).and_then(Value::as_str) {
+                    Some(kind) => (!registered(kind)).then(|| kind.to_owned()),
+                    None => Some(one.to_string()),
+                },
+                other => Some(other.to_string()),
+            }
+        };
+        match listed? {
+            Value::Array(elements) => elements.iter().find_map(unresolved),
+            one => unresolved(one),
+        }
+        .map(Unresolved::CharFilter)
     }
 
     /// The chain a request composes itself: the tokenizer it names and the filters it
@@ -815,6 +916,118 @@ impl IndexAnalysis {
             tokenizer,
             filters: chain,
         })
+    }
+
+    /// What this index's analysis settings DEFINE that this engine cannot build: the name
+    /// of the first such analyzer and what could not be resolved in it, or `None` when
+    /// every analyzer these settings define assembles.
+    ///
+    /// The settings are what the cluster builds the index's analysis FROM, so an analyzer
+    /// naming a tokenizer, a token filter or a built-in analyzer nothing registers cannot be
+    /// assembled at all — and an index carrying one could analyze no text through it.
+    ///
+    /// The definitions are visited in name order, so one document with two such definitions
+    /// is refused for the same analyzer however it was written.
+    pub fn unbuildable_analyzer(&self, files: &PackageFiles) -> Option<(String, Unresolved)> {
+        // The settings are judged by ASSEMBLING every chain they define, so how many they
+        // define is what sizes that work: past the bound the settings are refused rather
+        // than walked ([`MAX_ANALYSIS_DEFINITIONS`]). The refusal is about the settings as a
+        // whole, so it names no one component.
+        let defined =
+            self.analyzers.len() + self.filters.len() + self.tokenizers.len() + self.char_filters.len();
+        if defined > MAX_ANALYSIS_DEFINITIONS {
+            return Some((String::new(), Unresolved::TooManyDefinitions(defined)));
+        }
+        // What this walk judges is whether every component a chain NAMES is one the cluster
+        // registers, which the DICTIONARY a filter carries says nothing about — and
+        // ingesting one is the only step of building a chain that costs more than a
+        // constant. So the walk runs over the settings with that content left out
+        // ([`Self::without_dictionary_content`]): one document then costs the number of
+        // definitions it carries, which the bound above caps, rather than the product of
+        // that number and the content each definition happens to hold.
+        let names_only = self.without_dictionary_content();
+        names_only.analyzers.keys().find_map(|name| {
+            names_only
+                .analyzer(name, files)
+                .err()
+                .map(|unresolved| (name.clone(), unresolved))
+        })
+    }
+
+    /// These settings with the dictionary CONTENT of every filter definition left out: the
+    /// word list a `stop` filter carries and the rules a `synonym` filter carries become
+    /// empty lists, the PATH either names one by is dropped, and nothing else changes.
+    ///
+    /// For [`Self::unbuildable_analyzer`], which judges the NAMES a chain is composed of: a
+    /// filter still resolves (or fails to) exactly as it would with its content, and the
+    /// predefined list a `stop` filter names by LANGUAGE is left alone, because which
+    /// languages the engine carries a list for is part of what resolves. What is dropped is
+    /// only what one chain would have INGESTED — inline or out of a mounted file — which,
+    /// ingested once per analyzer naming the filter, is what would make the work one request
+    /// causes a product rather than a sum.
+    fn without_dictionary_content(&self) -> Self {
+        /// One component definition with the content a chain would ingest from it left out.
+        fn elided(definition: &Value) -> Value {
+            let Value::Object(members) = definition else {
+                return definition.clone();
+            };
+            let mut members = members.clone();
+            for member in [STOPWORDS_SETTING, ANALYSIS_SYNONYMS] {
+                if matches!(members.get(member), Some(Value::Array(_))) {
+                    members.insert(member.to_string(), Value::Array(Vec::new()));
+                }
+            }
+            for path in [STOPWORDS_PATH_SETTING, SYNONYMS_PATH_SETTING] {
+                members.remove(path);
+            }
+            Value::Object(members)
+        }
+
+        /// One ANALYZER definition with every filter it configures INLINE elided too: a
+        /// chain may carry a filter as an object of its own instead of naming one the
+        /// settings define, and such an object ingests a dictionary exactly as a named
+        /// definition does.
+        fn elided_chain(definition: &Value) -> Value {
+            let Value::Object(members) = definition else {
+                return definition.clone();
+            };
+            let mut members = members.clone();
+            for listed in [ANALYSIS_FILTERS, ANALYSIS_CHAR_FILTERS] {
+                match members.get(listed) {
+                    Some(Value::Array(elements)) => {
+                        let elided: Vec<Value> = elements.iter().map(elided).collect();
+                        members.insert(listed.to_string(), Value::Array(elided));
+                    }
+                    Some(one @ Value::Object(_)) => {
+                        let one = elided(one);
+                        members.insert(listed.to_string(), one);
+                    }
+                    _ => {}
+                }
+            }
+            Value::Object(members)
+        }
+
+        Self {
+            analyzers: self
+                .analyzers
+                .iter()
+                .map(|(name, definition)| (name.clone(), elided_chain(definition)))
+                .collect(),
+            filters: self
+                .filters
+                .iter()
+                .map(|(name, definition)| (name.clone(), elided(definition)))
+                .collect(),
+            tokenizers: self.tokenizers.clone(),
+            char_filters: self
+                .char_filters
+                .iter()
+                .map(|(name, definition)| (name.clone(), elided(definition)))
+                .collect(),
+            // The mappings are not read by the walk this is for.
+            mappings: Map::new(),
+        }
     }
 
     /// The chain the field `field` is analyzed with: the analyzer its mapping names, or the
@@ -1150,7 +1363,7 @@ fn stop_words(definition: &Value, files: &PackageFiles) -> Result<BTreeSet<Strin
         }
         _ => {}
     }
-    match definition.get("stopwords_path").and_then(Value::as_str) {
+    match definition.get(STOPWORDS_PATH_SETTING).and_then(Value::as_str) {
         Some(path) => Ok(word_list(files.at(path).unwrap_or_default())),
         // "A pre-defined stop words list like _english_ or an array containing a list of
         // stop words. Defaults to _english_."
@@ -1158,10 +1371,19 @@ fn stop_words(definition: &Value, files: &PackageFiles) -> Result<BTreeSet<Strin
     }
 }
 
+/// The members a `stop` and a `synonym` filter name their dictionary FILE by, instead of
+/// carrying its content inline: the mount point of a custom package the domain holds in
+/// place.
+const STOPWORDS_PATH_SETTING: &str = "stopwords_path";
+const SYNONYMS_PATH_SETTING: &str = "synonyms_path";
+
+/// The member a `synonym` filter carries its rules inline in.
+const ANALYSIS_SYNONYMS: &str = "synonyms";
+
 /// The rules a `synonym` filter applies: the ones it carries inline, or the ones the file
 /// it names by path holds.
 fn synonyms(definition: &Value, files: &PackageFiles) -> Synonyms {
-    if let Some(Value::Array(listed)) = definition.get("synonyms") {
+    if let Some(Value::Array(listed)) = definition.get(ANALYSIS_SYNONYMS) {
         let lines: Vec<String> = listed
             .iter()
             .filter_map(Value::as_str)
@@ -1170,18 +1392,20 @@ fn synonyms(definition: &Value, files: &PackageFiles) -> Synonyms {
             .collect();
         return Synonyms::of(synonym_rules(&lines));
     }
-    match definition.get("synonyms_path").and_then(Value::as_str) {
+    match definition.get(SYNONYMS_PATH_SETTING).and_then(Value::as_str) {
         Some(path) => Synonyms::of(synonym_rules(files.at(path).unwrap_or_default())),
         None => Synonyms::default(),
     }
 }
 
 /// The words a dictionary file lists: one word per line, which is how the engine's own
-/// word-list loader reads a stop-word file.
+/// word-list loader reads a stop-word file. A word longer than [`MAX_TERM_LENGTH`] is left
+/// out, for the reason that constant records.
 fn word_list(lines: &[String]) -> BTreeSet<String> {
     lines
         .iter()
         .filter_map(|line| line.split_whitespace().next())
+        .filter(|word| word.chars().count() <= MAX_TERM_LENGTH)
         .map(str::to_owned)
         .collect()
 }
@@ -1191,12 +1415,13 @@ fn word_list(lines: &[String]) -> BTreeSet<String> {
 /// outputs.
 ///
 /// Each side of one line contributes at most [`MAX_TERMS_PER_RULE`] terms, so a single long
-/// line cannot size the work a later analysis does.
+/// line cannot size the work a later analysis does, and a term longer than
+/// [`MAX_TERM_LENGTH`] is left out, so one rule cannot size what that work MATERIALISES.
 fn synonym_rules(lines: &[String]) -> Vec<SynonymRule> {
     let terms = |side: &str| -> Vec<String> {
         side.split(',')
             .map(str::trim)
-            .filter(|term| !term.is_empty())
+            .filter(|term| !term.is_empty() && term.chars().count() <= MAX_TERM_LENGTH)
             .take(MAX_TERMS_PER_RULE)
             .map(str::to_owned)
             .collect()

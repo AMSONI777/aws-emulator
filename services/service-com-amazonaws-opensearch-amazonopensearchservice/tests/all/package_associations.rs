@@ -82,10 +82,19 @@ pub(crate) fn package_key(name: &str) -> String {
     format!("packages/{name}")
 }
 
+/// The content a suite that is not about a package's CONTENT imports: a word per line, the
+/// shape of a dictionary file, so the object the create imports from really holds something.
+pub(crate) const PACKAGE_CONTENT: &str = "alpha\nbeta\n";
+
 /// `CreatePackage` for `name` with type `package_type`, answering with the
 /// `PackageID` it minted.
+///
+/// The content is PUT at the location the create imports from first
+/// ([`Emulator::given_object`]): a create whose Amazon S3 location holds no object is
+/// refused, so a suite that expects its package to exist puts one there.
 pub(crate) async fn create_package(emulator: &Emulator, name: &str, package_type: &str) -> String {
     let case = format!("CreatePackage({name:?}, {package_type:?})");
+    emulator.given_object(PACKAGE_BUCKET, &package_key(name), PACKAGE_CONTENT);
     let answer = emulator
         .call(
             "POST",

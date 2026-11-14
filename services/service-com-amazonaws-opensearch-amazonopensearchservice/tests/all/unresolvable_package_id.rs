@@ -32,7 +32,7 @@ use service_com_amazonaws_opensearch_amazonopensearchservice::state::{
 
 use super::domain_lifecycle::{create_baseline, error_code, Answer, Emulator, PREFIX, SETTLE_WAIT};
 use super::package_associations::{
-    create_package, PACKAGE_TYPES, SERVICE_PACKAGE_ID, UNKNOWN_PACKAGE_ID,
+    create_package, PACKAGE_CONTENT, PACKAGE_TYPES, SERVICE_PACKAGE_ID, UNKNOWN_PACKAGE_ID,
 };
 
 /// The domain every row that names one acts on.
@@ -139,6 +139,10 @@ async fn drive(emulator: &Emulator, op: Op, package_id: &str, live: &str) -> Ans
                 .await
         }
         Op::UpdatePackage => {
+            // The object an update IMPORTS is put at the location the body names first: an
+            // import whose Amazon S3 location holds no object is refused, and what this
+            // row is about is the `PackageID` the request carries.
+            emulator.given_object("my-package-bucket", "packages/next.txt", PACKAGE_CONTENT);
             emulator
                 .call(
                     "POST",

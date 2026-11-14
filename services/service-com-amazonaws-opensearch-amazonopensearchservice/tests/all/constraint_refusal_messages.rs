@@ -709,8 +709,9 @@ async fn start_migration_states_its_own_report_over_the_members_it_validates() {
         "SECURITY_ANALYTICS",
         "SEARCH",
     ];
-    /// A collection ARN the expression admits.
-    const WELL_FORMED_SOURCE: &str = "arn:aws:aoss:us-east-1:123456789012:collection/probe";
+    /// A collection ARN the expression admits, held by the account this emulator serves —
+    /// a source in another account is refused for the account rather than for its shape.
+    const WELL_FORMED_SOURCE: &str = "arn:aws:aoss:us-east-1:000000000000:collection/probe";
     /// An ARN of the right vendor naming another resource.
     const WRONG_RESOURCE_SOURCE: &str = "arn:aws:es:us-east-1:123456789012:domain/probe";
 

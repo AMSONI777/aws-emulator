@@ -27,9 +27,8 @@
 //!   nothing beyond it;
 //! * `DomainName` limits the answer to the one version THAT domain runs, over a
 //!   table of domains spanning both engines, several majors, the newest published
-//!   version (which has no target), the default version a request omitting
-//!   `EngineVersion` gets, and a pattern-valid version the catalog does not publish;
-//!   a name no domain has is refused with the modelled error;
+//!   version (which has no target) and the default version a request omitting
+//!   `EngineVersion` gets; a name no domain has is refused with the modelled error;
 //! * the read changes nothing a later caller sees.
 
 use serde_json::{json, Value};
@@ -389,11 +388,11 @@ async fn domain_filter_reports_the_version_that_domain_runs() {
     let emulator = Emulator::new();
 
     // One row per way a domain's engine version can differ: both engines, several
-    // majors, a two-digit minor, the newest published version (no target at all), the
-    // default a request omitting `EngineVersion` gets, and a pattern-valid version the
-    // catalog does not publish.
+    // majors, a two-digit minor, the newest published version (no target at all) and the
+    // default a request omitting `EngineVersion` gets. A pattern-valid version the catalog
+    // does not publish is no row: a create naming one is refused, so no domain runs it.
     let newest = SUPPORTED_ENGINE_VERSIONS[SUPPORTED_ENGINE_VERSIONS.len() - 1];
-    let rows: [(&str, Option<&str>, &str); 7] = [
+    let rows: [(&str, Option<&str>, &str); 6] = [
         ("filter-es-five", Some("Elasticsearch_5.6"), "Elasticsearch_5.6"),
         ("filter-es-six", Some("Elasticsearch_6.8"), "Elasticsearch_6.8"),
         (
@@ -407,11 +406,6 @@ async fn domain_filter_reports_the_version_that_domain_runs() {
             "filter-default",
             None,
             super::domain_lifecycle::default_engine_version(),
-        ),
-        (
-            "filter-unpublished",
-            Some("OpenSearch_2.12"),
-            "OpenSearch_2.12",
         ),
     ];
 

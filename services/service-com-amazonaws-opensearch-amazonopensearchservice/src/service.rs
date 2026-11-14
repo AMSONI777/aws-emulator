@@ -154,10 +154,13 @@ pub struct EmulatedService<Eng: Send + Sync + 'static> {
     /// Held in a field, built once, because `override_operation` hands back a reference
     /// borrowed from `&self`.
     credentialed_data_plane: CredentialedDataPlane<Eng>,
-    /// `StartMigration` with that operation's own validation of its input run first
-    /// ([`StatedStartMigration`]). Held in a field for the same reason as the data plane:
-    /// `override_operation` hands back a reference borrowed from `&self`.
-    stated_start_migration: StatedStartMigration,
+    /// An operation with that operation's OWN validation of its input run first
+    /// ([`StatedInputOperation`]): `StartMigration` and `AttachDataSource`, each of which
+    /// states a constraint report over members this model declares no constraint trait for.
+    /// Held in fields for the same reason as the data plane: `override_operation` hands back
+    /// a reference borrowed from `&self`.
+    stated_start_migration: StatedInputOperation,
+    stated_attach_data_source: StatedInputOperation,
     /// The request-DESERIALIZATION layer ([`request_layer`]): the answer to a request
     /// whose body carries a value the modelled member it is bound to cannot be read from.
     /// Held in a field for the same reason as the two above, and because it carries this
@@ -233,10 +236,16 @@ impl<Eng: Send + Sync + 'static> EmulatedService<Eng> {
             credentialed_data_plane: CredentialedDataPlane {
                 engine: Arc::clone(&engine),
             },
-            stated_start_migration: StatedStartMigration {
+            stated_start_migration: StatedInputOperation {
                 // The generated operation's own name, so this can never name a routing
                 // key the generated table does not hold.
                 routing_key: <crate::ops::start_migration::StartMigration<Eng> as Operation>::NAME,
+                violations: crate::ops::start_migration::stated_input_violations,
+            },
+            stated_attach_data_source: StatedInputOperation {
+                routing_key:
+                    <crate::ops::attach_data_source::AttachDataSource<Eng> as Operation>::NAME,
+                violations: crate::ops::attach_data_source::stated_input_violations,
             },
             unreadable_body: request_layer::UnreadableBody::new::<Eng>(),
             engine,
@@ -244,23 +253,26 @@ impl<Eng: Send + Sync + 'static> EmulatedService<Eng> {
     }
 }
 
-/// `StartMigration` with that operation's own validation of the request's input run
-/// BEFORE the request boundary reports on the constraints this model declares.
+/// An operation with its OWN validation of the request's input run BEFORE the request
+/// boundary reports on the constraints this model declares.
 ///
-/// WHY a seam and not the handler: that operation states ONE constraint report over every
-/// member of its input it refuses, and two of those members carry no constraint trait in
-/// this model at all — so the boundary, which reports only the traits and answers before
-/// any handler runs, can neither state those clauses nor let a handler state them. What
-/// the report SAYS is the operation's own rule
-/// ([`crate::ops::start_migration::stated_input_violations`]); this type only runs it
+/// WHY a seam and not the handler: such an operation states ONE constraint report over
+/// every member of its input it refuses, and some of those members carry no constraint
+/// trait in this model at all — so the boundary, which reports only the traits and answers
+/// before any handler runs, can neither state those clauses nor let a handler state them.
+/// What the report SAYS is the operation's own rule
+/// ([`crate::ops::start_migration::stated_input_violations`],
+/// [`crate::ops::attach_data_source::stated_input_violations`]); this type only runs it
 /// first, and hands every request it refuses nothing in to the generated operation
 /// unchanged.
-struct StatedStartMigration {
+struct StatedInputOperation {
     /// The routing key the generated operation is wired under.
     routing_key: &'static str,
+    /// That operation's own validation of the request's body.
+    violations: fn(&[u8]) -> Vec<::aws_smithy_schema_server::Violation>,
 }
 
-impl ErasedOperation for StatedStartMigration {
+impl ErasedOperation for StatedInputOperation {
     fn run<'r>(
         &'r self,
         svc: &'r dyn Service,
@@ -273,7 +285,7 @@ impl ErasedOperation for StatedStartMigration {
             // operation — where the boundary refuses it for the members the model
             // requires. Nothing is accepted that would otherwise have been refused.
             let body = req.body().bytes().unwrap_or_default();
-            let violations = crate::ops::start_migration::stated_input_violations(body);
+            let violations = (self.violations)(body);
             if let Some(refused) = validation::stated_report(&violations) {
                 // The clauses, the envelope and the code are the ones every other refusal
                 // of this service states; the status and the error envelope are the
@@ -378,16 +390,16 @@ impl<Eng: Send + Sync + 'static> Service for EmulatedService<Eng> {
         {
             return Some(&self.unreadable_body);
         }
-        // `StartMigration` is served through the seam that runs that operation's own
-        // validation of the input first (see [`StatedStartMigration`]). WHICH request that
-        // is comes from the model: the protocol resolves a request's routing key off the
-        // method and the URI pattern the model declares, so this names no path of its own.
-        if self.entry.protocol().routing_key(req).ok()
-            == Some(self.stated_start_migration.routing_key)
-        {
-            return Some(&self.stated_start_migration);
-        }
-        None
+        // `StartMigration` and `AttachDataSource` are served through the seam that runs the
+        // operation's own validation of the input first (see [`StatedInputOperation`]).
+        // WHICH request that is comes from the model: the protocol resolves a request's
+        // routing key off the method and the URI pattern the model declares, so this names
+        // no path of its own.
+        let routing_key = self.entry.protocol().routing_key(req).ok();
+        [&self.stated_start_migration, &self.stated_attach_data_source]
+            .into_iter()
+            .find(|stated| routing_key == Some(stated.routing_key))
+            .map(|stated| stated as &dyn ErasedOperation)
     }
 
     fn override_refusal(&self, refusal: &Refusal) -> Option<Refused> {

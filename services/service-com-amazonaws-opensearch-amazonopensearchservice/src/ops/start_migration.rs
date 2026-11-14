@@ -208,6 +208,21 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
 
         let options = input.migration_options;
 
+        // The saved objects are exported FROM the collection the source names, and this
+        // service serves the account its requests are made for: a source ARN carrying
+        // another account's id names a collection no request of this account can export
+        // from, so the start is refused as the malformed value it is
+        // ([`crate::state::data_source_arns::foreign_account_arn_refusal`], the rule
+        // `AttachDataSource` applies to the data source it is handed) rather than minting a
+        // job that could never run. The ARN's own SHAPE is this operation's stated input
+        // report, which answers before this handler runs.
+        if let Some(refusal) = crate::state::data_source_arns::foreign_account_arn_refusal(
+            "migrationOptions.source.datasourceArn",
+            &options.source.datasource_arn,
+        ) {
+            return Err(StartMigrationErrorModeled::ValidationException(refusal).into());
+        }
+
         // What the import writes into has to be ONE workspace: a request naming two, or
         // none, or a new one with no name describes no target, which is malformed input
         // rather than a target this service picks for the caller.
@@ -260,7 +275,22 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         // refusal is the modelled not-found shape, carried under the status this service
         // answers that shape on (`crate::scaffolded::RESOURCE_NOT_FOUND_STATUS`) rather
         // than the status the shape's own `@httpError` annotates.
-        if !store.applications.contains_key(&input.application_id) {
+        //
+        // An application the account does not hold YET is nothing to migrate into either:
+        // one still being provisioned has no workspace to import saved objects into, and
+        // one whose DELETION has been asked for is on its way out — its record is kept only
+        // to report that deletion ([`crate::state::Application::begin_deletion`]). Both are
+        // refused with the same sentence, because what the caller is told is that the
+        // account holds no such application to migrate into; a start is taken only on an
+        // application that is ACTIVE ("the application is up and can be used").
+        let active = store
+            .applications
+            .get(&input.application_id)
+            .is_some_and(|application| {
+                application.removal_due.is_none()
+                    && application.status == crate::state::APPLICATION_STATUS_ACTIVE
+            });
+        if !active {
             return Err(StartMigrationErrorModeled::ResourceNotFoundException(
                 application_does_not_exist(&input.application_id),
             )

@@ -26,15 +26,14 @@ use serde_json::json;
 
 use super::application_deletion::delete_application;
 use super::control_plane_refusal_wording::message;
-use super::data_source_attachments::application;
 use super::domain_lifecycle::{
-    error_code, string_member, Emulator, RECORDED_NOT_FOUND_STATUS, SETTLE_WAIT,
+    error_code, poll_until, string_member, Emulator, RECORDED_NOT_FOUND_STATUS,
 };
-use super::saved_object_migrations::{get_migration, start_migration};
+use super::saved_object_migrations::{active_application, get_migration, start_migration};
 
 /// The data source a job exports saved objects out of: a search COLLECTION ARN, the shape
 /// `StartMigration` validates its source against.
-const SOURCE: &str = "arn:aws:aoss:us-east-1:123456789012:collection/ownerresolution";
+const SOURCE: &str = "arn:aws:aoss:us-east-1:000000000000:collection/ownerresolution";
 
 /// Start one job for `application_id` and hand back the `migrationId` it was minted
 /// under.
@@ -103,7 +102,7 @@ async fn a_migration_id_whose_application_is_not_held_is_refused_for_that_applic
     let emulator = Emulator::new();
     // One application the account DOES hold, so every row below is about the id the
     // request carried rather than about an empty store.
-    let held = application(&emulator, "owner-resolution-held").await;
+    let held = active_application(&emulator, "owner-resolution-held").await;
     let job = started_job(&emulator, &held, "the held application's job").await;
     assert!(
         job.starts_with(&format!("{held}-")),
@@ -157,7 +156,7 @@ async fn a_migration_id_whose_application_is_not_held_is_refused_for_that_applic
 #[tokio::test]
 async fn a_jobs_own_id_is_refused_for_its_application_once_the_clock_removes_it() {
     let emulator = Emulator::new();
-    let id = application(&emulator, "owner-resolution-removed").await;
+    let id = active_application(&emulator, "owner-resolution-removed").await;
     let job = started_job(&emulator, &id, "the job of the removed application").await;
 
     let read = get_migration(&emulator, &job).await;
@@ -185,8 +184,12 @@ async fn a_jobs_own_id_is_refused_for_its_application_once_the_clock_removes_it(
     );
 
     // Once the removal has fallen due the account holds no such application, so the SAME
-    // id names nothing to look a job up in.
-    tokio::time::sleep(SETTLE_WAIT).await;
+    // id names nothing to look a job up in — the CONDITION this polls for rather than a
+    // stretch of time it waits out.
+    poll_until("the application's removal falling due", || async {
+        get_migration(&emulator, &job).await.status != 200
+    })
+    .await;
     assert_refused_for_the_application(
         &emulator,
         &job,

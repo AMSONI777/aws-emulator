@@ -105,6 +105,8 @@ mod direct_query_data_source_inventory;
 mod direct_query_data_source_updates;
 #[path = "all/direct_query_data_sources.rs"]
 mod direct_query_data_sources;
+#[path = "all/documented_request_rules.rs"]
+mod documented_request_rules;
 #[path = "all/domain_activity_gates.rs"]
 mod domain_activity_gates;
 #[path = "all/domain_analysis.rs"]

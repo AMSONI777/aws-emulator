@@ -32,17 +32,15 @@
 //! * an `applicationId` naming no application of this account, and a `migrationId`
 //!   naming no job, are refused with the modelled `ResourceNotFoundException`.
 
-use std::time::Duration;
-
 use serde_json::{json, Value};
 use service_com_amazonaws_opensearch_amazonopensearchservice::state::{
-    CONFLICT_RESOLUTION_VALUES, MIGRATION_STATUS_IN_PROGRESS, MIGRATION_STATUS_PENDING,
-    MIGRATION_STATUS_SUCCEEDED, MIGRATION_STATUS_VALUES, PROVISIONING,
+    APPLICATION_STATUS_ACTIVE, CONFLICT_RESOLUTION_VALUES, MIGRATION_STATUS_IN_PROGRESS,
+    MIGRATION_STATUS_PENDING, MIGRATION_STATUS_SUCCEEDED, MIGRATION_STATUS_VALUES, PROVISIONING,
 };
 
 use super::data_source_attachments::application;
 use super::domain_lifecycle::{
-    error_code, string_member, Answer, Emulator, PREFIX, RECORDED_NOT_FOUND_STATUS,
+    error_code, poll_until, string_member, Answer, Emulator, PREFIX, RECORDED_NOT_FOUND_STATUS,
 };
 
 /// The ARN of the data source a row migrates saved objects out of, unless it names
@@ -50,8 +48,10 @@ use super::domain_lifecycle::{
 ///
 /// Saved objects are exported from a search COLLECTION, which is the shape
 /// `StartMigration` validates its source ARN against, so every row that expects a start
-/// to be served names one.
-const SOURCE: &str = "arn:aws:aoss:us-east-1:123456789012:collection/savedobjects";
+/// to be served names one — held by the account this emulator serves
+/// (`engine::emulator_account_id`), because a source in another account names a collection
+/// no request of this account can export from.
+const SOURCE: &str = "arn:aws:aoss:us-east-1:000000000000:collection/savedobjects";
 
 /// `StartMigration`: `POST /2021-01-01/opensearch/app-migrations`.
 pub(crate) async fn start_migration(emulator: &Emulator, body: Value) -> Answer {
@@ -64,6 +64,30 @@ pub(crate) async fn start_migration(emulator: &Emulator, body: Value) -> Answer 
         .await
 }
 
+/// An application of this account that is ACTIVE — the condition a start is taken on: a
+/// migration is started INTO an application's workspace, so one still being provisioned is
+/// not yet an application to migrate into.
+///
+/// Polls the STATUS the clock owes the application rather than sleeping for the provisioning
+/// span, so a case that needs an application to migrate into cannot depend on how fast the
+/// host runs. Shared with the sibling suites that start a migration.
+pub(crate) async fn active_application(emulator: &Emulator, name: &str) -> String {
+    let id = application(emulator, name).await;
+    let case = format!("the application {name:?} becoming active");
+    poll_until(&case, || async {
+        let read = emulator
+            .call(
+                "GET",
+                &format!("{PREFIX}/opensearch/application/{id}"),
+                None,
+            )
+            .await;
+        read.body["status"].as_str() == Some(APPLICATION_STATUS_ACTIVE)
+    })
+    .await;
+    id
+}
+
 /// `GetMigration`: `GET /2021-01-01/opensearch/app-migrations/{migrationId}`.
 pub(crate) async fn get_migration(emulator: &Emulator, migration_id: &str) -> Answer {
     emulator
@@ -73,15 +97,6 @@ pub(crate) async fn get_migration(emulator: &Emulator, migration_id: &str) -> An
             None,
         )
         .await
-}
-
-/// How long to wait for every step the clock owes a job to have fallen due.
-///
-/// A job takes one provisioning span per step — the export, then the import that
-/// follows it — so the wait is both spans plus a margin, taken from the span itself
-/// rather than from a second copy of its length.
-fn whole_job() -> Duration {
-    PROVISIONING * 3
 }
 
 /// A timestamp member of a response, in seconds — the `restJson1` form of a modelled
@@ -225,7 +240,7 @@ fn rows() -> Vec<Row> {
             options: json!({
                 "source": {
                     "datasourceArn":
-                        "arn:aws-us-gov:aoss:us-gov-west-1:123456789012:collection/savedobjects",
+                        "arn:aws-us-gov:aoss:us-gov-west-1:000000000000:collection/savedobjects",
                 },
                 "workspace": { "workspaceId": "ws-reporting" },
                 "exportOptions": { "objects": [{ "type": "index-pattern", "id": "orders-*" }] },
@@ -245,7 +260,7 @@ async fn a_start_mints_one_pending_job_the_read_reports() {
 
     for row in rows() {
         let case = row.case;
-        let id = application(&emulator, row.name).await;
+        let id = active_application(&emulator, row.name).await;
         let answer = start_migration(
             &emulator,
             json!({ "applicationId": id, "migrationOptions": row.options }),
@@ -328,8 +343,16 @@ async fn a_start_mints_one_pending_job_the_read_reports() {
     }
 
     // Nothing asked for a move: the clock owes every job its export and its import, and
-    // whichever call reads the record next materialises them.
-    tokio::time::sleep(whole_job()).await;
+    // whichever call reads the record next materialises them — the CONDITION this polls for
+    // rather than a stretch of time it waits out.
+    for (row, _, migration_id) in &started {
+        let case = row.case;
+        poll_until(&format!("the job of {case} completing"), || async {
+            get_migration(&emulator, migration_id).await.body["status"].as_str()
+                == Some(MIGRATION_STATUS_SUCCEEDED)
+        })
+        .await;
+    }
 
     for (row, id, migration_id) in &started {
         let case = row.case;
@@ -377,7 +400,7 @@ async fn a_start_mints_one_pending_job_the_read_reports() {
 #[tokio::test]
 async fn the_clock_moves_a_job_through_its_lifecycle_in_order() {
     let emulator = Emulator::new();
-    let id = application(&emulator, "migration-progression").await;
+    let id = active_application(&emulator, "migration-progression").await;
     let answer = start_migration(
         &emulator,
         json!({
@@ -468,9 +491,9 @@ async fn the_clock_moves_a_job_through_its_lifecycle_in_order() {
         );
     }
 
-    // A job in a terminal status is owed nothing more, so a later read reports the same
-    // record.
-    tokio::time::sleep(whole_job()).await;
+    // A job in a terminal status is owed nothing more, so the NEXT read reports the same
+    // record: there is no move to wait for, which is why this reads again straight away
+    // rather than waiting out a span.
     let again = get_migration(&emulator, &migration_id).await;
     assert_eq!(
         (
@@ -493,8 +516,8 @@ async fn the_clock_moves_a_job_through_its_lifecycle_in_order() {
 #[tokio::test]
 async fn a_client_token_identifies_the_start_of_one_job() {
     let emulator = Emulator::new();
-    let one = application(&emulator, "migration-token-one").await;
-    let other = application(&emulator, "migration-token-other").await;
+    let one = active_application(&emulator, "migration-token-one").await;
+    let other = active_application(&emulator, "migration-token-other").await;
     let options = json!({
         "source": { "datasourceArn": SOURCE },
         "workspace": { "workspaceId": "ws-reporting" },
@@ -581,7 +604,7 @@ async fn a_client_token_identifies_the_start_of_one_job() {
 #[tokio::test]
 async fn a_request_the_service_cannot_run_is_refused_and_starts_nothing() {
     let emulator = Emulator::new();
-    let id = application(&emulator, "migration-refusals").await;
+    let id = active_application(&emulator, "migration-refusals").await;
 
     // (case, the applicationId, the migrationOptions, the status and code expected)
     let rows: Vec<(&str, String, Value, u16, &str)> = vec![
@@ -708,7 +731,7 @@ async fn a_request_the_service_cannot_run_is_refused_and_starts_nothing() {
 #[tokio::test]
 async fn an_id_naming_no_job_is_refused() {
     let emulator = Emulator::new();
-    let id = application(&emulator, "migration-unknown-ids").await;
+    let id = active_application(&emulator, "migration-unknown-ids").await;
     let started = start_migration(
         &emulator,
         json!({

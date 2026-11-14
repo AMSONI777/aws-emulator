@@ -30,16 +30,14 @@ use service_com_amazonaws_opensearch_amazonopensearchservice::state::{
 };
 
 use super::data_source_attachments::{application, attach, describe_attachment, list_attachments};
-use super::domain_lifecycle::{string_member, Emulator, PREFIX, REGION, SETTLE_WAIT};
+use super::domain_lifecycle::{
+    poll_until, settled_domain, string_member, Emulator, PREFIX, REGION, SETTLE_WAIT,
+};
 
 /// An IAM role a direct query data source's union member names, inside
 /// `DirectQueryDataSourceRoleArn`'s pattern
 /// (`smithy_query(query="shape",shape="CloudWatchDirectQueryDataSource")`).
 const DIRECT_QUERY_ROLE_ARN: &str = "arn:aws:iam::123456789012:role/OpenSearchDirectQueryRole";
-
-/// Another account of the same partition, so a row can name a resource of an account
-/// this emulator does not serve.
-const ANOTHER_ACCOUNT: &str = "210987654321";
 
 /// Another Region of the same partition, so a row can name a resource outside the one
 /// the request was signed for.
@@ -160,11 +158,15 @@ async fn an_attachment_completes_for_every_data_source_kind_this_account_holds()
     let account = ::engine::emulator_account_id();
 
     // The application and the domain have finished provisioning, so each row below is
-    // decided by its own data source rather than by something else still coming up.
-    tokio::time::sleep(SETTLE_WAIT).await;
+    // decided by its own data source rather than by something else still coming up: the
+    // CONDITION is polled for rather than waited out.
+    settled_domain(&emulator, "ds-kinds-held").await;
 
     // Each row: the case, the data source ARN, the status the attach answers with, and the
-    // status the attachment settles to once the clock has passed whatever it owed.
+    // status the attachment settles to once the clock has passed whatever it owed. Every
+    // row names a KIND of resource this service attaches, held by the account it serves —
+    // an ARN that names neither is refused rather than attached, which
+    // [`super::documented_request_rules`] asserts.
     let rows: Vec<(&str, String, &str, &str)> = vec![
         (
             "this account's Data Catalog in the Region the request was signed for",
@@ -191,24 +193,6 @@ async fn an_attachment_completes_for_every_data_source_kind_this_account_holds()
             ATTACHMENT_STATUS_ATTACHED,
         ),
         (
-            "a Data Catalog of another account, which this one does not hold",
-            glue_data_catalog_arn(REGION, ANOTHER_ACCOUNT),
-            ATTACHMENT_STATUS_PENDING,
-            ATTACHMENT_STATUS_FAILED,
-        ),
-        (
-            "another resource type of the same vendor, which is no data source",
-            format!("arn:aws:glue:{REGION}:{account}:database/ds-kinds-absent"),
-            ATTACHMENT_STATUS_PENDING,
-            ATTACHMENT_STATUS_FAILED,
-        ),
-        (
-            "a Data Catalog ARN naming no Region, which names no catalog",
-            format!("arn:aws:glue::{account}:catalog"),
-            ATTACHMENT_STATUS_PENDING,
-            ATTACHMENT_STATUS_FAILED,
-        ),
-        (
             "a domain of this account under another name",
             domain_arn("ds-kinds-absent"),
             ATTACHMENT_STATUS_PENDING,
@@ -230,8 +214,18 @@ async fn an_attachment_completes_for_every_data_source_kind_this_account_holds()
     }
 
     // Nothing asks for the move: the span the clock owed each attachment passes, and every
-    // one of them is then in the status its own data source decides.
-    tokio::time::sleep(SETTLE_WAIT).await;
+    // one of them is then in the status its own data source decides — the condition this
+    // polls for.
+    poll_until("every attachment the clock owed a move landing", || async {
+        let listed = list_attachments(&emulator, &id, json!({})).await;
+        listed.body["attachments"]
+            .as_array()
+            .cloned()
+            .unwrap_or_default()
+            .iter()
+            .all(|entry| entry["status"].as_str() != Some(ATTACHMENT_STATUS_PENDING))
+    })
+    .await;
     for (case, data_source_arn, _, settled) in &rows {
         assert_eq!(
             listed_status(&emulator, &id, data_source_arn, case).await,

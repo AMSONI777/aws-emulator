@@ -29,22 +29,20 @@
 //!   `applicationId` naming no application of this account with the modelled
 //!   missing-resource refusal.
 
-use std::time::Duration;
-
 use serde_json::{json, Value};
 use service_com_amazonaws_opensearch_amazonopensearchservice::state::{
     MIGRATION_STATUS_FAILED, MIGRATION_STATUS_IN_PROGRESS, MIGRATION_STATUS_PENDING,
-    MIGRATION_STATUS_SUCCEEDED, MIGRATION_STATUS_VALUES, PROVISIONING,
+    MIGRATION_STATUS_SUCCEEDED, MIGRATION_STATUS_VALUES,
 };
 
-use super::data_source_attachments::application;
 use super::domain_lifecycle::{
-    error_code, string_member, Answer, Emulator, PREFIX, RECORDED_NOT_FOUND_STATUS,
+    error_code, poll_until, string_member, Answer, Emulator, PREFIX, RECORDED_NOT_FOUND_STATUS,
 };
+use super::saved_object_migrations::active_application;
 
 /// The ARN of the data source every job below migrates saved objects out of: the search
 /// COLLECTION shape `StartMigration` validates a source against.
-const SOURCE: &str = "arn:aws:aoss:us-east-1:123456789012:collection/listedobjects";
+const SOURCE: &str = "arn:aws:aoss:us-east-1:000000000000:collection/listedobjects";
 
 /// `ListMigrations`: `GET /2021-01-01/opensearch/app-migrations?applicationId=…`.
 pub(crate) async fn list_migrations(
@@ -101,15 +99,6 @@ async fn start(emulator: &Emulator, application_id: &str, objects: usize) -> Str
     string_member(&answer.body, "migrationId", "a start this suite made")
 }
 
-/// How long to wait for every step the clock owes a job to have fallen due.
-///
-/// A job takes one provisioning span per step — the export, then the import that follows
-/// it — so the wait is both spans plus a margin, taken from the span itself rather than
-/// from a second copy of its length.
-fn whole_job() -> Duration {
-    PROVISIONING * 3
-}
-
 /// The `migrationId`s a listing answer reports, in the order it reported them.
 fn listed_ids(answer: &Answer, case: &str) -> Vec<String> {
     answer.body["migrations"]
@@ -143,7 +132,7 @@ async fn the_listing_reports_every_job_of_the_application_from_the_stored_record
 
     for (case, name, scopes) in rows {
         let emulator = Emulator::new();
-        let id = application(&emulator, name).await;
+        let id = active_application(&emulator, name).await;
         let mut started: Vec<String> = Vec::new();
         for objects in &scopes {
             started.push(start(&emulator, &id, *objects).await);
@@ -218,8 +207,8 @@ async fn the_listing_reports_every_job_of_the_application_from_the_stored_record
 #[tokio::test]
 async fn the_listing_is_scoped_to_the_application_it_names() {
     let emulator = Emulator::new();
-    let one = application(&emulator, "listing-scope-one").await;
-    let other = application(&emulator, "listing-scope-other").await;
+    let one = active_application(&emulator, "listing-scope-one").await;
+    let other = active_application(&emulator, "listing-scope-other").await;
 
     let mut of_one = Vec::new();
     let mut of_other = Vec::new();
@@ -250,7 +239,7 @@ async fn the_listing_is_scoped_to_the_application_it_names() {
 #[tokio::test]
 async fn any_page_size_walks_the_whole_listing_once() {
     let emulator = Emulator::new();
-    let id = application(&emulator, "listing-pages").await;
+    let id = active_application(&emulator, "listing-pages").await;
     let mut started = Vec::new();
     for objects in 0..5 {
         started.push(start(&emulator, &id, objects).await);
@@ -320,7 +309,7 @@ async fn any_page_size_walks_the_whole_listing_once() {
 #[tokio::test]
 async fn a_status_filter_selects_the_jobs_in_that_status() {
     let emulator = Emulator::new();
-    let id = application(&emulator, "listing-status-filter").await;
+    let id = active_application(&emulator, "listing-status-filter").await;
     let mut started = Vec::new();
     for objects in 0..3 {
         started.push(start(&emulator, &id, objects).await);
@@ -349,8 +338,14 @@ async fn a_status_filter_selects_the_jobs_in_that_status() {
     }
 
     // Nothing asked for a move: the clock owes every job its export and its import, and
-    // this listing is a call that materialises them.
-    tokio::time::sleep(whole_job()).await;
+    // this listing is a call that materialises them — the CONDITION this polls for rather
+    // than a stretch of time it waits out.
+    poll_until("every job the clock owed its steps succeeding", || async {
+        let answer =
+            list_migrations(&emulator, &id, &format!("&status={MIGRATION_STATUS_SUCCEEDED}")).await;
+        listed_ids(&answer, "every job succeeding").len() == started.len()
+    })
+    .await;
 
     for (case, status, expected) in [
         ("succeeded once both steps fell due", MIGRATION_STATUS_SUCCEEDED, started.clone()),
@@ -399,8 +394,8 @@ async fn a_status_filter_selects_the_jobs_in_that_status() {
 #[tokio::test]
 async fn a_request_the_listing_cannot_run_is_refused() {
     let emulator = Emulator::new();
-    let id = application(&emulator, "listing-refusals").await;
-    let other = application(&emulator, "listing-refusals-other").await;
+    let id = active_application(&emulator, "listing-refusals").await;
+    let other = active_application(&emulator, "listing-refusals-other").await;
     let mut started = Vec::new();
     for objects in 0..2 {
         started.push(start(&emulator, &id, objects).await);

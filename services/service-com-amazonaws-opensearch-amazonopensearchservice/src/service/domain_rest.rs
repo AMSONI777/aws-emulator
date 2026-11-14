@@ -2652,6 +2652,24 @@ fn create_index(domain: &mut Domain, request: &Request<'_>, index_name: &str) ->
             &format!("index schema holds {values} values, past the maximum this cluster takes"),
         );
     }
+    // The cluster builds the index's ANALYSIS from the settings it is created with, so a
+    // defined analyzer naming a tokenizer, a token filter, a character filter or a built-in
+    // analyzer nothing registers cannot be assembled: the create is refused with the
+    // engine's own sentence for what could not be resolved, by the same rule the control
+    // plane's `CreateIndex` applies to the settings it is handed
+    // ([`state::analysis::IndexAnalysis::unbuildable_analyzer`]), so neither path stores an
+    // index whose chain the cluster could not build. The dictionary FILES a chain may name
+    // are resolved where the index is created through the control plane; a chain that reads
+    // one is judged here on the names alone.
+    if let Some((_, unresolved)) = state::analysis::IndexAnalysis::of(&schema)
+        .unbuildable_analyzer(&state::analysis::PackageFiles::default())
+    {
+        return error(
+            400,
+            ingest::ILLEGAL_ARGUMENT_EXCEPTION,
+            &unresolved.message(false),
+        );
+    }
     domain.indexes.insert(
         index_name.to_string(),
         state::Index {

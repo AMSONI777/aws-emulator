@@ -299,6 +299,34 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
             crate::state::vpc_network::DOMAIN_PLACEMENT,
         );
 
+        // Every other refusal that resolves a resource of ANOTHER service is read here for
+        // the same reason, and stated below among the rest: the certificate a custom
+        // endpoint is served under (Certificate Manager), the log groups an enabled
+        // log-publishing option delivers into (CloudWatch Logs), the user pool a Cognito
+        // authentication configuration names (Amazon Cognito) and the key an enabled
+        // encryption-at-rest configuration is provisioned through (KMS). Reading them
+        // before this service's store is locked is what keeps ONE lock order: no call holds
+        // two service stores at once, so no pair of services can hold each other's.
+        let custom_endpoint_refused = crate::state::custom_endpoint::custom_endpoint_certificate_refusal(
+            &*self.engine,
+            &region,
+            input.domain_endpoint_options.as_ref(),
+        );
+        let log_destination_refused =
+            crate::state::log_destinations::log_publishing_destination_refusal(
+                &*self.engine,
+                input.log_publishing_options.iter().flatten(),
+            );
+        let cognito_refused = crate::state::cognito_authentication::cognito_options_refusal(
+            &*self.engine,
+            input.cognito_options.as_ref(),
+        );
+        let kms_key_refused = crate::state::encryption_at_rest::kms_key_refusal(
+            &*self.engine,
+            &region,
+            input.encryption_at_rest_options.as_ref(),
+        );
+
         let mut store = state.lock();
 
         // "Defaults to the latest version of OpenSearch" — a domain runs ONE engine
@@ -309,6 +337,20 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
             .engine_version
             .clone()
             .unwrap_or_else(|| latest_opensearch_version().to_string());
+
+        // A domain runs an engine release the SERVICE OFFERS: `EngineVersion`'s pattern
+        // admits every `Elasticsearch_X.Y` and `OpenSearch_X.Y` string, so a value of that
+        // shape naming a release outside the published catalog — the same set
+        // `ListVersions` advertises — names an engine nothing runs, and every later
+        // version-dependent answer about the domain would be computed from it. It is
+        // refused before any domain is created, through the ONE resolution of a version
+        // against that catalog ([`crate::state::resolve_engine_version`]), so this create
+        // and the operations that report per release cannot disagree about which releases
+        // exist.
+        if let Err(refusal) = crate::state::resolve_engine_version("EngineVersion", &engine_version)
+        {
+            return Err(CreateDomainErrorModeled::ValidationException(refusal).into());
+        }
 
         // Every node of the cluster runs on the domain's engine release, so an
         // instance type that release does not offer describes a cluster the service
@@ -354,6 +396,15 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         // resources it is served by and a user pool that exists.
         if let Some(refusal) = [
             crate::state::master_user_password_refusal(input.advanced_security_options.as_ref()),
+            // A domain reached through fine-grained access control has ONE master user,
+            // and which kind it is follows from whether the internal user database is on:
+            // a create that switches the boundary on without that master user, or that
+            // names the credentials of the other kind, describes a domain the service does
+            // not provision ([`crate::state::advanced_security::master_user_refusal`]), by
+            // the same rule the update path applies.
+            crate::state::advanced_security::master_user_refusal(
+                input.advanced_security_options.as_ref(),
+            ),
             // Fine-grained access control is served by the domain's encryption and its
             // HTTPS-only endpoint, so a create that switches it on without one of those
             // prerequisites describes a domain the service does not provision. Judged on
@@ -374,6 +425,24 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
                 input.advanced_security_options.as_ref(),
             ),
             crate::state::warm_storage_refusal(input.cluster_config.as_ref()),
+            // ... and the data nodes of a cluster placed in multiple Availability Zones
+            // are spread across them, so a cluster asking for zone awareness with fewer
+            // data nodes than the service places zones is refused rather than provisioned
+            // ([`crate::state::zone_awareness_refusal`]), and so is one asking for a
+            // master quorum the service does not configure
+            // ([`crate::state::dedicated_master_count_refusal`]) — both by the same rules
+            // the update path applies.
+            crate::state::data_node_count_refusal(input.cluster_config.as_ref()),
+            crate::state::zone_count_refusal(input.cluster_config.as_ref()),
+            crate::state::zone_awareness_refusal(input.cluster_config.as_ref()),
+            crate::state::dedicated_master_count_refusal(input.cluster_config.as_ref()),
+            // A policy document that is not JSON denotes no access policy at all, so it is
+            // refused rather than stored as one nothing could later read or enforce
+            // ([`crate::service::domain_configuration::access_policies_refusal`]), by the
+            // same rule the update path applies.
+            crate::service::domain_configuration::access_policies_refusal(
+                input.access_policies.as_deref(),
+            ),
             // ... and the warm tier is offered only on hot-tier instance types that
             // publish that capability, so a cluster asking for it on one that does not is
             // refused rather than provisioned
@@ -405,38 +474,25 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
             // served by, a certificate the account holds none of, and a certificate that
             // does not cover the requested host all describe an HTTPS endpoint no client
             // could reach under the name it asked for
-            // ([`crate::state::custom_endpoint::custom_endpoint_certificate_refusal`]), by
-            // the same rule the update path applies.
-            crate::state::custom_endpoint::custom_endpoint_certificate_refusal(
-                &*self.engine,
-                &region,
-                input.domain_endpoint_options.as_ref(),
-            ),
+            // ([`crate::state::custom_endpoint::custom_endpoint_certificate_refusal`], read
+            // above before this store was locked), by the same rule the update path
+            // applies.
+            custom_endpoint_refused,
             crate::state::log_publishing_refusal(input.log_publishing_options.iter().flatten()),
             // And the group that ARN names has to be one CloudWatch Logs holds: a
             // create that enables publishing to a group nobody created configures a
             // delivery that can never happen, so it is refused and no domain is
             // created, by the same rule the update path applies.
-            crate::state::log_destinations::log_publishing_destination_refusal(
-                &*self.engine,
-                input.log_publishing_options.iter().flatten(),
-            ),
+            log_destination_refused,
             crate::state::off_peak_window_refusal(input.off_peak_window_options.as_ref()),
-            crate::state::cognito_authentication::cognito_options_refusal(
-                &*self.engine,
-                input.cognito_options.as_ref(),
-            ),
+            cognito_refused,
             // A domain whose encryption at rest is enabled is provisioned THROUGH the KMS
             // key the request names, so that key is resolved before the domain is created:
             // a key the domain's own Region holds none of — a key ARN of another Region
             // among them — or one in a key state KMS performs no cryptographic operation
             // in encrypts nothing, so the create is refused and no domain exists
             // afterwards ([`crate::state::encryption_at_rest`]).
-            crate::state::encryption_at_rest::kms_key_refusal(
-                &*self.engine,
-                &region,
-                input.encryption_at_rest_options.as_ref(),
-            ),
+            kms_key_refused,
         ]
         .into_iter()
         .flatten()
@@ -766,22 +822,27 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
             .domains
             .get(&name)
             .ok_or_else(crate::state::state_unavailable)?;
+        let domain_status = crate::service::domain_configuration::reported_status(stored);
         // A domain encrypted at rest uses its key through the create's whole life and long
         // after it: its storage is encrypted under a data key the service asks the key for,
         // so the service takes the permission it needs on that key — the grant KMS reports
         // for the key, scoped to this domain ([`crate::state::encryption_grant`]). Reached
         // after the record is stored, so what the grant is taken for is the encryption the
-        // domain really holds.
+        // domain really holds — and after THIS store has been released, because the grant
+        // lives in another service's store and no call holds two at once.
+        let (arn, encryption) = (
+            stored.arn.clone(),
+            stored.encryption_at_rest_options.clone(),
+        );
+        drop(store);
         crate::state::encryption_grant::settle_domain_grant(
             &*self.engine,
             &region,
-            &stored.arn,
-            stored.encryption_at_rest_options.as_ref(),
+            &arn,
+            encryption.as_ref(),
         );
         Ok(CreateDomainOutput {
-            domain_status: Some(crate::service::domain_configuration::reported_status(
-                stored,
-            )),
+            domain_status: Some(domain_status),
         })
     }
 }

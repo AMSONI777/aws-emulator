@@ -36,7 +36,7 @@ use service_com_amazonaws_opensearch_amazonopensearchservice::state::{
 };
 
 use super::domain_lifecycle::{error_code, Answer, Emulator, PREFIX, SETTLE_WAIT};
-use super::package_associations::{SERVICE_PACKAGE_ID, UNKNOWN_PACKAGE_ID};
+use super::package_associations::{PACKAGE_CONTENT, SERVICE_PACKAGE_ID, UNKNOWN_PACKAGE_ID};
 
 /// The largest page size `GetPackageVersionHistory` publishes: `MaxResults` is
 /// `@range(max: 100)` with `@default(0)` and no minimum
@@ -54,7 +54,17 @@ const MAX_COMMIT_MESSAGE: usize = 160;
 const SEED_EPOCH: Duration = Duration::from_secs(1_767_225_600);
 
 /// `CreatePackage`: `POST /2021-01-01/packages`.
+///
+/// The object the create IMPORTS is put at the Amazon S3 location the body names first
+/// ([`Emulator::given_object`]): a create whose location holds no object is refused, and
+/// what these rows are about is the version HISTORY rather than the content of one version.
 async fn create(emulator: &Emulator, body: Value) -> Answer {
+    if let (Some(bucket), Some(key)) = (
+        body["PackageSource"]["S3BucketName"].as_str(),
+        body["PackageSource"]["S3Key"].as_str(),
+    ) {
+        emulator.given_object(bucket, key, PACKAGE_CONTENT);
+    }
     emulator
         .call("POST", &format!("{PREFIX}/packages"), Some(body))
         .await
