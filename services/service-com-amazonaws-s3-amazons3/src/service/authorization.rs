@@ -15,8 +15,9 @@
 //!
 //! * the CONTEXT the request carries — the condition keys a statement may be written over,
 //!   taken from the request's own members ([`ObjectWriteContext`]) and from the facts this
-//!   gate holds for every request ([`global_conditions`]: who the caller is, which account it
-//!   and the resource belong to; [`multi_factor_auth_conditions`]: whether the credential that
+//!   gate holds for every request ([`global_conditions`]: who the caller is, its unique id,
+//!   which account it and the resource belong to, and the Region the request addressed;
+//!   [`multi_factor_auth_conditions`]: whether the credential that
 //!   signed was MFA-backed) — so a clause over one of them is DECIDED rather than
 //!   unknown, which is what makes a policy that conditions a write on an encryption header,
 //!   or a grant that conditions a read on the resource's owning account, enforceable at all;
@@ -108,6 +109,28 @@ const DELIMITER_KEY: &str = "s3:delimiter";
 /// credential.
 const PRINCIPAL_ARN_KEY: &str = "aws:PrincipalArn";
 const PRINCIPAL_ACCOUNT_KEY: &str = "aws:PrincipalAccount";
+
+/// The global condition key naming the UNIQUE ID of the principal that signed the request:
+/// "aws:userid — the unique identifier of the principal making the request" (AWS General
+/// Reference, *Global condition context keys*).
+///
+/// It is the very value `sts:GetCallerIdentity` reports as `UserId` for the credential
+/// presented, which is why this gate answers it from the credential's own record rather
+/// than composing one here: an IAM user's unique id for a long-term key, and
+/// `<role id>:<session name>` for a role session — "when you specify a role session, the
+/// unique id is the role id and the session name" — so a statement pinned to ONE named
+/// session is decided for that session and for no other.
+const USER_ID_KEY: &str = "aws:userid";
+
+/// The global condition key naming the Region the request was made TO: "aws:RequestedRegion
+/// — the Region that was called in the request" (AWS General Reference, *Global condition
+/// context keys*).
+///
+/// The Region is the endpoint the client addressed, which for a signed request is the one in
+/// its SigV4 credential scope ([`crate::state::request_region`]) — not a property of the
+/// resource — so a policy that confines a principal, or a session, to one Region is decided
+/// per request.
+const REQUESTED_REGION_KEY: &str = "aws:RequestedRegion";
 
 /// The global condition key saying whether the credential that signed the request was
 /// obtained with multi-factor authentication: "whether multi-factor authentication (MFA) was
@@ -221,6 +244,8 @@ pub const PUBLISHED_CONDITION_KEYS: &[&str] = &[
     RESOURCE_ACCOUNT_KEY,
     PRINCIPAL_ARN_KEY,
     PRINCIPAL_ACCOUNT_KEY,
+    USER_ID_KEY,
+    REQUESTED_REGION_KEY,
     MULTI_FACTOR_AUTH_PRESENT_KEY,
     TOKEN_ISSUE_TIME_KEY,
 ];
@@ -251,14 +276,17 @@ pub const CALLER_FREE_CONDITION_KEYS: &[&str] = &[
     RESOURCE_ACCOUNT_KEY,
 ];
 
-/// The keys of [`PUBLISHED_CONDITION_KEYS`] that only a decision which resolved the signing
-/// identity can answer — who the caller is, which account it belongs to, and whether its
-/// credential was MFA-backed — which are the difference between the two lists above; see
+/// The keys of [`PUBLISHED_CONDITION_KEYS`] that only the FULL gate can answer — who the
+/// caller is, which account it belongs to, its unique id, whether its credential was
+/// MFA-backed, and the Region the request addressed, which that gate reads off the request
+/// itself — which are the difference between the two lists above; see
 /// `the_two_published_lists_differ_by_the_caller_keys`.
 #[cfg(test)]
 const CALLER_CONDITION_KEYS: &[&str] = &[
     PRINCIPAL_ARN_KEY,
     PRINCIPAL_ACCOUNT_KEY,
+    USER_ID_KEY,
+    REQUESTED_REGION_KEY,
     MULTI_FACTOR_AUTH_PRESENT_KEY,
     TOKEN_ISSUE_TIME_KEY,
 ];
@@ -281,18 +309,36 @@ pub fn resource_conditions() -> Vec<(String, String)> {
 }
 
 /// [`resource_conditions`] together with the keys naming the PRINCIPAL that signed the
-/// request: who it is ([`PRINCIPAL_ARN_KEY`]) and which account it belongs to
-/// ([`PRINCIPAL_ACCOUNT_KEY`]).
+/// request — who it is ([`PRINCIPAL_ARN_KEY`]), which account it belongs to
+/// ([`PRINCIPAL_ACCOUNT_KEY`]) and its unique id ([`USER_ID_KEY`]) — and the Region the
+/// request addressed ([`REQUESTED_REGION_KEY`]).
 ///
 /// `identity_arn` is the ARN of the identity whose policies are in force — the ROLE behind an
-/// assumed-role session, the user behind a long-term key (see [`PRINCIPAL_ARN_KEY`]). Only a
+/// assumed-role session, the user behind a long-term key (see [`PRINCIPAL_ARN_KEY`]) — and
+/// `user_id` the unique id of the principal the credential itself speaks for, which for a
+/// session is the session's own and not the role's. Only a
 /// decision that RESOLVED the signing identity may use this, and it publishes
-/// [`PUBLISHED_CONDITION_KEYS`]: a caller speaking for nobody carries no ARN, so its principal
-/// keys are reported absent rather than guessed, while a gate holding no identity at all
-/// publishes [`CALLER_FREE_CONDITION_KEYS`] and leaves a clause over them undecided.
+/// [`PUBLISHED_CONDITION_KEYS`]: a caller speaking for nobody carries neither an ARN nor a
+/// unique id, so its principal keys are reported absent rather than guessed, while a gate
+/// holding no identity at all publishes [`CALLER_FREE_CONDITION_KEYS`] and leaves a clause
+/// over them undecided. `requested_region` is answered for every request, whatever it signed
+/// with, because the endpoint it addressed is a property of the request alone.
 #[must_use]
-pub fn global_conditions(identity_arn: &str) -> Vec<(String, String)> {
+pub fn global_conditions(
+    identity_arn: &str,
+    user_id: &str,
+    requested_region: &str,
+) -> Vec<(String, String)> {
     let mut context = resource_conditions();
+    if !requested_region.is_empty() {
+        context.push((
+            REQUESTED_REGION_KEY.to_string(),
+            requested_region.to_string(),
+        ));
+    }
+    if !user_id.is_empty() {
+        context.push((USER_ID_KEY.to_string(), user_id.to_string()));
+    }
     if identity_arn.is_empty() {
         return context;
     }

@@ -272,6 +272,15 @@ pub struct Caller {
     /// session, else the principal's own ARN. It is what `aws:PrincipalArn` answers with
     /// (`authorization::global_conditions`), and empty for a caller that speaks for nobody.
     pub identity_arn: String,
+    /// The UNIQUE ID of the principal the credential speaks for, as `sts:GetCallerIdentity`
+    /// reports it for that credential: the value `aws:userid` answers with
+    /// (`authorization::global_conditions`). For a role session it is the session's own
+    /// composite rather than the role's id, which is what lets a document pin access to one
+    /// named session. Empty for a caller that speaks for nobody, whose key is then absent.
+    pub user_id: String,
+    /// The Region the request was ADDRESSED to, read off the request itself
+    /// (`crate::state::request_region`): the value `aws:RequestedRegion` answers with.
+    pub requested_region: String,
     /// The spellings that name the ACCOUNT the principal belongs to rather than the
     /// principal: they decide a deny and never grant (see the module docs).
     pub account_principals: Vec<String>,
@@ -364,6 +373,9 @@ pub fn request_caller<Eng: Send + Sync + 'static>(
     engine: &Eng,
     ctx: &::smithy_server_runtime::OperationContext<'_>,
 ) -> Caller {
+    // Which endpoint this request addressed, which every caller answers `aws:RequestedRegion`
+    // with: a property of the request alone, so it is read before the credential is resolved.
+    let requested_region = crate::state::request_region(ctx.parts());
     if let Some(call) = service_principal_call(engine, ctx) {
         ::tracing::debug!(
             principal = %call.principal,
@@ -371,7 +383,10 @@ pub fn request_caller<Eng: Send + Sync + 'static>(
             "this request is one another service is making as its own service principal, so it \
              is authorized as that principal acting for that resource"
         );
-        return Caller::of_service_principal(call);
+        return Caller {
+            requested_region,
+            ..Caller::of_service_principal(call)
+        };
     }
     let access_key_id = ::engine::extract_akid(&ctx.parts().headers);
     let iam_state = sts_store::iam_state(engine);
@@ -392,6 +407,10 @@ pub fn request_caller<Eng: Send + Sync + 'static>(
         .map(|caller| {
             (
                 caller.identity.arn.clone(),
+                // The unique id of the principal the credential speaks for, which is what
+                // `sts:GetCallerIdentity` answers for it and what `aws:userid` is decided
+                // against — the session's own composite for a session.
+                caller.identity.user_id.clone(),
                 caller.role_arn.clone(),
                 // WHOSE identity-based documents are in force for this credential, which is
                 // not always the principal it speaks for: the role behind an assumed-role
@@ -414,6 +433,7 @@ pub fn request_caller<Eng: Send + Sync + 'static>(
         // long-term identity it was resolved to, and is judged on that identity's documents.
         None => Ok((
             long_term.arn.clone(),
+            long_term.user_id.clone(),
             None,
             long_term.arn.clone(),
             sts_store::SessionPolicies::default(),
@@ -427,6 +447,7 @@ pub fn request_caller<Eng: Send + Sync + 'static>(
     // principal spelling, so every action it asks for falls to the implicit deny.
     let Ok((
         arn,
+        user_id,
         role_arn,
         policies_arn,
         session_policies,
@@ -438,6 +459,7 @@ pub fn request_caller<Eng: Send + Sync + 'static>(
     else {
         return Caller {
             arn: EXPIRED_CREDENTIAL_PRINCIPAL.to_string(),
+            requested_region,
             ..Caller::default()
         };
     };
@@ -446,6 +468,8 @@ pub fn request_caller<Eng: Send + Sync + 'static>(
         principals: vec![arn.clone()],
         account_principals: iam::account_principals(&arn),
         arn,
+        user_id,
+        requested_region,
         multi_factor_auth_present,
         token_issue_time,
         tags,
@@ -822,7 +846,8 @@ impl AddressedBucketTags {
 
 /// The condition context every decision of this gate is taken over: the keys the REQUEST
 /// itself carried (`conditions`), plus the keys this gate holds for EVERY request — who the
-/// caller is and which account it belongs to, whether the credential that signed was
+/// caller is, its unique id, which account it belongs to, the Region the request addressed,
+/// whether the credential that signed was
 /// MFA-backed, and the session tags the principal carries — so a statement written over one
 /// of those is decided rather than left undecided.
 ///
@@ -830,7 +855,11 @@ impl AddressedBucketTags {
 /// account-wide action ([`account_wide_denial`]) answer the same keys.
 fn caller_conditions(caller: &Caller, conditions: &[(String, String)]) -> Vec<(String, String)> {
     let mut context = conditions.to_vec();
-    context.extend(authorization::global_conditions(&caller.identity_arn));
+    context.extend(authorization::global_conditions(
+        &caller.identity_arn,
+        &caller.user_id,
+        &caller.requested_region,
+    ));
     context.extend(authorization::multi_factor_auth_conditions(
         caller.multi_factor_auth_present,
     ));

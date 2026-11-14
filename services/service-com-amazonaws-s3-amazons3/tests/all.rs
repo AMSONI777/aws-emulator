@@ -403,6 +403,8 @@ mod served_envelope_values;
 mod service_principal_object_access;
 #[path = "all/service_set_tag_keys.rs"]
 mod service_set_tag_keys;
+#[path = "all/session_policy_condition_keys.rs"]
+mod session_policy_condition_keys;
 #[path = "all/session_scoped_object_authorization.rs"]
 mod session_scoped_object_authorization;
 #[path = "all/signature_refusal_wording.rs"]

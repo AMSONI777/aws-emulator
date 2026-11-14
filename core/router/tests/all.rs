@@ -2990,3 +2990,6 @@ mod cloudformation_task_definition_runs_an_ecs_service;
 // name is `E0428` and fails every suite in this target.
 // `all/all_rs_declares_each_suite_once.rs` checks that for this file and for every service
 // crate's `tests/all.rs`, so check there rather than leaving a note here.
+// (The crate-level guidance two concurrent landings appended here belongs to the module
+// header at the top of this file, where it now stands: an inner doc comment may only precede
+// items, so a `//!` line in this appended tail is `E0753` and compiles nothing.)

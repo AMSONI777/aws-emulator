@@ -237,7 +237,7 @@ async fn a_challenge_the_device_does_not_answer_mints_nothing() {
                 ("SerialNumber", serial_number.clone()),
                 ("TokenCode", pass_code(&seed, step + 500)),
             ],
-            "MultiFactorAuthentication failed with invalid MFA one time pass code.",
+            "MultiFactorAuthentication failed with invalid MFA one time pass code. ",
         ),
         (
             "a serial the account holds no device under",

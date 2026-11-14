@@ -63,9 +63,12 @@ const MFA_SERIAL_NOT_ASSOCIATED: &str = concat!(
     "  Please verify your MFA serial number is valid and associated with this user."
 );
 
-/// The sentence AWS refuses a code the caller's own device does not answer with.
-const MFA_INVALID_PASS_CODE: &str =
-    "MultiFactorAuthentication failed with invalid MFA one time pass code.";
+/// The sentence AWS refuses a code the caller's own device does not answer with. Written in
+/// two pieces so the trailing space stays visible: it is part of the fixed text.
+const MFA_INVALID_PASS_CODE: &str = concat!(
+    "MultiFactorAuthentication failed with invalid MFA one time pass code.",
+    " "
+);
 
 /// The serial number a virtual MFA device of the IAM user `user` is addressed by: "an
 /// Amazon Resource Name (ARN) for a virtual device (such as
