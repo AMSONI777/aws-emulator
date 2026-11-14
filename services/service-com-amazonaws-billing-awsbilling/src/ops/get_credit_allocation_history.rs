@@ -194,11 +194,18 @@ fn invalid_field(member: &str, constraint: &str) -> GetCreditAllocationHistoryEr
 }
 
 /// The store key a `nextToken` resumes after, or a `ValidationException` when
-/// the token is not one this service issued. The token format and the
-/// refusal's wording live in `crate::state`, shared with this service's other
-/// paginated reads.
-fn resume_key(token: &str) -> Result<String, GetCreditAllocationHistoryError> {
-    crate::state::decode_page_token(token).ok_or_else(|| {
+/// the token is not one THIS read issued under this store's key — one this
+/// service cannot read back, one a caller assembled, and one it minted for
+/// another of its paginated reads, whose payload is a cut point of another
+/// sequence and names nothing in this one. The token format and the refusal's
+/// wording live in `crate::state`, shared with this service's other paginated
+/// reads.
+fn resume_key(
+    key: &crate::state::PageTokenKey,
+    read_by: &str,
+    token: &str,
+) -> Result<String, GetCreditAllocationHistoryError> {
+    crate::state::decode_page_token(key, read_by, token).ok_or_else(|| {
         GetCreditAllocationHistoryErrorModeled::ValidationException(ValidationException {
             message: crate::state::PAGE_TOKEN_REFUSAL.to_string(),
             reason: crate::state::VALIDATION_REASON_CANNOT_PARSE.to_string(),
@@ -352,8 +359,11 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         // The page resumes strictly after the entry the previous page ended on,
         // so an allocation written or removed between pages cannot make the
         // walk skip or repeat another one.
+        // The key the store's tokens are authenticated under, taken off the
+        // store by value so the walk below can borrow the records it reports.
+        let page_key = state.page_token_key();
         let resume_after = match input.next_token.as_deref() {
-            Some(token) => Some(resume_key(token)?),
+            Some(token) => Some(resume_key(&page_key, Self::NAME, token)?),
             None => None,
         };
         let limit = input
@@ -393,7 +403,7 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         let next_token = if page.len() > limit {
             page.truncate(limit);
             page.last()
-                .map(|(key, _)| crate::state::encode_page_token(key))
+                .map(|(key, _)| crate::state::encode_page_token(&page_key, Self::NAME, key))
         } else {
             None
         };

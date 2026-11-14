@@ -222,10 +222,17 @@ fn resolve_arns_filter(
 }
 
 /// The ARN a `nextToken` resumes after, or a `ValidationException` when the
-/// token is not one this service issued. The token format and the refusal's
-/// wording live in `crate::state`, shared with every other paginated read.
-fn decode_page_token(token: &str) -> Result<String, ListBillingViewsError> {
-    crate::state::decode_page_token(token).ok_or_else(|| {
+/// token is not one THIS read issued under this store's key — one this service
+/// cannot read back, one a caller assembled, and one it minted for another of
+/// its paginated reads, whose payload is a cut point of another sequence and
+/// names no view in this one. The token format and the refusal's wording live
+/// in `crate::state`, shared with every other paginated read.
+fn decode_page_token(
+    key: &crate::state::PageTokenKey,
+    read_by: &str,
+    token: &str,
+) -> Result<String, ListBillingViewsError> {
+    crate::state::decode_page_token(key, read_by, token).ok_or_else(|| {
         ListBillingViewsErrorModeled::ValidationException(ValidationException {
             message: crate::state::PAGE_TOKEN_REFUSAL.to_string(),
             reason: crate::state::VALIDATION_REASON_CANNOT_PARSE.to_string(),
@@ -364,8 +371,11 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         // The page resumes strictly after the last ARN the previous page
         // returned, so a view inserted or removed between pages cannot make the
         // walk skip or repeat another one.
+        // The key the store's tokens are authenticated under, taken off the
+        // store by value so the walk below can borrow the views it reports.
+        let page_key = state.page_token_key();
         let resume_after = match input.next_token.as_deref() {
-            Some(token) => Some(decode_page_token(token)?),
+            Some(token) => Some(decode_page_token(&page_key, Self::NAME, token)?),
             None => None,
         };
 
@@ -396,7 +406,7 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
             matched.truncate(limit);
             matched
                 .last()
-                .map(|view| crate::state::encode_page_token(&view.arn))
+                .map(|view| crate::state::encode_page_token(&page_key, Self::NAME, &view.arn))
         } else {
             None
         };

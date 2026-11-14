@@ -184,10 +184,17 @@ fn unavailable(why: &str) -> ListBillingViewSegmentsError {
 }
 
 /// The key a `nextToken` resumes after, or a `ValidationException` when the
-/// token is not one this service issued. The token format and the refusal's
-/// wording live in `crate::state`, shared with every other paginated read.
-fn decode_page_token(token: &str) -> Result<String, ListBillingViewSegmentsError> {
-    crate::state::decode_page_token(token).ok_or_else(|| {
+/// token is not one THIS read issued under this store's key — one this service
+/// cannot read back, one a caller assembled, and one it minted for another of
+/// its paginated reads, whose payload is a cut point of another sequence and
+/// names nothing in this one. The token format and the refusal's wording live
+/// in `crate::state`, shared with every other paginated read.
+fn decode_page_token(
+    key: &crate::state::PageTokenKey,
+    read_by: &str,
+    token: &str,
+) -> Result<String, ListBillingViewSegmentsError> {
+    crate::state::decode_page_token(key, read_by, token).ok_or_else(|| {
         ListBillingViewSegmentsErrorModeled::ValidationException(ValidationException {
             message: crate::state::PAGE_TOKEN_REFUSAL.to_string(),
             reason: crate::state::VALIDATION_REASON_CANNOT_PARSE.to_string(),
@@ -352,14 +359,20 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         }
         let (begin_secs, end_secs) =
             requested_period(&input, ::std::time::SystemTime::now())?;
-        let resume_after = match input.next_token.as_deref() {
-            Some(token) => Some(decode_page_token(token)?),
-            None => None,
-        };
 
         let state = crate::state::service_state(&*self.engine)
             .ok_or_else(|| unavailable("the billing view store is unavailable"))?;
         let state = state.lock();
+
+        // The token is read back before the view is resolved, so the order the
+        // refusals come in is the one this read already had; the key it is
+        // authenticated under lives on the store, so the store is reached
+        // first.
+        let page_key = state.page_token_key();
+        let resume_after = match input.next_token.as_deref() {
+            Some(token) => Some(decode_page_token(&page_key, Self::NAME, token)?),
+            None => None,
+        };
 
         let view = resolve_view(&input, &state)?;
         // A view whose health status is not HEALTHY is one no operation may act
@@ -406,7 +419,9 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
             .clamp(MIN_MAX_RESULTS, DEFAULT_MAX_RESULTS);
         let next_token = if matched.len() > limit {
             matched.truncate(limit);
-            matched.last().map(|(key, _)| crate::state::encode_page_token(key))
+            matched.last().map(|(key, _)| {
+                crate::state::encode_page_token(&page_key, Self::NAME, key)
+            })
         } else {
             None
         };

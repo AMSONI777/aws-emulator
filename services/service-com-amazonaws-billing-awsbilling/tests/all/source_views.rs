@@ -15,6 +15,8 @@
 //! its maximum), the order they were associated in, and the page size the caller
 //! asks for.
 
+use std::sync::Arc;
+
 use serde_json::{json, Value};
 
 // The awsJson1_0 harness — a router over ONE shared engine, plus `call` and
@@ -28,6 +30,15 @@ use crate::billing_views::{
 /// A pattern-valid `BillingViewArn` for a source view with resource id `id`.
 fn source_arn(id: &str) -> String {
     format!("arn:aws:billing::{ACCOUNT_ID}:billingview/{id}")
+}
+
+/// A `nextToken` the service itself minted for THIS read and the payload
+/// `payload`, under the store behind `engine` — a cut point this read would not
+/// offer from a page of its own (a position past the end of a list, text in
+/// place of a position). The minting goes through the codec suite's one helper,
+/// so no suite spells a token by hand.
+fn token_for_this_read(engine: &Arc<engine::InMemoryEngine>, payload: &str) -> String {
+    crate::page_token_codec::page_token(engine, "ListSourceViewsForBillingView", payload)
 }
 
 /// One row of the source-view table: the `sourceViews` a create persists, which
@@ -312,7 +323,11 @@ async fn an_arn_no_view_is_stored_under_is_refused_with_the_modeled_error() {
 
 #[tokio::test]
 async fn a_request_the_service_cannot_honour_is_refused_with_a_validation_error() {
-    let router = emulator_holding(&[source_arn("src-a"), source_arn("src-b")]);
+    // The store already holds a view under every source ARN the rows name (a
+    // create resolves each entry against it), and the engine stays in hand
+    // because the rows below need tokens this very store minted.
+    let (router, engine) = emulator_with_engine();
+    plant_source_views(&engine, &[source_arn("src-a"), source_arn("src-b")]);
     let arn = create_view(
         &router,
         "validation",
@@ -321,9 +336,9 @@ async fn a_request_the_service_cannot_honour_is_refused_with_a_validation_error(
     )
     .await;
 
-    // Each row breaks one rule: a `nextToken` this service never issued (it
-    // decodes to nothing it writes), or a `maxResults` outside the modeled
-    // range 1..100.
+    // Each row breaks one rule: a `nextToken` this read never issued (it
+    // decodes to nothing this read writes), or a `maxResults` outside the
+    // modeled range 1..100.
     let cases: Vec<(&str, Value)> = vec![
         (
             "a nextToken that is not hex",
@@ -334,8 +349,27 @@ async fn a_request_the_service_cannot_honour_is_refused_with_a_validation_error(
             json!({ "arn": arn, "nextToken": hex::encode("abc") }),
         ),
         (
+            // The read this token names is this one, but its payload is text
+            // rather than the position this read's page boundary is.
+            "a nextToken of this read whose payload is not a position",
+            json!({ "arn": arn, "nextToken": token_for_this_read(&engine, "abc") }),
+        ),
+        (
             "a nextToken that decodes to a negative position",
-            json!({ "arn": arn, "nextToken": hex::encode("-1") }),
+            json!({ "arn": arn, "nextToken": token_for_this_read(&engine, "-1") }),
+        ),
+        (
+            // A value with the SHAPE of a minted token of this read, whose
+            // authenticator the caller made up: a cut point this store never
+            // issued, so it is a bad request and not a page.
+            "a nextToken of this read a caller assembled",
+            json!({
+                "arn": arn,
+                "nextToken": crate::page_token_codec::token_with_a_made_up_authenticator(
+                    "ListSourceViewsForBillingView",
+                    "1",
+                ),
+            }),
         ),
         (
             "maxResults below its range minimum",
@@ -361,7 +395,7 @@ async fn a_request_the_service_cannot_honour_is_refused_with_a_validation_error(
     let (status, listed) = call(
         &router,
         "ListSourceViewsForBillingView",
-        &json!({ "arn": arn, "nextToken": hex::encode("9") }),
+        &json!({ "arn": arn, "nextToken": token_for_this_read(&engine, "9") }),
     )
     .await;
     assert_eq!(

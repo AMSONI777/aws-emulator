@@ -170,21 +170,33 @@ const DEFAULT_MAX_RESULTS: usize = MAX_MAX_RESULTS;
 /// `PageToken` pattern (`^[-a-zA-Z0-9+=/_]+$`) and length (1..4095) and is
 /// shared with this service's other paginated reads, so the minting rule lives
 /// in one place.
-/// It is encoded, not unforgeable: a caller that hand-builds one resumes at that
-/// position of the view it already named, which is bounded by the slice below
-/// and reaches nothing the same caller could not list page by page.
-fn encode_page_token(returned: usize) -> String {
-    crate::state::encode_page_token(&returned.to_string())
+/// It is encoded, not unforgeable: a caller that hand-builds one — naming this
+/// read and a position — resumes at that position of the view it already named,
+/// which is bounded by the slice below and reaches nothing the same caller could
+/// not list page by page.
+fn encode_page_token(
+    key: &crate::state::PageTokenKey,
+    read_by: &str,
+    returned: usize,
+) -> String {
+    crate::state::encode_page_token(key, read_by, &returned.to_string())
 }
 
 /// The number of entries a `nextToken` resumes after, or a `ValidationException`
-/// when the token is not one this service issued. The transcoding and the
-/// refusal's wording are both the ones in `crate::state`, shared with this
-/// service's other paginated reads so a client sees the same acceptance rule and
-/// the same refusal for an unusable token whichever read answered it; only the
-/// decoded payload — a position in the view's list — is parsed here.
-fn decode_page_token(token: &str) -> Result<usize, ListSourceViewsForBillingViewError> {
-    crate::state::decode_page_token(token)
+/// when the token is not one THIS read issued: one this service cannot read
+/// back, one it minted for another of its paginated reads — whose payload is a
+/// cut point of another sequence, not a position in this view's list — and one
+/// whose payload is not a position at all. The transcoding and the refusal's
+/// wording are both the ones in `crate::state`, shared with this service's other
+/// paginated reads so a client sees the same acceptance rule and the same refusal
+/// for an unusable token whichever read answered it; only the decoded payload — a
+/// position in the view's list — is parsed here.
+fn decode_page_token(
+    key: &crate::state::PageTokenKey,
+    read_by: &str,
+    token: &str,
+) -> Result<usize, ListSourceViewsForBillingViewError> {
+    crate::state::decode_page_token(key, read_by, token)
         .and_then(|text| text.parse::<usize>().ok())
         .ok_or_else(|| {
             ListSourceViewsForBillingViewErrorModeled::ValidationException(ValidationException {
@@ -271,8 +283,9 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         // The page starts where the previous one stopped. An offset past the end
         // of the list (the entries behind it were disassociated since the token
         // was issued) leaves nothing to return, which is the last page.
+        let page_key = state.page_token_key();
         let resume_after = match input.next_token.as_deref() {
-            Some(token) => decode_page_token(token)?,
+            Some(token) => decode_page_token(&page_key, Self::NAME, token)?,
             None => 0,
         };
         let remaining = view.source_views.get(resume_after..).unwrap_or_default();
@@ -288,7 +301,7 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         let (page, next_token) = if remaining.len() > limit {
             (
                 &remaining[..limit],
-                Some(encode_page_token(resume_after + limit)),
+                Some(encode_page_token(&page_key, Self::NAME, resume_after + limit)),
             )
         } else {
             (remaining, None)

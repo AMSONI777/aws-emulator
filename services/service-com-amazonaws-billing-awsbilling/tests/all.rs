@@ -71,6 +71,8 @@ mod source_views_tags_and_policy;
 mod state_roundtrip;
 #[path = "all/tag_set_duplicate_keys.rs"]
 mod tag_set_duplicate_keys;
+#[path = "all/token_scope.rs"]
+mod token_scope;
 #[path = "all/untag_resource.rs"]
 mod untag_resource;
 #[path = "all/enterprise_support_contract_details.rs"]

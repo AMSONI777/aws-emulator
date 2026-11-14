@@ -12,6 +12,10 @@ engine = { workspace = true }
 # `sts:GetCallerIdentity` and this service must answer with one principal for
 # one credential, so the identity is resolved from the STS store (src/state.rs).
 service-com-amazonaws-sts-awssecuritytokenservicev20110615 = { workspace = true }
+# The opaque `nextToken` every paginated read hands out is AUTHENTICATED under a
+# per-store secret, so a cut point a caller assembled is refused rather than
+# honoured: the workspace's one page-token key (src/state.rs).
+service-common = { path = "../common" }
 # The promotional credit codes `RedeemCredits` redeems are issued against an AWS
 # partner's benefit allocation, so the registry of issued codes — and the terms of
 # the promotion each one names — belongs to that service's store, not this one's

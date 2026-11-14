@@ -182,30 +182,47 @@ const SCOPE_KEY_TERMINATOR: &[u8] = b"\0";
 /// count of entries already delivered, which a write between two pages would
 /// move.
 ///
+/// Those three fields are the cursor AUTHENTICATED under `key`, the secret the
+/// store drew from the system's randomness
+/// ([`crate::state::ComAmazonawsBillingAwsbillingState::page_token_key`], the
+/// workspace's one reading of that): the fields stay readable — a continuation
+/// token is opaque, not confidential — but no caller can produce the
+/// authenticator for a page boundary of its own, so a token this store did not
+/// mint is refused rather than honoured, exactly as it is for this service's
+/// other paginated reads.
+///
 /// base64 keeps the token inside the modeled `PageToken` pattern
 /// (`^[-a-zA-Z0-9+=/_]+$`, which admits the whole standard base64 alphabet) and
 /// length (1..4095) for every `PreferenceKey` the model admits — up to 2148
-/// characters, which hex's two-fold expansion would not hold — and it is the
-/// codec `aws_smithy_types` already carries, so no second one is introduced for
-/// it. The token carries no meaning a client could construct one from.
-fn encode_page_token(feature: &str, scope: &str, cursor: &str) -> String {
-    ::aws_smithy_types::base64::encode(format!(
+/// characters, which the hex the other reads spell their tokens in would not
+/// hold once the authenticator travels with it — and it is the codec
+/// `aws_smithy_types` already carries, so no second one is introduced for it.
+fn encode_page_token(
+    key: &crate::state::PageTokenKey,
+    feature: &str,
+    scope: &str,
+    cursor: &str,
+) -> String {
+    ::aws_smithy_types::base64::encode(key.mint(&format!(
         "{feature}{PAGE_TOKEN_SEPARATOR}{scope}{PAGE_TOKEN_SEPARATOR}{cursor}"
-    ))
+    )))
 }
 
 /// The entry a `nextToken` resumes strictly after, or a `ValidationException`
 /// when the token is not one this service issued for this very walk: one it did
-/// not mint at all, one minted for another feature, and one minted under
-/// filters that select other entries than this request's do.
+/// not mint at all — one that is not base64, one whose authenticator does not
+/// match the fields it travels with, so a value a caller assembled — one minted
+/// for another feature, and one minted under filters that select other entries
+/// than this request's do.
 fn decode_page_token(
+    key: &crate::state::PageTokenKey,
     token: &str,
     feature: &str,
     scope: &str,
 ) -> Result<String, GetBillingPreferencesError> {
     let decoded = ::aws_smithy_types::base64::decode(token)
         .ok()
-        .and_then(|bytes| String::from_utf8(bytes).ok())
+        .and_then(|bytes| key.cursor_of(&bytes))
         .and_then(|text| {
             let (stored_feature, rest) = text.split_once(PAGE_TOKEN_SEPARATOR)?;
             let (stored_scope, cursor) = rest.split_once(PAGE_TOKEN_SEPARATOR)?;
@@ -403,8 +420,11 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         // so a preference written or removed between two pages cannot make the
         // walk skip or repeat another one — the rule this service's other
         // paginated reads follow.
+        // The key this store's tokens are authenticated under, taken off the
+        // store by value so the walk below can borrow the entries it reports.
+        let page_key = state.page_token_key();
         let resume_after = match input.next_token.as_deref() {
-            Some(token) => Some(decode_page_token(token, feature, &scope)?),
+            Some(token) => Some(decode_page_token(&page_key, token, feature, &scope)?),
             None => None,
         };
 
@@ -437,7 +457,12 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
             page.push(entry);
         }
         let next_token = match (more_to_come, page.last()) {
-            (true, Some(last)) => Some(encode_page_token(feature, &scope, &last.cursor)),
+            (true, Some(last)) => Some(encode_page_token(
+                &page_key,
+                feature,
+                &scope,
+                &last.cursor,
+            )),
             _ => None,
         };
 

@@ -47,6 +47,11 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use service_com_amazonaws_sts_awssecuritytokenservicev20110615::state as sts_state;
 
+/// The secret a store's continuation tokens are authenticated under — the
+/// workspace's one reading of "a token this service ISSUED" (see
+/// [`encode_page_token`]), so this crate adds no second mechanism for it.
+pub use ::service_common::page_tokens::PageTokenKey;
+
 use crate::ops::types::{
     AccessDeniedException, BillingViewHealthStatus, BillingViewHealthStatusException, Expression,
     ResourceNotFoundException, ResourceTag, ValidationException, ValidationExceptionField,
@@ -779,6 +784,13 @@ pub struct ComAmazonawsBillingAwsbillingState {
     /// `billing_preferences`, so a gated feature is refused whether or not a
     /// preference is stored under it, and a gated write stores nothing.
     pub feature_access: BTreeSet<String>,
+    /// The secret this store's `nextToken`s are authenticated under, drawn from
+    /// the system's randomness when the store is created: it is what lets a
+    /// paginated read tell a token it ISSUED from one a caller assembled (see
+    /// [`encode_page_token`], reached through [`Self::page_token_key`]). Never
+    /// reported and never logged — its own `Debug` renders nothing of it, so
+    /// this state's derived one carries nothing of it either.
+    page_token_key: PageTokenKey,
 }
 
 impl Default for ComAmazonawsBillingAwsbillingState {
@@ -863,11 +875,23 @@ impl Default for ComAmazonawsBillingAwsbillingState {
                 .filter(|feature| !ACCESS_ACTIVATION_FEATURES.contains(*feature))
                 .map(|feature| (*feature).to_string())
                 .collect(),
+            // Fresh randomness per store: a token this store minted resumes a
+            // walk, and one another store (another process, a restarted one)
+            // minted does not.
+            page_token_key: PageTokenKey::new(),
         }
     }
 }
 
 impl ComAmazonawsBillingAwsbillingState {
+    /// The secret this store's `nextToken`s are authenticated under.
+    ///
+    /// Handed out by value — [`PageTokenKey`] is `Copy` — so a read takes the
+    /// key off its store and goes on to borrow the records it is about to
+    /// report in the same call. Never reported and never logged.
+    pub fn page_token_key(&self) -> PageTokenKey {
+        self.page_token_key
+    }
     /// Mint an unused billing-view ARN and advance the id source.
     ///
     /// The returned ARN is not stored by this call — the caller inserts the
@@ -1616,29 +1640,60 @@ pub fn billing_view_arn(view_id: &str) -> String {
     ::engine::emulator_arn("billing", "", &format!("billingview/{view_id}"))
 }
 
-/// The opaque `nextToken` for a page that ended at `last`, where the page
-/// boundary is a VALUE the store is keyed by (`ListBillingViews` walks
+/// Separates the read that minted a token from the payload that read resumes
+/// after, inside the cursor the token authenticates.
+///
+/// NUL, which no page boundary any read of this service mints can carry — the
+/// store keys are built from modeled `BillingMonth`, `AccountId`, `CreditId`,
+/// service-name and ARN values joined by the unit separator, and a position is
+/// decimal digits — so the two fields always read back whole and no payload can
+/// spell another read's identity.
+const PAGE_TOKEN_SCOPE_SEPARATOR: char = '\u{0}';
+
+/// The opaque `nextToken` for a page of `minted_by` that ended at `last`, where
+/// the page boundary is a VALUE the store is keyed by (`ListBillingViews` walks
 /// `billing_views`, a map keyed and ordered by ARN). A read whose page boundary
 /// is a position in a list carries its own PAYLOAD through this same pair,
 /// rather than a second codec — see `ops::list_source_views_for_billing_view`.
 ///
+/// `minted_by` is the name of the read that issued the token, and it travels
+/// IN the token because a payload alone does not say which walk it is a
+/// boundary of: every read of this service pages over its own sequence, so a
+/// cut point one read issued names some other entry — or no entry at all — in
+/// another's. [`decode_page_token`] takes a token back only for the read named
+/// in it, so no read resumes a walk from a token it did not issue.
+///
+/// The cursor is AUTHENTICATED under `key`, the secret this store drew from the
+/// system's randomness ([`ComAmazonawsBillingAwsbillingState::page_token_key`],
+/// the workspace's one reading of that in
+/// [`::service_common::page_tokens::PageTokenKey`]): the cursor stays readable
+/// — a continuation token is opaque, not confidential — but no caller can
+/// produce the authenticator for a cut point of its own, so a token this store
+/// did not mint for this read is refused rather than honoured.
+///
 /// Hex keeps the token inside the modeled `PageToken` pattern
-/// (`^[-a-zA-Z0-9+=/_]+$`) and length (1..4095) for every ARN the service mints,
-/// and carries no meaning a client could construct one from.
-pub fn encode_page_token(last: &str) -> String {
-    ::hex::encode(last.as_bytes())
+/// (`^[-a-zA-Z0-9+=/_]+$`) and length (1..4095) for every payload and read name
+/// the service mints, and carries no meaning a client could construct one from.
+pub fn encode_page_token(key: &PageTokenKey, minted_by: &str, last: &str) -> String {
+    ::hex::encode(key.mint(&format!(
+        "{minted_by}{PAGE_TOKEN_SCOPE_SEPARATOR}{last}"
+    )))
 }
 
-/// The value a `nextToken` resumes after, or `None` when the token is not one
-/// [`encode_page_token`] produced.
+/// The value a `nextToken` resumes after for the read named `read_by`, or
+/// `None` when the token is not one [`encode_page_token`] produced FOR THAT
+/// READ under `key`: one that is not hex, one too short to carry an
+/// authenticator, one whose authenticator does not match the cursor it travels
+/// with (a cut point a caller assembled, or one another store minted), and one
+/// this store minted for another of its paginated reads.
 ///
 /// The caller renders the `None` as its own modeled `ValidationException`, from
 /// [`PAGE_TOKEN_REFUSAL`] and [`PAGE_TOKEN_FIELD_REFUSAL`] so the refusal reads
 /// the same whichever read answered it.
-pub fn decode_page_token(token: &str) -> Option<String> {
-    ::hex::decode(token)
-        .ok()
-        .and_then(|bytes| String::from_utf8(bytes).ok())
+pub fn decode_page_token(key: &PageTokenKey, read_by: &str, token: &str) -> Option<String> {
+    let cursor = key.cursor_of(&::hex::decode(token).ok()?)?;
+    let (minted_by, payload) = cursor.split_once(PAGE_TOKEN_SCOPE_SEPARATOR)?;
+    (minted_by == read_by).then(|| payload.to_string())
 }
 
 /// The `BillingViewHealthStatus` a read reports for `view`.
