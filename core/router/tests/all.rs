@@ -3963,3 +3963,8 @@ mod cloudformation_provisions_redshift_snapshot_copy_grants;
 // reason the lines above record: an inner doc comment belongs at the head of this file or
 // nowhere.)
 // comment is only legal before the first item, so a `//!` line in this appended tail is
+// (A fragment of this file's own header that a landing appended here: past the first item a
+// `//!` line is `E0753` and compiles no suite of this target, so it stands as an ordinary
+// comment. The rule it repeats is in the header at the head of this file.)
+// (A fragment of this file's own header that a landing appended here, an ordinary comment
+// for the same reason the lines above record: a `//!` line past the first item is `E0753`.)

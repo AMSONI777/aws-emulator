@@ -48,6 +48,15 @@
 //! bounded by that group's own attachments ([`crate::state::MAX_TARGET_GROUPS_PER_GROUP`])
 //! times its own instances ([`crate::state::MAX_GROUP_CAPACITY`]).
 //!
+//! # What an attachment is REPORTED as
+//!
+//! The state a client reads off an attachment ([`attachment_states`]) is derived from the
+//! same two facts, every time it is asked for: the registrations the attachment owes and the
+//! ones Elastic Load Balancing v2 holds. So an attachment is `Adding` while an instance of
+//! the group is not registered there yet, `Added` once every one of them is, and `InService`
+//! once that service reports one of those registrations healthy — nothing is stored beside
+//! the attachment to say so, and no read moves it.
+//!
 //! # An attachment whose target group is gone
 //!
 //! Registering the instance is PART of bringing it into service, so an attachment whose
@@ -67,7 +76,7 @@
 //! never reaches this service, so the two locks are never taken in the other order and no
 //! cycle exists.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::time::SystemTime;
 
 use ::service_com_amazonaws_elasticloadbalancingv2_elasticloadbalancing_v10::state as elbv2;
@@ -273,6 +282,122 @@ pub fn wanted_of(store: &AutoScalingState, group_name: &str) -> Vec<TargetRegist
         }
     }
     registrations
+}
+
+/// The `LoadBalancerTargetGroupState$State` / `TrafficSourceState$State` values an
+/// attachment of a target group to an Auto Scaling group is reported in, from the model's
+/// own catalog for them
+/// (`smithy_query(query="doc",shape="LoadBalancerTargetGroupState",member="State")`).
+pub const ATTACHMENT_ADDING: &str = "Adding";
+pub const ATTACHMENT_ADDED: &str = "Added";
+pub const ATTACHMENT_IN_SERVICE: &str = "InService";
+
+/// The `HealthCheckType` value that makes a group's health checks Elastic Load Balancing's
+/// own — "`ELB` - Use Elastic Load Balancing health checks"
+/// (`crate::state::HEALTH_CHECK_TYPES`).
+const HEALTH_CHECK_TYPE_ELB: &str = "ELB";
+
+/// Whether Elastic Load Balancing health checks are enabled for the group: its
+/// `HealthCheckType` names `ELB`, which the member admits beside the other types as a
+/// comma-separated list ([`crate::state::is_valid_health_check_type`]).
+fn elb_health_checks_enabled(group: &StoredGroup) -> bool {
+    group
+        .health_check_type
+        .split(',')
+        .any(|kind| kind.trim() == HEALTH_CHECK_TYPE_ELB)
+}
+
+/// The state each target group in `arns` is reported in for the group `group`, in the order
+/// given — what `DescribeLoadBalancerTargetGroups` answers for an attachment.
+///
+/// DERIVED, every time, from the registrations the attachment owes and the ones Elastic Load
+/// Balancing v2 actually holds, so the state follows the group's instances and that service's
+/// own health checks rather than anything stored beside the attachment:
+///
+/// * `Adding` — "the Auto Scaling instances are being registered with the target group":
+///   some instance of the group is not registered there yet, which is also what an
+///   attachment whose target group that service no longer holds, and one whose target group
+///   takes a different kind of target altogether, is left in.
+/// * `Added` — "all Auto Scaling instances are registered with the target group", which a
+///   group holding no instance satisfies with none.
+/// * `InService` — "at least one Auto Scaling instance passed an `ELB` health check": one of
+///   those registrations is reported healthy by the service that checks it, and Elastic Load
+///   Balancing health checks are enabled for the group ("if Elastic Load Balancing health
+///   checks are enabled for the Auto Scaling group, the state transitions to InService after
+///   at least one Auto Scaling instance passes the health check",
+///   `DescribeLoadBalancerTargetGroups`).
+///
+/// A READ of the other service's store, exactly as [`unresolved_attachments`] reads it: it
+/// takes that store's lock for the read alone and locks nothing of this service inside it,
+/// which is the order this module's header states. It writes NOTHING — a registration a
+/// drain has already taken out of a target group is skipped here rather than retired, which
+/// the write that owes that removal does ([`reconcile`]).
+pub fn attachment_states<Eng: Send + Sync + 'static>(
+    engine: &Eng,
+    group: &StoredGroup,
+    arns: &[String],
+    now: SystemTime,
+) -> Vec<&'static str> {
+    // One registration per instance of the group that is not on its way out: the very set a
+    // reconcile puts in place ([`wanted_of`]), named by the workload each registration of it
+    // carries.
+    let owed: BTreeSet<String> = group
+        .active_instances()
+        .map(|instance| workload(&group.arn, &instance.instance_id))
+        .collect();
+    // What an attachment is in before anything of it is registered — which is where every
+    // attachment of a group that holds instances starts, and where one whose registrations
+    // cannot be read stays.
+    let unregistered = if owed.is_empty() {
+        ATTACHMENT_ADDED
+    } else {
+        ATTACHMENT_ADDING
+    };
+    let Some(state) = elbv2::service_state(engine) else {
+        return arns.iter().map(|_| unregistered).collect();
+    };
+    let elb_health_checked = elb_health_checks_enabled(group);
+    let store = state.lock();
+    arns.iter()
+        .map(|arn| {
+            let Some(target_group) = store.target_groups.get(arn) else {
+                return unregistered;
+            };
+            // The instances of THIS group that the target group holds a live registration
+            // for, and whether any of those registrations has passed a health check. A
+            // registration of another group, of another emulated service's scheduler or of a
+            // `RegisterTargets` caller stands for no instance of this group, so none of them
+            // counts ([`Scope::claims`]), and one that is draining is leaving the target
+            // group rather than registered in it.
+            let mut registered: BTreeSet<&str> = BTreeSet::new();
+            let mut passed_a_health_check = false;
+            for target in target_group.targets.values() {
+                if target.draining_until.is_some() {
+                    continue;
+                }
+                let Some(workload) = target.registered_for.as_deref() else {
+                    continue;
+                };
+                if !owed.contains(workload) {
+                    continue;
+                }
+                registered.insert(workload);
+                passed_a_health_check = passed_a_health_check
+                    || target_group
+                        .health_of(target, now)
+                        .state
+                        .as_deref()
+                        .is_some_and(|health| health == elbv2::target_health::HEALTHY_STATE);
+            }
+            if registered.len() < owed.len() {
+                return ATTACHMENT_ADDING;
+            }
+            if elb_health_checked && passed_a_health_check {
+                return ATTACHMENT_IN_SERVICE;
+            }
+            ATTACHMENT_ADDED
+        })
+        .collect()
 }
 
 /// Bring the Elastic Load Balancing v2 target groups in line with what the group

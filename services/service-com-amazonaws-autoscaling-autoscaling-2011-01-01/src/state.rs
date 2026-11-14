@@ -2929,3 +2929,11 @@ pub const MIN_MAX_RECORDS: i32 = 1;
 /// name-ordered describes take, so that operation names it where it pages.
 pub const DEFAULT_ACTIVITY_MAX_RECORDS: i32 = 100;
 
+/// `MaxRecords` when a read of a group's load-balancer attachments omits it.
+///
+/// From the model's own documentation for
+/// `DescribeLoadBalancerTargetGroupsRequest$MaxRecords`: "The default value is 100 and the
+/// maximum value is 100" — the same larger default the scaling activities take, stated
+/// separately because it is that operation's documentation that says so.
+pub const DEFAULT_ATTACHMENT_MAX_RECORDS: i32 = 100;
+

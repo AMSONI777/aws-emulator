@@ -27,6 +27,8 @@ mod client_error_refusal_wording;
 mod delete_notification_configuration;
 #[path = "all/describe_lifecycle_hooks_projection.rs"]
 mod describe_lifecycle_hooks_projection;
+#[path = "all/describe_load_balancer_target_groups.rs"]
+mod describe_load_balancer_target_groups;
 #[path = "all/describe_policies_page_size.rs"]
 mod describe_policies_page_size;
 #[path = "all/describe_tags.rs"]
