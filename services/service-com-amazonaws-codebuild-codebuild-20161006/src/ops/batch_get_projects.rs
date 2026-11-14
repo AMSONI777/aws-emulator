@@ -81,9 +81,12 @@ pub enum BatchGetProjectsErrorModeled {
 }
 
 /// This operation's error channel, as the generated `impl Operation` names it
-/// (`crate::ops::batch_get_projects::BatchGetProjectsError`). Wrapping the modeled enum is what
-/// lets a scaffolded operation answer 501 for one whose model declares no errors at all.
-pub type BatchGetProjectsError = crate::scaffolded::Scaffolded<BatchGetProjectsErrorModeled>;
+/// (`crate::ops::batch_get_projects::BatchGetProjectsError`): the operation's own channel —
+/// its modeled errors and the scaffold's 501 — widened by the refusal this service words
+/// itself (`crate::state::wire_refusals`), which is how a request this account is not
+/// authorized to make is answered at all, no operation of this service modeling one.
+pub type BatchGetProjectsError =
+    crate::state::wire_refusals::Refusable<BatchGetProjectsErrorModeled>;
 
 /// Lets `?` and `.into()` lift a modeled failure into the error channel, so an
 /// implemented handler writes `Err(SomeModeledError.into())` rather than naming the
@@ -91,7 +94,9 @@ pub type BatchGetProjectsError = crate::scaffolded::Scaffolded<BatchGetProjectsE
 /// this operation is implemented.
 impl From<BatchGetProjectsErrorModeled> for BatchGetProjectsError {
     fn from(modeled: BatchGetProjectsErrorModeled) -> Self {
-        crate::scaffolded::Scaffolded::Modeled(modeled)
+        crate::state::wire_refusals::Refusable::Channel(crate::scaffolded::Scaffolded::Modeled(
+            modeled,
+        ))
     }
 }
 
@@ -134,9 +139,10 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         let Some(state) = crate::state::service_state(&*self.engine) else {
             return Err(crate::scaffolded::Scaffolded::not_implemented(
                 "BatchGetProjects (this engine carries no CodeBuild state)",
-            ));
+            )
+            .into());
         };
-        let _ = ctx;
+        let region = crate::state::request_region(ctx.parts());
 
         // `names` takes "the names or ARNs of the build projects", and a value that is
         // neither is no project identifier at all: it is refused here, ahead of the
@@ -150,17 +156,42 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
             .iter()
             .find_map(|identifier| crate::state::project_identifier_violation(identifier))
         {
-            return Err(BatchGetProjectsErrorModeled::InvalidInputException(
-                InvalidInputException {
-                    message: Some(message.to_string()),
-                },
-            )
-            .into());
+            return Err(invalid_input(message));
+        }
+
+        // `names` takes "the names or ARNs of the build projects", so an identifier that
+        // IS an ARN is PARSED before anything is looked up, by the one reading of a
+        // project identifier this service has
+        // (`crate::state::ProjectReference`): an ARN of another Region names no project
+        // this regional endpoint can answer about, and an ARN of another account asks
+        // about a project only that account's own resource-based policy could grant. Both
+        // are decided from the request alone, so they are stated before the store's lock
+        // is taken — and a refusal is the answer to the whole call, the way every other
+        // input refusal of a batch read is.
+        let mut references = Vec::new();
+        for identifier in crate::state::distinct_identifiers(&input.names) {
+            match crate::state::ProjectReference::parse(identifier, &region) {
+                Ok(reference) => references.push(reference),
+                Err(crate::state::ProjectArnRefusal::Malformed(message)) => {
+                    return Err(invalid_input(&message))
+                }
+                Err(crate::state::ProjectArnRefusal::ForeignRegion) => {
+                    return Err(invalid_input(
+                        crate::state::INVALID_PROJECT_ARN_REGION_MESSAGE,
+                    ))
+                }
+                Err(crate::state::ProjectArnRefusal::ForeignAccount(arn)) => {
+                    return Err(
+                        crate::state::wire_refusals::WireRefusal::access_denied(Self::NAME, arn)
+                            .into(),
+                    )
+                }
+            }
         }
 
         // A read: it reports what CreateProject stored, in the order the request
         // named the projects, and splits the identifiers it does not hold into
-        // `projectsNotFound`. `names` is documented as "The names or ARNs of the build        // projects", so each identifier is resolved through
+        // `projectsNotFound`. Each identifier is resolved through
         // `crate::state::ComAmazonawsCodebuildCodebuild20161006State::project_by_identifier`,
         // which takes either form — and an identifier that resolves to nothing is
         // reported back exactly as the request sent it, so a caller that asked by ARN
@@ -173,7 +204,7 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         let guard = state.lock();
         let mut projects = Vec::new();
         let mut not_found = Vec::new();
-        for identifier in crate::state::distinct_identifiers(&input.names) {
+        for identifier in references.iter().map(crate::state::ProjectReference::identifier) {
             match guard.project_by_identifier(identifier) {
                 // One project is reported once however many identifiers named it: the
                 // list names the SET of projects the call is about, and the name and the
@@ -204,4 +235,14 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
             projects_not_found: Some(not_found),
         })
     }
+}
+
+/// This operation's modelled client-input refusal, stating `message`:
+/// `InvalidInputException` ("The input value that was provided is not valid", HTTP 400),
+/// the one input error the model declares for it.
+fn invalid_input(message: &str) -> BatchGetProjectsError {
+    BatchGetProjectsErrorModeled::InvalidInputException(InvalidInputException {
+        message: Some(message.to_string()),
+    })
+    .into()
 }

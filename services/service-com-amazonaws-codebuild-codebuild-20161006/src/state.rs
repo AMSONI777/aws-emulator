@@ -65,10 +65,16 @@ mod build_source;
 mod buildspec;
 /// The SHAPE of the identifiers the operations that take one as a plain string accept.
 mod identifiers;
+/// What a project identifier names: a project NAME, or an ARN whose fields are read
+/// before anything is looked up.
+mod project_reference;
 /// The runtimes a build environment has, and the ones a build's buildspec installs.
 mod runtime_versions;
 /// The ZIP archive a build's input and its output travel in.
 mod source_archive;
+/// The refusal this service words itself, whose wire identity no operation's modelled
+/// error list expresses.
+pub mod wire_refusals;
 
 pub use arn_fields::*;
 pub use artifact_upload::*;
@@ -79,6 +85,7 @@ pub use build_run::*;
 pub use build_source::*;
 pub use buildspec::*;
 pub use identifiers::*;
+pub use project_reference::*;
 pub use runtime_versions::*;
 
 /// The ARN service segment for this service, as `emulator_arn`'s first argument
@@ -668,10 +675,18 @@ pub const REPORT_GROUP_NOT_FOUND_MESSAGE: &str = "Report group does not exist";
 /// way. The ARN is computed from the request, the signed region and this emulator's
 /// account, so nothing of any single exchange is baked in.
 pub fn provided_project_absent_message(region: &str, project_name: &str) -> String {
-    format!(
-        "The provided project {} does not exist.",
-        project_arn(region, project_name)
-    )
+    provided_project_absent_message_for(&project_arn(region, project_name))
+}
+
+/// [`provided_project_absent_message`] for a project already resolved to its ARN — the one
+/// place that sentence is written.
+///
+/// The per-project listings take their project identifier as a plain string, so the value
+/// may be an ARN already ([`ProjectReference::arn`]); quoting THAT ARN rather than
+/// building one around it is what keeps the sentence naming a resource that could exist,
+/// instead of an ARN with another ARN inside its resource segment.
+pub fn provided_project_absent_message_for(project_arn: &str) -> String {
+    format!("The provided project {project_arn} does not exist.")
 }
 
 /// What CodeBuild states as the reason a reporting read of a report group's contents names

@@ -17,34 +17,43 @@
 
 use super::ARN_NAMESPACE;
 
-/// The fewest hyphen-separated groups a Region name is written with — an area, a
-/// direction and a number (`us-east-1`), the shortest form in the AWS General
-/// Reference's Region table; a partitioned Region simply carries one group more
-/// (`us-gov-west-1`).
-const REGION_NAME_GROUPS: usize = 3;
-
-/// Whether `value` is written the way an AWS Region NAME is: at least
-/// [`REGION_NAME_GROUPS`] non-empty groups separated by single hyphens, the last of them
-/// digits and every earlier one lowercase letters or digits (`us-east-1`,
-/// `ap-southeast-4`, `us-gov-west-1`, `us-isob-east-1`).
+/// Whether `value` NAMES an AWS Region.
 ///
-/// The SHAPE question only, the way every other ARN rule of this service answers the
-/// shape question ([`super::project_name_from_arn`]): whether this emulator serves that
-/// Region is a different question, and an ARN minted in a Region it does not serve names
-/// no record it holds rather than a malformed request — which is why a well-formed
-/// Region of another partition still resolves to nothing instead of being refused.
+/// Asked against the catalogue of Region codes the workspace already carries
+/// (`emulator_telemetry::policy::KNOWN_REGIONS`, "every AWS region the wire may carry",
+/// already a dependency of this crate) rather than a second copy of that list here. It is
+/// a CATALOGUE and not a shape rule because a value written like a Region code but naming
+/// no Region (`us-east-9`) is not a Region at all: an ARN carrying it is malformed, where
+/// an ARN carrying a real Region is merely one this account holds no record in.
+///
+/// Whether this emulator SERVES that Region is still a different question: a Region in the
+/// catalogue resolves to nothing rather than being refused, which is what keeps a
+/// well-formed ARN of another partition a lookup miss.
 pub fn is_region_name(value: &str) -> bool {
-    let Some((area, number)) = value.rsplit_once('-') else {
-        return false;
-    };
-    let number_reads = !number.is_empty() && number.bytes().all(|byte| byte.is_ascii_digit());
-    let area_reads = area.split('-').all(|group| {
-        !group.is_empty()
-            && group
-                .bytes()
-                .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit())
-    });
-    number_reads && area_reads && area.split('-').count() + 1 >= REGION_NAME_GROUPS
+    ::emulator_telemetry::policy::KNOWN_REGIONS.contains(&value)
+}
+
+/// The REGION field of `arn` — the fourth of its six colon-separated fields — or `None`
+/// when the value does not have an ARN's six fields.
+///
+/// The counterpart of [`super::arn_account`] for the field read before it, and read the
+/// same way: walked field by field, so nothing is allocated. The field is handed back as
+/// written, empty field included — an ARN naming no Region names no regional resource of
+/// any Region — so the question "is this field a Region name" ([`is_region_name`]) and the
+/// question "is it the Region this request is signed for" are both answered by the caller.
+pub fn arn_region(arn: &str) -> Option<&str> {
+    let mut fields = arn.splitn(6, ':');
+    if fields.next()? != "arn" {
+        return None;
+    }
+    // The partition and the service, then the region.
+    fields.next()?;
+    fields.next()?;
+    let region = fields.next()?;
+    // The account and the resource must be PRESENT for the value to be an ARN at all.
+    fields.next()?;
+    fields.next()?;
+    Some(region)
 }
 
 /// The region field of `arn` when that field is the FIRST field of the ARN that cannot

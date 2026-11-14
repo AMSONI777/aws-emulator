@@ -27,7 +27,6 @@ use smithy_server_runtime::MultiServiceRouter;
 
 use super::project_build_lifecycle::{
     call, create_project, create_project_body, emulator, emulator_on, error_type, expected_arn,
-    REGION,
 };
 
 /// The `message` an error body carries.
@@ -198,8 +197,10 @@ struct IdentifierRow {
 /// this account is reported in `projectsNotFound` exactly as the request sent it.
 ///
 /// The rows span the identifier forms: the name, the project's own ARN, a mix of the two
-/// in one request, the same project named twice, an ARN of another region and of another
-/// account, an ARN of another resource type, and a name no project is held under.
+/// in one request, the same project named twice, an ARN of another resource type, and a
+/// name no project is held under. An ARN of another Region or another account is NOT a
+/// not-found result at all but a refusal, so those rows live in `project_arn_addressing`
+/// instead: an ARN's fields are read before anything is looked up.
 #[tokio::test]
 async fn a_project_resolves_by_name_or_by_its_own_arn() {
     let router = emulator();
@@ -212,13 +213,6 @@ async fn a_project_resolves_by_name_or_by_its_own_arn() {
         "the created project must carry the ARN of its own name and region, got {first}"
     );
     let second_arn = expected_arn("project/ident-second");
-    // The two ARNs that name THIS project's resource path in a scope this account's
-    // records are not in: another region, and another account.
-    let another_region_arn = format!(
-        "arn:aws:codebuild:eu-west-1:{}:project/ident-first",
-        engine::EMULATOR_ACCOUNT_ID
-    );
-    let another_account_arn = format!("arn:aws:codebuild:{REGION}:210987654321:project/ident-first");
 
     // (case, the identifiers the request names, the names that must resolve, the
     // identifiers that must be reported absent)
@@ -246,18 +240,6 @@ async fn a_project_resolves_by_name_or_by_its_own_arn() {
             names: vec![first_arn.clone(), "ident-first".to_string()],
             resolved: vec!["ident-first"],
             absent: vec![],
-        },
-        IdentifierRow {
-            case: "an ARN in another region",
-            names: vec![another_region_arn.clone()],
-            resolved: vec![],
-            absent: vec![another_region_arn],
-        },
-        IdentifierRow {
-            case: "an ARN of another account",
-            names: vec![another_account_arn.clone()],
-            resolved: vec![],
-            absent: vec![another_account_arn],
         },
         IdentifierRow {
             case: "an ARN of another resource type",

@@ -69,6 +69,8 @@ mod list_shared_projects;
 mod list_shared_report_groups;
 #[path = "all/name_character_refusals.rs"]
 mod name_character_refusals;
+#[path = "all/project_arn_addressing.rs"]
+mod project_arn_addressing;
 #[path = "all/project_build_batch_lifecycle.rs"]
 mod project_build_batch_lifecycle;
 #[path = "all/project_build_lifecycle.rs"]

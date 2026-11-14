@@ -286,6 +286,10 @@ async fn list_sandboxes_for_project_reports_each_project_in_start_order() {
 /// RULE: a `projectName` no project of the account answers to is a not-found
 /// condition, refused with the modelled `ResourceNotFoundException` (HTTP 400) naming
 /// the project asked for — never an unmodelled error code.
+///
+/// A project's OWN ARN is not such a value: `projectName` takes a name or an ARN, so the
+/// held project's ARN resolves to it and is listed (the control at the end), which is the
+/// rule `project_arn_addressing` covers across the family.
 #[tokio::test]
 async fn list_sandboxes_for_project_refuses_a_project_the_account_does_not_hold() {
     let router = emulator();
@@ -303,7 +307,10 @@ async fn list_sandboxes_for_project_refuses_a_project_the_account_does_not_hold(
         ("a project just deleted", "doomed-proj"),
         ("a held name in the wrong case", "HELD-PROJ"),
         ("a name that is a prefix of a held one", "held"),
-        ("a project ARN rather than a name", "arn:aws:codebuild:us-west-2:000000000000:project/held-proj"),
+        (
+            "an ARN no project is held under",
+            "arn:aws:codebuild:us-west-2:000000000000:project/never-created",
+        ),
     ];
 
     for (case, project_name) in cases {
@@ -324,12 +331,22 @@ async fn list_sandboxes_for_project_refuses_a_project_the_account_does_not_hold(
         );
     }
 
-    // The held project itself is served, so the refusal is about the project and not
-    // about the operation.
+    // The held project itself is served, by its name and by its own ARN alike, so every
+    // refusal above was about the project asked for and not about the operation.
     let response = list(&router, json!({"projectName": "held-proj"})).await;
     assert_eq!(
         response["ids"],
         json!([]),
         "a held project with no sandboxes is served, got {response}"
+    );
+    let response = list(
+        &router,
+        json!({"projectName": "arn:aws:codebuild:us-west-2:000000000000:project/held-proj"}),
+    )
+    .await;
+    assert_eq!(
+        response["ids"],
+        json!([]),
+        "a held project addressed by its own ARN is served, got {response}"
     );
 }

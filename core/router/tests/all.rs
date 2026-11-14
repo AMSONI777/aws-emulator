@@ -3591,3 +3591,6 @@ mod cloudformation_provisions_appsync_resources;
 // (One more fragment of that same header landed here as an inner doc comment, which is
 // legal only before the first item; the rule it states stands in the module doc at the HEAD
 // of this file.)
+// suite left at the top level of `tests/` fails the build. (An ordinary comment: such a
+// line is a fragment of this file's own header, and an inner doc comment is legal only
+// before the first item, so a `//!` here is `E0753` and compiles nothing.)

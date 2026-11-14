@@ -94,9 +94,13 @@ pub enum ListBuildBatchesForProjectErrorModeled {
 }
 
 /// This operation's error channel, as the generated `impl Operation` names it
-/// (`crate::ops::list_build_batches_for_project::ListBuildBatchesForProjectError`). Wrapping the modeled enum is what
-/// lets a scaffolded operation answer 501 for one whose model declares no errors at all.
-pub type ListBuildBatchesForProjectError = crate::scaffolded::Scaffolded<ListBuildBatchesForProjectErrorModeled>;
+/// (`crate::ops::list_build_batches_for_project::ListBuildBatchesForProjectError`): the
+/// operation's own channel — its modeled errors and the scaffold's 501 — widened by the
+/// refusal this service words itself (`crate::state::wire_refusals`), which is how a
+/// request this account is not authorized to make is answered at all, no operation of this
+/// service modeling one.
+pub type ListBuildBatchesForProjectError =
+    crate::state::wire_refusals::Refusable<ListBuildBatchesForProjectErrorModeled>;
 
 /// Lets `?` and `.into()` lift a modeled failure into the error channel, so an
 /// implemented handler writes `Err(SomeModeledError.into())` rather than naming the
@@ -104,7 +108,9 @@ pub type ListBuildBatchesForProjectError = crate::scaffolded::Scaffolded<ListBui
 /// this operation is implemented.
 impl From<ListBuildBatchesForProjectErrorModeled> for ListBuildBatchesForProjectError {
     fn from(modeled: ListBuildBatchesForProjectErrorModeled) -> Self {
-        crate::scaffolded::Scaffolded::Modeled(modeled)
+        crate::state::wire_refusals::Refusable::Channel(crate::scaffolded::Scaffolded::Modeled(
+            modeled,
+        ))
     }
 }
 
@@ -147,7 +153,8 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         let Some(state) = crate::state::service_state(&*self.engine) else {
             return Err(crate::scaffolded::Scaffolded::not_implemented(
                 "ListBuildBatchesForProject (this engine carries no CodeBuild state)",
-            ));
+            )
+            .into());
         };
 
         let region = crate::state::request_region(ctx.parts());
@@ -177,17 +184,37 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
             );
         };
 
+        // `projectName` targets `NonEmptyString`, so the value may be the project's ARN as
+        // well as its name, read by the one reading of a project identifier this service
+        // has (`crate::state::ProjectReference`, as
+        // `crate::ops::list_builds_for_project` reads the same member).
+        let reference = match crate::state::ProjectReference::parse(project_name, &region) {
+            Ok(reference) => reference,
+            Err(crate::state::ProjectArnRefusal::Malformed(message)) => {
+                return Err(invalid_input(&message))
+            }
+            Err(crate::state::ProjectArnRefusal::ForeignRegion) => {
+                return Err(invalid_input(
+                    crate::state::INVALID_PROJECT_ARN_REGION_MESSAGE,
+                ))
+            }
+            Err(crate::state::ProjectArnRefusal::ForeignAccount(arn)) => {
+                return Err(
+                    crate::state::wire_refusals::WireRefusal::access_denied(Self::NAME, arn).into(),
+                )
+            }
+        };
+
         // A project the account does not hold is the plain not-found condition this
         // operation models: `ResourceNotFoundException` (HTTP 400), naming the project
-        // ARN the request resolves to, as the sibling per-project build listing
-        // (`crate::ops::list_builds_for_project`) words it.
-        if !guard.projects.contains_key(project_name) {
+        // ARN the request's identifier resolves to, as the sibling per-project build
+        // listing (`crate::ops::list_builds_for_project`) words it.
+        if guard.project_by_identifier(reference.identifier()).is_none() {
             return Err(
                 ListBuildBatchesForProjectErrorModeled::ResourceNotFoundException(
                     ResourceNotFoundException {
-                        message: Some(crate::state::provided_project_absent_message(
-                            &region,
-                            project_name,
+                        message: Some(crate::state::provided_project_absent_message_for(
+                            &reference.arn(&region),
                         )),
                     },
                 )
@@ -210,7 +237,7 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         // owes it, so a status filtered on here is the one `BatchGetBuildBatches`
         // reports for the same batch build.
         let mut ids = guard.build_batch_ids_for_project(
-            project_name,
+            reference.name(),
             crate::state::now_millis(),
             wanted_status,
         );
@@ -221,16 +248,9 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         let Some((page, next_token)) =
             crate::state::page_limited(&ids, input.next_token.as_deref(), input.max_results)
         else {
-            return Err(
-                ListBuildBatchesForProjectErrorModeled::InvalidInputException(
-                    InvalidInputException {
-                        message: Some(
-                            crate::state::INVALID_CONTINUATION_TOKEN_MESSAGE.to_string(),
-                        ),
-                    },
-                )
-                .into(),
-            );
+            return Err(invalid_input(
+                crate::state::INVALID_CONTINUATION_TOKEN_MESSAGE,
+            ));
         };
 
         Ok(ListBuildBatchesForProjectOutput {
@@ -256,3 +276,12 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
 /// `buildBatchNumber`, NOT the id's opaque uuid, even though the member's wording says
 /// "by identifier": the same reading `crate::ops::list_build_batches` records.
 const ASCENDING_SORT_ORDER: &str = "ASCENDING";
+
+/// This operation's modelled client-input refusal, stating `message`:
+/// `InvalidInputException` ("The input value that was provided is not valid", HTTP 400).
+fn invalid_input(message: &str) -> ListBuildBatchesForProjectError {
+    ListBuildBatchesForProjectErrorModeled::InvalidInputException(InvalidInputException {
+        message: Some(message.to_string()),
+    })
+    .into()
+}

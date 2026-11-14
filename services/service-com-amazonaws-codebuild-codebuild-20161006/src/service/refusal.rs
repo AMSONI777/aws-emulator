@@ -42,6 +42,13 @@ pub(super) fn message(violations: &[Violation]) -> String {
 fn codebuild_sentence(violation: &Violation) -> Option<String> {
     let path = member_path_of(&violation.path);
     match &violation.kind {
+        // A request that carries no project identifier at all on an operation whose input
+        // addresses ONE project: CodeBuild states what that member takes — a project's name
+        // or its ARN — rather than the constraint envelope's "must not be null", which says
+        // nothing about the two forms the value may take.
+        ViolationKind::MissingRequiredMember if path == PROJECT_IDENTIFIER_PATH => {
+            Some(PROJECT_IDENTIFIER_REQUIRED_MESSAGE.to_string())
+        }
         // A sort order outside its enum: CodeBuild's own sentence, so no caller is told
         // its list request failed generic request validation.
         ViolationKind::EnumValue(_) if is_sort_order(violation) => {
@@ -216,6 +223,25 @@ fn max_length_of(member: &Schema) -> Option<i64> {
 /// operation that CREATES it — the member the pattern and the length bound above are read
 /// from.
 const NAME_MEMBER: &str = "name";
+
+/// What CodeBuild states as the reason a request addressing ONE project carries no project
+/// identifier, carried by the modelled `InvalidInputException`.
+///
+/// Fixed text, and it names the two FORMS the member takes rather than the member itself:
+/// those members are typed as plain strings precisely because either a project's name or
+/// its ARN is a legal value there (`crate::state::ProjectReference` reads both). Recorded
+/// behaviour — the model states no message for the error.
+const PROJECT_IDENTIFIER_REQUIRED_MESSAGE: &str = "Project name or ARN is required";
+
+/// The validation path of the input member that carries ONE project's identifier.
+///
+/// Every operation of this service that addresses a single project by a plain-string
+/// identifier names that member `projectName` — the per-project listings, the
+/// build-starting operations, the cache invalidation and the webhook operations — so a
+/// missing-member violation at this path is a request that named no project. The members
+/// called `name` are NOT this path: `name` carries the project's own name on the operations
+/// that create or change one, and the same spelling carries a FLEET's and a report group's.
+const PROJECT_IDENTIFIER_PATH: &str = "projectName";
 
 /// What CodeBuild states as the reason a list request asked for a sort order it does
 /// not define, carried by the modelled `InvalidInputException`.
