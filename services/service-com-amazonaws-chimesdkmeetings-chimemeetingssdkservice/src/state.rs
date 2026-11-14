@@ -37,10 +37,10 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use sha2::{Digest as _, Sha256};
 
 use crate::ops::types::{
-    Attendee, AttendeeCapabilities, BadRequestException, LimitExceededException, MediaPlacement,
-    Meeting, MeetingFeaturesConfiguration, NotFoundException, NotificationsConfiguration,
-    ResourceNotFoundException, ServiceFailureException, TooManyTagsException,
-    TranscriptionConfiguration,
+    Attendee, AttendeeCapabilities, BadRequestException, ForbiddenException,
+    LimitExceededException, MediaPlacement, Meeting, MeetingFeaturesConfiguration,
+    NotFoundException, NotificationsConfiguration, ResourceNotFoundException,
+    ServiceFailureException, TooManyTagsException, TranscriptionConfiguration,
 };
 
 /// The `arnNamespace` this service's ARNs carry (`OPERATIONS.md`, `## Wire protocol`).
@@ -142,14 +142,71 @@ pub fn bad_request(message: impl Into<String>) -> BadRequestException {
     }
 }
 
+/// The prefix the model RESERVES in the two caller-supplied identifiers of this service.
+///
+/// From the model: `CreateAttendeeRequest$ExternalUserId` and
+/// `CreateMeetingRequest$ExternalMeetingId` both document "Values that begin with `aws:`
+/// are reserved. You can't configure a value that uses this prefix. Case insensitive."
+/// (`smithy_query(query="doc",shape="CreateAttendeeRequest",member="ExternalUserId")`) —
+/// which is why [`reserved_prefix_refusal`] compares it without regard to case.
+pub const RESERVED_IDENTIFIER_PREFIX: &str = "aws:";
+
+/// How a request naming the reserved prefix in `member` is refused.
+///
+/// The sentence is FIXED text for this error class apart from the INPUT MEMBER it names,
+/// which is what tells a caller which of the identifiers it supplied was the offending
+/// one; no value of the request is in it — the prefix it quotes is the reserved one as the
+/// documentation writes it, not the casing the request happened to use.
+pub fn reserved_prefix_problem(member: &str) -> String {
+    format!("Validation error for {member}, prefix '{RESERVED_IDENTIFIER_PREFIX}' is reserved.")
+}
+
+/// `None` when `value` may be stored under `member`, or the refusal when it begins with
+/// the prefix the model reserves.
+///
+/// The comparison is CASE-INSENSITIVE, as the documentation of both members states ("Case
+/// insensitive."), so the reserved namespace cannot be entered by changing the casing of
+/// the prefix. Only the beginning of the value is compared: one that merely CONTAINS the
+/// prefix is admitted, because the rule is about what a value BEGINS with.
+///
+/// One function for every caller-supplied identifier the rule is documented on, so the
+/// attendee's and the meeting's external ids cannot enforce it differently.
+pub fn reserved_prefix_refusal(member: &str, value: &str) -> Option<BadRequestException> {
+    value
+        .get(..RESERVED_IDENTIFIER_PREFIX.len())
+        .is_some_and(|prefix| prefix.eq_ignore_ascii_case(RESERVED_IDENTIFIER_PREFIX))
+        .then(|| bad_request(reserved_prefix_problem(member)))
+}
+
+/// The input member of `CreateAttendee` the reserved-prefix rule is documented on.
+pub const EXTERNAL_USER_ID_MEMBER: &str = "ExternalUserId";
+
+/// The input member of `CreateMeeting` the same rule is documented on.
+pub const EXTERNAL_MEETING_ID_MEMBER: &str = "ExternalMeetingId";
+
+/// How a tagging call naming a `MeetingId` this service holds no meeting under is refused.
+///
+/// A meeting's tags live exactly as long as the meeting, so an ARN whose meeting this
+/// store does not hold — one that never named a meeting here, or one that has ended —
+/// addresses no resource and the refusal reports the id in it as invalid. Entirely fixed
+/// text: it interpolates nothing from the request.
+pub const INVALID_MEETING_ID_MESSAGE: &str = "Invalid meeting id";
+
+/// `BadRequestException`'s payload for a tagging call whose `ResourceARN` carries a
+/// `MeetingId` this store holds no meeting under.
+pub fn invalid_meeting_id() -> BadRequestException {
+    bad_request(INVALID_MEETING_ID_MESSAGE)
+}
+
 /// How this service words every `NotFoundException`: the kind of resource the request
 /// named, then the id it supplied for that resource in angle brackets, then `not found`.
 ///
 /// The message is built from the REQUEST — the id in it is the one the caller sent, never
 /// a value from this store — so a client that logs or surfaces the message can see which
 /// of the ids it passed was the absent one. One function so every reader of a missing
-/// meeting or attendee (`GetMeeting`, `ListAttendees`, `CreateAttendee`, `GetAttendee`,
-/// `DeleteAttendee`) words the refusal identically.
+/// meeting (`GetMeeting`, `ListAttendees`, `CreateAttendee`, `GetAttendee`,
+/// `DeleteAttendee`) words the refusal identically. An `AttendeeId` absent from a meeting
+/// that EXISTS is not this refusal: see [`attendee_not_in_meeting`].
 fn not_found(kind: &str, id: &str) -> NotFoundException {
     NotFoundException {
         code: Some("NotFound".to_string()),
@@ -178,13 +235,35 @@ pub fn meeting_ended() -> NotFoundException {
     }
 }
 
-/// `NotFoundException`'s payload for an attendee that is not in the named meeting.
+/// `ForbiddenException`'s payload wording `message`: the refusal for access that is
+/// revoked for good rather than for a resource the request could not name
+/// (`ForbiddenException` is documented "The client is permanently forbidden from making
+/// the request").
+pub fn forbidden(message: impl Into<String>) -> ForbiddenException {
+    ForbiddenException {
+        code: Some("Forbidden".to_string()),
+        message: Some(message.into()),
+        request_id: None,
+    }
+}
+
+/// `ForbiddenException`'s payload for an `AttendeeId` that names no attendee of a LIVE
+/// meeting — one that was never created there, or one `DeleteAttendee` has removed.
 ///
-/// The absent resource is the ATTENDEE — the meeting it was looked for in exists, or the
-/// caller would have been refused with [`meeting_not_found`] instead — so the id this
-/// names is the `AttendeeId`.
-pub fn attendee_not_found(attendee_id: &str) -> NotFoundException {
-    not_found("Attendee", attendee_id)
+/// The refusal is the modelled `ForbiddenException` (HTTP 403, "The client is permanently
+/// forbidden from making the request") rather than a 404: the meeting the attendee was
+/// looked for in EXISTS, so access to that attendee's record is revoked rather than the
+/// request naming an unknown resource, and a client reading 403 stops retrying the id and
+/// re-joins instead. Every operation that resolves an `AttendeeId` inside a live meeting
+/// (`GetAttendee`, `DeleteAttendee`, `UpdateAttendeeCapabilities`) raises THIS payload, so
+/// the three cannot word one refusal three ways.
+///
+/// Both ids come from the REQUEST — never from this store — so a client that logs the
+/// message sees the pair it asked about.
+pub fn attendee_not_in_meeting(attendee_id: &str, meeting_id: &str) -> ForbiddenException {
+    forbidden(format!(
+        "Attendee <{attendee_id}> is not in the meeting <{meeting_id}>"
+    ))
 }
 
 /// `ServiceFailureException`'s payload for a state store that could not be reached — the
@@ -287,12 +366,32 @@ pub struct StoredMeeting {
     pub transcription: Option<TranscriptionConfiguration>,
 }
 
+impl StoredMeeting {
+    /// The attendee of this meeting whose `ExternalUserId` is `external_user_id`, or
+    /// `None` when the meeting holds none.
+    ///
+    /// `CreateAttendeeRequest$ExternalUserId` is documented as "An idempotency token.
+    /// Links the attendee to an identity managed by a builder application", so an external
+    /// identity has at most ONE attendee in a meeting and a repeated create resolves to
+    /// the attendee the first call minted instead of a second one. The scan is over this
+    /// meeting's attendees alone, so one meeting's external identity never resolves
+    /// through another's.
+    ///
+    /// Answers the FIRST attendee in `AttendeeId` order, which is a total order over a
+    /// `BTreeMap`'s keys, so the answer does not depend on how the map was filled.
+    pub fn attendee_with_external_user_id(&self, external_user_id: &str) -> Option<&Attendee> {
+        self.attendees.values().find(|attendee| {
+            attendee.external_user_id.as_deref() == Some(external_user_id)
+        })
+    }
+}
+
 /// Per-service state for com-amazonaws-chimesdkmeetings-chimemeetingssdkservice. A handler reaches it through [`service_state`].
 ///
-/// The meetings map is NOT partitioned by region: a meeting's ARN and media endpoints
-/// record the `MediaRegion` it was created in, but any later call reaches every meeting in
-/// the store whatever region it is signed for. Partitioning the control plane by region is
-/// a separate change; nothing here claims it.
+/// The meetings map is NOT partitioned by region: a meeting's media endpoints record the
+/// `MediaRegion` it was created in and its ARN the Region of the endpoint that created it,
+/// but any later call reaches every meeting in the store whatever region it is signed for.
+/// Partitioning the control plane by region is a separate change; nothing here claims it.
 #[derive(Debug, Default)]
 pub struct ComAmazonawsChimesdkmeetingsChimemeetingssdkserviceState {
     /// Every meeting that currently exists, keyed by its minted `MeetingId`.
@@ -430,24 +529,55 @@ impl ComAmazonawsChimesdkmeetingsChimemeetingssdkserviceState {
         self.next_seq
     }
 
-    /// Whether a tagging call may address `arn`.
+    /// Why a tagging call may NOT address `arn`, or `None` when it may.
     ///
-    /// The family's one rule for that question lives in
+    /// The family's one rule for which ARNs the shared tagging routes serve lives in
     /// [`::service_common::chime_tags::addresses_taggable_resource`]; this store answers
     /// the half of it only this service can — whether an ARN that names a resource THIS
     /// service mints (one of type [`MEETING_RESOURCE_TYPE`]) is one it still holds. The
     /// comparison is against the meeting's OWN ARN, so an ARN carrying a live meeting's id
     /// in another Region names no meeting here. An ARN of any other Chime resource type is
     /// another family member's, which this store cannot check.
-    pub fn taggable(&self, arn: &str) -> bool {
-        let own_resource_exists =
-            ::service_common::arn::resource_id_of_type(arn, MEETING_RESOURCE_TYPE).map(|id| {
-                self.meetings
-                    .get(id)
-                    .is_some_and(|stored| stored.meeting.meeting_arn.as_deref() == Some(arn))
-            });
-        ::service_common::chime_tags::addresses_taggable_resource(arn, own_resource_exists)
+    ///
+    /// The two refusals differ because the caller's mistake does: an ARN of THIS service
+    /// whose meeting the store does not hold carries an invalid `MeetingId`
+    /// ([`TaggingRefusal::InvalidMeetingId`]), while a value that is no family resource ARN
+    /// at all names nothing this service could resolve
+    /// ([`TaggingRefusal::UnresolvedResource`]).
+    pub fn tagging_refusal(&self, arn: &str) -> Option<TaggingRefusal> {
+        // `Some(true)`/`Some(false)` when the ARN names a MEETING of this family, `None`
+        // when it names another member's resource type or is no family ARN at all.
+        let own_resource_exists = ::service_common::arn::is_resource_arn_of(
+            arn,
+            ::service_common::chime_tags::CHIME_ARN_NAMESPACE,
+        )
+        .then(|| ::service_common::arn::resource_id_of_type(arn, MEETING_RESOURCE_TYPE))
+        .flatten()
+        .map(|id| {
+            self.meetings
+                .get(id)
+                .is_some_and(|stored| stored.meeting.meeting_arn.as_deref() == Some(arn))
+        });
+        if ::service_common::chime_tags::addresses_taggable_resource(arn, own_resource_exists) {
+            return None;
+        }
+        if own_resource_exists == Some(false) {
+            return Some(TaggingRefusal::InvalidMeetingId);
+        }
+        Some(TaggingRefusal::UnresolvedResource)
     }
+}
+
+/// Why a tagging call cannot address the `ResourceARN` it named, as
+/// [`ComAmazonawsChimesdkmeetingsChimemeetingssdkserviceState::tagging_refusal`] decides
+/// it. The three tagging handlers map each variant to the error their own model declares
+/// for it, so one ARN gets one verdict whichever of them read it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TaggingRefusal {
+    /// The ARN names a meeting of this service that the store holds no meeting under.
+    InvalidMeetingId,
+    /// The ARN names no resource of this family at all.
+    UnresolvedResource,
 }
 
 /// The meeting's effective `MeetingFeatures.Video.MaxResolution`: what the request named,
@@ -617,15 +747,30 @@ fn content_needs_video_problem() -> String {
     )
 }
 
-/// The `MeetingArn` of a meeting: `arn:aws:chime:<MediaRegion>:<account>:meeting/<id>`,
-/// which satisfies `AmazonResourceName`'s modelled `^arn:` pattern and length 1..1011.
-pub fn meeting_arn(meeting_id: &str, media_region: &str) -> String {
-    ::engine::emulator_arn(
-        ARN_NAMESPACE,
-        media_region,
-        &format!("meeting/{meeting_id}"),
-    )
+/// The `MeetingArn` of a meeting: `arn:aws:chime:<region>:<account>:meeting/<id>`, which
+/// satisfies `AmazonResourceName`'s modelled `^arn:` pattern and length 1..1011.
+///
+/// `region` is the Region of the ENDPOINT the call was signed for ([`request_region`]),
+/// not the meeting's `MediaRegion`: the ARN names the control-plane resource, so a client
+/// that builds a meeting's ARN from its own Region and account — to tag it, to write an
+/// IAM resource condition, or to compare it against a stored ARN — builds the same string
+/// this service hands back. `MediaRegion` is an independent request parameter that scopes
+/// the meeting's MEDIA endpoints ([`media_placement`]) and nothing else.
+pub fn meeting_arn(meeting_id: &str, region: &str) -> String {
+    ::engine::emulator_arn(ARN_NAMESPACE, region, &format!("meeting/{meeting_id}"))
 }
+
+/// The Region the caller signed this request for, from the SigV4 credential scope;
+/// [`DEFAULT_REGION`] for a request carrying no scope.
+pub fn request_region(parts: &::http::request::Parts) -> String {
+    ::emulator_server::sigv4_credential_scope(&parts.headers)
+        .map(|scope| scope.region)
+        .filter(|region| !region.is_empty())
+        .unwrap_or_else(|| DEFAULT_REGION.to_string())
+}
+
+/// The Region an unsigned request is attributed to; the emulator's default.
+const DEFAULT_REGION: &str = "us-east-1";
 
 /// The media endpoints reported for a meeting.
 ///

@@ -6,6 +6,12 @@
 //! `Capabilities` take the documented defaults, and the attendee is stored under its
 //! meeting so `GetAttendee` / `ListAttendees` read back exactly this record.
 //!
+//! `ExternalUserId` is modelled as an idempotency token, so a repeat call for an identity
+//! that already has an attendee in this meeting answers with THAT attendee — the same
+//! `AttendeeId` and `JoinToken` — rather than minting a second one; and a value beginning
+//! with the prefix the model reserves is refused before anything is resolved
+//! ([`crate::state::reserved_prefix_refusal`]).
+//!
 //! ## Shape of an operation
 //!
 //! Each operation is a struct that owns the shared engine and implements
@@ -172,6 +178,15 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         })?;
         let mut store = state.lock();
 
+        // The reserved-prefix rule the model states on this member, applied BEFORE
+        // anything is resolved or minted, so a refused request leaves the store as it was.
+        if let Some(refusal) = crate::state::reserved_prefix_refusal(
+            crate::state::EXTERNAL_USER_ID_MEMBER,
+            &input.external_user_id,
+        ) {
+            return Err(CreateAttendeeErrorModeled::BadRequestException(refusal).into());
+        }
+
         // An attendee exists only inside a meeting, so a `MeetingId` that names none is
         // the modelled `NotFoundException` — and nothing is minted for it.
         let Some(meeting) = store.meetings.get(&input.meeting_id) else {
@@ -184,6 +199,12 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         // ceiling, so they are read from the STORED meeting, not from this request.
         let features = meeting.meeting.meeting_features.clone();
         let attendee_count = meeting.attendees.len();
+        // `ExternalUserId` is an IDEMPOTENCY TOKEN: this identity's attendee in this
+        // meeting, when it already has one. Resolved from the stored meeting so a retried
+        // create answers with the attendee — and the `JoinToken` — the first one minted.
+        let existing = meeting
+            .attendee_with_external_user_id(&input.external_user_id)
+            .cloned();
 
         let capabilities = match input.capabilities {
             Some(requested) => {
@@ -199,6 +220,16 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
             }
             None => crate::state::default_capabilities(features.as_ref()),
         };
+
+        // The repeat of a create this meeting already served: the stored attendee is
+        // answered as it stands, nothing is minted, and the capabilities this call carried
+        // do not replace the ones the attendee holds — changing them is
+        // `UpdateAttendeeCapabilities`.
+        if let Some(existing) = existing {
+            return Ok(CreateAttendeeOutput {
+                attendee: Some(existing),
+            });
+        }
 
         let ceiling = crate::state::attendee_ceiling(features.as_ref());
         if attendee_count >= ceiling {

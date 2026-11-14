@@ -9,12 +9,17 @@
 //! The rule under test: a `NotFoundException` reports WHICH situation the request met,
 //! with `Code` `NotFound` and HTTP 404. An id that never named a resource here is reported
 //! as that id being absent, worded from the REQUEST — the kind of resource asked for and
-//! the id supplied for it (`Meeting <MeetingId> not found`, `Attendee <AttendeeId> not
-//! found`) — so a caller that passed two ids can tell which one was wrong. A meeting that
+//! the id supplied for it (`Meeting <MeetingId> not found`) — so a caller that passed two
+//! ids can tell which one was wrong. A meeting that
 //! EXISTED and has since been deleted is reported as having ENDED instead, because the
 //! caller's id was right and no retry of it can ever succeed; `DeleteMeeting` is
 //! documented as disconnecting every client and preventing new ones from joining, which
 //! is exactly that outcome.
+//!
+//! An `AttendeeId` absent from a meeting that EXISTS is NOT this refusal: the meeting is
+//! live, so access to that attendee's record is revoked rather than unknown, and the
+//! answer is the modelled `ForbiddenException` (HTTP 403) naming both ids the request
+//! carried.
 //!
 //! The table spans the class the rule generalises over: which operation refuses (reader,
 //! lister and writer, for both resource kinds), which resource is the absent one (the
@@ -159,6 +164,36 @@ fn absent_message(kind: &str, id: &str) -> String {
 
 /// How a meeting that existed and has since been deleted is reported.
 const ENDED_MESSAGE: &str = "The meeting has ended";
+
+/// How an `AttendeeId` that names no attendee of a LIVE meeting is reported: both ids come
+/// from the request, so a caller that passed two can see which pair was refused.
+fn not_in_meeting_message(attendee_id: &str, meeting_id: &str) -> String {
+    format!("Attendee <{attendee_id}> is not in the meeting <{meeting_id}>")
+}
+
+/// Assert one refusal is the modelled `ForbiddenException` carrying `expected`.
+fn assert_forbidden(case: &str, reply: &Reply, expected: &str) {
+    assert_eq!(
+        (reply.status, reply.error_code.as_deref()),
+        (403, Some("ForbiddenException")),
+        "case {case:?}: expected the modelled 403 ForbiddenException, got {} {:?} with {:?}",
+        reply.status,
+        reply.error_code,
+        reply.body
+    );
+    assert_eq!(
+        reply.text("Code").as_deref(),
+        Some("Forbidden"),
+        "case {case:?}: expected Code Forbidden, got {:?}",
+        reply.text("Code")
+    );
+    assert_eq!(
+        reply.text("Message").as_deref(),
+        Some(expected),
+        "case {case:?}: expected Message {expected:?}, got {:?}",
+        reply.text("Message")
+    );
+}
 
 /// Assert one refusal is the modelled `NotFoundException` carrying `expected`.
 fn assert_not_found(case: &str, reply: &Reply, expected: &str) {
@@ -314,11 +349,12 @@ async fn an_absent_meeting_is_reported_by_the_situation_the_request_met() {
     );
 }
 
-/// When the MEETING exists but the attendee does not, the refusal names the ATTENDEE and
-/// the `AttendeeId` the request carried — so a caller that passed both ids can tell which
-/// of the two was the absent one.
+/// When the MEETING exists but the attendee does not, the refusal is the modelled
+/// `ForbiddenException` naming the ATTENDEE and the MEETING the request carried — so a
+/// caller that passed both ids can tell which of the two was the absent one, and knows the
+/// attendee is gone for good rather than mistyped.
 #[tokio::test]
-async fn an_absent_attendee_is_named_by_its_own_id() {
+async fn an_attendee_absent_from_a_live_meeting_is_permanently_refused() {
     let emulator = Emulator::new();
     let meeting_id = emulator.new_meeting_id("tok-attendees", "ext-attendees").await;
 
@@ -391,10 +427,10 @@ async fn an_absent_attendee_is_named_by_its_own_id() {
             ),
         ];
         for (operation, reply) in refusals {
-            assert_not_found(
+            assert_forbidden(
                 &format!("{operation} on an attendee {case}"),
                 &reply,
-                &absent_message("Attendee", attendee_id),
+                &not_in_meeting_message(attendee_id, &meeting_id),
             );
         }
     }

@@ -182,10 +182,12 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
             .into());
         };
         // The attendee is removed from INSIDE its meeting, so one meeting's
-        // `AttendeeId` can never delete another's attendee.
+        // `AttendeeId` can never delete another's attendee. The meeting EXISTS here, so
+        // an `AttendeeId` it holds no attendee under — never created, or already deleted
+        // — is the modelled `ForbiddenException`, not a 404.
         if meeting.attendees.remove(&input.attendee_id).is_none() {
-            return Err(DeleteAttendeeErrorModeled::NotFoundException(
-                crate::state::attendee_not_found(&input.attendee_id),
+            return Err(DeleteAttendeeErrorModeled::ForbiddenException(
+                crate::state::attendee_not_in_meeting(&input.attendee_id, &input.meeting_id),
             )
             .into());
         }

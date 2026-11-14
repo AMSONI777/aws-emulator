@@ -21,8 +21,10 @@
 //!    (HTTP 404), worded by
 //!    [`crate::state::ComAmazonawsChimesdkmeetingsChimemeetingssdkserviceState::meeting_absent`]
 //!    so a meeting that has ENDED is reported as ended rather than as an unknown id;
-//! 2. an `AttendeeId` that names no attendee OF THAT MEETING is the same error, worded by
-//!    [`crate::state::attendee_not_found`];
+//! 2. an `AttendeeId` that names no attendee OF THAT MEETING is the modelled
+//!    `ForbiddenException` (HTTP 403), worded by
+//!    [`crate::state::attendee_not_in_meeting`] — the meeting exists, so access to that
+//!    attendee's record is revoked rather than the id naming an unknown resource;
 //! 3. a capability set the meeting's own `MeetingFeatures` do not admit is the modelled
 //!    `BadRequestException` (HTTP 400), judged by [`crate::state::capability_problem`] —
 //!    the same corner cases `CreateAttendee` applies, because they are rules about the
@@ -218,10 +220,12 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
             .into());
         };
         // Looked up INSIDE its meeting, so one meeting's `AttendeeId` never updates
-        // another's attendee.
+        // another's attendee. The meeting EXISTS here, so an `AttendeeId` it holds no
+        // attendee under — never created, or deleted — is the modelled
+        // `ForbiddenException`, not a 404.
         if !meeting.attendees.contains_key(&input.attendee_id) {
-            return Err(UpdateAttendeeCapabilitiesErrorModeled::NotFoundException(
-                crate::state::attendee_not_found(&input.attendee_id),
+            return Err(UpdateAttendeeCapabilitiesErrorModeled::ForbiddenException(
+                crate::state::attendee_not_in_meeting(&input.attendee_id, &input.meeting_id),
             )
             .into());
         }

@@ -7,10 +7,12 @@
 //! has (a repeated key is re-valued, an untouched one kept), `UntagResource` removes
 //! exactly the keys it names and nothing else, and `ListTagsForResource` reports back the
 //! tags those two and the CREATE left — an empty list for a resource carrying none. A
-//! tagging call keyed by a resource of this service that does not exist is refused with
-//! the modelled `ResourceNotFoundException` and writes nothing, and one that would take a
-//! resource past the modelled maximum number of tags per resource with the modelled
-//! `TooManyTagsException`.
+//! tagging call whose ARN names a MEETING this store holds no meeting under — one that
+//! never existed, or one `DeleteMeeting` has ended — is refused with the modelled
+//! `BadRequestException` reporting the id in it as invalid and writes nothing, a call whose
+//! ARN names no resource of the Chime family at all with the modelled
+//! `ResourceNotFoundException`, and one that would take a resource past the modelled
+//! maximum number of tags per resource with the modelled `TooManyTagsException`.
 //!
 //! The tables span what the rule generalises over: how many pairs one call carries (one,
 //! several, the modelled maximum, one past it), the form of a key and a value (short, an
@@ -22,7 +24,9 @@ use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use serde_json::{json, Value};
-use service_com_amazonaws_chimesdkmeetings_chimemeetingssdkservice::state::MAX_TAGS_PER_RESOURCE;
+use service_com_amazonaws_chimesdkmeetings_chimemeetingssdkservice::state::{
+    INVALID_MEETING_ID_MESSAGE as INVALID_MEETING_ID, MAX_TAGS_PER_RESOURCE,
+};
 use service_com_amazonaws_chimesdkmeetings_chimemeetingssdkservice::EmulatedService;
 use smithy_server_runtime::MultiServiceRouter;
 
@@ -165,7 +169,11 @@ fn ids_of(meeting: &Value) -> (String, String) {
 }
 
 /// Percent-encode a value for a query value, the way an AWS SDK encodes one.
-fn encode(value: &str) -> String {
+///
+/// `pub(crate)` so the sibling suites of this test binary share this ONE copy rather than
+/// each writing an encoder of their own, which would let two suites assert against
+/// different encodings of the same ARN.
+pub(crate) fn encode(value: &str) -> String {
     let mut out = String::with_capacity(value.len());
     for byte in value.bytes() {
         match byte {
@@ -432,7 +440,8 @@ async fn tags_supplied_at_create_time_are_listed_and_can_be_changed() {
         }
 
         // The resource's tags go with the resource: once the meeting is deleted, its ARN
-        // is not a resource of this service any more and the listing refuses it.
+        // carries a `MeetingId` this service holds no meeting under, so every tagging call
+        // naming it is refused as invalid.
         let (status, body) = emulator
             .call("DELETE", &format!("/meetings/{meeting_id}"), None)
             .await;
@@ -440,65 +449,102 @@ async fn tags_supplied_at_create_time_are_listed_and_can_be_changed() {
             status, 204,
             "case {case:?}: expected DeleteMeeting to answer 204, got {status} {body:?}"
         );
-        let (status, body) = emulator.list_raw(&arn).await;
-        assert_eq!(
-            (status, body["Code"].as_str()),
-            (404, Some("NotFound")),
-            "case {case:?}: expected a deleted resource's tags to be refused, got {body:?}"
-        );
+        let refusals = [
+            ("ListTagsForResource", emulator.list_raw(&arn).await),
+            (
+                "TagResource",
+                emulator.tag(&arn, &owned(&[("after", "delete")])).await,
+            ),
+            ("UntagResource", emulator.untag(&arn, &keys(&["env"])).await),
+        ];
+        for (operation, (status, body)) in refusals {
+            assert_eq!(
+                (status, body["Code"].as_str(), body["Message"].as_str()),
+                (400, Some("BadRequest"), Some(INVALID_MEETING_ID)),
+                "case {case:?} ({operation}): expected a deleted meeting's ARN to be refused \
+                 as an invalid meeting id, got {status} {body:?}"
+            );
+        }
     }
 }
 
-/// RULE: a tagging call that names a resource of this service that does not exist is
-/// refused with the modelled 404 and writes nothing, and a call past the modelled maximum
-/// number of tags per resource is refused with the modelled too-many-tags error, leaving
-/// the resource's tags as they were.
+/// RULE: a tagging call whose ARN names a meeting this store holds no meeting under is
+/// refused with the modelled 400 reporting the id as invalid and writes nothing; one whose
+/// ARN names no resource of this family at all is refused with the modelled 404; and a
+/// call past the modelled maximum number of tags per resource is refused with the modelled
+/// too-many-tags error, leaving the resource's tags as they were.
 #[tokio::test]
 async fn a_tagging_call_this_service_cannot_serve_is_refused_and_writes_nothing() {
     let emulator = Emulator::new();
     let (meeting_id, arn) = emulator.meeting("tok-refuse", "ext-refuse", &[]).await;
+    let (ended_id, ended_arn) = emulator.meeting("tok-ended", "ext-ended", &[]).await;
+    let (status, body) = emulator
+        .call("DELETE", &format!("/meetings/{ended_id}"), None)
+        .await;
+    assert_eq!(
+        status, 204,
+        "DeleteMeeting on the meeting that is ended for the table: got {status} {body:?}"
+    );
 
     // Rows: a meeting ARN this store holds no meeting for, the live meeting's id in
     // another Region (which names no meeting here, because a meeting's ARN carries the
-    // Region it was created in), and an ARN outside this family's ARN namespace.
-    let absent: Vec<(&str, String)> = vec![
+    // Region of the endpoint that created it), and a meeting that EXISTED and has ended.
+    let invalid: Vec<(&str, String)> = vec![
         ("a meeting that never existed", format!("{arn}x")),
         (
             "the live meeting's id in another Region",
             arn.replace("us-east-1", "eu-west-1"),
         ),
-        (
-            "another vendor's resource ARN",
-            format!("arn:aws:sqs:us-east-1:000000000000:queue/{meeting_id}"),
-        ),
+        ("a meeting that has been deleted", ended_arn),
     ];
 
-    for (case, absent_arn) in absent {
+    for (case, invalid_arn) in invalid {
         let refusals = [
             (
                 "TagResource",
-                emulator.tag(&absent_arn, &owned(&[("k", "v")])).await,
+                emulator.tag(&invalid_arn, &owned(&[("k", "v")])).await,
             ),
             (
                 "UntagResource",
-                emulator.untag(&absent_arn, &keys(&["k"])).await,
+                emulator.untag(&invalid_arn, &keys(&["k"])).await,
             ),
-            ("ListTagsForResource", emulator.list_raw(&absent_arn).await),
+            ("ListTagsForResource", emulator.list_raw(&invalid_arn).await),
         ];
         for (operation, (status, payload)) in refusals {
             assert_eq!(
-                (status, payload["Code"].as_str()),
-                (404, Some("NotFound")),
-                "case {case:?} ({operation}): expected 404 NotFound for {absent_arn}, got \
-                 {status} {payload:?}"
-            );
-            assert_eq!(
-                payload["ResourceName"].as_str(),
-                Some(absent_arn.as_str()),
-                "case {case:?} ({operation}): expected the refusal to name the resource it \
-                 could not find, got {payload:?}"
+                (
+                    status,
+                    payload["Code"].as_str(),
+                    payload["Message"].as_str()
+                ),
+                (400, Some("BadRequest"), Some(INVALID_MEETING_ID)),
+                "case {case:?} ({operation}): expected 400 BadRequest {INVALID_MEETING_ID:?} \
+                 for {invalid_arn}, got {status} {payload:?}"
             );
         }
+    }
+
+    // An ARN that names no resource of this family at all is a different mistake: there is
+    // no meeting id in it to report as invalid.
+    let foreign = format!("arn:aws:sqs:us-east-1:000000000000:queue/{meeting_id}");
+    let refusals = [
+        ("TagResource", emulator.tag(&foreign, &owned(&[("k", "v")])).await),
+        ("UntagResource", emulator.untag(&foreign, &keys(&["k"])).await),
+        ("ListTagsForResource", emulator.list_raw(&foreign).await),
+    ];
+    for (operation, (status, payload)) in refusals {
+        assert_eq!(
+            (status, payload["Code"].as_str()),
+            (404, Some("NotFound")),
+            "case another vendor's resource ARN ({operation}): expected 404 NotFound for \
+             {foreign}, got {status} {payload:?}"
+        );
+        assert_eq!(
+            payload["ResourceName"].as_str(),
+            Some(foreign.as_str()),
+            "case another vendor's resource ARN ({operation}): expected the refusal to name \
+             the resource it could not find, got {payload:?}"
+        );
     }
 
     // The tag count is bounded by the model's own `TagList` maximum: a call that would

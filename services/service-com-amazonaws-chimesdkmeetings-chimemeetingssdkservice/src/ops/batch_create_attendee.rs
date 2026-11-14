@@ -195,6 +195,33 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         let mut created: Vec<Attendee> = Vec::new();
         let mut errors: Vec<CreateAttendeeError2> = Vec::new();
         for item in input.attendees {
+            // The reserved-prefix rule the model states on `ExternalUserId`, read as a
+            // per-item failure exactly as a capability conflict is: the item is refused
+            // and nothing is minted for it, while the rest of the batch is served.
+            if let Some(refusal) = crate::state::reserved_prefix_refusal(
+                crate::state::EXTERNAL_USER_ID_MEMBER,
+                &item.external_user_id,
+            ) {
+                errors.push(CreateAttendeeError2 {
+                    external_user_id: Some(item.external_user_id),
+                    error_code: refusal.code,
+                    error_message: refusal.message,
+                });
+                continue;
+            }
+            // `ExternalUserId` is an idempotency token, so an identity that already has an
+            // attendee in this meeting is reported with THAT attendee and nothing is
+            // minted — the same resolution a single `CreateAttendee` makes.
+            let existing = store
+                .meetings
+                .get(&input.meeting_id)
+                .and_then(|stored| stored.attendee_with_external_user_id(&item.external_user_id))
+                .cloned();
+            if let Some(existing) = existing {
+                created.push(existing);
+                continue;
+            }
+
             let capabilities = match item.capabilities {
                 Some(requested) => {
                     match crate::state::capability_problem(&requested, features.as_ref()) {

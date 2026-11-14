@@ -162,10 +162,12 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
             .into());
         };
         // The attendee is looked up INSIDE its meeting, so one meeting's `AttendeeId`
-        // never resolves through another's.
+        // never resolves through another's. The meeting EXISTS here, so an `AttendeeId`
+        // it holds no attendee under — never created, or deleted — is the modelled
+        // `ForbiddenException`, not a 404.
         let Some(attendee) = meeting.attendees.get(&input.attendee_id) else {
-            return Err(GetAttendeeErrorModeled::NotFoundException(
-                crate::state::attendee_not_found(&input.attendee_id),
+            return Err(GetAttendeeErrorModeled::ForbiddenException(
+                crate::state::attendee_not_in_meeting(&input.attendee_id, &input.meeting_id),
             )
             .into());
         };

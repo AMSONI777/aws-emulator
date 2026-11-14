@@ -35,6 +35,12 @@ const SIGNED_FOR_CHIME: &str = "AWS4-HMAC-SHA256 \
 /// The account id every emulated ARN carries (`engine::emulator_account_id`).
 const ACCOUNT_ID: &str = "000000000000";
 
+/// The Region of the endpoint every request in this suite is signed for, which is what a
+/// resource ARN this service mints names — as against the request's own `MediaRegion`,
+/// which scopes the meeting's media endpoints. It is the Region in `SIGNED_FOR_CHIME`'s
+/// credential scope.
+const ENDPOINT_REGION: &str = "us-east-1";
+
 /// The values of the model's `MediaCapabilities` enum
 /// (`smithy_query(query="shape",shape="MediaCapabilities",
 /// model_path="services/service-com-amazonaws-chimesdkmeetings-chimemeetingssdkservice/smithy-model/com-amazonaws-chimesdkmeetings-chimemeetingssdkservice.json")`).
@@ -331,11 +337,15 @@ async fn create_meeting_persists_a_meeting_derived_from_its_minted_id() {
             "case {case:?}: MeetingId {meeting_id} was already minted for another meeting"
         );
 
+        // The ARN names the CONTROL-PLANE resource, so its Region segment is the Region of
+        // the endpoint the call was signed for, whatever media Region the meeting asked
+        // for.
         let region = string_member(&request, "MediaRegion");
         assert_eq!(
             string_member(&meeting, "MeetingArn"),
-            format!("arn:aws:chime:{region}:{ACCOUNT_ID}:meeting/{meeting_id}"),
-            "case {case:?}: expected the meeting's ARN to name its id and media Region, got {}",
+            format!("arn:aws:chime:{ENDPOINT_REGION}:{ACCOUNT_ID}:meeting/{meeting_id}"),
+            "case {case:?}: expected the meeting's ARN to name its id and the endpoint \
+             Region, got {}",
             meeting["MeetingArn"]
         );
 
@@ -932,9 +942,10 @@ async fn list_attendees_refuses_a_next_token_it_did_not_issue() {
     );
 }
 
-/// Every READER of the loop answers the modelled `NotFoundException` (HTTP 404) for an
-/// id that is well formed but names nothing — and an attendee is reachable only through
-/// its own meeting.
+/// Every READER of the loop answers the modelled `NotFoundException` (HTTP 404) for a
+/// `MeetingId` that is well formed but names nothing, and the modelled
+/// `ForbiddenException` (HTTP 403) for an `AttendeeId` that names no attendee of the LIVE
+/// meeting it was asked for — and an attendee is reachable only through its own meeting.
 ///
 /// `DeleteMeeting` is NOT in this table: it states an outcome rather than reporting a
 /// value, so an absent meeting is a no-op for it rather than a refusal — see
@@ -952,56 +963,73 @@ async fn unknown_meetings_and_attendees_are_not_found() {
         .attendee_id_of_new_attendee(&meeting_id, "user-404")
         .await;
 
-    // Rows span every reader in the slice, over both kinds of unknown id.
-    let cases: Vec<(&str, Reply)> = vec![
-        ("GetMeeting on an absent meeting", emulator.get_meeting(ABSENT_MEETING_ID).await),
+    // Rows span every reader in the slice, over both kinds of unknown id: the MEETING is
+    // the absent resource (404), or the meeting is live and the ATTENDEE is (403).
+    let cases: Vec<(&str, u16, &str, Reply)> = vec![
+        (
+            "GetMeeting on an absent meeting",
+            404,
+            "NotFoundException",
+            emulator.get_meeting(ABSENT_MEETING_ID).await,
+        ),
         (
             "ListAttendees on an absent meeting",
+            404,
+            "NotFoundException",
             emulator.list_attendees(ABSENT_MEETING_ID, "").await,
         ),
         (
             "CreateAttendee on an absent meeting",
+            404,
+            "NotFoundException",
             emulator
                 .create_attendee(ABSENT_MEETING_ID, &json!({ "ExternalUserId": "user-x" }))
                 .await,
         ),
         (
             "GetAttendee on an absent meeting",
+            404,
+            "NotFoundException",
             emulator.get_attendee(ABSENT_MEETING_ID, &attendee_id).await,
         ),
         (
             "GetAttendee on an absent attendee",
+            403,
+            "ForbiddenException",
             emulator.get_attendee(&meeting_id, ABSENT_MEETING_ID).await,
         ),
         (
             "DeleteAttendee on an absent attendee",
+            403,
+            "ForbiddenException",
             emulator
                 .delete_attendee(&meeting_id, ABSENT_MEETING_ID)
                 .await,
         ),
         (
             "GetAttendee through the wrong meeting",
+            403,
+            "ForbiddenException",
             emulator.get_attendee(&other_meeting_id, &attendee_id).await,
         ),
         (
             "DeleteAttendee through the wrong meeting",
+            403,
+            "ForbiddenException",
             emulator
                 .delete_attendee(&other_meeting_id, &attendee_id)
                 .await,
         ),
     ];
 
-    for (case, reply) in cases {
+    for (case, status, code, reply) in cases {
         assert_eq!(
-            reply.status, 404,
-            "case {case:?}: expected HTTP 404, got {} with {:?}",
-            reply.status, reply.body
-        );
-        assert_eq!(
-            reply.error_code.as_deref(),
-            Some("NotFoundException"),
-            "case {case:?}: expected the modelled NotFoundException, got {:?}",
-            reply.error_code
+            (reply.status, reply.error_code.as_deref()),
+            (status, Some(code)),
+            "case {case:?}: expected the modelled {status} {code}, got {} {:?} with {:?}",
+            reply.status,
+            reply.error_code,
+            reply.body
         );
     }
 
@@ -1044,9 +1072,12 @@ async fn deleting_removes_exactly_what_it_names() {
 
     let gone = emulator.get_attendee(&meeting_id, &doomed).await;
     assert_eq!(
-        gone.status, 404,
-        "GetAttendee after the delete expected 404, got {} with {:?}",
-        gone.status, gone.body
+        (gone.status, gone.error_code.as_deref()),
+        (403, Some("ForbiddenException")),
+        "GetAttendee after the delete expected the modelled 403, got {} {:?} with {:?}",
+        gone.status,
+        gone.error_code,
+        gone.body
     );
     let listed = emulator.list_attendees(&meeting_id, "").await;
     let remaining: Vec<String> = listed
@@ -1062,12 +1093,16 @@ async fn deleting_removes_exactly_what_it_names() {
         "ListAttendees after the delete must report only the survivor, got {remaining:?}"
     );
 
-    // Deleting the same attendee twice is a 404: the first delete really removed it.
+    // Deleting the same attendee twice is the modelled 403: the first delete really
+    // removed it, and the meeting it was in is still live.
     let again = emulator.delete_attendee(&meeting_id, &doomed).await;
     assert_eq!(
-        again.status, 404,
-        "a second DeleteAttendee expected 404, got {} with {:?}",
-        again.status, again.body
+        (again.status, again.error_code.as_deref()),
+        (403, Some("ForbiddenException")),
+        "a second DeleteAttendee expected the modelled 403, got {} {:?} with {:?}",
+        again.status,
+        again.error_code,
+        again.body
     );
 
     let dropped = emulator.delete_meeting(&meeting_id).await;

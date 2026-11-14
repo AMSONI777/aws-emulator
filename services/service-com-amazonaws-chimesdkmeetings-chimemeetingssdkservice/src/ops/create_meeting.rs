@@ -188,10 +188,10 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         input: Self::Input,
         ctx: &smithy_server_runtime::OperationContext<'_>,
     ) -> Result<Self::Output, Self::Error> {
-        // `ctx` carries request metadata only; nothing about a meeting depends on it —
-        // the Region a meeting's ARN and media endpoints are scoped to is the request's
-        // own `MediaRegion` member, not the Region it was signed for.
-        let _ = ctx;
+        // The Region of the ENDPOINT this call was signed for: that is what the meeting's
+        // ARN names, as against the request's own `MediaRegion`, which scopes its media
+        // endpoints.
+        let endpoint_region = crate::state::request_region(ctx.parts());
         let state = crate::state::service_state(&*self.engine).ok_or_else(|| {
             CreateMeetingErrorModeled::ServiceFailureException(crate::state::store_unavailable())
         })?;
@@ -202,6 +202,15 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
             CreateMeetingErrorModeled::ServiceFailureException(crate::state::store_unavailable())
         })?;
         let mut store = state.lock();
+
+        // The reserved-prefix rule the model states on `ExternalMeetingId`, applied before
+        // anything is resolved, minted or stored.
+        if let Some(refusal) = crate::state::reserved_prefix_refusal(
+            crate::state::EXTERNAL_MEETING_ID_MEMBER,
+            &input.external_meeting_id,
+        ) {
+            return Err(CreateMeetingErrorModeled::BadRequestException(refusal).into());
+        }
 
         // `ClientRequestToken` is `@idempotencyToken`: a replay returns the meeting the
         // first call created, so a client that retries does not accumulate meetings.
@@ -229,7 +238,7 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         // Bound once and used both for the record and for the tag directory's key, so a
         // create-time tag can never be written under a different ARN than the one the
         // meeting carries — nor be dropped for want of one.
-        let meeting_arn = crate::state::meeting_arn(&meeting_id, &input.media_region);
+        let meeting_arn = crate::state::meeting_arn(&meeting_id, &endpoint_region);
         let meeting = Meeting {
             // Server-owned: the media endpoints and the ARN are DERIVED from the minted
             // id, never taken from the request.

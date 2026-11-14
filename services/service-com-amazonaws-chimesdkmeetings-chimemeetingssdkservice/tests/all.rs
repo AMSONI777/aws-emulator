@@ -25,6 +25,10 @@ mod capability_resolution_catalog;
 mod create_meeting_with_attendees;
 #[path = "all/delete_meeting_idempotence.rs"]
 mod delete_meeting_idempotence;
+#[path = "all/external_user_id_rules.rs"]
+mod external_user_id_rules;
+#[path = "all/meeting_arn_region.rs"]
+mod meeting_arn_region;
 #[path = "all/meeting_attendee_lifecycle.rs"]
 mod meeting_attendee_lifecycle;
 #[path = "all/meeting_projection.rs"]

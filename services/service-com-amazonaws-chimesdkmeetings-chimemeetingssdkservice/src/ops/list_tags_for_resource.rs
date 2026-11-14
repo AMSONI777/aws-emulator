@@ -156,10 +156,45 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
                 crate::state::store_unavailable(),
             )
         })?;
-        if !state.lock().taggable(&input.resource_arn) {
-            return Err(ListTagsForResourceErrorModeled::ResourceNotFoundException(
-                crate::state::tagged_resource_not_found(&input.resource_arn),
-            )
+        if let Some(refusal) = state.lock().tagging_refusal(&input.resource_arn) {
+            return Err(match refusal {
+                // A meeting's tags live exactly as long as the meeting, so an ARN of this
+                // service whose meeting the store does not hold carries an id that is not
+                // one of this service's.
+                crate::state::TaggingRefusal::InvalidMeetingId => {
+                    ListTagsForResourceErrorModeled::BadRequestException(
+                        crate::state::invalid_meeting_id(),
+                    )
+                }
+                crate::state::TaggingRefusal::UnresolvedResource => {
+                    ListTagsForResourceErrorModeled::ResourceNotFoundException(
+                        crate::state::tagged_resource_not_found(&input.resource_arn),
+                    )
+                }
+            }
+            .into());
+        }
+        // An ARN another family member has WITHDRAWN — the resource it named was deleted
+        // by the service that owns it — is refused with that owner's class and wording,
+        // read from the shared directory because this store cannot see a sibling's
+        // resources.
+        let withdrawn = directory
+            .lock()
+            .withdrawn_refusal(&input.resource_arn)
+            .map(|refusal| (refusal.class, refusal.message.to_string()));
+        if let Some((class, message)) = withdrawn {
+            return Err(match class {
+                ::service_common::chime_tags::WithdrawnClass::InvalidRequest => {
+                    ListTagsForResourceErrorModeled::BadRequestException(
+                        crate::state::bad_request(message),
+                    )
+                }
+                ::service_common::chime_tags::WithdrawnClass::Forbidden => {
+                    ListTagsForResourceErrorModeled::ForbiddenException(crate::state::forbidden(
+                        message,
+                    ))
+                }
+            }
             .into());
         }
 

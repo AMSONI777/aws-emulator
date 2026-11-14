@@ -175,8 +175,10 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         let state = crate::state::service_state(&*self.engine).ok_or_else(|| {
             DeleteMeetingErrorModeled::ServiceFailureException(crate::state::store_unavailable())
         })?;
-        // A deleted meeting leaves no tags behind: its tags live in the family's shared
-        // ARN-keyed directory, so they are dropped there rather than with the record.
+        // A deleted meeting leaves no tags behind, and its ARN stops addressing a resource
+        // at all: both facts are recorded in the family's shared ARN-keyed directory,
+        // because the member that serves the next tagging call may be a sibling that
+        // cannot read this store.
         let tag_directory = crate::state::chime_tags(&*self.engine).ok_or_else(|| {
             DeleteMeetingErrorModeled::ServiceFailureException(crate::state::store_unavailable())
         })?;
@@ -204,7 +206,11 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
             .as_ref()
             .and_then(|stored| stored.meeting.meeting_arn.as_deref())
         {
-            tag_directory.lock().forget(arn);
+            tag_directory.lock().withdraw(
+                arn,
+                ::service_common::chime_tags::WithdrawnClass::InvalidRequest,
+                crate::state::INVALID_MEETING_ID_MESSAGE,
+            );
         }
         Ok(DeleteMeetingOutput)
     }

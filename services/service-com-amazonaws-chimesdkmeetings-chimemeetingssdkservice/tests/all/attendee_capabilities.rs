@@ -10,9 +10,10 @@
 //! the two path ids name, and the replacement is all-or-nothing. An admissible set is
 //! applied whole (HTTP 200, the answer carrying the attendee with exactly that set, which
 //! a following `GetAttendee` reads back); a set the meeting's `MeetingFeatures` do not
-//! admit is refused with HTTP 400 and leaves the attendee's current set untouched; ids
-//! that name no live meeting or no attendee of it are refused with HTTP 404 and write
-//! nothing. Under simultaneous callers each one therefore ends as a success or as the
+//! admit is refused with HTTP 400 and leaves the attendee's current set untouched; an id
+//! that names no live meeting is refused with HTTP 404, and an `AttendeeId` that names no
+//! attendee of the live meeting it names with HTTP 403, both writing nothing. Under
+//! simultaneous callers each one therefore ends as a success or as the
 //! modelled contention refusal (HTTP 409 `ConflictException`), and the attendee is left
 //! holding one applied set member-for-member rather than a mix of two.
 //!
@@ -267,6 +268,29 @@ fn assert_not_found(case: &str, reply: &Reply, message: &str) {
     );
 }
 
+/// Assert a refusal is the modelled `ForbiddenException`, worded as this service words one.
+fn assert_forbidden(case: &str, reply: &Reply, message: &str) {
+    assert_eq!(
+        (reply.status, reply.error_code.as_deref()),
+        (403, Some("ForbiddenException")),
+        "case {case:?}: expected the modelled 403 ForbiddenException, got {} {:?} with {:?}",
+        reply.status,
+        reply.error_code,
+        reply.body
+    );
+    assert_eq!(
+        reply.text("Message").as_deref(),
+        Some(message),
+        "case {case:?}: expected Message {message:?}, got {:?}",
+        reply.text("Message")
+    );
+}
+
+/// How an `AttendeeId` that names no attendee of a LIVE meeting is refused.
+fn not_in_meeting(attendee_id: &str, meeting_id: &str) -> String {
+    format!("Attendee <{attendee_id}> is not in the meeting <{meeting_id}>")
+}
+
 /// Every set the meeting admits is applied WHOLE and read back member-for-member; every set
 /// it does not admit is refused with the modelled 400 and leaves the stored set as it was.
 ///
@@ -412,8 +436,9 @@ async fn an_admitted_capability_set_replaces_the_whole_stored_set() {
     }
 }
 
-/// Ids that name no live meeting, or no attendee of the meeting they name, are refused with
-/// the modelled 404 and write nothing.
+/// Ids that name no live meeting are refused with the modelled 404, and an `AttendeeId`
+/// that names no attendee of the LIVE meeting it names with the modelled 403; both write
+/// nothing.
 ///
 /// The rows differ in WHICH of the two path ids is the absent one, and in whether it never
 /// named a resource, named one in another meeting, or named one that was deleted.
@@ -424,6 +449,19 @@ async fn ids_that_name_nothing_are_refused_and_write_nothing() {
     let attendee_id = new_attendee(&router, &meeting_id, "user-absent-row").await;
     let other_meeting = new_meeting(&router, "tok-absent-other", None).await;
     let other_attendee = new_attendee(&router, &other_meeting, "user-other-meeting").await;
+    let deleted_attendee = new_attendee(&router, &meeting_id, "user-deleted-row").await;
+    let dropped = call(
+        &router,
+        "DELETE",
+        &format!("/meetings/{meeting_id}/attendees/{deleted_attendee}"),
+        None,
+    )
+    .await;
+    assert_eq!(
+        dropped.status, 204,
+        "DeleteAttendee: expected 204, got {} with {:?}",
+        dropped.status, dropped.body
+    );
 
     let requested = capability_set("Send", "Send", "None");
     let before = get_attendee(&router, &meeting_id, &attendee_id)
@@ -441,7 +479,8 @@ async fn ids_that_name_nothing_are_refused_and_write_nothing() {
         deleted.status, deleted.body
     );
 
-    let rows: Vec<(&str, &str, &str, String)> = vec![
+    // The MEETING is the absent resource: the modelled 404.
+    let absent_meetings: Vec<(&str, &str, &str, String)> = vec![
         (
             "a MeetingId that never named a meeting",
             ABSENT_GUID,
@@ -454,29 +493,32 @@ async fn ids_that_name_nothing_are_refused_and_write_nothing() {
             ended_attendee.as_str(),
             "The meeting has ended".to_string(),
         ),
-        (
-            "an AttendeeId that never named an attendee",
-            meeting_id.as_str(),
-            ABSENT_GUID,
-            format!("Attendee <{ABSENT_GUID}> not found"),
-        ),
+    ];
+    for (case, meeting, attendee, message) in absent_meetings {
+        let reply = update_capabilities(&router, meeting, attendee, &requested).await;
+        assert_not_found(case, &reply, &message);
+    }
+
+    // The meeting is LIVE and the ATTENDEE is the one it holds no record of: the modelled
+    // 403, naming both ids the request carried.
+    let absent_attendees: Vec<(&str, &str)> = vec![
+        ("an AttendeeId that never named an attendee", ABSENT_GUID),
         (
             "an AttendeeId in its upper-case form that names nothing",
-            meeting_id.as_str(),
             OTHER_ABSENT_GUID,
-            format!("Attendee <{OTHER_ABSENT_GUID}> not found"),
         ),
         (
             "an AttendeeId of ANOTHER meeting's attendee",
-            meeting_id.as_str(),
             other_attendee.as_str(),
-            format!("Attendee <{other_attendee}> not found"),
+        ),
+        (
+            "an AttendeeId this meeting held until it was deleted",
+            deleted_attendee.as_str(),
         ),
     ];
-
-    for (case, meeting, attendee, message) in rows {
-        let reply = update_capabilities(&router, meeting, attendee, &requested).await;
-        assert_not_found(case, &reply, &message);
+    for (case, attendee) in absent_attendees {
+        let reply = update_capabilities(&router, &meeting_id, attendee, &requested).await;
+        assert_forbidden(case, &reply, &not_in_meeting(attendee, &meeting_id));
     }
 
     // Nothing was written: the attendee that exists still holds the set it was created

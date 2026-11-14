@@ -3424,3 +3424,12 @@ mod eks_kubernetes_api_rbac_audit;
 // `E0753` and compiles no suite of this target.) A suite left at the top level of `tests/`
 // fails the build. Declare each suite exactly ONCE: this is one crate root, so a second
 // `mod` for the same name is `E0428` and fails every suite in this target.
+// Declared in this same quiet `n`/`o` gap, beside the other cross-service Chime suites and
+// for the reason the entries above record.
+#[path = "all/chime_deleted_meeting_tagging.rs"]
+mod chime_deleted_meeting_tagging;
+// leaving a note here. (Ordinary comments: an inner doc comment past the first item is
+// `E0753` and compiles no suite of this target.)
+// reason the block above records.)
+// leaving a note here. (Line comments, for the reason the span above records: an inner
+// doc comment past the first item is `E0753` and compiles no suite of this target.)

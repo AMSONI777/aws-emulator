@@ -27,6 +27,25 @@
 //! construction: a resource it holds no entry for simply has no tags. Every member that
 //! binds the generic tagging routes writes the tags its CREATE operations were given here
 //! too, so the tags of a resource are one piece of state whichever route wrote them.
+//!
+//! It also records, for the same reason, the ARNs whose owning member has DELETED the
+//! resource ([`ChimeTagDirectory::withdraw`]): the member serving a tagging call cannot
+//! read a sibling's store, so without that record it would report a deleted resource as a
+//! live, untagged one.
+//!
+//! That record is what the owning member TOLD the directory, so like the tags themselves it
+//! is partial in two ways, and a member whose own store can answer should ask its own store
+//! first (as each member's `taggable`-style check does) and read this only for an ARN it
+//! cannot resolve:
+//!
+//! * an ARN of a resource type a member owns that it never created \u2014 or that carries
+//!   another Region \u2014 was never withdrawn, so a sibling serving the call still admits it;
+//! * past [`MAX_WITHDRAWN_RESOURCES`] the oldest withdrawal is forgotten, after which that
+//!   ARN reads as un-withdrawn again.
+//!
+//! Closing the first gap means keying the directory on which member owns a resource type
+//! and having each of them publish its live ARNs here, which is a change to every member
+//! that binds these routes rather than to one.
 
 use std::collections::{BTreeMap, VecDeque};
 
@@ -55,6 +74,16 @@ pub const MAX_TAGS_PER_RESOURCE: usize = 50;
 /// resources a running workflow just tagged still report their tags.
 pub const MAX_TAGGED_RESOURCES: usize = 10_000;
 
+/// How many WITHDRAWN resources the directory remembers
+/// ([`ChimeTagDirectory::withdraw`]).
+///
+/// Bounded for the same reason and in the same way as [`MAX_TAGGED_RESOURCES`]: the record
+/// grows by one ARN per delete and is released by no client call, so past the bound the
+/// OLDEST withdrawal is forgotten and that ARN reads as one no member ever published
+/// again. Each publishing member bounds its own resources far below this, so a workflow
+/// that deletes everything it created still sees every one of those ARNs refused.
+pub const MAX_WITHDRAWN_RESOURCES: usize = MAX_TAGGED_RESOURCES;
+
 /// What [`ChimeTagDirectory::tag`] did, so the caller maps it to the outcome its model
 /// declares.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -66,6 +95,33 @@ pub enum Tagged {
     TooManyTags(usize),
 }
 
+/// The CLASS of refusal the member owning a withdrawn resource serves for a tagging call
+/// naming it, as [`ChimeTagDirectory::withdraw`] records it.
+///
+/// The class, not a shape: every member of the family declares its own error shapes, so
+/// the member that SERVES the call maps this onto the shape its own model declares. The
+/// owner chooses the class because which one is right is a fact about the owner's
+/// resource, not about which endpoint the client happened to address.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WithdrawnClass {
+    /// The request named an identifier the owner no longer holds, so the input is invalid:
+    /// the family's `BadRequestException` (HTTP 400).
+    InvalidRequest,
+    /// Access to the resource is revoked for good: the family's `ForbiddenException`
+    /// (HTTP 403).
+    Forbidden,
+}
+
+/// The refusal recorded for one withdrawn ARN: the class the owner chose and the wording
+/// it serves.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct WithdrawnRefusal<'a> {
+    /// Which error class the serving member must answer with.
+    pub class: WithdrawnClass,
+    /// The message the owning member words that refusal with.
+    pub message: &'a str,
+}
+
 /// The directory itself: the tags of every tagged resource, keyed by resource ARN.
 ///
 /// `BTreeMap` (not `HashMap`) for the tags of one resource, so a listing walks them in a
@@ -75,6 +131,12 @@ pub struct ChimeTagDirectory {
     tags: BTreeMap<String, BTreeMap<String, String>>,
     /// The order resources were first tagged in, so the oldest can be dropped first.
     order: VecDeque<String>,
+    /// The ARNs whose OWNING member has deleted the resource, each with the error class
+    /// and the wording that member serves for a tagging call naming it
+    /// ([`ChimeTagDirectory::withdraw`]).
+    withdrawn: BTreeMap<String, (WithdrawnClass, String)>,
+    /// The order those ARNs were withdrawn in, so the oldest can be dropped first.
+    withdrawn_order: VecDeque<String>,
 }
 
 impl ChimeTagDirectory {
@@ -153,6 +215,55 @@ impl ChimeTagDirectory {
     pub fn forget(&mut self, resource_arn: &str) -> bool {
         self.order.retain(|held| held != resource_arn);
         self.tags.remove(resource_arn).is_some()
+    }
+
+    /// Drop every tag of `resource_arn` AND record that the member owning the resource has
+    /// deleted it, so a later tagging call naming that ARN is refused instead of served.
+    ///
+    /// The owning member calls this from its own delete; `class` and `message` are the
+    /// error class and the wording IT serves for a tagging call naming an id it no longer
+    /// holds, so the member that happens to serve that call answers the owner's refusal
+    /// rather than one of its own. The record has to live here rather than in that member's
+    /// own store because the family's three generic tagging routes are served by ONE member
+    /// for every member's resource (see this module's header): the member serving the call
+    /// cannot read a sibling's store, so without this it would report a deleted resource as
+    /// a live, untagged one.
+    pub fn withdraw(
+        &mut self,
+        resource_arn: &str,
+        class: WithdrawnClass,
+        message: impl Into<String>,
+    ) {
+        self.forget(resource_arn);
+        if self
+            .withdrawn
+            .insert(resource_arn.to_string(), (class, message.into()))
+            .is_none()
+        {
+            self.withdrawn_order.push_back(resource_arn.to_string());
+            while self.withdrawn_order.len() > MAX_WITHDRAWN_RESOURCES {
+                if let Some(oldest) = self.withdrawn_order.pop_front() {
+                    self.withdrawn.remove(&oldest);
+                }
+            }
+        }
+    }
+
+    /// The refusal a tagging call naming `resource_arn` gets because the member owning
+    /// that resource has deleted it, or `None` when no member has withdrawn the ARN.
+    ///
+    /// Every member that serves a tagging call reads this, so whichever one the request
+    /// reached answers a dangling ARN the same way — with the OWNER's class and wording,
+    /// each mapped onto the error shape the SERVING member's own model declares for that
+    /// class.
+    #[must_use]
+    pub fn withdrawn_refusal(&self, resource_arn: &str) -> Option<WithdrawnRefusal<'_>> {
+        self.withdrawn
+            .get(resource_arn)
+            .map(|(class, message)| WithdrawnRefusal {
+                class: *class,
+                message,
+            })
     }
 
     /// How many resources the directory currently holds tags for.
@@ -326,6 +437,89 @@ mod tests {
             200,
             "case one tag past a 200-tag bound: expected the refused call to write nothing"
         );
+    }
+
+    #[test]
+    fn withdrawing_a_resource_drops_its_tags_and_answers_the_owners_refusal() {
+        let mut directory = ChimeTagDirectory::default();
+        /// One row: the case, the ARN, the tags it carried, and the refusal its owner
+        /// serves for it.
+        struct Row {
+            case: &'static str,
+            arn: &'static str,
+            tagged: Vec<(&'static str, &'static str)>,
+            class: WithdrawnClass,
+            message: &'static str,
+        }
+        // Rows span what the rule generalises over: which member's resource type the ARN
+        // names, whether the resource carried tags, and which class and wording its owner
+        // serves — the owner chooses the class, so a member serving the call cannot
+        // re-dress one owner's refusal as another's.
+        let rows = [
+            Row {
+                case: "a tagged resource of one member",
+                arn: "arn:aws:chime:us-east-1:000000000000:meeting/m1",
+                tagged: vec![("env", "dev"), ("team", "core")],
+                class: WithdrawnClass::InvalidRequest,
+                message: "Invalid meeting id",
+            },
+            Row {
+                case: "an untagged resource of the same member",
+                arn: "arn:aws:chime:eu-west-1:000000000000:meeting/m2",
+                tagged: Vec::new(),
+                class: WithdrawnClass::InvalidRequest,
+                message: "Invalid meeting id",
+            },
+            Row {
+                case: "a resource of another member, refused as a revoked one",
+                arn: "arn:aws:chime:us-east-1:000000000000:app-instance/ai1",
+                tagged: vec![("k", "v")],
+                class: WithdrawnClass::Forbidden,
+                message: "You are not allowed to make this request.",
+            },
+        ];
+
+        for Row {
+            case,
+            arn,
+            tagged,
+            class,
+            message,
+        } in rows
+        {
+            directory.tag(arn, pairs(&tagged));
+            assert_eq!(
+                directory.withdrawn_refusal(arn),
+                None,
+                "case {case:?}: a live resource is not withdrawn"
+            );
+
+            directory.withdraw(arn, class, message);
+            assert_eq!(
+                directory.withdrawn_refusal(arn),
+                Some(WithdrawnRefusal { class, message }),
+                "case {case:?}: expected the owner's class and wording, got {:?}",
+                directory.withdrawn_refusal(arn)
+            );
+            assert!(
+                directory.tags_of(arn).is_empty(),
+                "case {case:?}: expected the withdrawal to drop the tags, got {:?}",
+                directory.tags_of(arn)
+            );
+            // Repeating the withdrawal answers the same, and an ARN no member withdrew is
+            // untouched by it.
+            directory.withdraw(arn, class, message);
+            assert_eq!(
+                directory.withdrawn_refusal(arn),
+                Some(WithdrawnRefusal { class, message }),
+                "case {case:?}: a repeated withdrawal changed the refusal"
+            );
+            assert_eq!(
+                directory.withdrawn_refusal(&format!("{arn}x")),
+                None,
+                "case {case:?}: an ARN no member withdrew must not be refused"
+            );
+        }
     }
 
     #[test]
