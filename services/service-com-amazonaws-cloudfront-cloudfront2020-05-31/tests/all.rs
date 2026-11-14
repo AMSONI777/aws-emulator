@@ -144,6 +144,8 @@ mod edge_request_shaping;
 mod edge_response_headers_policy;
 #[path = "all/edge_signed_access.rs"]
 mod edge_signed_access;
+#[path = "all/edge_standard_logging_v2.rs"]
+mod edge_standard_logging_v2;
 #[path = "all/edge_web_acl.rs"]
 mod edge_web_acl;
 #[path = "all/enum_value_set_message.rs"]

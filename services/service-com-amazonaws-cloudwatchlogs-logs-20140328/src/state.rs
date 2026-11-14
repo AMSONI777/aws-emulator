@@ -271,6 +271,12 @@ pub use deliveries::*;
 mod delivery_configuration;
 pub use delivery_configuration::*;
 
+/// The DELIVERY LEG of a vended-log pipeline: which deliveries carry one sending resource's
+/// records into a log group, and how each writes one record. Read by the SENDING service,
+/// whose records travel the pipeline this service holds.
+mod vended_log_dispatch;
+pub use vended_log_dispatch::*;
+
 /// What makes a document the cross-account policy a delivery destination carries.
 mod delivery_destination_policy;
 pub use delivery_destination_policy::*;

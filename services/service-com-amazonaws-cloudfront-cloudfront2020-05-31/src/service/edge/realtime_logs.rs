@@ -242,6 +242,14 @@ pub struct LoggedRequest<'a> {
     pub content_type: Option<&'a str>,
     /// The `DomainName` of the distribution that served the request.
     pub distribution_domain: &'a str,
+    /// The host the VIEWER addressed the distribution by: its `DomainName`, or the alias the
+    /// viewer chose among the names the distribution is served on.
+    ///
+    /// Read by the edge rather than off the request's own `Host` header, because a viewer
+    /// request that reached the edge through this emulator's own forwarded leg carries the
+    /// service endpoint there instead of the name the viewer dialled — and what the record
+    /// states is the name the viewer addressed the distribution by.
+    pub viewer_host: &'a str,
     /// The path within the distribution's endpoint the viewer asked for.
     pub viewer_path: &'a str,
     /// The viewer's query string, without its leading `?`.
@@ -277,7 +285,11 @@ impl LoggedRequest<'_> {
     ///
     /// Each arm is the field's own definition from the real-time log configuration fields
     /// documentation ([`crate::state::REALTIME_LOG_FIELDS`] names its source).
-    fn value(&self, field: &str) -> String {
+    ///
+    /// Reached by the STANDARD access-log plane as well ([`super::access_logs`]): the two
+    /// planes name their fields alike, so one request is read once and reported identically by
+    /// both.
+    pub(super) fn value(&self, field: &str) -> String {
         match field {
             // "The date and time at which the edge server finished responding to the
             // request", as seconds on the Unix clock.
@@ -306,8 +318,9 @@ impl LoggedRequest<'_> {
             "cs-bytes" => viewer_request_bytes(self.req).to_string(),
             // "An encrypted string that uniquely identifies a request."
             "x-edge-request-id" => self.request_id.to_string(),
-            // "The value of the Host header in the viewer request."
-            "x-host-header" => self.header("host"),
+            // "The value of the Host header in the viewer request" — the name the viewer
+            // addressed the distribution by, as the edge resolved it ([`Self::viewer_host`]).
+            "x-host-header" => self.viewer_host.to_string(),
             // "The IP version of the request", as the viewer's own address states it.
             "c-ip-version" => ip_version(self.client_ip()),
             // The viewer's own headers, each reported as the viewer sent it.
@@ -544,6 +557,7 @@ mod tests {
             response_bytes: 42,
             content_type: Some("text/plain"),
             distribution_domain: "d111111abcdef8.cloudfront.net",
+            viewer_host: "cdn.example.com",
             viewer_path: "/probe.txt",
             query: "a=1",
             country: "US",

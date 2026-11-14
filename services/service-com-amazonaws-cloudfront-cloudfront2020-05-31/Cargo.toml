@@ -51,6 +51,14 @@ service-com-amazonaws-iam-awsidentitymanagementv20100508 = { workspace = true }
 # metrics never travel over that API; this writes the very store `ListMetrics`,
 # `GetMetricStatistics` and the alarm evaluation read.
 service-com-amazonaws-cloudwatch-graniteserviceversion20100801 = { workspace = true }
+# The vended-log DELIVERY pipeline standard logging v2 is configured through: a delivery
+# source for the distribution, a delivery destination naming a log group and the delivery
+# pairing them are all CloudWatch Logs' own resources, so which log group a served viewer
+# request's access-log record goes to is read from that service's store over the shared engine
+# (`service::edge::access_logs`). The record itself is written through the one vended-logs
+# write (`service_common::cloudwatch_logs`), so what is delivered is what `FilterLogEvents`
+# reads back.
+service-com-amazonaws-cloudwatchlogs-logs-20140328 = { workspace = true }
 # The WAFv2 web ACL a distribution's configuration puts in front of it, and the ONE
 # evaluation of its rule tree (`service::web_acl`): a viewer request the web ACL does not
 # let through is answered 403 at the edge, with no origin request made. It also holds the one

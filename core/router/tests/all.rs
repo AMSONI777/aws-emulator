@@ -2813,7 +2813,7 @@ mod iam_session_tag_authorization;
 // `cloudformation_scripted_queue_deploy` are each declared once in the sorted spans above: a
 // above: a module may be declared only once, and two branches landing in the same window each
 // declared it here as well.)
-// A suite left at the top level of `tests/` fails the build. Declare each suite exactly
+// suite left at the top level of `tests/` fails the build. Declare each suite exactly
 // ONCE: this is one crate root, so a second `mod` for the same name is `E0428` and fails
 // every suite in this target. `all/all_rs_declares_each_suite_once.rs` checks that for
 // this file and for every service crate's `tests/all.rs`, so check there rather than
@@ -3003,6 +3003,9 @@ mod s3_object_events_update_their_search_index;
 // service crate's test target can deploy the stack and then read the pool's roles back.
 #[path = "all/cloudformation_cognito_identity_role_attachment_refusal.rs"]
 mod cloudformation_cognito_identity_role_attachment_refusal;
+// A suite left at the top level of `tests/` fails the build. Declare each suite exactly
+// leaving a note here. (This note sits mid-file, so it is a plain comment: an inner doc
+// comment is only accepted before the first item of a module.)
 //! suite left at the top level of `tests/` fails the build. Declare each suite exactly
 //! ONCE: this is one crate root, so a second `mod` for the same name is `E0428` and fails
 //! every suite in this target. `all/all_rs_declares_each_suite_once.rs` checks that for

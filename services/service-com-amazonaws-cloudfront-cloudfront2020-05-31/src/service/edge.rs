@@ -131,6 +131,9 @@
 //! (origin-form URI plus a `Host` header), so `ViewerProtocolPolicy` — which is about
 //! HTTP versus HTTPS from the viewer — is not decided here.
 
+/// The STANDARD LOGGING v2 access-log record one served viewer request produces, and the
+/// CloudWatch Logs log groups the account's vended-log deliveries carry it into.
+pub mod access_logs;
 /// The content encodings the edge compresses an answer with, and the bytes they produce.
 pub mod compression;
 /// WHICH headers, cookies and query strings the behaviour's policies key on and forward.
@@ -1107,41 +1110,49 @@ pub async fn serve<Eng: Send + Sync + 'static>(
             },
             served.additional_metrics,
         );
-        // And what the edge did with it is ALSO what the real-time log record of this request
-        // states, for a cache behaviour whose real-time log configuration covers it: one
-        // record per request, delivered to each data stream that configuration names
-        // ([`realtime_logs`]). Delivered with this service's store released, since the hop
-        // locks the stores of the services it asks.
+        // And what the edge did with it is ALSO what the LOG RECORD of this request states, on
+        // either log plane: one request the edge served, read once ([`realtime_logs`]) so the
+        // real-time record and the standard access-log record of it cannot disagree.
+        //
+        // The span the edge spent on the request, measured once, and the instant it finished
+        // responding read from the SAME pair of clock readings the rest of this request is
+        // reported by: `now` is when the edge received it, so the two values a record carries
+        // cannot describe different requests.
+        let taken = received.elapsed();
+        let logged = realtime_logs::LoggedRequest {
+            req,
+            at: now + taken,
+            taken,
+            origin_latency,
+            status: response.status().as_u16(),
+            response_bytes: response.body().bytes().map_or(0, <[u8]>::len),
+            content_type: response
+                .headers()
+                .get(CONTENT_TYPE),
+            distribution_domain: &served.domain_name,
+            viewer_host: &served.viewer_host,
+            viewer_path: &served.viewer_path,
+            query: &served.query,
+            country: &served.country,
+            request_id: &cf_id,
+            path_pattern: served.path_pattern.as_deref(),
+            result_type: realtime_logs::ResultType::of_answer(
+                served_from,
+                response.status().as_u16(),
+            ),
+        };
+        // The REAL-TIME record goes to the data streams of the matched cache behaviour's
+        // real-time log configuration, for a request that configuration covers ([`realtime_logs`]).
+        // Delivered with this service's store released, since the hop locks the stores of the
+        // services it asks.
         if let Some(configured) = realtime_log {
-            // The span the edge spent on the request, measured once, and the instant it
-            // finished responding read from the SAME pair of clock readings the rest of this
-            // request is reported by: `now` is when the edge received it, so the two values
-            // the record carries cannot describe different requests.
-            let taken = received.elapsed();
-            let logged = realtime_logs::LoggedRequest {
-                req,
-                at: now + taken,
-                taken,
-                origin_latency,
-                status: response.status().as_u16(),
-                response_bytes: response.body().bytes().map_or(0, <[u8]>::len),
-                content_type: response
-                    .headers()
-                    .get(CONTENT_TYPE),
-                distribution_domain: &served.domain_name,
-                viewer_path: &served.viewer_path,
-                query: &served.query,
-                country: &served.country,
-                request_id: &cf_id,
-                path_pattern: served.path_pattern.as_deref(),
-                result_type: realtime_logs::ResultType::of_answer(
-                    served_from,
-                    response.status().as_u16(),
-                ),
-            };
             let record = logged.record(&configured.fields);
             realtime_logs::deliver(ctx, &configured, &record, &cf_id).await;
         }
+        // The STANDARD LOGGING v2 record goes to the log group each vended-log delivery of this
+        // distribution's access logs names ([`access_logs`]), whichever cache behaviour matched:
+        // standard logging is configured on the distribution as a whole, in CloudWatch Logs.
+        access_logs::deliver(engine, ctx, &served.id, &logged).await;
     }
     response
 }
@@ -1244,6 +1255,9 @@ struct ServedFor {
     /// `Distribution$DomainName`, which is the name a record reports as the distribution's
     /// own ([`realtime_logs`]).
     domain_name: String,
+    /// The host the VIEWER addressed this distribution by ([`viewer_host`]): a name the
+    /// distribution is served on, which is what a record reports as the viewer's `Host`.
+    viewer_host: String,
     /// The country the edge resolved for this viewer, read once and reported wherever a
     /// country is.
     country: String,
@@ -1296,6 +1310,11 @@ fn plan_request(
         viewer_path: resolved.viewer_path.to_string(),
         query: addressed.query.to_string(),
         domain_name: resolved.distribution.domain_name.clone(),
+        // The name the viewer reached this distribution by, read ONCE here: a request that
+        // arrived through the reserved data-plane path carries this service's own host rather
+        // than a name of the distribution's, and the name such a viewer addressed the
+        // distribution by is the one it publishes ([`viewer_host`]).
+        viewer_host: viewer_host(&addressed, &resolved).to_string(),
         country: viewer_country(req),
         path_pattern: behavior.path_pattern.clone(),
         realtime_log_config_arn: behavior.realtime_log_config_arn.clone(),
