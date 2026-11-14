@@ -1,0 +1,49 @@
+Issue-Severity: HIGH
+Issue-Corpus: simparity-behavioral-aws-v1
+Issue-Corpus-Kind: behavioral
+Issue-Trace-Ids: eks.eks-kubectl-namespace eks.k8s-configmap-mounted-value-readable-inside-the-pod eks.k8s-deployment-apply-runs-pods-on-real-nodes eks.k8s-deployment-scale-converges-to-the-requested-replicas eks.k8s-rbac-get-only-role-rejects-deleting-a-pod eks.k8s-resourcequota-rejects-a-pod-over-the-namespace-limit eks.k8s-rolling-update-replaces-pods-without-dropping-the-service eks.k8s-service-clusterip-load-balances-across-pods eks.hpa-min-replicas-above-max-replicas-rejected eks.hpa-scales-out-under-cpu-load-and-back-in-when-it-stops eks.hpa-target-without-a-cpu-request-is-blocked-from-scaling eks.nodegroup-taint-effect-is-translated-and-repels-an-untolerating-pod
+Issue-Shape-Id: com.amazonaws.eks#AWSWesleyFrontend
+Issue-Key: eks.eks-kubectl-namespace|_run_cli#14|AssertionError|raise AssertionError(
+Issue-Key: eks.k8s-configmap-mounted-value-readable-inside-the-pod|_sh#4|AssertionError|raise AssertionError(
+Issue-Key: eks.k8s-deployment-apply-runs-pods-on-real-nodes|_sh#5|AssertionError|raise AssertionError(
+Issue-Key: eks.k8s-deployment-scale-converges-to-the-requested-replicas|_sh#4|AssertionError|raise AssertionError(
+Issue-Key: eks.k8s-rbac-get-only-role-rejects-deleting-a-pod|_sh#4|AssertionError|raise AssertionError(
+Issue-Key: eks.k8s-resourcequota-rejects-a-pod-over-the-namespace-limit|_sh#4|AssertionError|raise AssertionError(
+Issue-Key: eks.k8s-rolling-update-replaces-pods-without-dropping-the-service|_sh#4|AssertionError|raise AssertionError(
+Issue-Key: eks.k8s-service-clusterip-load-balances-across-pods|_sh#6|AssertionError|raise AssertionError(
+Issue-Key: eks.hpa-min-replicas-above-max-replicas-rejected|_sh#5|AssertionError|raise AssertionError(
+Issue-Key: eks.hpa-scales-out-under-cpu-load-and-back-in-when-it-stops|_sh#4|AssertionError|raise AssertionError(
+Issue-Key: eks.hpa-target-without-a-cpu-request-is-blocked-from-scaling|_sh#4|AssertionError|raise AssertionError(
+Issue-Key: eks.nodegroup-taint-effect-is-translated-and-repels-an-untolerating-pod|run#16|AssertionError|assert matching[0]["effect"] == _K8S_EFFECT[_API_EFFECT], (
+Issue-Commit: 22429b7a0c0ae7d0c87a7901239a937fd78a2091
+
+# eks: 2 net-new root causes in the served Kubernetes API — every kubectl create body is refused 415 UnsupportedMediaType, and a nodegroup taint effect is copied verbatim as NO_SCHEDULE onto the Node
+
+> _Note: this issue was identified against the code base at commit `22429b7a0c0ae7d0c87a7901239a937fd78a2091`. If you are an issue fixer working on this, the code base you are currently working in can have drifted, so you might need to trace the issue back to the current code base._
+
+## Operation
+DescribeCluster
+
+## Description
+Two independent defects in the Kubernetes API server the emulator serves for an EKS cluster (the endpoint DescribeCluster publishes). Each cause below is a separate defect and must be closed separately; the failing check ids for each are listed with it.
+
+Cause 1 of 2: the served cluster API server refuses the JSON create body kubectl sends with HTTP 415 UnsupportedMediaType, so no namespace (and therefore no workload, RBAC object, quota or HPA) can be created through kubectl.
+AWS: recorded behavior only — the cluster's Kubernetes API server is not part of the EKS Smithy model (Smithy models only DescribeCluster -> Cluster.endpoint and Cluster.certificateAuthority.data). A real EKS cluster accepts `kubectl create namespace <name>`, which is a POST to /api/v1/namespaces with Content-Type: application/json and a body of the form {"apiVersion":"v1","kind":"Namespace","metadata":{"name":"<name>"}}, and answers 201 Created with the stored Namespace object. A real API server answers 415 only when it cannot decode the request's Content-Type, and then its Status message is the fixed sentence "the body of the request was in an unknown format - accepted media types include: " followed by the media types it really accepts (on a real cluster application/json, application/yaml and application/vnd.kubernetes.protobuf), with reason "UnsupportedMediaType" and code 415.
+Emulator: every kubectl write is refused. `kubectl create namespace <name>` exits rc=1 with 'Error from server (UnsupportedMediaType): the body of the request was in an unknown format - accepted media types include: application/json' — the server 415s a body whose Content-Type kubectl set to application/json, and the media-type list it advertises omits application/yaml and application/vnd.kubernetes.protobuf. In the quoted message the sentence is fixed text; the trailing media-type list is the server's own accepted set and the namespace name is a value from the request. Hypothesis: the content-type matcher compares the header byte-for-byte against a single literal and does not strip parameters (e.g. '; charset=utf-8') or accept the form kubectl sends.
+Why: a client relying on AWS's behavior starts essentially every cluster workflow with `kubectl create namespace` / `kubectl apply`. Against the emulator every such write dies on a 415 that tells the client its own, correct, JSON body is in an unknown format, so namespaces, Deployments, Services, ConfigMaps, RBAC Roles, ResourceQuotas and HorizontalPodAutoscalers cannot be created at all and no in-cluster behavior can be driven from kubectl or any client-go-based tool.
+Fix: the content-type negotiation / request-body decoder in front of the create (POST) handlers of the served cluster Kubernetes API in the EKS service crate (services/service-com-amazonaws-eks-awswesleyfrontend) — it must accept application/json with or without media-type parameters, and when it genuinely refuses a media type it must advertise the media types a real API server accepts.
+Note: open issue 20261113T151622Z-eks-10-net-new-root-causes-in-the.md recorded a different refusal of the same request (Status message 'The request is invalid: the request body is not a JSON object naming a Kubernetes resource'); the refusal has changed to a 415 media-type refusal and the suite does not report these checks as owned by that issue, so it does not cover this cause.
+Traces: eks.eks-kubectl-namespace, eks.k8s-configmap-mounted-value-readable-inside-the-pod, eks.k8s-deployment-apply-runs-pods-on-real-nodes, eks.k8s-deployment-scale-converges-to-the-requested-replicas, eks.k8s-rbac-get-only-role-rejects-deleting-a-pod, eks.k8s-resourcequota-rejects-a-pod-over-the-namespace-limit, eks.k8s-rolling-update-replaces-pods-without-dropping-the-service, eks.k8s-service-clusterip-load-balances-across-pods, eks.hpa-min-replicas-above-max-replicas-rejected, eks.hpa-scales-out-under-cpu-load-and-back-in-when-it-stops, eks.hpa-target-without-a-cpu-request-is-blocked-from-scaling.
+
+Cause 2 of 2: a managed node group's taint effect is published on the Kubernetes Node with the EKS API enum spelling instead of the Kubernetes spelling.
+AWS: Smithy: CreateNodegroup/UpdateNodegroupConfig carry com.amazonaws.eks#Taint{key,value,effect}, and Taint.effect targets the enum com.amazonaws.eks#TaintEffect with values NO_SCHEDULE, NO_EXECUTE, PREFER_NO_SCHEDULE. Recorded behavior for the Kubernetes side: EKS translates that enum to the Kubernetes taint effect vocabulary when it registers the node — NO_SCHEDULE -> NoSchedule, NO_EXECUTE -> NoExecute, PREFER_NO_SCHEDULE -> PreferNoSchedule — because Kubernetes accepts only those three CamelCase values in Node.spec.taints[].effect, so the EKS API value and the Node value are the same effect spelled in each API's own vocabulary.
+Emulator: the Node object carries the API enum verbatim: DescribeNodegroup reports effect 'NO_SCHEDULE' and Node.spec.taints[].effect is also 'NO_SCHEDULE' instead of 'NoSchedule'.
+Why: the taint has no scheduling meaning to any Kubernetes component — a pod whose toleration names effect NoSchedule does not match, an untolerating pod is not repelled, and a real kube-apiserver would have rejected 'NO_SCHEDULE' as an unsupported field value, so a client that validates or compares the node's taints sees a value Kubernetes cannot produce.
+Fix: the node-group-to-Node projection of the served cluster Kubernetes API (the taint translation in the nodegroup state/Node serializer), which must map each TaintEffect enum value to its Kubernetes spelling.
+Traces: eks.nodegroup-taint-effect-is-translated-and-repels-an-untolerating-pod.
+
+## Evidence
+Cause 1: `kubectl create namespace <name>` against the published cluster endpoint -> rc=1, stderr 'Error from server (UnsupportedMediaType): the body of the request was in an unknown format - accepted media types include: application/json'; expected HTTP 201 Created with the stored Namespace object (observed in 11 checks, each on its own freshly created namespace). Cause 2: AssertionError: "the EKS API reports effect 'NO_SCHEDULE' and Kubernetes must spell the SAME effect 'NoSchedule' on the Node; spec.taints says 'NO_SCHEDULE'" — Node.spec.taints[].effect == 'NO_SCHEDULE', expected 'NoSchedule'.
+
+## Steps to Reproduce
+1. CreateCluster, wait for ACTIVE, and build a kubeconfig from DescribeCluster's cluster.endpoint + certificateAuthority.data (bootstrapClusterCreatorAdminPermissions, so the caller is cluster admin). 2. Run `kubectl create namespace <name>` -> observe rc=1 with 'Error from server (UnsupportedMediaType): the body of the request was in an unknown format - accepted media types include: application/json' instead of 201 Created (cause 1); the same 415 refuses the subsequent `kubectl create`/`kubectl apply` of Deployments, Services, ConfigMaps, RBAC Roles, ResourceQuotas and HPAs. 3. CreateNodegroup with taints=[{key:'<k>',value:'<v>',effect:'NO_SCHEDULE'}], wait for ACTIVE, then GET /api/v1/nodes and read the matching node's spec.taints -> effect is 'NO_SCHEDULE' instead of 'NoSchedule' (cause 2).
