@@ -252,6 +252,20 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
                 message,
             ));
         }
+        // WHO may read the tables this statement names is Lake Formation's answer, resolved
+        // BEFORE the statement is planned: the resolution that consults it runs on a
+        // blocking thread, and the question is put to Lake Formation over the in-process
+        // callback this context carries. A Data Catalog Lake Formation says nothing about
+        // governs nothing (see `crate::state::lake_formation`). The registry's guard is
+        // taken and released here, before that question is put.
+        let registered: Vec<String> = state.lock().data_catalogs.keys().cloned().collect();
+        let access = crate::state::lake_formation::resolved(
+            &*self.engine,
+            ctx,
+            addressed_catalogs(&reading, &query_context, registered),
+        )
+        .await;
+
         let id = crate::state::new_query_execution_id();
         let submitted_at = SystemTime::now();
         // Everything that reads or writes the registry happens here, and the lock is
@@ -395,9 +409,12 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
                         &prepared,
                         &sql,
                         reading,
-                        &query_context,
-                        &parameters,
-                        SystemTime::now(),
+                        &catalog_sql::Submission {
+                            context: &query_context,
+                            parameters: &parameters,
+                            access: &access,
+                            now: SystemTime::now(),
+                        },
                     )
                 })
                 .await;
@@ -450,6 +467,33 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
 /// The `StateChangeReason` of a query whose run reported nothing at all, because the
 /// thread it ran on did not return: the only thing that can honestly be said about it.
 const UNREPORTED_RUN: &str = "the SQL engine did not report a result for this query";
+
+/// The data catalogs one submission needs Lake Formation's answer about: every catalog the
+/// statement could resolve a relation in.
+///
+/// Three sources, because a relation's catalog is not always written down: the one its
+/// context addresses, the one each relation the statement WRITES DOWN names, and every
+/// catalog this account has REGISTERED (`registered`) — the last because a view the
+/// statement reads may name a three-part relation of its own, in a catalog the submitted
+/// text never mentions, and a catalog nobody asked Lake Formation about would otherwise be
+/// read as one Lake Formation governs nothing in. A statement can resolve a relation in no
+/// other catalog than those, and a catalog named twice is asked about once
+/// ([`crate::state::lake_formation::resolved`]), which in the ordinary case where every
+/// name resolves to this account's own Data Catalog is a single question.
+fn addressed_catalogs(
+    reading: &catalog_sql::statement::Reading,
+    context: &catalog_sql::statement::QueryContext,
+    registered: Vec<String>,
+) -> Vec<String> {
+    let mut catalogs = vec![context.catalog.clone()];
+    if let catalog_sql::statement::Plan::Relations(relational) = &reading.plan {
+        for relation in &relational.relations {
+            catalogs.push(relation.catalog.clone());
+        }
+    }
+    catalogs.extend(registered);
+    catalogs
+}
 
 /// The `StateChangeReason` of a query that does not carry exactly one SQL statement.
 fn one_statement_only(statements: usize) -> String {

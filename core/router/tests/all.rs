@@ -2803,7 +2803,7 @@ mod cloudformation_eventbridge_fan_out_to_lambda_and_sfn;
 // `cloudformation_scripted_queue_deploy` are each declared once in the sorted spans above: a
 // above: a module may be declared only once, and two branches landing in the same window each
 // declared it here as well.)
-// suite left at the top level of `tests/` fails the build. Declare each suite exactly
+// A suite left at the top level of `tests/` fails the build. Declare each suite exactly
 // ONCE: this is one crate root, so a second `mod` for the same name is `E0428` and fails
 // every suite in this target. `all/all_rs_declares_each_suite_once.rs` checks that for
 // this file and for every service crate's `tests/all.rs`, so check there rather than
@@ -2814,6 +2814,7 @@ mod cloudformation_eventbridge_fan_out_to_lambda_and_sfn;
 // (A suite left at the top level of `tests/` fails the build. Declare each suite exactly
 // leaving a note here. These lines sit after the first item in this file, so they are
 // ordinary comments: an inner doc comment here is `E0753` and compiles no suite at all.)
+// suite left at the top level of `tests/` fails the build. Declare each suite exactly
 // leaving a note here. (Line comments, not `//!`: an inner doc comment is only legal at
 // the head of a crate root, so one in this tail is `E0753` and compiles no suite at all.)
 // (The five lines below arrived as INNER doc comments (`//!`) in this appended tail, where
@@ -3136,6 +3137,11 @@ mod ecr_scan_on_push_event_reaches_its_queue_target;
 // ONCE, since this is one crate root and a second `mod` for the same name is `E0428` and
 // fails every suite in this target. `all/all_rs_declares_each_suite_once.rs` checks both,
 // for this file and for every service crate's `tests/all.rs`.)
+// (Two more lines of that same note, landed in this tail as `//!` while branches were
+// merging: an inner doc comment is legal only before the first item, so they stand as
+// ordinary comments. A suite left at the top level of `tests/` fails the build, and
+// `all/all_rs_declares_each_suite_once.rs` checks the declarations of this file and of
+// every service crate's `tests/all.rs`.)
 // (`cloudformation_provisions_cloudfront_resources` is declared ONCE, in the head region
 // which compiles neither, so the duplicate is removed and the first declaration stands.)
 // head of this file: two branches landing in the same window appended a second declaration

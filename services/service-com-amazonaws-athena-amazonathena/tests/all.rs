@@ -35,6 +35,9 @@ mod harness;
 #[path = "all/hive_table_registration.rs"]
 mod hive_table_registration;
 
+#[path = "all/lake_formation_table_reads.rs"]
+mod lake_formation_table_reads;
+
 #[path = "all/notebook_import_export.rs"]
 mod notebook_import_export;
 

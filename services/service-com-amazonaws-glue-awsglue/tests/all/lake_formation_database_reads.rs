@@ -1,15 +1,19 @@
 // SPDX-License-Identifier: CC0-1.0
 
-//! End-to-end tests for the Lake Formation governance of a Data Catalog DATABASE READ:
-//! `GetDatabase` and the `GetDatabases` listing beside it.
+//! End-to-end tests for the Lake Formation governance of a Data Catalog METADATA READ:
+//! `GetDatabase` and the `GetDatabases` listing beside it, and `GetTable` and the
+//! `GetTables` listing beside that.
 //!
 //! The rule under test: a database's metadata is answered only to a principal that holds a
 //! Lake Formation permission ON that database, on a resource INSIDE it (a grant on a table
 //! makes the table's parent database describable), or over the whole data lake as an
 //! administrator — the permission being held in the principal's own name or through the
-//! `IAM_ALLOWED_PRINCIPALS` group every IAM user and role belongs to. A read by a principal
-//! none of those cover is refused with HTTP 400 `AccessDeniedException`; a listing OMITS
-//! such a database rather than refusing the call.
+//! `IAM_ALLOWED_PRINCIPALS` group every IAM user and role belongs to. A TABLE is governed
+//! the same way one level down: its metadata is answered only to a principal holding a
+//! permission on that table, on every table of its database, or over the whole data lake. A
+//! read by a principal none of those cover is refused with HTTP 400
+//! `AccessDeniedException`; a listing OMITS such a database or table rather than refusing
+//! the call.
 //!
 //! Lake Formation OWNS those grants, so it is mounted beside Glue on the SAME engine (the
 //! pair the production router builds) and every grant, revoke and settings write here goes
@@ -733,5 +737,348 @@ async fn a_name_the_catalog_does_not_hold_is_still_reported_as_a_missing_entity(
         error_code(&body),
         "EntityNotFoundException",
         "case {case:?}: expected EntityNotFoundException, got {body}"
+    );
+}
+
+/// A second table of [`DATABASE`], so a row can grant on a table other than the one it
+/// reads, and a listing can show one table omitted while another is reported.
+const OTHER_TABLE: &str = "billing_events";
+
+/// Register [`OTHER_TABLE`] beside [`TABLE`] in [`DATABASE`], through Glue's own wire API
+/// and by the ACCOUNT's own credential, exactly as the catalog's other tables are.
+async fn create_other_table(router: &MultiServiceRouter, case: &str) {
+    let (status, body) = call(
+        router,
+        "CreateTable",
+        &json!({ "DatabaseName": DATABASE, "TableInput": { "Name": OTHER_TABLE } }),
+    )
+    .await;
+    assert_eq!(
+        status, 200,
+        "case {case:?}: creating {DATABASE}.{OTHER_TABLE} must succeed, got {status} with \
+         {body}"
+    );
+}
+
+/// `Resource` naming every table of [`DATABASE`] — "every table under a database".
+fn on_every_table() -> Value {
+    json!({ "Table": { "DatabaseName": DATABASE, "TableWildcard": {} } })
+}
+
+/// `Resource` naming the OTHER table of [`DATABASE`].
+fn on_other_table() -> Value {
+    json!({ "Table": { "DatabaseName": DATABASE, "Name": OTHER_TABLE } })
+}
+
+#[tokio::test]
+async fn a_table_read_is_answered_only_where_lake_formation_grants_it() {
+    // The same governance one level down, over the resource a grant may name: the table
+    // itself, its columns, every table of its database, the database alone (which is not a
+    // permission on anything IN it), another table, and the whole data lake. The databases
+    // of this suite hand their tables NO `IAM_ALLOWED_PRINCIPALS` default, so a table starts
+    // out holding nothing for a principal that did not create it.
+    let cases: Vec<(&str, Held, u16)> = vec![
+        (
+            "nothing at all on the table",
+            Held::CreationDefault,
+            400,
+        ),
+        (
+            "DESCRIBE on the table itself",
+            Held::Granted {
+                principal: reader_arn,
+                resource: on_table,
+                permissions: &["DESCRIBE"],
+            },
+            200,
+        ),
+        (
+            "SELECT on named columns of the table",
+            Held::Granted {
+                principal: reader_arn,
+                resource: on_table_columns,
+                permissions: &["SELECT"],
+            },
+            200,
+        ),
+        (
+            "SELECT on every table of the database",
+            Held::Granted {
+                principal: reader_arn,
+                resource: on_every_table,
+                permissions: &["SELECT"],
+            },
+            200,
+        ),
+        (
+            "DESCRIBE on the DATABASE alone, which names nothing inside it",
+            Held::Granted {
+                principal: reader_arn,
+                resource: on_database,
+                permissions: &["DESCRIBE"],
+            },
+            400,
+        ),
+        (
+            "DESCRIBE on ANOTHER table of the same database",
+            Held::Granted {
+                principal: reader_arn,
+                resource: on_other_table,
+                permissions: &["DESCRIBE"],
+            },
+            400,
+        ),
+        (
+            "DESCRIBE on the table, held by ANOTHER principal",
+            Held::Granted {
+                principal: another_principal,
+                resource: on_table,
+                permissions: &["DESCRIBE"],
+            },
+            400,
+        ),
+        (
+            "nothing granted, the reader being an administrator of the data lake",
+            Held::DataLakeAdmin,
+            200,
+        ),
+    ];
+
+    for (case, held, expected) in &cases {
+        let governed = governed_catalog().await;
+        create_other_table(&governed.router, case).await;
+        held.apply(&governed.router, case).await;
+
+        let (status, body) = glue_as(
+            &governed.router,
+            &governed.session_key,
+            "GetTable",
+            &json!({ "DatabaseName": DATABASE, "Name": TABLE }),
+        )
+        .await;
+        assert_eq!(
+            status, *expected,
+            "case {case:?}: expected HTTP {expected}, got {status} with {body}"
+        );
+        if *expected == 200 {
+            assert_eq!(
+                body["Table"]["Name"].as_str(),
+                Some(TABLE),
+                "case {case:?}: expected the table to be answered, got {body}"
+            );
+        } else {
+            assert_eq!(
+                error_code(&body),
+                "AccessDeniedException",
+                "case {case:?}: expected AccessDeniedException, got {body}"
+            );
+            assert_eq!(
+                error_message(&body),
+                format!("Insufficient Lake Formation permission(s): Required Describe on {TABLE}"),
+                "case {case:?}: expected the Lake Formation refusal naming the table, got {body}"
+            );
+        }
+    }
+}
+
+#[tokio::test]
+async fn the_table_listing_omits_a_table_the_caller_may_not_describe() {
+    // A listing reports the tables its caller may see: it omits the ones nothing grants
+    // rather than refusing the call, and reports one again once a grant on it exists.
+    let case = "the table listing follows the grants";
+    let governed = governed_catalog().await;
+    create_other_table(&governed.router, case).await;
+
+    let names = |page: &Value| -> Vec<String> {
+        page["TableList"]
+            .as_array()
+            .unwrap_or_else(|| panic!("case {case:?}: GetTables must answer a list, got {page}"))
+            .iter()
+            .map(|table| table["Name"].as_str().unwrap_or_default().to_string())
+            .collect()
+    };
+
+    let (status, page) = glue_as(
+        &governed.router,
+        &governed.session_key,
+        "GetTables",
+        &json!({ "DatabaseName": DATABASE }),
+    )
+    .await;
+    assert_eq!(
+        status, 200,
+        "case {case:?}: a listing is not refused for the tables it omits, got {status} with \
+         {page}"
+    );
+    assert_eq!(
+        names(&page),
+        Vec::<String>::new(),
+        "case {case:?}: the reader holds nothing on either table, got {page}"
+    );
+
+    grant(
+        &governed.router,
+        case,
+        &reader_arn(),
+        on_table(),
+        &["DESCRIBE"],
+    )
+    .await;
+    let (status, page) = glue_as(
+        &governed.router,
+        &governed.session_key,
+        "GetTables",
+        &json!({ "DatabaseName": DATABASE }),
+    )
+    .await;
+    assert_eq!(
+        status, 200,
+        "case {case:?}: expected 200, got {status} with {page}"
+    );
+    assert_eq!(
+        names(&page),
+        vec![TABLE.to_string()],
+        "case {case:?}: expected only the granted table, got {page}"
+    );
+}
+
+/// The columns [`COLUMNED_TABLE`] declares, in order.
+const DECLARED_COLUMNS: [&str; 3] = ["id", "name", "zone"];
+
+/// A table of [`DATABASE`] that declares columns, so a test can assert what a column-scoped
+/// grant lets its holder be TOLD about the table.
+const COLUMNED_TABLE: &str = "column_scoped_events";
+
+/// Register [`COLUMNED_TABLE`] in [`DATABASE`] with [`DECLARED_COLUMNS`], the last of them
+/// also a partition key — a column grant covers a partition column like any other.
+async fn create_columned_table(router: &MultiServiceRouter, case: &str) {
+    let (status, body) = call(
+        router,
+        "CreateTable",
+        &json!({
+            "DatabaseName": DATABASE,
+            "TableInput": {
+                "Name": COLUMNED_TABLE,
+                "StorageDescriptor": {
+                    "Columns": DECLARED_COLUMNS
+                        .iter()
+                        .map(|name| json!({ "Name": name, "Type": "string" }))
+                        .collect::<Vec<Value>>(),
+                },
+                "PartitionKeys": [{ "Name": DECLARED_COLUMNS[2], "Type": "string" }],
+            },
+        }),
+    )
+    .await;
+    assert_eq!(
+        status, 200,
+        "case {case:?}: creating {DATABASE}.{COLUMNED_TABLE} must succeed, got {status} with \
+         {body}"
+    );
+}
+
+/// The column names a `GetTable` answer reports, and the partition keys beside them.
+fn reported_columns(table: &Value) -> (Vec<String>, Vec<String>) {
+    let names = |columns: &Value| -> Vec<String> {
+        columns
+            .as_array()
+            .unwrap_or(&Vec::new())
+            .iter()
+            .map(|column| column["Name"].as_str().unwrap_or_default().to_string())
+            .collect()
+    };
+    (
+        names(&table["StorageDescriptor"]["Columns"]),
+        names(&table["PartitionKeys"]),
+    )
+}
+
+#[tokio::test]
+async fn a_table_read_reports_only_the_columns_the_grant_covers() {
+    // A column-scoped grant is a grant on THOSE columns: the metadata read is answered
+    // projected to them, so a column outside the grant is not reported at all — while the
+    // principal that created the table, which holds it whole, still reads every column.
+    let case = "a column-scoped grant";
+    let governed = governed_catalog().await;
+    create_columned_table(&governed.router, case).await;
+    grant(
+        &governed.router,
+        case,
+        &reader_arn(),
+        json!({
+            "TableWithColumns": {
+                "DatabaseName": DATABASE,
+                "Name": COLUMNED_TABLE,
+                "ColumnNames": [DECLARED_COLUMNS[0], DECLARED_COLUMNS[2]],
+            }
+        }),
+        &["SELECT"],
+    )
+    .await;
+
+    let (status, body) = glue_as(
+        &governed.router,
+        &governed.session_key,
+        "GetTable",
+        &json!({ "DatabaseName": DATABASE, "Name": COLUMNED_TABLE }),
+    )
+    .await;
+    assert_eq!(
+        status, 200,
+        "case {case:?}: the column grant must make the table readable, got {status} with {body}"
+    );
+    let (columns, partition_keys) = reported_columns(&body["Table"]);
+    assert_eq!(
+        columns,
+        vec![
+            DECLARED_COLUMNS[0].to_string(),
+            DECLARED_COLUMNS[2].to_string()
+        ],
+        "case {case:?}: expected only the granted columns, got {body}"
+    );
+    assert_eq!(
+        partition_keys,
+        vec![DECLARED_COLUMNS[2].to_string()],
+        "case {case:?}: a partition key the grant covers is still reported, got {body}"
+    );
+
+    let (status, body) = call(
+        &governed.router,
+        "GetTable",
+        &json!({ "DatabaseName": DATABASE, "Name": COLUMNED_TABLE }),
+    )
+    .await;
+    assert_eq!(
+        status, 200,
+        "case {case:?}: the creator must still read the table, got {status} with {body}"
+    );
+    let (columns, _) = reported_columns(&body["Table"]);
+    assert_eq!(
+        columns,
+        DECLARED_COLUMNS
+            .iter()
+            .map(|name| (*name).to_string())
+            .collect::<Vec<String>>(),
+        "case {case:?}: a principal holding the whole table reads every column, got {body}"
+    );
+}
+
+#[tokio::test]
+async fn the_principal_that_created_a_table_still_reads_it() {
+    // The control that says the refusals above are about what the READER holds: the account's
+    // own credential created these tables, so Lake Formation reports it holding the creator's
+    // grant on each one — and that grant is what keeps every one of them readable to it.
+    let case = "the creator of the table";
+    let governed = governed_catalog().await;
+
+    let (status, body) = call(
+        &governed.router,
+        "GetTable",
+        &json!({ "DatabaseName": DATABASE, "Name": TABLE }),
+    )
+    .await;
+    assert_eq!(
+        status, 200,
+        "case {case:?}: expected the creator to still read the table, got {status} with {body}"
     );
 }

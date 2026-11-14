@@ -189,7 +189,11 @@ fn stopped_at(sql: &str) -> Option<(Position, String)> {
 
 /// The tokens `sql` carries that the grammar reads, in order: whitespace and comments
 /// carry no production, so the grammar stops at none of them.
-fn significant_tokens(sql: &str) -> Vec<TokenWithSpan> {
+///
+/// Reached by the sibling that locates one identifier of a submitted statement
+/// ([`super::statement::identifier_position`]), so both read the submitted text through one
+/// lexer pass rather than two.
+pub(super) fn significant_tokens(sql: &str) -> Vec<TokenWithSpan> {
     Tokenizer::new(&GenericDialect {}, sql)
         .tokenize_with_location()
         .unwrap_or_default()
@@ -200,7 +204,7 @@ fn significant_tokens(sql: &str) -> Vec<TokenWithSpan> {
 
 /// Whether `token` is the word `word`, however it was written: a keyword is matched
 /// without regard to case.
-fn word_is(token: &TokenWithSpan, word: &str) -> bool {
+pub(super) fn word_is(token: &TokenWithSpan, word: &str) -> bool {
     match &token.token {
         Token::Word(written) => written.value.eq_ignore_ascii_case(word),
         _ => false,
@@ -208,7 +212,7 @@ fn word_is(token: &TokenWithSpan, word: &str) -> bool {
 }
 
 /// Where `token` starts in the submitted text.
-fn position_of(token: &TokenWithSpan) -> Position {
+pub(super) fn position_of(token: &TokenWithSpan) -> Position {
     let start = token.span.start;
     if start.line == 0 {
         return Position::START;

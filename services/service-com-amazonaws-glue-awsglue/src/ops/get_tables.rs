@@ -473,6 +473,19 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         }
         let page_size = usize::try_from(requested_page_size).unwrap_or(usize::MAX);
 
+        // What the caller holds in this Data Catalog, asked BEFORE the store is locked:
+        // Lake Formation reads this same Data Catalog to resolve the resources its grants
+        // name. A table the caller holds no permission on is left OUT of the listing, just
+        // as a database it may not describe is left out of `GetDatabases`; `None` is Lake
+        // Formation saying nothing, under which every table is listed.
+        let permissions = crate::state::lake_formation::catalog_permissions(
+            &*self.engine,
+            ctx,
+            &region,
+            &catalog_id,
+        )
+        .await;
+
         // The page is built under the store's guard and the guard released before KMS is
         // asked anything: the key material of the tables on the page travels out with it.
         let (table_list, next_token, encryptions) = {
@@ -511,6 +524,11 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
                         .as_ref()
                         .is_none_or(|matcher| matcher.is_match(&table.name))
                 })
+                .filter(|table| {
+                    permissions.as_ref().is_none_or(|held| {
+                        held.may_describe_table(&input.database_name, &table.name)
+                    })
+                })
                 .collect();
 
             // The token is the last name of the previous page, so the page resumes at the
@@ -530,7 +548,22 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
             // exactly the members it named.
             let table_list: Vec<Table> = page
                 .iter()
-                .map(|table| projection.apply(table.to_table(&database.database_id)))
+                .map(|table| {
+                    // Each element is narrowed to the columns the caller's grants on THAT
+                    // table cover, exactly as the single-table read narrows its answer.
+                    let answered = table.to_table(&database.database_id);
+                    let answered = match permissions
+                        .as_ref()
+                        .and_then(|held| {
+                            held.table_metadata_scope(&input.database_name, &table.name)
+                        }) {
+                        Some(scope) => {
+                            crate::state::lake_formation::narrowed_table(answered, &scope)
+                        }
+                        None => answered,
+                    };
+                    projection.apply(answered)
+                })
                 .collect();
             // The key material of every table ON THE PAGE: this read answers each of them,
             // so each has to be decrypted before any is served.

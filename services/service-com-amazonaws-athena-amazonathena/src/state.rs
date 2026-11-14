@@ -87,6 +87,9 @@ pub use capacity_reservations::*;
 /// Whether IAM lets a request perform the action it asks for on the workgroup it names.
 pub mod authorization;
 
+/// Whether Lake Formation lets the caller read a Data Catalog table, and which cells of it.
+pub mod lake_formation;
+
 /// Which Athena resource an ARN names, and the tags that resource holds.
 mod resource_tags;
 pub use resource_tags::*;

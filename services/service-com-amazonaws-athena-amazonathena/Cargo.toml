@@ -95,6 +95,11 @@ emulator-core-build-support = { workspace = true }
 
 [dev-dependencies]
 sha2 = { workspace = true }
+# Lake Formation, mounted beside Athena, Glue and Amazon S3 on one engine in the
+# lake-formation suite: a query over a governed Data Catalog table is answered from the
+# permissions that service holds, so without it mounted there is nothing governing the read.
+# It depends on the Glue crate rather than on this one, so it is a dev-dependency here.
+service-com-amazonaws-lakeformation-awslakeformation = { workspace = true }
 # The query-lifecycle suite waits out the span a started query's completion is due
 # after, so it needs the timer driver as well as the runtime.
 tokio = { workspace = true, features = ["time"] }

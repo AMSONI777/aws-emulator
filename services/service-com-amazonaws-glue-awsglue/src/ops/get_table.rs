@@ -401,20 +401,27 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
             &catalog_id,
         )
         .await;
-        if permissions
-            .is_some_and(|held| !held.may_describe_table(&input.database_name, &input.name))
-        {
-            return Err(GetTableErrorModeled::AccessDeniedException(
-                AccessDeniedException {
-                    message: Some(
-                        crate::state::messages::insufficient_lake_formation_describe_table(
-                            &input.name,
-                        ),
-                    ),
-                },
-            )
-            .into());
-        }
+        // The definition is answered PROJECTED to the columns those grants cover: a reader
+        // whose only grant on the table names some of its columns is told about those and
+        // not about the rest, which is the same column list its queries may address.
+        let table = match &permissions {
+            None => table,
+            Some(held) => match held.table_metadata_scope(&input.database_name, &input.name) {
+                Some(scope) => crate::state::lake_formation::narrowed_table(table, &scope),
+                None => {
+                    return Err(GetTableErrorModeled::AccessDeniedException(
+                        AccessDeniedException {
+                            message: Some(
+                                crate::state::messages::insufficient_lake_formation_describe_table(
+                                    &input.name,
+                                ),
+                            ),
+                        },
+                    )
+                    .into())
+                }
+            },
+        };
 
         // A table written while its catalog encrypted catalog writes under a KMS key is
         // readable only while that key is: the definition is answered once KMS has opened

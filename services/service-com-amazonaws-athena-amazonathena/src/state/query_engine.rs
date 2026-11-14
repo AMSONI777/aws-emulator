@@ -240,6 +240,18 @@ impl Database {
             rusqlite::config::DbConfig::SQLITE_DBCONFIG_TRUSTED_SCHEMA,
             false,
         )?;
+        // A DOUBLE-QUOTED name is an IDENTIFIER, never a string literal. Athena's SQL
+        // dialect quotes an identifier with double quotes and a string with single ones, so
+        // a statement naming a column the relation does not carry has to fail as an unknown
+        // column — which is what a reader must be told about a column its Lake Formation
+        // grant leaves out. This engine's own default would instead read such a name as the
+        // text inside the quotes and answer with it.
+        for quoted_strings in [
+            rusqlite::config::DbConfig::SQLITE_DBCONFIG_DQS_DML,
+            rusqlite::config::DbConfig::SQLITE_DBCONFIG_DQS_DDL,
+        ] {
+            connection.set_db_config(quoted_strings, false)?;
+        }
 
         use rusqlite::limits::Limit;
         // No database may be attached at all, which closes `ATTACH` even if the
@@ -531,6 +543,21 @@ pub fn run(
 pub enum LocalObject {
     /// A table and the rows it holds.
     Table(LocalTable),
+    /// A table whose rows a PREDICATE narrows: the rows are loaded into a scratch table
+    /// the engine evaluates the predicate over, the kept rows are projected into the table
+    /// the statement reads, and the scratch table is gone again before the statement runs
+    /// — so nothing the predicate rejected, and no column the projection leaves out, is in
+    /// the database while the statement is executing.
+    Filtered {
+        /// The table the statement reads: the name it reads it under, and the columns that
+        /// name carries — a subset of `source_columns`, in their order.
+        table: LocalTable,
+        /// The columns the rows are loaded with, which the predicate is evaluated over:
+        /// they may include a column the statement may not read.
+        source_columns: Vec<LocalColumn>,
+        /// The boolean SQL expression a row has to satisfy to be kept.
+        predicate: String,
+    },
     /// A view and the query its rows come from.
     View {
         /// The name the view is reachable under.
@@ -733,7 +760,7 @@ fn materialise(
 ) -> Result<(), RunFailure> {
     for object in objects {
         let name = match object {
-            LocalObject::Table(table) => &table.name,
+            LocalObject::Table(table) | LocalObject::Filtered { table, .. } => &table.name,
             LocalObject::View { name, .. } => name,
         };
         let quoted = quoted_name(name);
@@ -742,22 +769,45 @@ fn materialise(
         let _ = connection.execute_batch(&format!("DROP VIEW IF EXISTS {quoted};"));
         let _ = connection.execute_batch(&format!("DROP TABLE IF EXISTS {quoted};"));
         match object {
-            LocalObject::Table(table) => {
-                let declarations: Vec<String> = table
-                    .columns
-                    .iter()
-                    .map(|column| format!("{} {}", quoted_name(&column.name), column.declared))
-                    .collect();
-                connection.execute_batch(&format!(
-                    "CREATE TABLE {quoted} ({});",
-                    declarations.join(", ")
-                ))?;
-                let placeholders = vec!["?"; table.columns.len()].join(", ");
-                let mut insert =
-                    connection.prepare(&format!("INSERT INTO {quoted} VALUES ({placeholders})"))?;
-                for row in &table.rows {
-                    insert.execute(rusqlite::params_from_iter(row.iter()))?;
-                }
+            LocalObject::Table(table) => define_table(connection, &quoted, table)?,
+            LocalObject::Filtered {
+                table,
+                source_columns,
+                predicate,
+            } => {
+                // The rows go into a scratch table of their own, the engine decides which
+                // of them the predicate keeps, and the scratch table is dropped again —
+                // whether or not the predicate could be evaluated, so a statement never
+                // runs in a database holding rows it may not read.
+                let scratch = quoted_name(&scratch_name(&table.name));
+                let _ = connection.execute_batch(&format!("DROP TABLE IF EXISTS {scratch};"));
+                let source = LocalTable {
+                    name: table.name.clone(),
+                    columns: source_columns.clone(),
+                    rows: table.rows.clone(),
+                };
+                let filtered = define_table(connection, &scratch, &source).and_then(|()| {
+                    declare_table(connection, &quoted, &table.columns)?;
+                    let projection: Vec<String> = table
+                        .columns
+                        .iter()
+                        .map(|column| quoted_name(&column.name))
+                        .collect();
+                    // ONE statement, prepared and run on its own: the predicate is a
+                    // boolean expression this engine evaluates, and preparing a single
+                    // statement is what keeps text that is more than an expression from
+                    // running as a second statement beside it.
+                    connection.execute(
+                        &format!(
+                            "INSERT INTO {quoted} SELECT {} FROM {scratch} WHERE {predicate}",
+                            projection.join(", ")
+                        ),
+                        [],
+                    )?;
+                    Ok(())
+                });
+                let _ = connection.execute_batch(&format!("DROP TABLE IF EXISTS {scratch};"));
+                filtered?;
             }
             LocalObject::View { sql, .. } => {
                 connection.execute_batch(&format!("CREATE VIEW {quoted} AS {sql};"))?;
@@ -765,6 +815,49 @@ fn materialise(
         }
     }
     Ok(())
+}
+
+/// Define `table` under the already-quoted name `quoted` and insert every row it holds.
+fn define_table(
+    connection: &rusqlite::Connection,
+    quoted: &str,
+    table: &LocalTable,
+) -> Result<(), RunFailure> {
+    declare_table(connection, quoted, &table.columns)?;
+    let placeholders = vec!["?"; table.columns.len()].join(", ");
+    let mut insert =
+        connection.prepare(&format!("INSERT INTO {quoted} VALUES ({placeholders})"))?;
+    for row in &table.rows {
+        insert.execute(rusqlite::params_from_iter(row.iter()))?;
+    }
+    Ok(())
+}
+
+/// Declare a table of `columns` under the already-quoted name `quoted`.
+fn declare_table(
+    connection: &rusqlite::Connection,
+    quoted: &str,
+    columns: &[LocalColumn],
+) -> Result<(), RunFailure> {
+    let declarations: Vec<String> = columns
+        .iter()
+        .map(|column| format!("{} {}", quoted_name(&column.name), column.declared))
+        .collect();
+    connection.execute_batch(&format!(
+        "CREATE TABLE {quoted} ({});",
+        declarations.join(", ")
+    ))?;
+    Ok(())
+}
+
+/// The name the unnarrowed rows of `name` are loaded under while the engine applies a
+/// predicate to them.
+///
+/// It carries a character the Data Catalog's own `NameString` pattern admits in no database
+/// or table name, so it is a name no catalog relation resolves to — and it exists only
+/// inside [`materialise`], which drops it again before the statement runs.
+fn scratch_name(name: &str) -> String {
+    format!("{name}\u{1}unfiltered")
 }
 
 /// Whether this database already holds a table or view called `name`.

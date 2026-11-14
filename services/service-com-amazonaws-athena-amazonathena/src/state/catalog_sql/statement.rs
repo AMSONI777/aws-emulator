@@ -147,6 +147,19 @@ impl Relation {
         format!("{}.{}", self.database, self.table)
     }
 
+    /// This relation as a refusal about it NAMES it: the data catalog, the database and the
+    /// table, with the catalog folded — a data catalog name is resolved without regard to
+    /// case, so the spelling Athena names it by is the folded one.
+    #[must_use]
+    pub fn qualified(&self) -> String {
+        format!(
+            "{}.{}.{}",
+            self.catalog.to_ascii_lowercase(),
+            self.database,
+            self.table
+        )
+    }
+
     /// Whether this relation addresses the catalog's own reporting schema.
     pub fn is_information_schema(&self) -> bool {
         self.database == INFORMATION_SCHEMA
@@ -500,6 +513,21 @@ pub fn parse_statements(sql: &str) -> Option<Vec<SqlStatement>> {
                 .and_then(|mut parser| parser.parse_statements())
         })
         .ok()
+}
+
+/// Where in `sql` the identifier `name` first appears, as a refusal about that name reports
+/// it — `None` when the submitted text names no such identifier at all.
+///
+/// Read through the lexer the grammar's own diagnostics read the submitted text with
+/// ([`super::grammar`]'s `significant_tokens`, `word_is` and `position_of`), so what is
+/// located is the identifier itself — never a substring of a literal or of a longer name —
+/// and the position is the one every other refusal about a name reports.
+#[must_use]
+pub fn identifier_position(sql: &str, name: &str) -> Option<Position> {
+    super::grammar::significant_tokens(sql)
+        .iter()
+        .find(|token| super::grammar::word_is(token, name))
+        .map(super::grammar::position_of)
 }
 
 /// How many tokens, other than whitespace, a submitted statement carries, or `None` for

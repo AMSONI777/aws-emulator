@@ -767,7 +767,7 @@ pub fn database_not_found(name: &str) -> String {
 /// deliberately withheld.
 pub const DATABASE_ALREADY_EXISTS: &str = "Database already exists.";
 
-/// A Data Catalog metadata read of a database the caller holds no Lake Formation
+/// A Data Catalog metadata read of a DATABASE the caller holds no Lake Formation
 /// permission on ([`super::lake_formation`]), refused as unauthorized rather than
 /// answered.
 ///
@@ -782,15 +782,19 @@ pub fn insufficient_lake_formation_describe(database_name: &str) -> String {
 /// A Data Catalog metadata read of a TABLE the caller holds no Lake Formation permission on
 /// ([`super::lake_formation`]), refused as unauthorized rather than answered.
 ///
-/// The TABLE-level wording, which is not the database-level one
-/// ([`insufficient_lake_formation_describe`]): Lake Formation words a refusal about a table
-/// as "Insufficient Lake Formation permission(s) on " and the table the request addressed,
-/// so the fixed text is that and the one variable part is the table name, taken from the
-/// request. No recording of this service's table-level refusal is held here, so the wording
-/// is the one Lake Formation publishes for it rather than one derived from the sibling
-/// above.
+/// RECORDED template, and the same sentence the database-level refusal
+/// ([`insufficient_lake_formation_describe`]) is worded with: the fixed text is
+/// "Insufficient Lake Formation permission(s): Required Describe on " and the one variable
+/// part is the table the request addressed, taken from the request. `Describe` is the Lake
+/// Formation permission a metadata read needs, so it is the permission the sentence names.
+///
+/// The recording is the behavioural unit this wording was taken from — the reader of a
+/// governed catalog calling `GetTable` on a table it holds no grant on, filed as
+/// `issues/.../athena-glue-lakeformation-s3-athena-does-not-enforce-lake-formation-permissions-ungranted.md`,
+/// which states that refusal's fixed text and its one variable part. Kept as a function of
+/// its own, because which RESOURCE a refusal names is the operation's to decide.
 pub fn insufficient_lake_formation_describe_table(table_name: &str) -> String {
-    format!("Insufficient Lake Formation permission(s) on {table_name}")
+    insufficient_lake_formation_describe(table_name)
 }
 
 /// A read that addresses ONE catalog resource by its `CatalogId` (`GetCatalog`) for a

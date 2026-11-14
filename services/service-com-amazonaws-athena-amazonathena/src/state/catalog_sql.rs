@@ -43,6 +43,7 @@ use ::std::time::{Duration, Instant, SystemTime};
 use ::service_com_amazonaws_glue_awsglue::state as glue_state;
 use ::service_com_amazonaws_s3_amazons3::state as s3_state;
 
+use super::lake_formation::{DataLakeAccess, TableAccess};
 use super::query_engine::{
     self, Completion, DatabaseHandle, FailureCause, LocalColumn, LocalObject, LocalTable, Outcome,
     StoredResultSet,
@@ -212,16 +213,42 @@ impl Failure {
     pub fn table_not_found(relation: &Relation) -> Self {
         Self::classified(
             format!(
-                "TABLE_NOT_FOUND: line {}:{}: Table '{}.{}.{}' does not exist",
+                "TABLE_NOT_FOUND: line {}:{}: Table '{}' does not exist",
                 relation.at.line,
                 relation.at.column,
-                relation.catalog.to_ascii_lowercase(),
-                relation.database,
-                relation.table
+                relation.qualified()
             ),
             ERROR_CATEGORY_USER,
             ERROR_TYPE_ENTITY_NOT_FOUND,
         )
+    }
+
+    /// The statement names a column no relation it reads carries.
+    ///
+    /// Athena's own class for an unresolvable name, worded like the not-found classes
+    /// above: the `COLUMN_NOT_FOUND: ` prefix and "cannot be resolved" are fixed text, the
+    /// column is the one the statement wrote, and the line and column are where it wrote
+    /// it.
+    pub fn column_not_found(at: Position, column: &str) -> Self {
+        Self::user(format!(
+            "{COLUMN_NOT_FOUND}: line {}:{}: Column '{column}' cannot be resolved",
+            at.line, at.column
+        ))
+    }
+
+    /// The statement names a column the relation it reads DECLARES and the caller may not
+    /// see, because the Lake Formation grant it reads that relation through covers other
+    /// columns.
+    ///
+    /// The same class as [`Self::column_not_found`] and the same prefix, with the clause
+    /// Athena adds where a name is unresolvable BECAUSE of the reader's permissions — the
+    /// one its not-authorized wording closes with, so the reader is not told which of the
+    /// two it is. Fixed text either side of the column the statement wrote.
+    pub fn column_not_authorized(column: &str) -> Self {
+        Self::user(format!(
+            "{COLUMN_NOT_FOUND}: Column '{column}' cannot be resolved or requester is not \
+             authorized to access requested resources"
+        ))
     }
 
     /// The statement names a database the data catalog does not hold.
@@ -378,6 +405,22 @@ const DATABASE_DOES_NOT_EXIST: &str = "Database does not exist";
 /// The error number of [`DATABASE_DOES_NOT_EXIST`] in the Hive DDL engine's catalogue.
 const HIVE_DATABASE_NOT_EXISTS: i32 = 10_072;
 
+/// Everything one run of a statement needs beside the statement itself.
+#[derive(Debug, Clone, Copy)]
+pub struct Submission<'r> {
+    /// The catalog and database an unqualified name in the statement resolves against.
+    pub context: &'r QueryContext,
+    /// The values bound to the statement's placeholders, in order.
+    pub parameters: &'r [String],
+    /// What Lake Formation said the caller may read in the Data Catalogs this statement
+    /// addresses, resolved before the statement was planned: it decides whether each
+    /// relation the statement reads is there for this caller at all, and which of its
+    /// columns and rows are.
+    pub access: &'r DataLakeAccess,
+    /// When the submission was made, which is what a catalog write it performs records.
+    pub now: SystemTime,
+}
+
 /// Run the statement `reading` planned, and report what it produced.
 ///
 /// The catalog and the object store are reached here rather than in the handler because
@@ -393,10 +436,14 @@ pub fn execute<Eng: Send + Sync + 'static>(
     handle: &DatabaseHandle,
     sql: &str,
     reading: Reading,
-    context: &QueryContext,
-    parameters: &[String],
-    now: SystemTime,
+    submission: &Submission<'_>,
 ) -> Completion {
+    let Submission {
+        context,
+        parameters,
+        access,
+        now,
+    } = *submission;
     match reading.plan {
         Plan::Engine => query_engine::run(handle, sql, reading.counts_rows, parameters),
         // A `DROP TABLE` naming a database the catalog does not hold addresses no catalog
@@ -428,7 +475,7 @@ pub fn execute<Eng: Send + Sync + 'static>(
         }
         Plan::Relations(relational) => {
             let started = Instant::now();
-            match resolved_sql(engine, handle, *relational, context) {
+            match resolved_sql(engine, handle, *relational, context, access) {
                 Ok(prepared) => {
                     // Resolving the statement's relations against the catalog and reading
                     // the objects at their locations is what Athena measures as the query
@@ -446,6 +493,10 @@ pub fn execute<Eng: Send + Sync + 'static>(
                         prepared.scanned_bytes,
                     );
                     completion.planning_time = planning_time;
+                    // A name the relations it read do not carry is a failure of one of
+                    // Athena's own classes, reported in Athena's words about the SUBMITTED
+                    // statement rather than in the engine's about the one it ran.
+                    classify_unresolvable_name(&mut completion, sql, &prepared.hidden_columns);
                     completion
                 }
                 Err(failure) => Completion {
@@ -457,6 +508,77 @@ pub fn execute<Eng: Send + Sync + 'static>(
         }
     }
 }
+
+/// The prefix Athena's message for an unresolvable name opens with, which is also the error
+/// code a client reads off it.
+const COLUMN_NOT_FOUND: &str = "COLUMN_NOT_FOUND";
+
+/// Report a run the SQL engine stopped over a NAME the SUBMITTED statement wrote and it
+/// could not resolve as the failure of Athena's own class for it.
+///
+/// The engine resolves the names of the statement it was handed, which is the submitted one
+/// with each relation rewritten to the rows it was materialised as — so what it says about
+/// an unresolvable column names that column but neither the class Athena publishes for it
+/// nor where the submitted statement wrote it. Both are added here: the class from the
+/// engine's own diagnostic ([`ENGINE_UNRESOLVABLE_COLUMN`], its fixed wording for that one
+/// failure), and the position from the submitted text.
+///
+/// A name the submitted statement does NOT carry is not the caller's to be told about in
+/// those words — the engine also resolves names this emulator wrote for it, among them the
+/// columns a Lake Formation row filter's own expression refers to — so such a failure is
+/// left exactly as the engine reported it, as is every other engine failure.
+fn classify_unresolvable_name(
+    completion: &mut Completion,
+    sql: &str,
+    hidden_columns: &HashSet<String>,
+) {
+    let Outcome::Failed {
+        message,
+        cause: FailureCause::Sql,
+        ..
+    } = &completion.outcome
+    else {
+        return;
+    };
+    let Some(column) = unresolvable_column(message) else {
+        return;
+    };
+    // A column the relation DECLARES and this reader may not see is unresolvable because of
+    // what the reader holds, which Athena says in a sentence of its own.
+    let failure = if hidden_columns.contains(&glue_state::fold_name(&column)) {
+        Failure::column_not_authorized(&column)
+    } else {
+        match statement::identifier_position(sql, &column) {
+            Some(at) => Failure::column_not_found(at, &column),
+            None => return,
+        }
+    };
+    completion.outcome = failure.outcome();
+}
+
+/// The column the SQL engine could not resolve, read off its own diagnostic for that
+/// failure — `None` for every other engine failure.
+///
+/// The engine words it as [`ENGINE_UNRESOLVABLE_COLUMN`] followed by the name as the
+/// statement wrote it, and then by what it was resolving the name in. A name the statement
+/// QUOTED is quoted there too, and carries the engine's own hint about the quoting after it;
+/// the name itself is what is taken, unquoted, because that is what Athena's own message
+/// names.
+fn unresolvable_column(message: &str) -> Option<String> {
+    let named = message.strip_prefix(ENGINE_UNRESOLVABLE_COLUMN)?.trim_start();
+    let name = match named.strip_prefix(ENGINE_QUOTE) {
+        // A quoted name runs to its closing quote, so a name carrying a space is one name.
+        Some(quoted) => quoted.split(ENGINE_QUOTE).next().unwrap_or(quoted),
+        None => named.split_whitespace().next().unwrap_or(named),
+    };
+    (!name.is_empty()).then(|| name.to_string())
+}
+
+/// How the SQL engine opens its diagnostic for a column it cannot resolve.
+const ENGINE_UNRESOLVABLE_COLUMN: &str = "no such column: ";
+
+/// How that diagnostic quotes a name the statement quoted.
+const ENGINE_QUOTE: char = '"';
 
 /// Perform one catalog statement against the Data Catalog.
 fn perform<Eng: Send + Sync + 'static>(
@@ -714,6 +836,18 @@ fn names_a_file(key: &str) -> bool {
 /// How long the extension of a file name may be for [`names_a_file`] to read it as one.
 const MAX_FILE_EXTENSION: usize = 10;
 
+/// The `CatalogId` the data catalog `catalog` names, or `None` when this emulator holds no
+/// metadata for it.
+///
+/// The same resolution a statement's own relations take ([`catalog_id_of`]), for a caller
+/// that needs the id rather than the failure to report: the Lake Formation decision a
+/// submission resolves before it is planned
+/// ([`crate::state::lake_formation::resolved`]) is keyed by the id, and a catalog whose
+/// metadata this emulator does not serve is a catalog nothing is known about.
+pub fn catalog_id<Eng: Send + Sync + 'static>(engine: &Eng, catalog: &str) -> Option<String> {
+    catalog_id_of(engine, catalog, Position::START).ok()
+}
+
 /// The `CatalogId` the data catalog `catalog` names, or why its metadata cannot be read.
 ///
 /// The SAME resolution Athena's metadata reads use: `AwsDataCatalog` is the account's own
@@ -757,6 +891,10 @@ struct Prepared {
     sql: String,
     /// The bytes of object data this statement scanned.
     scanned_bytes: i64,
+    /// The columns the relations this statement reads declare and the reader may not see,
+    /// as the catalog folds their names — what makes a statement that names one of them a
+    /// failure of authorization rather than a failure to resolve a name at all.
+    hidden_columns: HashSet<String>,
 }
 
 /// Resolve every relation one statement reads, and render the SQL the engine runs.
@@ -765,6 +903,7 @@ fn resolved_sql<Eng: Send + Sync + 'static>(
     handle: &DatabaseHandle,
     relational: RelationalStatement,
     context: &QueryContext,
+    access: &DataLakeAccess,
 ) -> Result<Prepared, Failure> {
     let RelationalStatement {
         mut statement,
@@ -776,7 +915,7 @@ fn resolved_sql<Eng: Send + Sync + 'static>(
     // when the resolution must stop whatever it has reached.
     let mut budget = Budget::default();
     let mut resolution = Resolution::default();
-    let resolved = resolve(engine, &relations, 0, &mut resolution, &mut budget)?;
+    let resolved = resolve(engine, &relations, 0, &mut resolution, &mut budget, access)?;
 
     // The catalog's guard is released before the object store's is taken, so no two
     // stores are ever held at once.
@@ -786,15 +925,17 @@ fn resolved_sql<Eng: Send + Sync + 'static>(
         .map(LocalObject::Table)
         .collect();
     let mut scanned_bytes = 0usize;
+    let mut hidden_columns: HashSet<String> = HashSet::new();
     if !resolution.sources.is_empty() {
         let Some(state) = s3_state::service_state(engine) else {
             return Err(Failure::emulator(OBJECT_STORE_UNREACHABLE));
         };
         let store = state.lock();
         for source in &resolution.sources {
-            let (table, scanned) = source.read(&store, &mut budget)?;
+            hidden_columns.extend(source.hidden_columns());
+            let (object, scanned) = source.read(&store, &mut budget)?;
             scanned_bytes = scanned_bytes.saturating_add(scanned);
-            objects.push(LocalObject::Table(table));
+            objects.push(object);
         }
     }
     objects.extend(
@@ -823,6 +964,7 @@ fn resolved_sql<Eng: Send + Sync + 'static>(
         sql: statement::rewritten(&mut statement, &rewrites),
         objects,
         scanned_bytes: i64::try_from(scanned_bytes).unwrap_or(i64::MAX),
+        hidden_columns,
     })
 }
 
@@ -853,12 +995,17 @@ struct Resolved {
 
 /// Resolve `relations` against the Data Catalog, following a view to the relations it
 /// reads, and charging every relation against `budget`.
+///
+/// `access` is Lake Formation's answer about the caller: a relation it covers no `SELECT`
+/// of is resolved to nothing — the table is not there for this caller — and one it covers
+/// a NARROWED `SELECT` of is read through that narrowing.
 fn resolve<Eng: Send + Sync + 'static>(
     engine: &Eng,
     relations: &[Relation],
     depth: usize,
     resolution: &mut Resolution,
     budget: &mut Budget,
+    access: &DataLakeAccess,
 ) -> Result<Resolved, Failure> {
     if depth > MAX_VIEW_DEPTH {
         return Err(Failure::emulator(format!(
@@ -877,6 +1024,11 @@ fn resolve<Eng: Send + Sync + 'static>(
         }
         budget.charge_relation()?;
         let catalog_id = catalog_id_of(engine, &relation.catalog, relation.at)?;
+        // What LAKE FORMATION lets this caller read of the relation, decided before the
+        // catalog is asked what it holds: a relation no `SELECT` of the caller's reaches is
+        // hidden from it, and its cells are never read.
+        let permitted =
+            access.table_access(&catalog_id, &relation.database, &relation.table);
         // What the catalog holds for this relation is read under its guard, and the guard
         // is released before anything else is reached.
         let held = {
@@ -891,6 +1043,19 @@ fn resolve<Eng: Send + Sync + 'static>(
                     None => Held::NoDatabase,
                     Some(database) => match database.tables.get(&relation.table) {
                         None => Held::NoTable,
+                        // A relation Lake Formation hides is not there for this caller,
+                        // whether it is a table or a view: the governance decision is taken
+                        // on the relation the statement NAMES, and the relations a view
+                        // reads are each governed in their own right when it is expanded.
+                        //
+                        // What a NARROWED grant on a view resource would show is not
+                        // applied here: a view's rows are the rows its own query computes
+                        // from the relations under it, and each of those is read through the
+                        // grant the caller holds on IT — so the narrowing that reaches the
+                        // caller is the one on the data, which is where Lake Formation holds
+                        // a column scope and a row filter (`TableWithColumns` and
+                        // `DataCellsFilter` both name a table).
+                        Some(_) if matches!(permitted, TableAccess::Hidden) => Held::Hidden,
                         Some(table) if ddl::is_view(table) => Held::View(
                             table
                                 .view_original_text
@@ -898,7 +1063,23 @@ fn resolve<Eng: Send + Sync + 'static>(
                                 .map(ddl::view_definition_sql)
                                 .unwrap_or_default(),
                         ),
-                        Some(table) => Held::Table(DataSource::of(relation, table)?),
+                        Some(table) => {
+                            let source = DataSource::of(relation, table)?;
+                            match &permitted {
+                                TableAccess::Readable(scope) if !scope.is_unrestricted() => {
+                                    let narrowed = source.narrowed(scope);
+                                    // A grant that covers no column of the table lets its
+                                    // holder read no cell of it, which is the same answer
+                                    // as holding no grant at all.
+                                    if narrowed.visible_columns().is_empty() {
+                                        Held::Hidden
+                                    } else {
+                                        Held::Table(narrowed)
+                                    }
+                                }
+                                _ => Held::Table(source),
+                            }
+                        }
                     },
                 }
             }
@@ -923,8 +1104,15 @@ fn resolve<Eng: Send + Sync + 'static>(
                     catalog: relation.catalog.clone(),
                     database: relation.database.clone(),
                 };
-                let sql =
-                    view_sql(engine, &definition, &view_context, depth, resolution, budget)?;
+                let sql = view_sql(
+                    engine,
+                    &definition,
+                    &view_context,
+                    depth,
+                    resolution,
+                    budget,
+                    access,
+                )?;
                 resolution.views.push((local, sql));
             }
             Held::NoDatabase => resolved
@@ -933,6 +1121,10 @@ fn resolve<Eng: Send + Sync + 'static>(
             Held::NoTable => resolved
                 .unresolved
                 .push((relation.clone(), Failure::table_not_found(relation))),
+            // A relation the caller may not read is reported as one that is not there, and
+            // nothing else of this engine database may answer for it: an earlier statement's
+            // own table of that name is not what the statement addressed.
+            Held::Hidden => return Err(Failure::table_not_found(relation)),
         }
     }
     Ok(resolved)
@@ -950,6 +1142,8 @@ enum Held {
     NoDatabase,
     /// No relation of that name in a database that is there.
     NoTable,
+    /// A relation that IS there, which Lake Formation does not let this caller read.
+    Hidden,
 }
 
 /// The SQL one view's rows come from: its own definition, with every relation IT reads
@@ -961,6 +1155,7 @@ fn view_sql<Eng: Send + Sync + 'static>(
     depth: usize,
     resolution: &mut Resolution,
     budget: &mut Budget,
+    access: &DataLakeAccess,
 ) -> Result<String, Failure> {
     let parsed = statement::parse_statements(definition)
         .and_then(|mut statements| (statements.len() == 1).then(|| statements.remove(0)));
@@ -974,7 +1169,7 @@ fn view_sql<Eng: Send + Sync + 'static>(
     if relations.is_empty() {
         return Ok(statement::rewritten(&mut parsed, &HashMap::new()));
     }
-    let resolved = resolve(engine, &relations, depth + 1, resolution, budget)?;
+    let resolved = resolve(engine, &relations, depth + 1, resolution, budget, access)?;
     // A view whose own source is missing cannot be read at all: the view is there, and
     // the relation under it is not.
     if let Some((_, miss)) = resolved.unresolved.into_iter().next() {

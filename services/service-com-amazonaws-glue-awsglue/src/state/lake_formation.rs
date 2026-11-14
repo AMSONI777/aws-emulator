@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: CC0-1.0
 
 //! Whether the caller holds the Lake Formation permission a Data Catalog METADATA READ
-//! needs.
+//! needs, and WHICH CELLS of a table it may read.
 //!
 //! A Data Catalog resource is governed by Lake Formation: a principal may read a
 //! database's metadata only while it holds at least one Lake Formation permission on that
@@ -10,8 +10,10 @@
 //! table's parent database describable. A TABLE's metadata needs a permission on that table
 //! itself — on the table, on named columns of it, on a filter over its cells, or on every
 //! table of its database through a table wildcard — because a database's own permissions are
-//! granted over the database resource. A data lake administrator holds every permission
-//! of its catalog implicitly. A read by a principal none of those cover is refused.
+//! granted over the database resource; and the DATA behind it is readable only to a
+//! principal holding `SELECT` there, then only the columns and rows that grant covers
+//! ([`ReadScope`]). A data lake administrator holds every permission of its catalog
+//! implicitly. A read by a principal none of those cover is refused.
 //!
 //! Lake Formation OWNS those grants, so they are read from Lake Formation rather than kept
 //! a second time here: this module asks the Lake Formation service in this same emulator
@@ -44,6 +46,21 @@ use ::service_com_amazonaws_sts_awssecuritytokenservicev20110615::state as sts_s
 /// `range 1..1000`, so this is that ceiling and the fewest pages a decision has to walk.
 const PERMISSIONS_PAGE_SIZE: i32 = 1000;
 
+/// The permission a read of a table's DATA needs: "Supported permissions are SELECT"
+/// is what `TableWithColumnsResource` exists to narrow, and `SELECT` is the value of the
+/// modelled `Permission` enum that names it
+/// (`smithy_query(query="shape",shape="Permission")`, Lake Formation's model).
+const SELECT_PERMISSION: &str = "SELECT";
+
+/// The most data cells filters one decision resolves the definition of.
+///
+/// A grant on a data cells filter names the filter; what it lets the holder see is the
+/// filter's own definition, which is read back from Lake Formation one call per filter. A
+/// principal may hold grants on many, so the number of those calls needs an end: a decision
+/// resolves this many and treats the rest as granting nothing, exactly as it treats a filter
+/// Lake Formation does not answer for.
+const MAX_RESOLVED_CELL_FILTERS: usize = 64;
+
 /// The most `ListPermissions` pages one decision walks for one principal.
 ///
 /// A loop over a service-supplied continuation token needs an end of its own. Lake
@@ -58,8 +75,9 @@ const MAX_PERMISSION_PAGES: usize = 64;
 /// What the caller holds in ONE Data Catalog, as far as reading metadata out of it goes.
 ///
 /// Built by [`catalog_permissions`] from what Lake Formation answered, and asked by the
-/// catalog's read paths. Deliberately NOT a copy of the grants: only the question those
-/// paths put to them — which databases are describable — is kept.
+/// catalog's read paths. Deliberately NOT a copy of the grants: only the questions those
+/// paths put to them — which databases are describable, which tables are, and which cells
+/// of a table may be read — are kept.
 #[derive(Debug, Clone, Default)]
 pub struct CatalogPermissions {
     /// Whether the caller is an administrator of this catalog's data lake, who holds every
@@ -68,13 +86,140 @@ pub struct CatalogPermissions {
     /// The stored (folded) names of the databases the caller holds a Lake Formation
     /// permission on, either on the database itself or on a resource inside it.
     databases: BTreeSet<String>,
-    /// The stored (folded) `(database, table)` pairs the caller holds a Lake Formation
-    /// permission on — a grant on the table itself, on named columns of it, or on a filter
-    /// over its cells.
-    tables: BTreeSet<(String, String)>,
-    /// The stored (folded) names of the databases the caller holds a permission on EVERY
-    /// table of, which is what a grant naming a table wildcard confers.
-    every_table_of: BTreeSet<String>,
+    /// What the caller holds on the catalog's TABLES, one entry per grant that names a
+    /// table, that table's columns, every table of a database, or a data cells filter over
+    /// one.
+    tables: Vec<TableGrant>,
+}
+
+/// One grant the caller holds on a table of this catalog, as the decisions below read it.
+#[derive(Debug, Clone)]
+struct TableGrant {
+    /// The database the table is in, as the catalog stores its name.
+    database: String,
+    /// The table, as the catalog stores its name, or `None` for a grant on every table of
+    /// the database (`TableResource$TableWildcard`, "every table under a database").
+    table: Option<String>,
+    /// Whether this grant lets its holder read the table's DATA: it carries `SELECT`, or
+    /// the `ALL` ("Super") that is every permission on the resource.
+    selects: bool,
+    /// Which columns of the table it covers.
+    columns: Columns,
+    /// Which rows of the table it covers.
+    rows: Rows,
+}
+
+/// The columns one grant covers.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum Columns {
+    /// Every column of the table: a grant on the table itself, or a column wildcard with
+    /// nothing excluded.
+    Every,
+    /// Every column but these: a `ColumnWildcard` carrying `ExcludedColumnNames`.
+    Except(BTreeSet<String>),
+    /// Exactly these: a `ColumnNames` list.
+    Only(BTreeSet<String>),
+}
+
+impl Columns {
+    /// Whether this scope covers the column `name`.
+    ///
+    /// Matched on the catalog's own fold of both names, so the casing a grant was written
+    /// with cannot decide the answer.
+    fn admits(&self, name: &str) -> bool {
+        let folded = super::fold_name(name);
+        match self {
+            Self::Every => true,
+            Self::Except(excluded) => !excluded.contains(&folded),
+            Self::Only(named) => named.contains(&folded),
+        }
+    }
+}
+
+/// The rows one grant covers.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum Rows {
+    /// Every row of the table: a grant that carries no row filter, or one whose filter is
+    /// the `AllRowsWildcard`.
+    Every,
+    /// The rows a predicate keeps (`RowFilter$FilterExpression`).
+    Matching(String),
+}
+
+/// What the caller may read of ONE table: the columns its `SELECT` grants cover and the
+/// rows they keep.
+///
+/// A principal may hold several grants on one table, so each axis is the UNION of what its
+/// grants allow: a column is readable when ANY of them covers it, and a row when ANY of
+/// them keeps it.
+#[derive(Debug, Clone)]
+pub struct ReadScope {
+    /// The column scopes of the grants in force.
+    columns: Vec<Columns>,
+    /// Their row scopes.
+    rows: Vec<Rows>,
+}
+
+impl ReadScope {
+    /// Whether this scope hides nothing, so the table reads exactly as it would with no
+    /// Lake Formation governing it.
+    #[must_use]
+    pub fn is_unrestricted(&self) -> bool {
+        self.columns.contains(&Columns::Every) && self.rows.contains(&Rows::Every)
+    }
+
+    /// Whether the column `name` is readable.
+    #[must_use]
+    pub fn admits_column(&self, name: &str) -> bool {
+        self.columns.iter().any(|columns| columns.admits(name))
+    }
+
+    /// The predicate the rows this scope keeps satisfy, as an SQL boolean expression, or
+    /// `None` when every row is readable.
+    ///
+    /// The expression is the grant's own (`RowFilter$FilterExpression`, "a filter
+    /// expression"), parenthesised so the disjunction of two of them means what each one
+    /// says; the engine that reads the table is what evaluates it.
+    #[must_use]
+    pub fn row_predicate(&self) -> Option<String> {
+        if self.rows.contains(&Rows::Every) {
+            return None;
+        }
+        let predicates: Vec<String> = self
+            .rows
+            .iter()
+            .filter_map(|rows| match rows {
+                Rows::Every => None,
+                Rows::Matching(expression) => Some(format!("({expression})")),
+            })
+            .collect();
+        (!predicates.is_empty()).then(|| predicates.join(" OR "))
+    }
+}
+
+/// `table` as a caller whose grants cover `scope` is told about it: its column list, and
+/// its partition keys, narrowed to the columns that scope covers.
+///
+/// Lake Formation answers a metadata read of a column-scoped table with the columns the
+/// reader's grant covers, so a column outside it is not reported at all — the same column
+/// the reader's queries cannot address. A scope covering every column leaves the definition
+/// exactly as the catalog holds it.
+#[must_use]
+pub fn narrowed_table(mut table: crate::ops::types::Table, scope: &ReadScope) -> crate::ops::types::Table {
+    if scope.columns.contains(&Columns::Every) {
+        return table;
+    }
+    let narrow = |columns: Vec<crate::ops::types::Column>| -> Vec<crate::ops::types::Column> {
+        columns
+            .into_iter()
+            .filter(|column| scope.admits_column(&column.name))
+            .collect()
+    };
+    if let Some(storage) = table.storage_descriptor.as_mut() {
+        storage.columns = storage.columns.take().map(narrow);
+    }
+    table.partition_keys = table.partition_keys.take().map(narrow);
+    table
 }
 
 impl CatalogPermissions {
@@ -101,14 +246,81 @@ impl CatalogPermissions {
     /// spelling a request used cannot decide the answer.
     #[must_use]
     pub fn may_describe_table(&self, database: &str, table: &str) -> bool {
+        self.admin || self.grants_on(database, table).next().is_some()
+    }
+
+    /// What the caller may read of the DATA behind the table `table` of `database`, or
+    /// `None` when no `SELECT` of its reaches it — in which case the table is not readable
+    /// at all.
+    #[must_use]
+    pub fn table_read_scope(&self, database: &str, table: &str) -> Option<ReadScope> {
+        self.scope_of(database, table, true)
+    }
+
+    /// What of the table `table` of `database` the caller may see the METADATA of: the
+    /// columns its grants cover, whichever permission each carries — `None` when it holds no
+    /// grant on the table at all.
+    ///
+    /// A metadata read is answered PROJECTED to those columns: Lake Formation holds a
+    /// `SELECT` on named columns as a grant on THOSE columns
+    /// (`TableWithColumnsResource`), so a principal whose only grant on a table is such a
+    /// one is told about the columns it covers and not about the rest. A grant on the table
+    /// itself covers every column, so a reader holding one sees the whole definition.
+    #[must_use]
+    pub fn table_metadata_scope(&self, database: &str, table: &str) -> Option<ReadScope> {
+        self.scope_of(database, table, false)
+    }
+
+    /// The union of what the caller's grants on the table `table` of `database` cover, taken
+    /// over every grant in force on it or, when `selecting_only`, over the ones that carry a
+    /// permission to read its data.
+    fn scope_of(&self, database: &str, table: &str, selecting_only: bool) -> Option<ReadScope> {
         if self.admin {
-            return true;
+            return Some(ReadScope {
+                columns: vec![Columns::Every],
+                rows: vec![Rows::Every],
+            });
         }
+        let in_force: Vec<&TableGrant> = self
+            .grants_on(database, table)
+            .filter(|grant| grant.selects || !selecting_only)
+            .collect();
+        if in_force.is_empty() {
+            return None;
+        }
+        Some(ReadScope {
+            columns: in_force.iter().map(|grant| grant.columns.clone()).collect(),
+            // A grant that is not about reading data says nothing about rows, so what it
+            // contributes is every row of the table.
+            rows: in_force
+                .iter()
+                .map(|grant| {
+                    if grant.selects {
+                        grant.rows.clone()
+                    } else {
+                        Rows::Every
+                    }
+                })
+                .collect(),
+        })
+    }
+
+    /// The grants in force on the table `table` of `database`: the ones naming that table
+    /// and the ones naming every table of its database.
+    fn grants_on<'held>(
+        &'held self,
+        database: &str,
+        table: &str,
+    ) -> impl Iterator<Item = &'held TableGrant> {
         let database = super::fold_name(database);
-        if self.every_table_of.contains(&database) {
-            return true;
-        }
-        self.tables.contains(&(database, super::fold_name(table)))
+        let table = super::fold_name(table);
+        self.tables.iter().filter(move |grant| {
+            grant.database == database
+                && grant
+                    .table
+                    .as_ref()
+                    .is_none_or(|granted| *granted == table)
+        })
     }
 }
 
@@ -162,8 +374,11 @@ pub async fn catalog_permissions<Eng: Send + Sync + 'static>(
     });
 
     let mut databases = BTreeSet::new();
-    let mut tables = BTreeSet::new();
-    let mut every_table_of = BTreeSet::new();
+    let mut tables: Vec<TableGrant> = Vec::new();
+    // The data cells filters the caller's grants name, whose definitions say what each one
+    // lets it see. Collected here and resolved once the listing is over, so Lake Formation's
+    // own answer about a filter is read with no listing in flight.
+    let mut cell_filters: Vec<CellFilterGrant> = Vec::new();
     for principal in &principals {
         let mut next_token: Option<String> = None;
         let mut pages = 0usize;
@@ -205,12 +420,24 @@ pub async fn catalog_permissions<Eng: Send + Sync + 'static>(
                 if let Some(database) = granted_database(entry.resource(), catalog_id) {
                     databases.insert(database);
                 }
+                // A permission on the resource AS A WHOLE ("Super") carries every
+                // permission of it, so it selects the table's data as a `SELECT` does.
+                let selects = entry
+                    .permissions()
+                    .iter()
+                    .chain(entry.permissions_with_grant_option())
+                    .any(|permission| {
+                        permission.as_str() == SELECT_PERMISSION
+                            || permission.as_str() == super::PERMISSION_ALL
+                    });
                 match granted_table(entry.resource(), catalog_id) {
-                    Some(GrantedTable::Named { database, table }) => {
-                        tables.insert((database, table));
+                    Some(GrantedTable::Table(mut grant)) => {
+                        grant.selects = selects;
+                        tables.push(grant);
                     }
-                    Some(GrantedTable::EveryTableOf { database }) => {
-                        every_table_of.insert(database);
+                    Some(GrantedTable::CellFilter(mut filter)) => {
+                        filter.selects = selects;
+                        cell_filters.push(filter);
                     }
                     None => {}
                 }
@@ -235,11 +462,177 @@ pub async fn catalog_permissions<Eng: Send + Sync + 'static>(
         }
     }
 
+    // What each data cells filter grant lets its holder see is the filter's own definition,
+    // which Lake Formation holds: the columns it names and the rows its predicate keeps. A
+    // filter this cannot read grants nothing — the grant names a definition that is not
+    // there to read — so it is left out rather than widened into a grant on the whole table.
+    for filter in cell_filters.into_iter().take(MAX_RESOLVED_CELL_FILTERS) {
+        match resolved_cell_filter(&client, &filter).await {
+            Some(grant) => tables.push(grant),
+            None => ::tracing::debug!(
+                catalog = %catalog_id,
+                database = %filter.database,
+                table = %filter.table,
+                "Lake Formation did not answer the definition of a data cells filter the \
+                 caller holds a grant on, so that grant covers nothing"
+            ),
+        }
+    }
+
     Some(CatalogPermissions {
         admin,
         databases,
         tables,
-        every_table_of,
+    })
+}
+
+/// A grant on a data cells filter, before its definition is read back.
+#[derive(Debug, Clone)]
+struct CellFilterGrant {
+    /// The database the filtered table is in, as the grant spelled it.
+    database: String,
+    /// The filtered table, as the grant spelled it.
+    table: String,
+    /// The filter's name, as the grant spelled it: the name
+    /// `GetDataCellsFilter$Name` addresses it by.
+    name: String,
+    /// The catalog id the grant named for the filtered table.
+    table_catalog_id: String,
+    /// Whether the grant lets its holder read data; see [`TableGrant::selects`].
+    selects: bool,
+}
+
+/// What a grant names: a table of this catalog, or a data cells filter over one.
+#[derive(Debug, Clone)]
+enum GrantedTable {
+    /// A grant whose scope the resource itself states.
+    Table(TableGrant),
+    /// A grant whose scope is the named filter's definition.
+    CellFilter(CellFilterGrant),
+}
+
+/// The table a grant on `resource` is about, and the columns and rows it covers — `None`
+/// for a resource that is not a table of `catalog_id`, not a column scope of one, and not a
+/// data cells filter over one.
+///
+/// `selects` is left for the caller to fill in: which permissions the grant carries is on
+/// the entry, not on the resource it names.
+fn granted_table(resource: Option<&Resource>, catalog_id: &str) -> Option<GrantedTable> {
+    let resource = resource?;
+    if let Some(table) = resource.table() {
+        if !in_catalog(table.catalog_id(), catalog_id) {
+            return None;
+        }
+        return Some(GrantedTable::Table(TableGrant {
+            database: super::fold_name(table.database_name()),
+            // "At least one of TableResource$Name or TableResource$TableWildcard is
+            // required": the wildcard is a grant on every table of the database.
+            table: table
+                .name()
+                .filter(|name| !name.is_empty())
+                .map(super::fold_name),
+            selects: false,
+            // A grant on the table itself is a grant on all of it.
+            columns: Columns::Every,
+            rows: Rows::Every,
+        }));
+    }
+    if let Some(table) = resource.table_with_columns() {
+        if !in_catalog(table.catalog_id(), catalog_id) {
+            return None;
+        }
+        return Some(GrantedTable::Table(TableGrant {
+            database: super::fold_name(table.database_name()),
+            table: Some(super::fold_name(table.name())),
+            selects: false,
+            columns: column_scope(table.column_names(), table.column_wildcard()),
+            rows: Rows::Every,
+        }));
+    }
+    if let Some(filter) = resource.data_cells_filter() {
+        if !in_catalog(filter.table_catalog_id(), catalog_id) {
+            return None;
+        }
+        // Every member of the resource names part of the filter's identity, so a grant
+        // naming only some of them addresses no filter whose definition could be read. The
+        // names travel on AS THE GRANT WROTE THEM, because that is the filter Lake Formation
+        // holds them under; the fold is applied to what the decision is matched by.
+        return Some(GrantedTable::CellFilter(CellFilterGrant {
+            database: filter.database_name()?.to_string(),
+            table: filter.table_name()?.to_string(),
+            name: filter.name()?.to_string(),
+            table_catalog_id: filter
+                .table_catalog_id()
+                .filter(|id| !id.is_empty())
+                .unwrap_or(catalog_id)
+                .to_string(),
+            selects: false,
+        }));
+    }
+    None
+}
+
+/// The columns a `ColumnNames` list and a `ColumnWildcard` name, as the scope they are.
+///
+/// "At least one of ColumnNames or ColumnWildcard is required"
+/// (`TableWithColumnsResource$ColumnNames`): a named list is exactly those columns, a
+/// wildcard is every column but the ones it excludes, and a resource carrying neither
+/// narrows nothing.
+fn column_scope(
+    column_names: &[String],
+    wildcard: Option<&::aws_sdk_lakeformation::types::ColumnWildcard>,
+) -> Columns {
+    if !column_names.is_empty() {
+        return Columns::Only(column_names.iter().map(|name| super::fold_name(name)).collect());
+    }
+    match wildcard {
+        Some(wildcard) if !wildcard.excluded_column_names().is_empty() => Columns::Except(
+            wildcard
+                .excluded_column_names()
+                .iter()
+                .map(|name| super::fold_name(name))
+                .collect(),
+        ),
+        _ => Columns::Every,
+    }
+}
+
+/// The grant a data cells filter confers, read from the filter's own definition in Lake
+/// Formation — `None` when Lake Formation holds no such filter or did not answer.
+async fn resolved_cell_filter(
+    client: &::aws_sdk_lakeformation::Client,
+    grant: &CellFilterGrant,
+) -> Option<TableGrant> {
+    let answer = client
+        .get_data_cells_filter()
+        .table_catalog_id(grant.table_catalog_id.clone())
+        .database_name(grant.database.clone())
+        .table_name(grant.table.clone())
+        .name(grant.name.clone())
+        .send()
+        .await
+        .ok()?;
+    let filter = answer.data_cells_filter?;
+    // "A PartiQL predicate": the rows the filter keeps, unless it carries the wildcard for
+    // all rows instead.
+    let rows = match filter.row_filter() {
+        Some(row_filter) if row_filter.all_rows_wildcard().is_some() => Rows::Every,
+        Some(row_filter) => match row_filter
+            .filter_expression()
+            .map(str::trim)
+            .filter(|expression| !expression.is_empty())
+        {
+            Some(expression) => Rows::Matching(expression.to_string()),
+            None => Rows::Every,
+        },
+        None => Rows::Every,
+    };
+    Some(TableGrant {
+        database: super::fold_name(&grant.database),
+        table: Some(super::fold_name(&grant.table)),
+        selects: grant.selects,
+        columns: column_scope(filter.column_names(), filter.column_wildcard()),
+        rows,
     })
 }
 
@@ -272,58 +665,6 @@ fn granted_database(resource: Option<&Resource>, catalog_id: &str) -> Option<Str
             .then(|| super::fold_name(database));
     }
     None
-}
-
-/// Which TABLE a grant on `resource` makes readable: the table it names, or every table of
-/// the database it names a table wildcard of.
-///
-/// `None` for a resource that is not in `catalog_id` and for every resource that is not a
-/// table or a thing inside one — a grant on the database, the catalog, a data location, an
-/// LF-tag or a tag policy names no one table.
-fn granted_table(resource: Option<&Resource>, catalog_id: &str) -> Option<GrantedTable> {
-    let resource = resource?;
-    if let Some(table) = resource.table() {
-        if !in_catalog(table.catalog_id(), catalog_id) {
-            return None;
-        }
-        let database = super::fold_name(table.database_name());
-        // "A wildcard object representing every table under a database": the grant covers
-        // the tables the database holds now and the ones created in it later, so it is kept
-        // as the database it covers rather than as the tables it happened to cover.
-        if table.table_wildcard().is_some() {
-            return Some(GrantedTable::EveryTableOf { database });
-        }
-        return table
-            .name()
-            .filter(|name| !name.is_empty())
-            .map(|name| GrantedTable::Named {
-                database,
-                table: super::fold_name(name),
-            });
-    }
-    if let Some(table) = resource.table_with_columns() {
-        return in_catalog(table.catalog_id(), catalog_id).then(|| GrantedTable::Named {
-            database: super::fold_name(table.database_name()),
-            table: super::fold_name(table.name()),
-        });
-    }
-    if let Some(filter) = resource.data_cells_filter() {
-        let database = filter.database_name()?;
-        let table = filter.table_name()?;
-        return in_catalog(filter.table_catalog_id(), catalog_id).then(|| GrantedTable::Named {
-            database: super::fold_name(database),
-            table: super::fold_name(table),
-        });
-    }
-    None
-}
-
-/// What a grant on one resource says about the TABLES of a catalog.
-enum GrantedTable {
-    /// One table, by name.
-    Named { database: String, table: String },
-    /// Every table of one database, which is what a table wildcard names.
-    EveryTableOf { database: String },
 }
 
 /// Whether a resource member that names `named` sits in `catalog_id`: the catalog it names,

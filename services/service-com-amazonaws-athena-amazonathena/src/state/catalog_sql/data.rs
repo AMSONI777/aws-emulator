@@ -18,7 +18,8 @@ use ::service_com_amazonaws_s3_amazons3::state as s3_state;
 use super::ddl;
 use super::statement::{self, DeclaredColumn, Relation};
 use super::Failure;
-use crate::state::query_engine::{self, LocalColumn, LocalTable};
+use crate::state::lake_formation::ReadScope;
+use crate::state::query_engine::{self, LocalColumn, LocalObject, LocalTable};
 
 /// The URI scheme a table's location names its data by.
 const S3_SCHEME: &str = "s3://";
@@ -121,6 +122,13 @@ pub struct DataSource {
     skip_header_lines: usize,
     /// What text stands for a NULL value.
     null_text: String,
+    /// Which of [`Self::columns`], by position and in the table's own column order, the
+    /// reader may read: every one of them, until a Lake Formation grant narrows the read
+    /// ([`Self::narrowed`]).
+    visible: Vec<usize>,
+    /// The boolean SQL expression a row has to satisfy for the reader to see it, when a
+    /// Lake Formation grant carries one.
+    row_predicate: Option<String>,
 }
 
 /// What one query may read, which every read of a table charges against.
@@ -249,10 +257,14 @@ impl DataSource {
                     relation.database, relation.table
                 ))
             })?;
+        let columns = ddl::table_columns(table);
         Ok(Self {
             relation: relation.clone(),
             local_name: relation.local_name(),
-            columns: ddl::table_columns(table),
+            // Every column of the table reads, until a Lake Formation grant narrows it.
+            visible: (0..columns.len()).collect(),
+            row_predicate: None,
+            columns,
             location: storage.and_then(|storage| storage.location.clone()),
             decoder,
             skip_header_lines: table_parameters
@@ -266,13 +278,73 @@ impl DataSource {
         })
     }
 
+    /// This source as the reader `scope` describes may read it: the columns that scope
+    /// covers, and the rows its predicate keeps.
+    ///
+    /// A column the scope does not cover is not read, not materialised and not addressable
+    /// — naming it is an unknown column to the statement, which is what a column outside a
+    /// reader's grant is.
+    #[must_use]
+    pub fn narrowed(mut self, scope: &ReadScope) -> Self {
+        self.visible = self
+            .columns
+            .iter()
+            .enumerate()
+            .filter(|(_, column)| scope.admits_column(&column.name))
+            .map(|(position, _)| position)
+            .collect();
+        self.row_predicate = scope.row_predicate();
+        self
+    }
+
+    /// The columns this source reads, in the table's own column order: the ones the
+    /// reader's Lake Formation grant covers.
+    #[must_use]
+    pub fn visible_columns(&self) -> Vec<&DeclaredColumn> {
+        self.visible
+            .iter()
+            .filter_map(|position| self.columns.get(*position))
+            .collect()
+    }
+
+    /// The columns this source does NOT read because the reader's Lake Formation grant
+    /// leaves them out, as the catalog folds their names.
+    ///
+    /// What a statement that names one of them is told rests on this: a column the table
+    /// declares and this reader may not see is one it is not AUTHORIZED to read, which is a
+    /// different sentence from one the table does not declare at all.
+    #[must_use]
+    pub fn hidden_columns(&self) -> Vec<String> {
+        self.columns
+            .iter()
+            .enumerate()
+            .filter(|(position, _)| !self.visible.contains(position))
+            .map(|(_, column)| glue_state::fold_name(&column.name))
+            .collect()
+    }
+
+    /// Which columns the decoded rows carry: every column of the table while a row
+    /// predicate is still to be evaluated — the predicate may name a column the reader may
+    /// not SEE, and the engine evaluates it before the projection — and the visible ones
+    /// alone otherwise.
+    fn materialised(&self) -> Vec<usize> {
+        match self.row_predicate {
+            Some(_) => (0..self.columns.len()).collect(),
+            None => self.visible.clone(),
+        }
+    }
+
     /// The table as the engine holds it: its columns with the type each is read as, and
     /// the rows the objects at its location decode to.
+    ///
+    /// A read the reader's grant narrows by a row predicate is handed to the engine as the
+    /// rows plus that predicate ([`LocalObject::Filtered`]), so the engine is what decides
+    /// which rows the statement sees.
     pub fn read(
         &self,
         objects: &s3_state::ComAmazonawsS3Amazons3State,
         budget: &mut Budget,
-    ) -> Result<(LocalTable, usize), Failure> {
+    ) -> Result<(LocalObject, usize), Failure> {
         if self.columns.is_empty() {
             return Err(Failure::user(format!(
                 "Table '{}.{}' has no columns, so nothing can be read from it",
@@ -280,21 +352,32 @@ impl DataSource {
             )));
         }
         let (rows, scanned) = self.rows(objects, budget)?;
-        Ok((
-            LocalTable {
+        let local_column = |position: &usize| {
+            self.columns.get(*position).map(|column| LocalColumn {
+                name: column.name.clone(),
+                declared: engine_type(&column.data_type),
+            })
+        };
+        let materialised: Vec<LocalColumn> =
+            self.materialised().iter().filter_map(local_column).collect();
+        let visible: Vec<LocalColumn> = self.visible.iter().filter_map(local_column).collect();
+        let object = match &self.row_predicate {
+            None => LocalObject::Table(LocalTable {
                 name: self.local_name.clone(),
-                columns: self
-                    .columns
-                    .iter()
-                    .map(|column| LocalColumn {
-                        name: column.name.clone(),
-                        declared: engine_type(&column.data_type),
-                    })
-                    .collect(),
+                columns: materialised,
                 rows,
+            }),
+            Some(predicate) => LocalObject::Filtered {
+                table: LocalTable {
+                    name: self.local_name.clone(),
+                    columns: visible,
+                    rows,
+                },
+                source_columns: materialised,
+                predicate: predicate.clone(),
             },
-            scanned,
-        ))
+        };
+        Ok((object, scanned))
     }
 
     /// The rows the objects at this table's location decode to, and the bytes read for
@@ -354,7 +437,10 @@ impl DataSource {
         rows: &mut Vec<Vec<::rusqlite::types::Value>>,
         budget: &mut Budget,
     ) -> Result<(), Failure> {
-        let width = self.columns.len();
+        // Only the cells the read MATERIALISES are built, so the width one row charges
+        // against the budget is the width of the row the engine is handed.
+        let materialised = self.materialised();
+        let width = materialised.len();
         match &self.decoder {
             Decoder::Delimited { separator, quote } => {
                 let mut reader = delimited_reader(body, *separator, *quote).map_err(|reason| {
@@ -380,7 +466,7 @@ impl DataSource {
                         continue;
                     }
                     budget.charge_row(&self.relation, width)?;
-                    rows.push(self.row(|position| record.get(position)));
+                    rows.push(self.row(&materialised, |position| record.get(position)));
                 }
             }
             Decoder::Json => {
@@ -409,7 +495,7 @@ impl DataSource {
                             members.and_then(|members| json_member(members, &column.name))
                         })
                         .collect();
-                    rows.push(self.row(|position| {
+                    rows.push(self.row(&materialised, |position| {
                         fields.get(position).and_then(Option::as_deref)
                     }));
                 }
@@ -418,16 +504,21 @@ impl DataSource {
         Ok(())
     }
 
-    /// One record as the row it holds: one value per column of the table, in the table's
-    /// own column order, each read from the record by its column's position.
+    /// One record as the row it holds: one value per MATERIALISED column, in the table's
+    /// own column order, each read from the record by its column's own position in the
+    /// table — so leaving a column out of the row never shifts the ones beside it.
     fn row<'f>(
         &self,
+        materialised: &[usize],
         field: impl Fn(usize) -> Option<&'f str>,
     ) -> Vec<::rusqlite::types::Value> {
-        self.columns
+        materialised
             .iter()
-            .enumerate()
-            .map(|(position, column)| self.cell(column, field(position)))
+            .filter_map(|position| {
+                self.columns
+                    .get(*position)
+                    .map(|column| self.cell(column, field(*position)))
+            })
             .collect()
     }
 
