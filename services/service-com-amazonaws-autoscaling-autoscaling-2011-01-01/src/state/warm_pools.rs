@@ -473,6 +473,7 @@ impl AutoScalingState {
             &GroupLaunch {
                 group_name,
                 count: usize::try_from(to_launch).unwrap_or(0),
+                launched_at: now,
                 due,
                 // A warm pool launches from the group's own launch source.
                 desired_configuration: None,

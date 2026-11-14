@@ -106,6 +106,10 @@ pub use lifecycle_hooks::{
 /// takes with the group.
 pub mod warm_pools;
 
+/// Which instances a scale-in of a group takes out of service: the group's
+/// `TerminationPolicies`, applied in the order it lists them.
+pub mod termination_policies;
+
 pub use warm_pools::{
     too_large_warm_pool_message, warm_pool_change_cause, warmed_lifecycle_state, StoredWarmPool,
     WarmPoolPut, DEFAULT_WARM_POOL_MIN_SIZE, DEFAULT_WARM_POOL_STATE,
@@ -170,7 +174,7 @@ pub const DEFAULT_HEALTH_CHECK_TYPE: &str = "EC2";
 /// `TerminationPolicies` when the request omits it: the `Default` policy, which
 /// the model documents as a valid `TerminationPolicies` value and which the
 /// service applies to a group that configures none.
-pub const DEFAULT_TERMINATION_POLICY: &str = "Default";
+pub const DEFAULT_TERMINATION_POLICY: &str = termination_policies::DEFAULT;
 
 // The three `LifecycleState` values this slice moves an instance through, spelled
 // exactly as the model's `com.amazonaws.autoscaling#LifecycleState` enum does
@@ -470,6 +474,16 @@ pub struct StoredInstance {
     pub instance_type: Option<String>,
     pub image_id: Option<String>,
     pub protected_from_scale_in: bool,
+    /// When this instance was launched, which is how old it is: what a scale-in's
+    /// `TerminationPolicies` order the group's instances by
+    /// ([`termination_policies`]). Not part of what the API reports for an instance.
+    pub launched_at: SystemTime,
+    /// Where this instance falls in the order the account's instances were launched in,
+    /// minted once per instance from [`AutoScalingState::next_instance_launch_seq`]. The
+    /// instances of ONE capacity change share [`Self::launched_at`] but not this, since
+    /// Amazon EC2 launches them one after another — so the oldest of them is a single
+    /// instance. Not part of what the API reports for an instance.
+    pub launch_sequence: u64,
     /// When this instance's transient lifecycle state comes due, if it is in one.
     pub transition_due: Option<SystemTime>,
 }
@@ -831,6 +845,9 @@ pub struct ComAmazonawsAutoscalingAutoscaling20110101State {
     pub next_activity_seq: u64,
     /// Source of the opaque id segment of a resource ARN.
     pub next_resource_seq: u64,
+    /// Source of the launch order an instance of a group keeps
+    /// ([`StoredInstance::launch_sequence`]).
+    pub next_instance_launch_seq: u64,
     /// The instance lifecycle events this store has not published to EventBridge yet,
     /// oldest first, each due at the instant the step it reports completes
     /// ([`lifecycle_events`]). At most [`lifecycle_events::MAX_PENDING_EVENTS`] entries,
@@ -1320,6 +1337,7 @@ impl AutoScalingState {
             &GroupLaunch {
                 group_name,
                 count: wanted,
+                launched_at: now,
                 due,
                 // A capacity change launches from the group's own launch source.
                 desired_configuration: None,
@@ -1338,7 +1356,7 @@ impl AutoScalingState {
         group.pending_capacity = None;
         group.cooldown_until = Some(now + Duration::from_secs(u64::from(cooldown.unsigned_abs())));
 
-        let terminated_ids = self.scale_in_selection(group_name, to_terminate);
+        let terminated_ids = self.scale_in_selection(group_name, to_terminate, now);
         self.terminate_group_instances(engine, group_name, &terminated_ids, due);
 
         for instance_id in launched_ids {
@@ -1589,9 +1607,18 @@ impl AutoScalingState {
             },
         );
         let unplaced = request.count.saturating_sub(launched.len());
+        // Amazon EC2 launches the instances of one capacity change one after another, so
+        // each of them is a little newer than the last even though they were asked for
+        // together: the launch ORDER is minted here, once per instance, from the store's
+        // own source, and is what a scale-in's age-ordered policies read
+        // ([`termination_policies`]).
+        let first_sequence = self.next_instance_launch_seq;
+        self.next_instance_launch_seq =
+            first_sequence.saturating_add(u64::try_from(launched.len()).unwrap_or(0));
         let launched: Vec<StoredInstance> = launched
             .into_iter()
-            .map(|instance| StoredInstance {
+            .enumerate()
+            .map(|(offset, instance)| StoredInstance {
                 instance_id: instance.instance_id,
                 availability_zone: instance.availability_zone,
                 lifecycle_state: request.destination.pending_state().to_string(),
@@ -1603,6 +1630,9 @@ impl AutoScalingState {
                 instance_type: instance.instance_type,
                 image_id: instance.image_id,
                 protected_from_scale_in: protected,
+                launched_at: request.launched_at,
+                launch_sequence: first_sequence
+                    .saturating_add(u64::try_from(offset).unwrap_or(u64::MAX)),
                 transition_due: Some(request.due),
             })
             .collect();
@@ -1641,30 +1671,17 @@ impl AutoScalingState {
 
     /// The instances a scale-in of `count` takes out of the group.
     ///
-    /// The most recently launched instances go first. The group's
-    /// `TerminationPolicies` are persisted and reported as configured, but the
-    /// `Default` policy's own inputs (Availability Zone rebalancing, billing hour,
-    /// launch template age) are not modelled here, so selection is by launch order.
-    /// An instance protected from scale-in is never chosen: that is what the
-    /// protection means.
-    fn scale_in_selection(&self, group_name: &str, count: i32) -> Vec<String> {
+    /// The group's own `TerminationPolicies` select them, applied in the order the
+    /// group lists them ([`termination_policies`]), against the account's launch
+    /// configurations — which one of those policies measures an instance's
+    /// configuration age against — at the instant `now` the scale-in happens. An
+    /// instance protected from scale-in is never chosen: that is what the protection
+    /// means.
+    fn scale_in_selection(&self, group_name: &str, count: i32, now: SystemTime) -> Vec<String> {
         let Some(group) = self.groups.get(group_name) else {
             return Vec::new();
         };
-        let mut ids = Vec::new();
-        let mut remaining = count;
-        for instance in group.instances.iter().rev() {
-            if remaining == 0 {
-                break;
-            }
-            if instance.lifecycle_state == LIFECYCLE_TERMINATING || instance.protected_from_scale_in
-            {
-                continue;
-            }
-            ids.push(instance.instance_id.clone());
-            remaining -= 1;
-        }
-        ids
+        termination_policies::scale_in_selection(group, &self.launch_configurations, count, now)
     }
 
     /// Take the instances `instance_ids` names out of the group: each is reported
@@ -1925,6 +1942,7 @@ impl AutoScalingState {
             &GroupLaunch {
                 group_name,
                 count: 1,
+                launched_at: now,
                 due,
                 desired_configuration,
                 destination: LaunchDestination::Group,
@@ -2016,6 +2034,8 @@ struct GroupLaunch<'a> {
     group_name: &'a str,
     /// How many instances to launch.
     count: usize,
+    /// The instant the launch happens, which is how old each instance it launches is.
+    launched_at: SystemTime,
     /// When the transient state each launched instance is reported in comes due.
     due: SystemTime,
     /// The desired configuration of the instance refresh that asked for the launch,
@@ -2119,13 +2139,13 @@ pub fn is_valid_health_check_type(health_check_type: &str) -> bool {
 /// OldestInstance | OldestLaunchConfiguration | OldestLaunchTemplate |
 /// arn:aws:lambda:region:account-id:function:my-function:my-alias".
 pub const TERMINATION_POLICIES: &[&str] = &[
-    "Default",
-    "AllocationStrategy",
-    "ClosestToNextInstanceHour",
-    "NewestInstance",
-    "OldestInstance",
-    "OldestLaunchConfiguration",
-    "OldestLaunchTemplate",
+    termination_policies::DEFAULT,
+    termination_policies::ALLOCATION_STRATEGY,
+    termination_policies::CLOSEST_TO_NEXT_INSTANCE_HOUR,
+    termination_policies::NEWEST_INSTANCE,
+    termination_policies::OLDEST_INSTANCE,
+    termination_policies::OLDEST_LAUNCH_CONFIGURATION,
+    termination_policies::OLDEST_LAUNCH_TEMPLATE,
 ];
 
 /// The prefix of the custom-policy form that documentation ends with: a Lambda
@@ -2186,14 +2206,14 @@ pub const TERMINATION_POLICY_TYPE_LAMBDA: &str = "Lambda";
 /// [`TERMINATION_POLICY_TYPE_LAMBDA`] for the Lambda-ARN form the same model
 /// documentation ends with, in ASCII order.
 pub const TERMINATION_POLICY_TYPES: &[&str] = &[
-    "AllocationStrategy",
-    "ClosestToNextInstanceHour",
-    "Default",
+    termination_policies::ALLOCATION_STRATEGY,
+    termination_policies::CLOSEST_TO_NEXT_INSTANCE_HOUR,
+    termination_policies::DEFAULT,
     TERMINATION_POLICY_TYPE_LAMBDA,
-    "NewestInstance",
-    "OldestInstance",
-    "OldestLaunchConfiguration",
-    "OldestLaunchTemplate",
+    termination_policies::NEWEST_INSTANCE,
+    termination_policies::OLDEST_INSTANCE,
+    termination_policies::OLDEST_LAUNCH_CONFIGURATION,
+    termination_policies::OLDEST_LAUNCH_TEMPLATE,
 ];
 
 /// The catalog `DescribeAdjustmentTypes` reports, from the model's own

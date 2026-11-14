@@ -4,10 +4,8 @@
 //!
 //! Put a new suite at `tests/all/<name>.rs` and declare it below, keeping the list
 //! sorted.
-//!
 //! A suite that is not declared here compiles nowhere and its tests never run. A
 //! suite left at the top level of `tests/` fails the build.
-
 // `tests/all.rs` is a test-target CRATE ROOT, so a bare `mod` resolves to a SIBLING
 // (`tests/state_roundtrip.rs`) — which the layout check refuses. The `#[path]` is what
 // points it into `tests/all/`.
@@ -71,8 +69,8 @@ mod policy_read_projection;
 mod reference_data_catalogs;
 #[path = "all/rollback_instance_refresh.rs"]
 mod rollback_instance_refresh;
-#[path = "all/scale_in_releases_instance_interfaces.rs"]
-mod scale_in_releases_instance_interfaces;
+#[path = "all/scale_in_termination_policies.rs"]
+mod scale_in_termination_policies;
 #[path = "all/scale_out_launches_ec2_instances.rs"]
 mod scale_out_launches_ec2_instances;
 #[path = "all/scaling_policies.rs"]
@@ -97,3 +95,5 @@ mod terminate_instance_in_auto_scaling_group;
 mod vpc_zone_identifier_zones;
 #[path = "all/warm_pools.rs"]
 mod warm_pools;
+#[path = "all/scale_in_releases_instance_interfaces.rs"]
+mod scale_in_releases_instance_interfaces;
