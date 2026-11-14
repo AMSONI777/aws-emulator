@@ -428,6 +428,9 @@ async fn disable_profile_is_confined_to_the_profile_it_addresses() {
                 json!({
                     "name": format!("profile {index}"),
                     "roleArns": [role_arn(&format!("Role{index}"))],
+                    // Created enabled, so a profile this case does not address has an
+                    // enablement the disable could still change.
+                    "enabled": true,
                 }),
             )
             .await;

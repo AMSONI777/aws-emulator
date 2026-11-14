@@ -754,8 +754,15 @@ async fn a_put_past_the_specifier_ceiling_is_refused_and_stores_nothing() {
     let client = Client::new();
     let id = profile_id(&client, "ceiling").await;
 
+    // The specifiers the field maps before the first put — the service's own defaults —
+    // count towards the ceiling, so the fill carries only the remainder.
+    let seeded = specifiers_in(&client.mappings("ceiling", &id).await, "x509Subject")
+        .unwrap_or_default()
+        .len();
     // Distinct specifiers, each within `MappingRule$specifier`'s `@length(max 60)`.
-    let to_the_bound: Vec<String> = (0..ceiling).map(|index| format!("s{index}")).collect();
+    let to_the_bound: Vec<String> = (0..ceiling - seeded)
+        .map(|index| format!("s{index}"))
+        .collect();
     let filled = client.put_mapping(&id, "x509Subject", &to_the_bound).await;
     assert_eq!(
         filled.status, 200,

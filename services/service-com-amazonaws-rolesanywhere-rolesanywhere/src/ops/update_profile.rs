@@ -204,7 +204,7 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
             record.role_arns = role_arns;
         }
         if let Some(managed_policy_arns) = input.managed_policy_arns {
-            record.managed_policy_arns = managed_policy_arns;
+            record.managed_policy_arns = Some(managed_policy_arns);
         }
         // The modelled `@range(900, 43200)` on the request member is already enforced by
         // the time this handler runs.

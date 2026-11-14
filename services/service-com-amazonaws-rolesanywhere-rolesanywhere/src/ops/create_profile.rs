@@ -176,6 +176,10 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         }
 
         let region = crate::state::request_region(ctx.parts());
+        // The principal this request speaks for, resolved before the profile store is
+        // locked: the identity question is the token service's, and its registry is a
+        // different store in the same engine.
+        let created_by = crate::state::caller_principal_arn(&*self.engine, ctx);
         let now = ::std::time::SystemTime::now();
         let mut store = state.lock();
         // Both caller-driven stores are bounded by an entry count, refused here before
@@ -197,7 +201,10 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
             profile_id: profile_id.clone(),
             name: input.name,
             role_arns: input.role_arns,
-            managed_policy_arns: input.managed_policy_arns.unwrap_or_default(),
+            // Stored exactly as the request left it: a member the request did not carry
+            // is one this service holds NO value for, and a read reports no value rather
+            // than an empty list or a cleared flag.
+            managed_policy_arns: input.managed_policy_arns,
             session_policy: input.session_policy,
             // "In requests, if this value is not provided, the default value will be
             // 3600" (`ProfileDetail$durationSeconds` doc). The modelled
@@ -206,18 +213,20 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
             duration_seconds: input
                 .duration_seconds
                 .unwrap_or(crate::state::DEFAULT_PROFILE_DURATION_SECONDS),
-            // A request that says nothing about `enabled` creates a usable profile:
-            // the member is optional, and `DisableProfile` is the way to turn one off
-            // afterwards.
-            enabled: input.enabled.unwrap_or(true),
-            require_instance_properties: input.require_instance_properties.unwrap_or(false),
+            // A profile is enabled because the request asked for it: `enabled`
+            // "specifies whether the profile is enabled", and a create that says nothing
+            // about it leaves the profile inert until `EnableProfile` turns it on. So a
+            // caller that creates a profile without the member never vends credentials
+            // through it by accident.
+            enabled: input.enabled.unwrap_or(false),
+            require_instance_properties: input.require_instance_properties,
             accept_role_session_name: input.accept_role_session_name.unwrap_or(false),
-            // "The Amazon Web Services account that created the profile"
-            // (`ProfileDetail$createdBy` doc).
-            created_by: ::engine::emulator_account_id().to_string(),
+            created_by,
             created_at: now,
             updated_at: now,
-            attribute_mappings: Vec::new(),
+            // A new profile already maps its certificate fields: the service's own
+            // defaults, which the mapping operations then compose on top of.
+            attribute_mappings: crate::state::default_attribute_mappings(),
             tags,
         };
         let profile = record.to_detail();

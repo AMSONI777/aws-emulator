@@ -31,6 +31,8 @@ mod not_found_refusal_messages;
 mod notification_settings;
 #[path = "all/profile_disablement.rs"]
 mod profile_disablement;
+#[path = "all/profile_response_defaults.rs"]
+mod profile_response_defaults;
 #[path = "all/profile_update_in_place.rs"]
 mod profile_update_in_place;
 #[path = "all/resource_tag_quota.rs"]

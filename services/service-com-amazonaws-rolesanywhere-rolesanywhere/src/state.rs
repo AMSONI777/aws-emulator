@@ -26,6 +26,10 @@
 /// has asked this account for credentials.
 pub mod subjects;
 
+/// The principal a request speaks for, which a created profile records as its creator.
+mod caller_identity;
+
+pub use caller_identity::*;
 pub use subjects::*;
 
 use std::collections::{BTreeMap, BTreeSet};
@@ -203,36 +207,48 @@ pub struct ProfileRecord {
     pub profile_arn: String,
     pub name: String,
     pub role_arns: Vec<String>,
-    pub managed_policy_arns: Vec<String>,
+    /// `None` while nothing has set the member: the profile holds no managed policies,
+    /// which is not the same fact as holding an empty list, and a read reports only what
+    /// the profile has a value for (see [`Self::to_detail`]).
+    pub managed_policy_arns: Option<Vec<String>>,
     pub session_policy: Option<String>,
     pub duration_seconds: i32,
     pub enabled: bool,
-    pub require_instance_properties: bool,
+    /// `None` while nothing has set the member — "unused, saved for future use"
+    /// (`ProfileDetail$requireInstanceProperties` doc), so this service defaults it to no
+    /// value at all rather than to a flag the caller never chose.
+    pub require_instance_properties: Option<bool>,
     pub accept_role_session_name: bool,
     pub created_by: String,
     pub created_at: SystemTime,
     pub updated_at: SystemTime,
     /// Certificate-field mappings applied to the authenticating end-entity certificate:
     /// at most one entry per `certificateField`, holding every specifier mapped for that
-    /// field. A create starts it empty, and [`put_attribute_mapping`] /
-    /// [`delete_attribute_mapping`] are the only writers.
+    /// field. A create seeds [`default_attribute_mappings`], and
+    /// [`put_attribute_mapping`] / [`delete_attribute_mapping`] are the only other
+    /// writers.
     pub attribute_mappings: Vec<AttributeMapping>,
     pub tags: Vec<Tag>,
 }
 
 impl ProfileRecord {
     /// The `ProfileDetail` every profile operation returns.
+    ///
+    /// A member the request never set and this service does not default carries no value
+    /// on the record, and is left OFF the wire rather than rendered as an empty list or a
+    /// false flag: the response states what the profile holds, and "holds nothing" is not
+    /// "holds the empty value".
     pub fn to_detail(&self) -> ProfileDetail {
         ProfileDetail {
             profile_id: Some(self.profile_id.clone()),
             profile_arn: Some(self.profile_arn.clone()),
             name: Some(self.name.clone()),
-            require_instance_properties: Some(self.require_instance_properties),
+            require_instance_properties: self.require_instance_properties,
             enabled: Some(self.enabled),
             created_by: Some(self.created_by.clone()),
             session_policy: self.session_policy.clone(),
             role_arns: Some(self.role_arns.clone()),
-            managed_policy_arns: Some(self.managed_policy_arns.clone()),
+            managed_policy_arns: self.managed_policy_arns.clone(),
             created_at: Some(::aws_smithy_types::DateTime::from(self.created_at)),
             updated_at: Some(::aws_smithy_types::DateTime::from(self.updated_at)),
             duration_seconds: Some(self.duration_seconds),
@@ -690,6 +706,51 @@ pub fn reset_notification_settings(
             .unwrap_or(DEFAULT_NOTIFICATION_CHANNEL);
         put_notification_detail(held, default_notification_detail(&key.event, channel));
     }
+}
+
+/// The specifiers this service maps for each certificate field until a caller changes
+/// them: the whole field for the subject and the issuer, and one entry per name form for
+/// the subject-alternative name.
+///
+/// The model documents no defaults for the member ("A mapping applied to the
+/// authenticating end-entity certificate",
+/// `smithy_query(query="shape", shape="AttributeMapping")`), so this is the set the
+/// service is RECORDED seeding a new profile with rather than a modelled constant — the
+/// same construct [`DEFAULT_NOTIFICATION_THRESHOLD_DAYS`] is for a trust anchor's
+/// notification settings. The fields are listed in the order a response carries them, one
+/// entry per value of the modelled `CertificateField` enum
+/// (`smithy_query(query="shape", shape="CertificateField")`:
+/// `["x509Subject", "x509Issuer", "x509SAN"]`).
+const DEFAULT_ATTRIBUTE_MAPPINGS: [(&str, &[&str]); 3] = [
+    ("x509Issuer", &["*"]),
+    ("x509SAN", &["DNS", "URI", "Name/*"]),
+    ("x509Subject", &["*"]),
+];
+
+/// The attribute mappings a profile holds before any caller writes one: the service
+/// default for every value of the modelled `CertificateField` enum
+/// ([`DEFAULT_ATTRIBUTE_MAPPINGS`]).
+///
+/// A create seeds them onto the record, so the mappings are state the profile HOLDS:
+/// every read reports them, `PutAttributeMapping` composes on top of them and
+/// `DeleteAttributeMapping` can unmap them, exactly as it can a specifier a caller put.
+/// A profile is therefore never without a mapping for its certificate fields unless a
+/// caller removed one.
+pub fn default_attribute_mappings() -> Vec<AttributeMapping> {
+    DEFAULT_ATTRIBUTE_MAPPINGS
+        .iter()
+        .map(|(certificate_field, specifiers)| AttributeMapping {
+            certificate_field: Some((*certificate_field).to_string()),
+            mapping_rules: Some(
+                specifiers
+                    .iter()
+                    .map(|specifier| MappingRule {
+                        specifier: (*specifier).to_string(),
+                    })
+                    .collect(),
+            ),
+        })
+        .collect()
 }
 
 /// Whether one `AttributeMapping` is the one held for `certificate_field`.

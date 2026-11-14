@@ -377,24 +377,24 @@ async fn created_profile_round_trips_through_get_profile() {
     // (`smithy_query(query="operation", operation="CreateProfile")`); an absent value
     // defaults to 3600 (`ProfileDetail$durationSeconds` doc).
     let cases: Vec<(&str, Value, i64, bool)> = vec![
-        ("minimal-default-duration", minimal_profile("demo-profile"), 3600, true),
+        ("minimal-default-duration", minimal_profile("demo-profile"), 3600, false),
         (
             "explicit-minimum-duration",
             json!({"name": "min duration", "roleArns": [role("A")], "durationSeconds": 900}),
             900,
-            true,
+            false,
         ),
         (
             "explicit-maximum-duration",
             json!({"name": "max duration", "roleArns": [role("B")], "durationSeconds": 43200}),
             43200,
-            true,
+            false,
         ),
         (
             "no-role-arns",
             json!({"name": "no roles", "roleArns": []}),
             3600,
-            true,
+            false,
         ),
         (
             "many-role-arns-disabled",
@@ -427,8 +427,8 @@ async fn created_profile_round_trips_through_get_profile() {
             true,
         ),
         // `ResourceName` is `@length(1, 255)`: both published bounds.
-        ("shortest-name", minimal_profile("p"), 3600, true),
-        ("longest-name", minimal_profile(&"p".repeat(255)), 3600, true),
+        ("shortest-name", minimal_profile("p"), 3600, false),
+        ("longest-name", minimal_profile(&"p".repeat(255)), 3600, false),
     ];
 
     let client = Client::new();
@@ -474,21 +474,21 @@ async fn created_profile_round_trips_through_get_profile() {
             Some(expected_enabled),
             "case {case:?}: expected enabled {expected_enabled}, got {profile:?}"
         );
+        // The suite signs with a key no store holds a record for, which is the account's
+        // own principal — asked of the service that owns the identity question rather than
+        // spelled here.
+        let creator = service_com_amazonaws_sts_awssecuritytokenservicev20110615::state::ambient_identity().arn;
         assert_eq!(
             profile.get("createdBy").and_then(Value::as_str),
-            Some(ACCOUNT),
-            "case {case:?}: createdBy is the account that created the profile, got {profile:?}"
+            Some(creator.as_str()),
+            "case {case:?}: createdBy is the ARN of the principal that created the profile, \
+             got {profile:?}"
         );
         assert_eq!(
-            profile.get("managedPolicyArns").and_then(Value::as_array),
-            Some(
-                &body
-                    .get("managedPolicyArns")
-                    .and_then(Value::as_array)
-                    .cloned()
-                    .unwrap_or_default()
-            ),
-            "case {case:?}: managedPolicyArns must survive the round trip, got {profile:?}"
+            profile.get("managedPolicyArns"),
+            body.get("managedPolicyArns"),
+            "case {case:?}: managedPolicyArns must survive the round trip, and stay off the \
+             response when the request set none, got {profile:?}"
         );
         assert_eq!(
             profile.get("sessionPolicy"),

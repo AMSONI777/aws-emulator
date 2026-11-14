@@ -356,7 +356,7 @@ impl<Eng: Send + Sync + 'static> NativeCreateSession<Eng> {
                 // it vends may do, exactly as the policies passed to an assume do.
                 policies: sts::SessionPolicies {
                     inline: profile.session_policy.clone(),
-                    managed_arns: profile.managed_policy_arns.clone(),
+                    managed_arns: profile.managed_policy_arns.clone().unwrap_or_default(),
                     ..sts::SessionPolicies::default()
                 },
                 ..sts::NewSession::new(

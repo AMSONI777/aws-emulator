@@ -535,10 +535,10 @@ async fn update_profile_composes_in_place_across_a_sequence_of_writes() {
 async fn update_profile_leaves_the_members_it_does_not_model_alone() {
     let cases: [(&str, Value, bool, bool); 4] = [
         (
-            "created-enabled-by-default",
+            "created-with-enabled-omitted",
             json!({"name": "default enablement", "roleArns": [role_arn("Default")]}),
             false,
-            true,
+            false,
         ),
         (
             "created-explicitly-enabled",
