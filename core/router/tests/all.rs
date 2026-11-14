@@ -1984,11 +1984,6 @@ mod cloudformation_metric_stream_estate_is_drainable;
 mod redshift_health_alarms_evaluate;
 // (`cloudwatch_alarm_ssm_ops_item_action` is declared in the head region above: a module may
 // be declared only once.)
-// stack-deployed metric-stream pipeline exports before and after an update rewrites its filter
-// spans CloudFormation, IAM, CloudWatch, Firehose and Amazon S3 at once, so no single service
-// crate's test target can deploy the pipeline and then read the objects it delivered.
-#[path = "all/cloudformation_metric_stream_filter_update.rs"]
-mod cloudformation_metric_stream_filter_update;
 // (`zz_probe` is declared once, further up this tail: it was appended here as well while two
 // (The metric-stream filter-update suite is declared ONCE, in the head region above: it was
 // appended here as well while two branches were landing at once.)
@@ -2001,20 +1996,12 @@ mod cloudformation_metric_stream_filter_update;
 // (`cloudwatch_alarm_ssm_ops_item_action` is declared once, in the head region above: a
 // module may be declared only once.)
 // (`zz_probe` is declared ONCE, further up this tail: a module may be declared only once.)
-// (`cloudwatch_alarm_ssm_ops_item_action` is declared once, in the head region above: a
-// module may be declared only once.)
 // (`cloudformation_metric_stream_filter_update` is declared ONCE, in the head region above
 // beside the other `cloudformation_…` suites: it was appended here as well while two
-// branches were landing at once, which declared it a second time and compiled neither.)
 // (`cloudformation_metric_stream_filter_update` is declared once, in the head region above:
-// (`cloudwatch_alarm_ssm_ops_item_action` is declared in the head region above: a module may
-// be declared only once.)
 // (`cloudformation_metric_stream_filter_update` is declared ONCE, in the sorted span at the
 // head of this file: a second declaration here compiled neither.)
-// (`zz_probe` is declared ONCE, further up this tail: it was appended here as well while two
-// (`zz_probe` is declared ONCE, further up this tail: a module may be declared only once.)
 // (`zz_probe` is declared once, further up this tail: a module may be declared only once.)
-// (`zz_probe` is declared once further up this tail: a module may be declared only once.)
 // (`cloudwatch_alarm_ssm_ops_item_action` is declared in the head region above: a module may be
 // declared only once.)
 // (`cloudwatch_alarm_ssm_ops_item_action` and the suites beside it
@@ -2033,9 +2020,6 @@ mod cloudformation_metric_stream_filter_update;
 // only once.)
 // (`zz_probe` is declared further up this tail already: two branches landing in the same
 // window each appended it, and a module may be declared only once.)
-// (`zz_probe` is declared once, further up this tail: a module may be declared only once.)
-// (`cloudformation_metric_stream_filter_update` is declared ONCE, in the head region above
-// beside the other `cloudformation_…` suites: it was appended here as well while two
 // (`cloudformation_metric_stream_filter_update` is declared ONCE, in the sorted head above:
 // two branches landing in the same window appended a second declaration of it here, which is a
 // redefinition that compiled neither, so the duplicate is removed and the first stands.)
@@ -2491,12 +2475,6 @@ mod cloudfront_edge_4xx_share_decides_the_alarm;
 // (`sdb_legacy_query_api_on_the_assembled_router` and `codebuild_s3_build_output` are
 // declared ONCE each, further up this tail: a module may be declared only once.)
 // `cloudformation_domain_endpoint_is_dialled_by_consumers` are declared ONCE each, further
-// Declared here, in this appended tail: whether a SESv2 send's email events reach the Lambda
-// target of a rule on the bus its event destination names spans SESv2, EventBridge, Lambda,
-// CloudFormation, IAM and Amazon SQS, so no single service crate's test target can wire it.
-#[path = "all/ses_event_destination_reaches_an_eventbridge_rule_target.rs"]
-mod ses_event_destination_reaches_an_eventbridge_rule_target;
-// (`apigateway_cognito_authorizer_app_client_audience` and
 // `cloudformation_metric_stream_estate_is_drainable` are declared in the head region above and
 // in this tail respectively: a module may be declared only once, and the pair was appended
 // here as well while two branches were landing at once, which compiled neither.)
@@ -2617,11 +2595,6 @@ mod cloudformation_kms_encrypted_sns_sqs_pipeline;
 // (`lambda_signed_write_to_an_aoss_collection_endpoint` is declared once, further up this
 // tail: a module may be declared only once, and two landings each appended a copy here.)
 // (`cloudformation_domain_endpoint_is_dialled_by_consumers` is declared ONCE, further up this
-// flat-rate CloudFront subscription may be sold over a distribution is decided by the web ACL
-// association CloudFront holds and by a web ACL only WAFv2 mints, so no single service crate's
-// test target can set the association and then ask Pricing Plan Manager for the subscription.
-#[path = "all/pricing_plan_subscription_resource_eligibility.rs"]
-mod pricing_plan_subscription_resource_eligibility;
 #[path = "all/sfn_relayed_dynamodb_request_id.rs"]
 mod sfn_relayed_dynamodb_request_id;
 // (`cloudtrail_read_only_api_calls` is declared ONCE, in the SORTED block beside the other
@@ -2922,3 +2895,20 @@ mod s3_object_read_identity_or_bucket_policy;
 // `cloudformation_domain_endpoint_is_dialled_by_consumers` is declared ONCE, in the span
 // above, for the reason the entry there records.
 // (`zz_probe` is declared ONCE, further up this tail, for the reason recorded there: two
+// suite's rule — what becomes of the record a client puts on the stream a stack deployed,
+// which only lands in a bucket if CloudFormation, IAM, Firehose and Amazon S3 all agree.
+#[path = "all/cloudformation_firehose_stream_direct_put_delivers.rs"]
+mod cloudformation_firehose_stream_direct_put_delivers;
+// (`cloudformation_provisions_cloudfront_resources` is declared in the head region above:
+// (`cloudtrail_read_only_api_calls` is declared in the SORTED block beside the other
+// CloudTrail suites above, and `zz_probe` further up this tail: a module may be declared
+// a module may be declared only once, and two landings at once each declared it.)
+// (`codebuild_s3_build_output` and `cloudformation_domain_endpoint_is_dialled_by_consumers`
+// are declared once each, in the span above: a module may be declared only once, and two
+// landings at once each appended their own copy here.)
+// (`ses_event_destination_reaches_an_eventbridge_rule_target` is declared once, further up
+// this tail: a module may be declared only once, and two branches landing at once each
+// appended a copy of it here.)
+// (`cloudformation_provisions_cloudfront_resources` is declared ONCE, further up this tail: a
+// module may be declared only once, and two branches landing in the same window each appended
+// their own copy here.)
