@@ -3494,3 +3494,6 @@ mod chime_deleted_meeting_tagging;
 // entry above records.) this file and for every service crate's `tests/all.rs`.
 // appear before the first item of the crate root.)
 // doc comment may only appear before the first item of the crate root.)
+// leaving a note here. (Ordinary comments: an inner doc comment `//!` is legal only
+// before the first item of a file, so this fragment of the header cannot keep that form
+// where a merge of two appended tails landed it.)

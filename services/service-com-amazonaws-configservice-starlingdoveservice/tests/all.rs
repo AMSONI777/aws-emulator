@@ -234,3 +234,5 @@ mod scratch_resume;
 mod discovered_resource_item_identity;
 #[path = "all/withdrawn_managed_rule.rs"]
 mod withdrawn_managed_rule;
+#[path = "all/recorded_relationship_graph_matches_its_counter.rs"]
+mod recorded_relationship_graph_matches_its_counter;
