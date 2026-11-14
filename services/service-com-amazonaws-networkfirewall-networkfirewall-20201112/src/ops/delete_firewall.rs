@@ -1,7 +1,9 @@
 // SPDX-License-Identifier: CC0-1.0
 
 //! @op DeleteFirewall
-//! IMPLEMENTED: removes the stored `FirewallRecord` so later reads miss it, releases
+//! IMPLEMENTED: removes the stored `FirewallRecord` so later reads miss it, deletes the
+//! firewall endpoints it carried in Amazon EC2 (`crate::state::firewall_endpoints`),
+//! releases
 //! its firewall policy association, and refuses a delete-protected firewall.
 //!
 //! ## Shape of an operation
@@ -173,7 +175,30 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         input: Self::Input,
         ctx: &smithy_server_runtime::OperationContext<'_>,
     ) -> Result<Self::Output, Self::Error> {
-        let _ = ctx;
+        // A deleted firewall takes its firewall endpoints with it, and those are Gateway
+        // Load Balancer VPC endpoints Amazon EC2 holds
+        // (`crate::state::firewall_endpoints`): they are deleted THERE once this service no
+        // longer holds the record, so no route can reach an endpoint of a firewall that is
+        // gone. The Region is the one the request is signed for, as every other firewall
+        // call reads it.
+        let region = crate::state::request_region(ctx);
+        let (deleted, removed) = self.remove_firewall(&input)?;
+        crate::state::firewall_endpoints::remove(ctx, &region, removed).await;
+        Ok(deleted)
+    }
+}
+
+impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> DeleteFirewall<Eng> {
+    /// Remove the firewall the request names, and answer the response alongside the firewall
+    /// endpoints Amazon EC2 is to delete.
+    ///
+    /// Split out of `handle` because this is the part that holds the store guard, and it is
+    /// SYNCHRONOUS: the hop that deletes those endpoints runs after it with no guard held.
+    #[allow(clippy::type_complexity)]
+    fn remove_firewall(
+        &self,
+        input: &DeleteFirewallInput,
+    ) -> Result<(DeleteFirewallOutput, Vec<String>), DeleteFirewallError> {
         let Some(state) = crate::state::service_state(&*self.engine) else {
             return Err(
                 DeleteFirewallErrorModeled::InternalServerError(InternalServerError {
@@ -234,6 +259,9 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         // The record is gone from state; the response reports the terminal status
         // of the firewall this call just removed.
         record.status = crate::state::FIREWALL_DELETING.to_string();
+        // Read before the attachments are re-stamped: the endpoints Amazon EC2 holds for
+        // this firewall are the ones it is asked to delete once the record is gone.
+        let removable = record.instantiated_endpoints();
         for sync_state in record.sync_states.values_mut() {
             sync_state.attachment_status = crate::state::ATTACHMENT_DELETING.to_string();
         }
@@ -242,10 +270,13 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         // empty when it carries no tags (see `state::projected_resource_tags`).
         record.tags = crate::state::projected_resource_tags(record.tags.take());
 
-        Ok(DeleteFirewallOutput {
-            firewall: Some(record.to_firewall()),
-            firewall_status: Some(record.to_firewall_status()),
-        })
+        Ok((
+            DeleteFirewallOutput {
+                firewall: Some(record.to_firewall()),
+                firewall_status: Some(record.to_firewall_status()),
+            },
+            removable,
+        ))
     }
 }
 

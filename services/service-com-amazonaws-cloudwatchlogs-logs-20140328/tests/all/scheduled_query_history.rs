@@ -910,3 +910,54 @@ async fn a_read_of_the_history_refuses_what_it_cannot_answer() {
         );
     }
 }
+
+/// RULE: the lookback a scheduled query that states no `startTimeOffset` reads back over is
+/// its schedule's OWN PERIOD — the gap between two instants the schedule names — so a run
+/// reads the same window whatever time of day it was triggered at.
+///
+/// Asserted on `state::Schedule` directly, because the quantity is the same for every trigger
+/// instant and a wire case can only observe the one instant the clock happens to be at. The
+/// table spans both forms of `scheduleExpression` (a rate and a cron), the periods a cron can
+/// name (daily, hourly) and, for each, trigger instants on either side of the time of day the
+/// expression names — the one the gap to the NEXT instant varies over.
+#[test]
+fn a_schedules_default_lookback_is_its_own_period() {
+    /// The epoch milliseconds of an RFC 3339 instant, which is how each row names the instant
+    /// a run was triggered at.
+    fn at(instant: &str) -> i64 {
+        ::chrono::DateTime::parse_from_rfc3339(instant)
+            .unwrap_or_else(|error| panic!("{instant} is an instant: {error}"))
+            .timestamp_millis()
+    }
+
+    let day_ms = 24 * 60 * 60 * 1_000;
+    let rows: [(&str, &str, i64); 7] = [
+        // A rate schedule names instants at its own interval, whenever it is asked.
+        ("rate(5 minutes)", "2026-01-15T02:10:00Z", 5 * 60 * 1_000),
+        ("rate(5 minutes)", "2026-01-15T03:10:00Z", 5 * 60 * 1_000),
+        ("rate(1 day)", "2026-01-15T02:10:00Z", day_ms),
+        // A daily cron: an hour before the time of day it names, an hour after it, and a
+        // minute before midnight — the gap to its next instant is 50 minutes, 23h50m and
+        // 3h1m, and its PERIOD is a day in each case.
+        ("cron(0 3 * * ? *)", "2026-01-15T02:10:00Z", day_ms),
+        ("cron(0 3 * * ? *)", "2026-01-15T03:10:00Z", day_ms),
+        ("cron(0 3 * * ? *)", "2026-01-15T23:59:00Z", day_ms),
+        // An hourly cron, whose period is an hour rather than the 50 minutes left until its
+        // next instant.
+        ("cron(0 * * * ? *)", "2026-01-15T02:10:00Z", 60 * 60 * 1_000),
+    ];
+
+    for (expression, instant, expected) in rows {
+        let schedule = service_com_amazonaws_cloudwatchlogs_logs_20140328::state::schedule_of(
+            expression,
+        )
+        .unwrap_or_else(|| panic!("case {expression:?}: the expression names a schedule"));
+        let interval = schedule.interval_after(at(instant), None);
+        assert_eq!(
+            interval,
+            Some(expected),
+            "case {expression:?} triggered at {instant}: expected a lookback of {expected} ms, \
+             got {interval:?}"
+        );
+    }
+}

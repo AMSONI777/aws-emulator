@@ -2,7 +2,8 @@
 
 //! @op DisassociateSubnets
 //! IMPLEMENTED: removes the named subnets from the stored `FirewallRecord`'s
-//! `SubnetMappings`, dropping the firewall endpoint each one carried — the inverse
+//! `SubnetMappings`, dropping the firewall endpoint each one carried — deleting it in
+//! Amazon EC2 (`crate::state::firewall_endpoints`), the inverse
 //! of `AssociateSubnets` over the same mapping set — and re-mints the firewall's
 //! `UpdateToken` when the mapping set changed, so a following `DescribeFirewall`
 //! reports the remainder. A stale `UpdateToken` is refused with
@@ -186,9 +187,30 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         input: Self::Input,
         ctx: &smithy_server_runtime::OperationContext<'_>,
     ) -> Result<Self::Output, Self::Error> {
-        // This call removes endpoints rather than creating any, so it names no
-        // Availability Zone and needs nothing from the request's metadata.
-        let _ = ctx;
+        // "This removes the firewall endpoints from the subnets" (`DisassociateSubnets`),
+        // and a firewall endpoint is a Gateway Load Balancer VPC endpoint Amazon EC2 holds
+        // (`crate::state::firewall_endpoints`): the endpoints the attachments this call
+        // removes were carrying are deleted THERE once the record no longer holds them, so
+        // nothing is left in the caller's VPC for a route to reach. The Region is the one
+        // the request is signed for, exactly as the association names it.
+        let region = crate::state::request_region(ctx);
+        let (detached, removed) = self.detach(&input)?;
+        crate::state::firewall_endpoints::remove(ctx, &region, removed).await;
+        Ok(detached)
+    }
+}
+
+impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> DisassociateSubnets<Eng> {
+    /// Remove the named subnets from the firewall, and answer the response alongside the
+    /// firewall endpoints Amazon EC2 is to delete.
+    ///
+    /// Split out of `handle` because this is the part that holds the store guard, and it is
+    /// SYNCHRONOUS: the hop that deletes those endpoints runs after it with no guard held.
+    #[allow(clippy::type_complexity)]
+    fn detach(
+        &self,
+        input: &DisassociateSubnetsInput,
+    ) -> Result<(DisassociateSubnetsOutput, Vec<String>), DisassociateSubnetsError> {
         let Some(state) = crate::state::service_state(&*self.engine) else {
             return Err(
                 DisassociateSubnetsErrorModeled::InternalServerError(InternalServerError {
@@ -236,9 +258,17 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
             .into());
         }
 
+        // Read while the attachments are still there: what the disassociation below takes
+        // out of the record is what Amazon EC2 is then asked to delete.
+        let removable = record.instantiated_endpoints_in(&input.subnet_ids);
         let detached = record
             .disassociate_subnets(&input.subnet_ids)
-            .map_err(|breach| disassociate_breach_error(breach, Self::NAME))?;
+            .map_err(|breach| {
+                disassociate_breach_error(
+                    breach,
+                    <Self as smithy_server_runtime::Operation>::NAME,
+                )
+            })?;
         // The token "marks the state of the firewall resource at the time of the
         // request", so it is re-minted exactly when this call moved that state: a
         // request naming only subnets the firewall does not carry disassociated
@@ -247,12 +277,13 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
             record.update_token = crate::state::new_uuid();
         }
 
-        Ok(DisassociateSubnetsOutput {
+        let output = DisassociateSubnetsOutput {
             firewall_arn: Some(record.firewall_arn.clone()),
             firewall_name: Some(record.firewall_name.clone()),
             subnet_mappings: Some(record.subnet_mappings.clone()),
             update_token: Some(record.update_token.clone()),
-        })
+        };
+        Ok((output, removable))
     }
 }
 

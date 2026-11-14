@@ -1,10 +1,11 @@
 // SPDX-License-Identifier: CC0-1.0
 
 //! @op CreateFirewall
-//! IMPLEMENTED for VPC-attached firewalls: stores a `FirewallRecord`, associates it
-//! with an existing firewall policy, and reports the firewall and its status from
-//! that record. Transit gateway-attached and proxy-mode firewalls are not
-//! implemented and still answer 501.
+//! IMPLEMENTED for VPC-attached firewalls: asks Amazon EC2 to instantiate the firewall
+//! endpoint of each subnet mapping (`crate::state::firewall_endpoints`), stores a
+//! `FirewallRecord` carrying the endpoints EC2 minted, associates it with an existing
+//! firewall policy, and reports the firewall and its status from that record. Transit
+//! gateway-attached and proxy-mode firewalls are not implemented and still answer 501.
 //!
 //! ## Shape of an operation
 //!
@@ -167,6 +168,9 @@
 #[allow(unused_imports)]
 use super::types::*;
 
+// The firewall endpoints this create instantiates in Amazon EC2 before it stores anything.
+use crate::state::firewall_endpoints as endpoints;
+
 // `#[operation_error]` below expands to an invocation of the LOCAL declarative
 // `smithy!` macro, which this line is what emits into the module. Without it the
 // expansion fails with `cannot find macro 'smithy' in this scope` and the
@@ -261,7 +265,11 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
             ));
         }
 
-        let (Some(vpc_id), Some(subnet_mappings)) = (input.vpc_id, input.subnet_mappings) else {
+        // Read out of the request rather than moved out of it, so the rest of `input`
+        // travels whole into the store step below.
+        let mut input = input;
+        let (Some(vpc_id), Some(subnet_mappings)) = (input.vpc_id.take(), input.subnet_mappings.take())
+        else {
             return Err(CreateFirewallErrorModeled::InvalidRequestException(
                 InvalidRequestException {
                     message: Some(
@@ -310,7 +318,59 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         }
 
         let region = crate::state::request_region(ctx);
-        let Some(state) = crate::state::service_state(&*self.engine) else {
+        // "In each configured subnet, Network Firewall instantiates a firewall endpoint to
+        // handle network traffic" (`Attachment`), and that endpoint is a Gateway Load
+        // Balancer VPC endpoint in the caller's VPC — Amazon EC2's resource. So it is
+        // created THERE first, and the attachments stored below report the ids EC2 minted:
+        // an endpoint a route table can name as its target, rather than an id nothing holds
+        // (see `crate::state::firewall_endpoints`).
+        let endpoint_service_id = endpoints::new_endpoint_service_id();
+        let service_name = endpoints::endpoint_service_name(&region, &endpoint_service_id);
+        let subnet_ids: Vec<String> = subnet_mappings
+            .iter()
+            .map(|mapping| mapping.subnet_id.clone())
+            .collect();
+        let mut instantiated =
+            endpoints::instantiate_all(ctx, &region, &vpc_id, &service_name, &subnet_ids).await;
+
+        let stored = Self::store(
+            &*self.engine,
+            &region,
+            endpoint_service_id,
+            vpc_id,
+            subnet_mappings,
+            input,
+            &mut instantiated,
+        );
+        // Whatever the store answered, an endpoint no attachment took is one nothing uses:
+        // it is deleted again rather than left behind in EC2.
+        endpoints::remove(ctx, &region, instantiated.into_values().collect()).await;
+        stored
+    }
+}
+
+impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> CreateFirewall<Eng> {
+    /// Store the firewall the request describes, and project the response from the record it
+    /// stored.
+    ///
+    /// Split out of `handle` because this is the part that holds the store guard, and it is
+    /// SYNCHRONOUS: the hop that instantiates this firewall's endpoints in Amazon EC2 runs
+    /// before it with no guard held, so the endpoints the attachments report are already
+    /// created when the record is written.
+    ///
+    /// `input` carries every member but `VpcId` and `SubnetMappings`, which `handle` has
+    /// already read out of it; `instantiated` holds the firewall endpoint Amazon EC2 created
+    /// for each subnet, keyed by that subnet, and each attachment takes its own out of it.
+    fn store(
+        engine: &Eng,
+        region: &str,
+        endpoint_service_id: String,
+        vpc_id: String,
+        subnet_mappings: Vec<SubnetMapping>,
+        input: CreateFirewallInput,
+        instantiated: &mut ::std::collections::HashMap<String, String>,
+    ) -> Result<CreateFirewallOutput, CreateFirewallError> {
+        let Some(state) = crate::state::service_state(engine) else {
             return Err(
                 CreateFirewallErrorModeled::InternalServerError(InternalServerError {
                     message: Some("the firewall store is unavailable".to_string()),
@@ -380,12 +440,11 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
             .enumerate()
             .map(|(index, mapping)| {
                 (
-                    crate::state::availability_zone_of(&region, index),
-                    crate::state::SyncStateRecord {
-                        subnet_id: mapping.subnet_id.clone(),
-                        endpoint_id: crate::state::new_endpoint_id(),
-                        attachment_status: crate::state::ATTACHMENT_CREATING.to_string(),
-                    },
+                    crate::state::availability_zone_of(region, index),
+                    crate::state::new_sync_state(
+                        &mapping.subnet_id,
+                        instantiated.remove(&mapping.subnet_id),
+                    ),
                 )
             })
             .collect();
@@ -395,11 +454,12 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         // mean, and what the SDKs send — so an omitted flag is stored as false and
         // the response reports what was stored.
         let record = crate::state::FirewallRecord {
-            firewall_arn: crate::state::firewall_arn(&region, &input.firewall_name),
+            firewall_arn: crate::state::firewall_arn(region, &input.firewall_name),
             firewall_name: input.firewall_name,
             firewall_id: crate::state::new_uuid(),
             firewall_policy_arn: input.firewall_policy_arn,
             vpc_id,
+            endpoint_service_id,
             subnet_mappings,
             delete_protection: input.delete_protection,
             subnet_change_protection: input.subnet_change_protection,

@@ -15,6 +15,8 @@
 mod error_messages;
 #[path = "all/firewall_delete_protection_updates.rs"]
 mod firewall_delete_protection_updates;
+#[path = "all/firewall_endpoint_routing.rs"]
+mod firewall_endpoint_routing;
 #[path = "all/firewall_lifecycle.rs"]
 mod firewall_lifecycle;
 #[path = "all/firewall_policy_associations.rs"]

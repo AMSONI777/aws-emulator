@@ -38,6 +38,11 @@ hex = { workspace = true }
 # a question only the service owning the bucket can answer
 # (`state::log_destinations`).
 aws-sdk-s3 = { version = "1", default-features = false }
+# The Amazon EC2 client a firewall's endpoints are instantiated and deleted through, over
+# the emulator's in-process callback: the firewall endpoint an attachment reports is a
+# Gateway Load Balancer VPC endpoint, which is EC2's resource and the only thing a route
+# can name as its `VpcEndpointId` target (`state::firewall_endpoints`).
+aws-sdk-ec2 = { version = "1", default-features = false }
 
 [build-dependencies]
 emulator-core-build-support = { workspace = true }
@@ -55,6 +60,11 @@ service-com-amazonaws-s3-amazons3 = { workspace = true }
 # The AWS SDK for Amazon S3, which that suite drives the bucket and its policy
 # through — the same client the handler resolves a destination with.
 aws-sdk-s3 = { version = "1", default-features = false }
+# The firewall-endpoint suite mounts Amazon EC2 beside Network Firewall on one engine,
+# because a firewall endpoint is ITS resource: the suite creates the VPC, the subnets and
+# the route table there, and reads the endpoints back through `DescribeVpcEndpoints`.
+# A workspace member this repository already locks.
+service-com-amazonaws-ec2-amazonec2 = { workspace = true }
 
 [lints]
 workspace = true

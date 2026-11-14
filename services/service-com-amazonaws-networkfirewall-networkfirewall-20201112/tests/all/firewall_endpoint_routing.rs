@@ -1,0 +1,644 @@
+// SPDX-License-Identifier: CC0-1.0
+
+//! End-to-end tests for the firewall endpoint a firewall instantiates in each of its
+//! subnets, and for routing traffic through it.
+//!
+//! RULE under test: the firewall endpoint an attachment reports
+//! (`FirewallStatus.SyncStates.<az>.Attachment.EndpointId`) is a Gateway Load Balancer VPC
+//! endpoint that Amazon EC2 HOLDS, created in the firewall's VPC and in that attachment's
+//! subnet — so EC2's own `DescribeVpcEndpoints` reports it and a route table of that VPC can
+//! name it as its `VpcEndpointId` target — and it exists exactly as long as the attachment
+//! carrying it does.
+//!
+//! Every test mounts Amazon EC2 beside Network Firewall on one engine, because the VPC, the
+//! subnets, the route table and the endpoint itself are all ITS resources: the networks are
+//! created through EC2's own API and the ids asserted on are the ids EC2 minted. Network
+//! Firewall is driven the way a client drives it, over the wire through the same router the
+//! emulator boots.
+//!
+//! The tests are tables: each row is one input in the class the rule covers, and every
+//! assertion names its row and the actual value.
+
+use std::collections::BTreeSet;
+use std::time::{Duration, Instant};
+
+use serde_json::{json, Value};
+
+use crate::harness::{string_at, Harness};
+
+/// The `VpcEndpointType` a firewall endpoint is reported with
+/// (`smithy_query(query="shape",shape="VpcEndpointType")` on the EC2 model: one of `Gateway`,
+/// `GatewayLoadBalancer`, `Interface`, `Resource`, `ServiceNetwork`, `Tunnel`).
+const GATEWAY_LOAD_BALANCER: &str = "GatewayLoadBalancer";
+
+/// How long a test waits for a CONDITION the clock owes before giving up. Far above the
+/// firewall's own provisioning span, because what each wait below loops on is the state the
+/// emulator reports, never an elapsed time.
+const CONDITION_DEADLINE: Duration = Duration::from_secs(60);
+
+/// How long a poll waits before looking again.
+const POLL_INTERVAL: Duration = Duration::from_millis(20);
+
+/// One VPC with one subnet per entry of `subnet_cidrs` and one route table, created through
+/// Amazon EC2's own API; every id is the one EC2 MINTED.
+struct Network {
+    vpc_id: String,
+    subnet_ids: Vec<String>,
+    route_table_id: String,
+}
+
+/// Create [`Network`] in `ec2`: the VPC `vpc_cidr`, a subnet per entry of `subnet_cidrs`, and
+/// one route table for the VPC.
+async fn create_network(
+    ec2: &::aws_sdk_ec2::Client,
+    case: &str,
+    vpc_cidr: &str,
+    subnet_cidrs: &[&str],
+) -> Network {
+    let created = ec2
+        .create_vpc()
+        .cidr_block(vpc_cidr)
+        .send()
+        .await
+        .unwrap_or_else(|error| panic!("case {case:?}: EC2 must create {vpc_cidr}: {error:?}"));
+    let vpc_id = created
+        .vpc()
+        .and_then(::aws_sdk_ec2::types::Vpc::vpc_id)
+        .unwrap_or_else(|| panic!("case {case:?}: CreateVpc must report the VPC it minted"))
+        .to_string();
+
+    let mut subnet_ids = Vec::with_capacity(subnet_cidrs.len());
+    for cidr in subnet_cidrs {
+        let created = ec2
+            .create_subnet()
+            .vpc_id(&vpc_id)
+            .cidr_block(*cidr)
+            .send()
+            .await
+            .unwrap_or_else(|error| {
+                panic!("case {case:?}: EC2 must create the subnet {cidr}: {error:?}")
+            });
+        subnet_ids.push(
+            created
+                .subnet()
+                .and_then(::aws_sdk_ec2::types::Subnet::subnet_id)
+                .unwrap_or_else(|| {
+                    panic!("case {case:?}: CreateSubnet must report the subnet it minted")
+                })
+                .to_string(),
+        );
+    }
+
+    let created = ec2
+        .create_route_table()
+        .vpc_id(&vpc_id)
+        .send()
+        .await
+        .unwrap_or_else(|error| {
+            panic!("case {case:?}: EC2 must create a route table in {vpc_id}: {error:?}")
+        });
+    let route_table_id = created
+        .route_table()
+        .and_then(::aws_sdk_ec2::types::RouteTable::route_table_id)
+        .unwrap_or_else(|| {
+            panic!("case {case:?}: CreateRouteTable must report the table it minted")
+        })
+        .to_string();
+
+    Network {
+        vpc_id,
+        subnet_ids,
+        route_table_id,
+    }
+}
+
+/// Create a firewall named `name` on `subnet_ids` of `vpc_id`, through a policy created for
+/// it, and answer the raw `CreateFirewall` response (status and body).
+async fn create_firewall(
+    harness: &Harness,
+    name: &str,
+    vpc_id: &str,
+    subnet_ids: &[String],
+) -> (u16, Value) {
+    let policy_arn = harness.shared_policy(&format!("{name}-policy")).await;
+    let mappings: Vec<Value> = subnet_ids
+        .iter()
+        .map(|subnet_id| json!({ "SubnetId": subnet_id }))
+        .collect();
+    harness
+        .call(
+            "CreateFirewall",
+            &json!({
+                "FirewallName": name,
+                "FirewallPolicyArn": policy_arn,
+                "VpcId": vpc_id,
+                "SubnetMappings": mappings,
+            }),
+        )
+        .await
+}
+
+/// Poll `DescribeFirewall` until the firewall reports `READY`, and answer that response.
+///
+/// Waits for the CONDITION rather than for a duration: the clock owes the firewall its
+/// `PROVISIONING` -> `READY` move, so a loaded host only makes this loop more times.
+async fn ready_firewall(harness: &Harness, case: &str, name: &str) -> Value {
+    let deadline = Instant::now() + CONDITION_DEADLINE;
+    loop {
+        let described = harness
+            .ok("DescribeFirewall", &json!({ "FirewallName": name }))
+            .await;
+        if described["FirewallStatus"]["Status"] == json!("READY") {
+            return described;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "case {case:?}: expected the firewall {name} to reach READY, last saw {described:?}"
+        );
+        tokio::time::sleep(POLL_INTERVAL).await;
+    }
+}
+
+/// The endpoint id each attachment of a `DescribeFirewall` response reports, keyed by the
+/// subnet that attachment is in.
+fn attachments(described: &Value) -> Vec<(String, String)> {
+    described["FirewallStatus"]["SyncStates"]
+        .as_object()
+        .unwrap_or_else(|| panic!("expected SyncStates in {described:?}"))
+        .values()
+        .map(|sync_state| {
+            (
+                string_at(sync_state, &["Attachment", "SubnetId"]).to_string(),
+                string_at(sync_state, &["Attachment", "EndpointId"]).to_string(),
+            )
+        })
+        .collect()
+}
+
+/// The VPC endpoints Amazon EC2 holds in `vpc_id`, as `(endpoint id, type, subnet ids)`.
+async fn endpoints_in_vpc(
+    ec2: &::aws_sdk_ec2::Client,
+    case: &str,
+    vpc_id: &str,
+) -> Vec<(String, String, Vec<String>)> {
+    let by_vpc = ::aws_sdk_ec2::types::Filter::builder()
+        .name("vpc-id")
+        .values(vpc_id.to_string())
+        .build();
+    let described = ec2
+        .describe_vpc_endpoints()
+        .filters(by_vpc)
+        .send()
+        .await
+        .unwrap_or_else(|error| {
+            panic!("case {case:?}: EC2 must report the endpoints of {vpc_id}: {error:?}")
+        });
+    described
+        .vpc_endpoints()
+        .iter()
+        .map(|endpoint| {
+            (
+                endpoint.vpc_endpoint_id().unwrap_or_default().to_string(),
+                endpoint.vpc_endpoint_type().map_or_else(
+                    || "<no type>".to_string(),
+                    |endpoint_type| endpoint_type.as_str().to_string(),
+                ),
+                endpoint.subnet_ids().to_vec(),
+            )
+        })
+        .collect()
+}
+
+/// The endpoint ids Amazon EC2 holds in `vpc_id`.
+async fn endpoint_ids_in_vpc(
+    ec2: &::aws_sdk_ec2::Client,
+    case: &str,
+    vpc_id: &str,
+) -> BTreeSet<String> {
+    endpoints_in_vpc(ec2, case, vpc_id)
+        .await
+        .into_iter()
+        .map(|(endpoint_id, _, _)| endpoint_id)
+        .collect()
+}
+
+/// The target `DescribeRouteTables` reports for the route to `destination` in the table
+/// `route_table_id`, or `None` when the table routes that destination nowhere.
+///
+/// An endpoint target is reported in `Route$GatewayId`, the modelled `Route` carrying no
+/// member of its own for a VPC endpoint.
+async fn route_target(
+    ec2: &::aws_sdk_ec2::Client,
+    case: &str,
+    route_table_id: &str,
+    destination: &str,
+) -> Option<String> {
+    let described = ec2
+        .describe_route_tables()
+        .route_table_ids(route_table_id)
+        .send()
+        .await
+        .unwrap_or_else(|error| {
+            panic!("case {case:?}: EC2 must report the table {route_table_id}: {error:?}")
+        });
+    described
+        .route_tables()
+        .iter()
+        .flat_map(::aws_sdk_ec2::types::RouteTable::routes)
+        .find(|route| route.destination_cidr_block() == Some(destination))
+        .and_then(|route| route.gateway_id().map(str::to_string))
+}
+
+/// RULE: every attachment of a READY firewall reports an endpoint Amazon EC2 holds — a
+/// `GatewayLoadBalancer` endpoint in the firewall's VPC and in that attachment's subnet — and
+/// a route table of that VPC accepts it as a `VpcEndpointId` target.
+///
+/// The table spans the number of subnets a firewall is placed in, which is what the endpoint
+/// count generalises over ("Network Firewall creates a firewall endpoint in each subnet",
+/// `CreateFirewallRequest$SubnetMappings`), each row in its own VPC with its own address
+/// ranges.
+#[tokio::test]
+async fn a_firewall_endpoint_is_an_ec2_endpoint_a_route_can_target() {
+    struct Case {
+        name: &'static str,
+        vpc_cidr: &'static str,
+        subnet_cidrs: &'static [&'static str],
+        /// One destination per endpoint, each more specific than the VPC's own range, as a
+        /// route steering workload traffic through a firewall endpoint is.
+        destinations: &'static [&'static str],
+    }
+    let cases = [
+        Case {
+            name: "one-subnet",
+            vpc_cidr: "10.21.0.0/16",
+            subnet_cidrs: &["10.21.1.0/24"],
+            destinations: &["10.21.8.0/24"],
+        },
+        Case {
+            name: "two-subnets",
+            vpc_cidr: "10.22.0.0/16",
+            subnet_cidrs: &["10.22.1.0/24", "10.22.2.0/24"],
+            destinations: &["10.22.8.0/24", "10.22.9.0/24"],
+        },
+        Case {
+            name: "three-subnets",
+            vpc_cidr: "10.23.0.0/16",
+            subnet_cidrs: &["10.23.1.0/24", "10.23.2.0/24", "10.23.3.0/24"],
+            destinations: &["10.23.8.0/24", "10.23.9.0/24", "10.23.10.0/24"],
+        },
+    ];
+
+    for case in cases {
+        let harness = Harness::with_ec2();
+        let ec2 = harness.ec2();
+        let network = create_network(&ec2, case.name, case.vpc_cidr, case.subnet_cidrs).await;
+
+        let (status, created) =
+            create_firewall(&harness, case.name, &network.vpc_id, &network.subnet_ids).await;
+        assert_eq!(
+            status, 200,
+            "case {name:?}: expected the firewall to be created, got HTTP {status} with \
+             {created:?}",
+            name = case.name
+        );
+
+        let described = ready_firewall(&harness, case.name, case.name).await;
+        let reported = attachments(&described);
+        assert_eq!(
+            reported.len(),
+            case.subnet_cidrs.len(),
+            "case {name:?}: expected one attachment per subnet, got {reported:?}",
+            name = case.name
+        );
+
+        // Every endpoint the firewall reports is one EC2 holds, of the routable type, in the
+        // firewall's VPC and in the attachment's own subnet.
+        let held = endpoints_in_vpc(&ec2, case.name, &network.vpc_id).await;
+        for (subnet_id, endpoint_id) in &reported {
+            let found = held
+                .iter()
+                .find(|(held_id, _, _)| held_id == endpoint_id)
+                .unwrap_or_else(|| {
+                    panic!(
+                        "case {name:?}: expected Amazon EC2 to hold the firewall endpoint \
+                         {endpoint_id}, it holds {held:?}",
+                        name = case.name
+                    )
+                });
+            assert_eq!(
+                found.1, GATEWAY_LOAD_BALANCER,
+                "case {name:?}: expected {endpoint_id} to be a {GATEWAY_LOAD_BALANCER} \
+                 endpoint, got {found:?}",
+                name = case.name
+            );
+            assert_eq!(
+                found.2,
+                vec![subnet_id.clone()],
+                "case {name:?}: expected {endpoint_id} to be in the attachment's subnet, got \
+                 {found:?}",
+                name = case.name
+            );
+        }
+
+        // And a route table of that VPC takes each of them as a target: 200, `return` true,
+        // and the stored route reports the endpoint it points at.
+        for ((_, endpoint_id), destination) in reported.iter().zip(case.destinations) {
+            let routed = ec2
+                .create_route()
+                .route_table_id(&network.route_table_id)
+                .destination_cidr_block(*destination)
+                .vpc_endpoint_id(endpoint_id)
+                .send()
+                .await
+                .unwrap_or_else(|error| {
+                    panic!(
+                        "case {name:?}: EC2 must route {destination} through {endpoint_id}: \
+                         {error:?}",
+                        name = case.name
+                    )
+                });
+            assert_eq!(
+                routed.r#return(),
+                Some(true),
+                "case {name:?}: expected CreateRoute to answer return=true for \
+                 {endpoint_id}, got {routed:?}",
+                name = case.name
+            );
+            let target = route_target(&ec2, case.name, &network.route_table_id, destination).await;
+            assert_eq!(
+                target.as_deref(),
+                Some(endpoint_id.as_str()),
+                "case {name:?}: expected the route to {destination} to target {endpoint_id}, \
+                 got {target:?}",
+                name = case.name
+            );
+        }
+    }
+}
+
+/// RULE: an attachment reports an endpoint Amazon EC2 holds exactly where EC2 created one —
+/// so a placement EC2 resolves to nothing yields no endpoint at all, and the id such an
+/// attachment reports is refused as a route target by EC2 itself.
+///
+/// The table spans the ways a placement fails to resolve: a subnet id nothing holds, a subnet
+/// of another VPC, a VPC nothing holds, and a list that mixes a subnet that resolves with one
+/// that does not — the last row showing the two outcomes side by side on one firewall. The
+/// create itself is not refused: this service resolves no placement against EC2 (it holds
+/// nothing of one beyond the ids the request carried), which is what every other suite of
+/// this crate, running with no EC2 mounted, relies on.
+#[tokio::test]
+async fn an_attachment_reports_an_endpoint_only_where_ec2_created_one() {
+    /// Which part of the placement a row makes unresolvable.
+    enum Placement {
+        /// A form-valid subnet id no account ever minted (`subnet-` and 17 hexadecimal
+        /// characters, the `AzSubnet` pattern `^subnet-[0-9a-f]+$`).
+        UnknownSubnet,
+        /// A subnet that exists, but in another VPC than the one the firewall names.
+        ForeignSubnet,
+        /// A form-valid VPC id no account ever minted (the `VpcId` pattern
+        /// `^vpc-[0-9a-f]+$`).
+        UnknownVpc,
+        /// The firewall's own subnet first, then one nothing holds.
+        ResolvingThenUnknown,
+    }
+    struct Case {
+        name: &'static str,
+        vpc_cidr: &'static str,
+        subnet_cidr: &'static str,
+        placement: Placement,
+    }
+    let unknown_subnet = "subnet-0000000000bad0bad";
+    let unknown_vpc = "vpc-0000000000bad0bad";
+    let cases = [
+        Case {
+            name: "unknown-subnet",
+            vpc_cidr: "10.31.0.0/16",
+            subnet_cidr: "10.31.1.0/24",
+            placement: Placement::UnknownSubnet,
+        },
+        Case {
+            name: "foreign-subnet",
+            vpc_cidr: "10.32.0.0/16",
+            subnet_cidr: "10.32.1.0/24",
+            placement: Placement::ForeignSubnet,
+        },
+        Case {
+            name: "unknown-vpc",
+            vpc_cidr: "10.33.0.0/16",
+            subnet_cidr: "10.33.1.0/24",
+            placement: Placement::UnknownVpc,
+        },
+        Case {
+            name: "resolving-then-unknown",
+            vpc_cidr: "10.34.0.0/16",
+            subnet_cidr: "10.34.1.0/24",
+            placement: Placement::ResolvingThenUnknown,
+        },
+    ];
+
+    for case in cases {
+        let harness = Harness::with_ec2();
+        let ec2 = harness.ec2();
+        let network = create_network(&ec2, case.name, case.vpc_cidr, &[case.subnet_cidr]).await;
+        let elsewhere =
+            create_network(&ec2, case.name, "10.99.0.0/16", &["10.99.1.0/24"]).await;
+
+        // What the request names, and which of those subnets EC2 can create an endpoint in:
+        // one of the firewall's OWN VPC, which is none of them unless the row says so.
+        let (vpc_id, subnet_ids, resolving): (String, Vec<String>, Vec<String>) =
+            match case.placement {
+                Placement::UnknownSubnet => (
+                    network.vpc_id.clone(),
+                    vec![unknown_subnet.to_string()],
+                    Vec::new(),
+                ),
+                Placement::ForeignSubnet => (
+                    network.vpc_id.clone(),
+                    elsewhere.subnet_ids.clone(),
+                    Vec::new(),
+                ),
+                Placement::UnknownVpc => (
+                    unknown_vpc.to_string(),
+                    network.subnet_ids.clone(),
+                    Vec::new(),
+                ),
+                Placement::ResolvingThenUnknown => (
+                    network.vpc_id.clone(),
+                    vec![network.subnet_ids[0].clone(), unknown_subnet.to_string()],
+                    vec![network.subnet_ids[0].clone()],
+                ),
+            };
+
+        let (status, created) = create_firewall(&harness, case.name, &vpc_id, &subnet_ids).await;
+        assert_eq!(
+            status, 200,
+            "case {name:?}: expected the create to be served, got HTTP {status} with {created:?}",
+            name = case.name
+        );
+        let described = ready_firewall(&harness, case.name, case.name).await;
+        let reported = attachments(&described);
+
+        // EC2 holds one endpoint for each subnet of the firewall's VPC and none for the rest.
+        let held = endpoint_ids_in_vpc(&ec2, case.name, &vpc_id).await;
+        assert_eq!(
+            held.len(),
+            resolving.len(),
+            "case {name:?}: expected {wanted} endpoint(s) in {vpc_id}, EC2 holds {held:?}",
+            name = case.name,
+            wanted = resolving.len(),
+        );
+        for (subnet_id, endpoint_id) in &reported {
+            let backed = resolving.contains(subnet_id);
+            assert_eq!(
+                held.contains(endpoint_id),
+                backed,
+                "case {name:?}: expected EC2 to hold the endpoint of {subnet_id} ({backed}), \
+                 it holds {held:?} and the attachment reports {endpoint_id}",
+                name = case.name,
+            );
+            if backed {
+                continue;
+            }
+            // An attachment EC2 created no endpoint for reports an id that resolves nowhere,
+            // and EC2 refuses it as a route target — the very refusal a firewall endpoint EC2
+            // DID create does not get (see the routing table above).
+            let refused = ec2
+                .create_route()
+                .route_table_id(&network.route_table_id)
+                .destination_cidr_block("10.80.0.0/24")
+                .vpc_endpoint_id(endpoint_id)
+                .send()
+                .await
+                .err()
+                .unwrap_or_else(|| {
+                    panic!(
+                        "case {name:?}: expected EC2 to refuse a route to {endpoint_id}, which \
+                         it holds no endpoint for",
+                        name = case.name
+                    )
+                });
+            let code = ::aws_sdk_ec2::error::ProvideErrorMetadata::code(&refused)
+                .unwrap_or("<no code>")
+                .to_string();
+            assert_eq!(
+                code, "InvalidGatewayID.NotFound",
+                "case {name:?}: expected EC2's own refusal for an endpoint it does not hold, \
+                 got {code:?}",
+                name = case.name
+            );
+        }
+    }
+}
+
+/// RULE: an attachment's endpoint exists in Amazon EC2 for exactly as long as the attachment
+/// does — an association instantiates one that a route can target, a disassociation deletes
+/// that one and leaves the rest, and deleting the firewall takes every one of them with it.
+#[tokio::test]
+async fn a_firewall_endpoint_lives_as_long_as_its_attachment() {
+    let case = "endpoint-lifecycle";
+    let harness = Harness::with_ec2();
+    let ec2 = harness.ec2();
+    let network = create_network(
+        &ec2,
+        case,
+        "10.41.0.0/16",
+        &["10.41.1.0/24", "10.41.2.0/24"],
+    )
+    .await;
+
+    let (status, created) = create_firewall(
+        &harness,
+        "lifecycle-fw",
+        &network.vpc_id,
+        &network.subnet_ids[..1],
+    )
+    .await;
+    assert_eq!(
+        status, 200,
+        "case {case:?}: expected the firewall to be created, got HTTP {status} with {created:?}"
+    );
+    let first = ready_firewall(&harness, case, "lifecycle-fw").await;
+    let first_endpoint = attachments(&first)
+        .first()
+        .map(|(_, endpoint_id)| endpoint_id.clone())
+        .unwrap_or_else(|| panic!("case {case:?}: expected one attachment in {first:?}"));
+    assert_eq!(
+        endpoint_ids_in_vpc(&ec2, case, &network.vpc_id).await,
+        BTreeSet::from([first_endpoint.clone()]),
+        "case {case:?}: expected EC2 to hold exactly the firewall's own endpoint"
+    );
+
+    // An association instantiates the second subnet's endpoint, and it is routable too.
+    harness
+        .ok(
+            "AssociateSubnets",
+            &json!({
+                "FirewallName": "lifecycle-fw",
+                "SubnetMappings": [{ "SubnetId": network.subnet_ids[1] }],
+            }),
+        )
+        .await;
+    let grown = ready_firewall(&harness, case, "lifecycle-fw").await;
+    let grown_attachments = attachments(&grown);
+    assert_eq!(
+        grown_attachments.len(),
+        2,
+        "case {case:?}: expected both subnets to carry an attachment, got {grown_attachments:?}"
+    );
+    let second_endpoint = grown_attachments
+        .iter()
+        .find(|(subnet_id, _)| subnet_id == &network.subnet_ids[1])
+        .map(|(_, endpoint_id)| endpoint_id.clone())
+        .unwrap_or_else(|| panic!("case {case:?}: expected an attachment in the new subnet"));
+    assert_eq!(
+        endpoint_ids_in_vpc(&ec2, case, &network.vpc_id).await,
+        BTreeSet::from([first_endpoint.clone(), second_endpoint.clone()]),
+        "case {case:?}: expected EC2 to hold both of the firewall's endpoints"
+    );
+    let routed = ec2
+        .create_route()
+        .route_table_id(&network.route_table_id)
+        .destination_cidr_block("10.41.8.0/24")
+        .vpc_endpoint_id(&second_endpoint)
+        .send()
+        .await
+        .unwrap_or_else(|error| {
+            panic!("case {case:?}: EC2 must route through {second_endpoint}: {error:?}")
+        });
+    assert_eq!(
+        routed.r#return(),
+        Some(true),
+        "case {case:?}: expected CreateRoute to answer return=true, got {routed:?}"
+    );
+
+    // A disassociation deletes that endpoint and leaves the other.
+    harness
+        .ok(
+            "DisassociateSubnets",
+            &json!({
+                "FirewallName": "lifecycle-fw",
+                "SubnetIds": [network.subnet_ids[1]],
+            }),
+        )
+        .await;
+    assert_eq!(
+        endpoint_ids_in_vpc(&ec2, case, &network.vpc_id).await,
+        BTreeSet::from([first_endpoint.clone()]),
+        "case {case:?}: expected the disassociated subnet's endpoint {second_endpoint} to be \
+         deleted and the other kept"
+    );
+
+    // And deleting the firewall takes the endpoints it still carried with it.
+    harness
+        .ok(
+            "DeleteFirewall",
+            &json!({ "FirewallName": "lifecycle-fw" }),
+        )
+        .await;
+    let held = endpoint_ids_in_vpc(&ec2, case, &network.vpc_id).await;
+    assert!(
+        held.is_empty(),
+        "case {case:?}: expected the deleted firewall's endpoints to be gone, EC2 holds \
+         {held:?}"
+    );
+}

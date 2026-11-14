@@ -3,7 +3,9 @@
 //! @op AssociateSubnets
 //! IMPLEMENTED: adds the requested subnets to the stored `FirewallRecord`'s
 //! `SubnetMappings`, giving each newly named subnet its own Availability Zone and a
-//! firewall endpoint that starts out `CREATING`, and re-mints the firewall's
+//! firewall endpoint that starts out `CREATING` — instantiated in Amazon EC2
+//! (`crate::state::firewall_endpoints`), so it can be routed to — and re-mints the
+//! firewall's
 //! `UpdateToken` when the mapping set changed — so a following `DescribeFirewall`
 //! reports the union. A stale `UpdateToken` is refused with `InvalidTokenException`,
 //! and a firewall carrying `SubnetChangeProtection` with `InvalidOperationException`.
@@ -116,6 +118,10 @@
 #[allow(unused_imports)]
 use super::types::*;
 
+// The firewall endpoints a new attachment carries are instantiated in Amazon EC2 before
+// anything is stored.
+use crate::state::firewall_endpoints as endpoints;
+
 // `#[operation_error]` below expands to an invocation of the LOCAL declarative
 // `smithy!` macro, which this line is what emits into the module. Without it the
 // expansion fails with `cannot find macro 'smithy' in this scope` and the
@@ -194,7 +200,102 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         // region the request is signed for, exactly as `CreateFirewall` names the
         // zones of the subnets a firewall starts with.
         let region = crate::state::request_region(ctx);
-        let Some(state) = crate::state::service_state(&*self.engine) else {
+        // "This request creates an Network Firewall firewall endpoint in each of the
+        // subnets" (`AssociateSubnets`), and a firewall endpoint is a Gateway Load Balancer
+        // VPC endpoint Amazon EC2 holds: the endpoints the new attachments report are
+        // created THERE first, with no store guard held, so each one is an endpoint a route
+        // table can name as its target (see `crate::state::firewall_endpoints`).
+        //
+        // What to ask for is read off the record first: a subnet the firewall already
+        // carries is already associated and gains no second endpoint. The mapping set is
+        // re-read under the guard below, which is what decides what is attached, so an
+        // endpoint this ask created that no attachment took is deleted again at the end.
+        let placement = Self::placement(&*self.engine, &region, &input)?;
+        let mut instantiated = match placement {
+            Some((vpc_id, service_name, subnet_ids)) => {
+                endpoints::instantiate_all(ctx, &region, &vpc_id, &service_name, &subnet_ids).await
+            }
+            None => ::std::collections::HashMap::new(),
+        };
+
+        let attached = Self::attach(&*self.engine, &region, &input, &mut instantiated);
+        // Whatever the association answered, an endpoint no attachment took is one nothing
+        // uses: it is deleted again rather than left behind in EC2.
+        endpoints::remove(ctx, &region, instantiated.into_values().collect()).await;
+        attached
+    }
+}
+
+impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> AssociateSubnets<Eng> {
+    /// Where the endpoints this request needs would go: the firewall's VPC, the endpoint
+    /// service its endpoints are endpoints to, and the subnets the request names that it does
+    /// not carry yet — or `None` when there is nothing to instantiate.
+    ///
+    /// A READ, taken and released before the hop that creates those endpoints. `None` covers
+    /// every request the association itself will not attach anything for — no firewall of
+    /// that name, a firewall protected against subnet changes, every named subnet already
+    /// associated, and a request that would push the mapping set past the one endpoint per
+    /// Availability Zone a firewall spans ("you can specify one subnet for each of the
+    /// Availability Zones that the VPC spans", `AssociateSubnets`) — so each of those is
+    /// refused in exactly one place, by [`AssociateSubnets::attach`], in the order
+    /// [`crate::state::FirewallRecord::associate_subnets`] states it, and NO endpoint is
+    /// asked for. That is also what bounds the work below: at most
+    /// [`crate::state::MAX_AVAILABILITY_ZONES`] subnets are ever read out of the request or
+    /// instantiated for, however long the caller's list is.
+    #[allow(clippy::type_complexity)]
+    fn placement(
+        engine: &Eng,
+        region: &str,
+        input: &AssociateSubnetsInput,
+    ) -> Result<Option<(String, String, Vec<String>)>, AssociateSubnetsError> {
+        let Some(state) = crate::state::service_state(engine) else {
+            return Err(
+                AssociateSubnetsErrorModeled::InternalServerError(InternalServerError {
+                    message: Some("the firewall store is unavailable".to_string()),
+                })
+                .into(),
+            );
+        };
+        let state = state.lock();
+        let Ok(key) = state.resolve_firewall(
+            input.firewall_name.as_deref(),
+            input.firewall_arn.as_deref(),
+        ) else {
+            return Ok(None);
+        };
+        let Some(record) = state.firewalls.get(&key) else {
+            return Ok(None);
+        };
+        if record.subnet_change_protection
+            || input.subnet_mappings.len() > crate::state::MAX_AVAILABILITY_ZONES
+        {
+            return Ok(None);
+        }
+        let subnet_ids = record.unassociated_subnets(&input.subnet_mappings);
+        if subnet_ids.is_empty()
+            || record.subnet_mappings.len() + subnet_ids.len() > crate::state::MAX_AVAILABILITY_ZONES
+        {
+            return Ok(None);
+        }
+        Ok(Some((
+            record.vpc_id.clone(),
+            endpoints::endpoint_service_name(region, &record.endpoint_service_id),
+            subnet_ids,
+        )))
+    }
+
+    /// Associate the subnets the request names, and project the response from the record.
+    ///
+    /// Split out of `handle` because this is the part that holds the store guard, and it is
+    /// SYNCHRONOUS: the hop that instantiates the new attachments' endpoints runs before it
+    /// with no guard held, and hands them over in `instantiated` keyed by subnet.
+    fn attach(
+        engine: &Eng,
+        region: &str,
+        input: &AssociateSubnetsInput,
+        instantiated: &mut ::std::collections::HashMap<String, String>,
+    ) -> Result<AssociateSubnetsOutput, AssociateSubnetsError> {
+        let Some(state) = crate::state::service_state(engine) else {
             return Err(
                 AssociateSubnetsErrorModeled::InternalServerError(InternalServerError {
                     message: Some("the firewall store is unavailable".to_string()),
@@ -241,8 +342,13 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         }
 
         let attached = record
-            .associate_subnets(&region, &input.subnet_mappings, now)
-            .map_err(|breach| associate_breach_error(breach, Self::NAME))?;
+            .associate_subnets(region, &input.subnet_mappings, instantiated, now)
+            .map_err(|breach| {
+                associate_breach_error(
+                    breach,
+                    <Self as smithy_server_runtime::Operation>::NAME,
+                )
+            })?;
         // The token "marks the state of the firewall resource at the time of the
         // request", so it is re-minted exactly when this call moved that state: a
         // request naming only subnets the firewall already carries associated

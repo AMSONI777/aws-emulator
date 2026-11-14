@@ -29,7 +29,7 @@ pub struct Harness {
 impl Harness {
     /// Stand up the router with this service mounted on a fresh engine.
     pub fn new() -> Self {
-        Self::mounting(false)
+        Self::mounting(false, false)
     }
 
     /// Stand up the router with this service AND Amazon S3 mounted on the SAME
@@ -40,11 +40,22 @@ impl Harness {
     /// those destinations needs one to reach; [`Harness::new`] deliberately
     /// leaves it unmounted, which is the "Amazon S3 said nothing" case.
     pub fn with_s3() -> Self {
-        Self::mounting(true)
+        Self::mounting(true, false)
     }
 
-    /// Stand up the router, with Amazon S3 beside this service when `s3` says so.
-    fn mounting(s3: bool) -> Self {
+    /// Stand up the router with this service AND Amazon EC2 mounted on the SAME engine,
+    /// exactly as the assembled emulator mounts them.
+    ///
+    /// A firewall endpoint is a Gateway Load Balancer VPC endpoint, which is EC2's
+    /// resource: a suite about the endpoints a firewall instantiates, and about routing to
+    /// them, needs the service that owns them to reach.
+    pub fn with_ec2() -> Self {
+        Self::mounting(false, true)
+    }
+
+    /// Stand up the router, with Amazon S3 and Amazon EC2 beside this service when the
+    /// flags say so.
+    fn mounting(s3: bool, ec2: bool) -> Self {
         let engine: Arc<engine::InMemoryEngine> = Arc::new(engine::InMemoryEngine::new());
         let mut router = MultiServiceRouter::new();
         router.set_request_authentication(false);
@@ -53,6 +64,11 @@ impl Harness {
             router.register_service(service_com_amazonaws_s3_amazons3::EmulatedService::new(
                 Arc::clone(&engine),
             ));
+        }
+        if ec2 {
+            router.register_service(
+                service_com_amazonaws_ec2_amazonec2::EmulatedService::new(Arc::clone(&engine)),
+            );
         }
         Self { router }
     }
@@ -64,11 +80,32 @@ impl Harness {
     }
 
     /// An Amazon S3 client for [`REGION`] over this emulator's own in-process
-    /// callback — the very seam, and the very client construction
+    /// callback — the same in-process seam, and the same client construction
     /// ([`service_common::s3_client::s3_client`]), the handlers resolve a log
     /// destination through.
     pub fn s3(&self) -> ::aws_sdk_s3::Client {
         ::service_common::s3_client::s3_client(&self.callback(), REGION)
+    }
+
+    /// An Amazon EC2 client for [`REGION`] over this emulator's own in-process callback —
+    /// the same seam, built the same way, the handlers instantiate a firewall endpoint
+    /// through.
+    pub fn ec2(&self) -> ::aws_sdk_ec2::Client {
+        let callback = self.callback();
+        let config = ::aws_sdk_ec2::Config::builder()
+            .behavior_version(::aws_sdk_ec2::config::BehaviorVersion::latest())
+            .region(::aws_sdk_ec2::config::Region::new(REGION.to_string()))
+            .endpoint_url(format!("https://ec2.{REGION}.amazonaws.com"))
+            .credentials_provider(callback.aws_credentials_provider())
+            .http_client(callback.http_client())
+            .retry_config(::aws_sdk_ec2::config::retry::RetryConfig::disabled())
+            .timeout_config(::aws_sdk_ec2::config::timeout::TimeoutConfig::disabled())
+            .identity_cache(::aws_sdk_ec2::config::IdentityCache::no_cache())
+            .stalled_stream_protection(
+                ::aws_sdk_ec2::config::StalledStreamProtectionConfig::disabled(),
+            )
+            .build();
+        ::aws_sdk_ec2::Client::from_conf(config)
     }
 
     /// Send one operation and return its HTTP status and parsed JSON body.

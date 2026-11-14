@@ -17,6 +17,7 @@ use crate::ops::types::{
     SourceMetadata, SubnetMapping, SummaryConfiguration, SyncState, Tag,
 };
 
+pub mod firewall_endpoints;
 pub mod log_destinations;
 
 /// The ARN namespace (and SigV4 signing name) this service's ARNs carry, from the
@@ -1126,11 +1127,32 @@ pub fn availability_zone_of(region: &str, index: usize) -> String {
 
 /// A firewall endpoint id (`vpce-` plus 17 hex digits, the shape AWS VPC endpoint
 /// ids take).
+///
+/// The FALLBACK id of an attachment: a firewall endpoint is a VPC endpoint Amazon EC2 holds
+/// and reports the id of ([`firewall_endpoints::instantiate`]), so this is only reached
+/// where there is no EC2 in this process to instantiate one in — the id then names no
+/// endpoint at all (see the [`firewall_endpoints`] module docs).
 pub fn new_endpoint_id() -> String {
     // `hex::encode` renders the 16 bytes as exactly 32 digits, so the 17-digit
     // prefix is always there.
     let digits = ::hex::encode(fresh_bytes());
     format!("vpce-{}", &digits[..17])
+}
+
+/// The attachment record for a firewall endpoint in `subnet_id`, which starts out
+/// [`ATTACHMENT_CREATING`] whichever endpoint it carries.
+///
+/// `instantiated` is the endpoint Amazon EC2 created for that subnet, when it created one:
+/// the attachment reports the id EC2 minted and is deleted there with the attachment. An
+/// attachment EC2 could not be asked for falls back to [`new_endpoint_id`].
+pub fn new_sync_state(subnet_id: &str, instantiated: Option<String>) -> SyncStateRecord {
+    let instantiated_in_ec2 = instantiated.is_some();
+    SyncStateRecord {
+        subnet_id: subnet_id.to_string(),
+        endpoint_id: instantiated.unwrap_or_else(new_endpoint_id),
+        instantiated_in_ec2,
+        attachment_status: ATTACHMENT_CREATING.to_string(),
+    }
 }
 
 /// Render a `SystemTime` as the modelled timestamp type.
@@ -1481,6 +1503,15 @@ pub struct SyncStateRecord {
     pub subnet_id: String,
     /// The endpoint id reported in route tables.
     pub endpoint_id: String,
+    /// Whether [`SyncStateRecord::endpoint_id`] names an endpoint Amazon EC2 holds — one
+    /// this service asked it to instantiate and it answered
+    /// ([`firewall_endpoints::instantiate`]) — so the attachment's endpoint is deleted
+    /// there when the attachment goes away.
+    ///
+    /// `false` where EC2 created no endpoint for the attachment at all — there was none in
+    /// this process to ask, or it answered the ask with no endpoint: the id is then one this
+    /// service minted and no route can resolve (see the [`firewall_endpoints`] module docs).
+    pub instantiated_in_ec2: bool,
     /// An `AttachmentStatus` member.
     pub attachment_status: String,
 }
@@ -1780,6 +1811,16 @@ pub struct FirewallRecord {
     pub firewall_policy_arn: String,
     /// `Firewall.VpcId`.
     pub vpc_id: String,
+    /// The id of the Gateway Load Balancer endpoint service this firewall's endpoints are
+    /// endpoints TO ([`firewall_endpoints::new_endpoint_service_id`]).
+    ///
+    /// One per firewall and minted with it, because "in each configured subnet, Network
+    /// Firewall instantiates a firewall endpoint to handle network traffic"
+    /// (`Attachment`) — every one of those endpoints reaches the same firewall, so every
+    /// one of them is an endpoint to the same service. Not a modelled member: it is what
+    /// the endpoints Amazon EC2 holds for this firewall are named by
+    /// ([`firewall_endpoints::endpoint_service_name`]).
+    pub endpoint_service_id: String,
     /// `Firewall.SubnetMappings`, in the order the create request gave them.
     pub subnet_mappings: Vec<SubnetMapping>,
     /// `Firewall.DeleteProtection`.
@@ -1869,12 +1910,18 @@ impl FirewallRecord {
     /// [`FIREWALL_PROVISIONING`] until the clock owes it `READY` again at
     /// [`FirewallRecord::ready_at`].
     ///
+    /// `instantiated` carries the firewall endpoints Amazon EC2 created for this call,
+    /// keyed by the subnet each one serves ([`firewall_endpoints::instantiate_all`]); each
+    /// newly attached subnet TAKES its own out of that map, so what is left over on return
+    /// is the endpoints this association did not use and the caller deletes again.
+    ///
     /// Nothing is written on a refusal: every check runs before the first
     /// mutation.
     pub fn associate_subnets(
         &mut self,
         region: &str,
         requested: &[SubnetMapping],
+        instantiated: &mut HashMap<String, String>,
         now: SystemTime,
     ) -> Result<Vec<String>, SubnetAssociationBreach> {
         if requested.is_empty() {
@@ -1929,11 +1976,7 @@ impl FirewallRecord {
         for (mapping, zone) in added.into_iter().zip(zones) {
             self.sync_states.insert(
                 zone,
-                SyncStateRecord {
-                    subnet_id: mapping.subnet_id.clone(),
-                    endpoint_id: new_endpoint_id(),
-                    attachment_status: ATTACHMENT_CREATING.to_string(),
-                },
+                new_sync_state(&mapping.subnet_id, instantiated.remove(&mapping.subnet_id)),
             );
             self.subnet_mappings.push(mapping);
         }
@@ -2011,6 +2054,52 @@ impl FirewallRecord {
         self.sync_states
             .retain(|_, endpoint| !named.contains(endpoint.subnet_id.as_str()));
         Ok(detached)
+    }
+
+    /// The subnets `requested` names that this firewall does not carry yet, and so the ones
+    /// an association would instantiate a firewall endpoint for.
+    ///
+    /// A READ of the record taken before the hop that instantiates those endpoints, so the
+    /// hop asks for the endpoints the association needs and no others; the association
+    /// itself re-reads the mapping set under the store guard
+    /// ([`FirewallRecord::associate_subnets`]), which is what decides what is attached.
+    pub fn unassociated_subnets(&self, requested: &[SubnetMapping]) -> Vec<String> {
+        let associated: HashSet<&str> = self
+            .subnet_mappings
+            .iter()
+            .map(|mapping| mapping.subnet_id.as_str())
+            .collect();
+        let mut named = HashSet::new();
+        requested
+            .iter()
+            .map(|mapping| mapping.subnet_id.clone())
+            .filter(|subnet_id| {
+                !associated.contains(subnet_id.as_str()) && named.insert(subnet_id.clone())
+            })
+            .collect()
+    }
+
+    /// The firewall endpoints Amazon EC2 holds for this firewall — the ones to delete there
+    /// when the firewall itself goes away (see [`SyncStateRecord::instantiated_in_ec2`]).
+    pub fn instantiated_endpoints(&self) -> Vec<String> {
+        self.sync_states
+            .values()
+            .filter(|sync_state| sync_state.instantiated_in_ec2)
+            .map(|sync_state| sync_state.endpoint_id.clone())
+            .collect()
+    }
+
+    /// The same endpoints, for the attachments of the subnets `subnet_ids` names alone — the
+    /// ones a disassociation of those subnets removes.
+    pub fn instantiated_endpoints_in(&self, subnet_ids: &[String]) -> Vec<String> {
+        let named: HashSet<&str> = subnet_ids.iter().map(String::as_str).collect();
+        self.sync_states
+            .values()
+            .filter(|sync_state| {
+                sync_state.instantiated_in_ec2 && named.contains(sync_state.subnet_id.as_str())
+            })
+            .map(|sync_state| sync_state.endpoint_id.clone())
+            .collect()
     }
 
     /// The `Firewall` shape for this record.
