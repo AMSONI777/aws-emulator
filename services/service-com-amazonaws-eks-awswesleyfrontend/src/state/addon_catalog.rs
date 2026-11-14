@@ -320,8 +320,11 @@ pub(super) const ADDON_CATALOG: &[AddonCatalogSeed] = &[
         required_addons: &["cert-manager"],
         admission_webhook: false,
         owner: ADDON_OWNER_AWS,
-        publisher: ADDON_PUBLISHER_EKS,
-        addon_type: "machine-learning",
+        // Amazon SageMaker HyperPod's own add-ons are built and published by that
+        // service team, under its own publisher name and its own category, not
+        // under the ones the add-ons Amazon EKS builds carry.
+        publisher: ADDON_PUBLISHER_SAGEMAKER,
+        addon_type: ADDON_TYPE_ML_OPERATOR,
         default_namespace: ADDON_DEFAULT_NAMESPACE,
         requires_iam_permissions: false,
         required_configuration: &[],
@@ -348,8 +351,10 @@ pub(super) const ADDON_CATALOG: &[AddonCatalogSeed] = &[
         required_addons: &["cert-manager"],
         admission_webhook: false,
         owner: ADDON_OWNER_AWS,
-        publisher: ADDON_PUBLISHER_EKS,
-        addon_type: "machine-learning",
+        // Published by the Amazon SageMaker HyperPod team, like the task
+        // governance add-on above.
+        publisher: ADDON_PUBLISHER_SAGEMAKER,
+        addon_type: ADDON_TYPE_ML_OPERATOR,
         default_namespace: "aws-hyperpod",
         // The operator calls Amazon SageMaker for the training jobs it runs, so
         // it needs IAM permissions of its own.
@@ -470,12 +475,25 @@ pub(super) const ADDON_CATALOG: &[AddonCatalogSeed] = &[
         // The driver's document is one Amazon EKS has reissued in the 2019-09
         // dialect, which is the `$schema` it declares.
         schema_dialect: ADDON_SCHEMA_DIALECT_2019_09,
-        first_cluster_version: None,
+        // Amazon EKS has published builds of this driver since the oldest
+        // Kubernetes version the calendar carries, so its published history
+        // starts at that row rather than at the window the newer add-ons share.
+        first_cluster_version: Some(ADDON_CATALOG_OLDEST_CLUSTER_VERSION),
         // The driver released two new major versions over these Kubernetes
         // releases, so its published history spans majors 1, 2 and 3: a caller
         // pinning, upgrading or rolling back to a build of any of them finds it
-        // in the catalog.
+        // in the catalog — including the builds of the EARLIER lines Amazon EKS
+        // still publishes for the older cluster versions, which is what a caller
+        // running one of those versions installs and reads a configuration
+        // schema for.
         releases: &[
+            (1, 4, 0),
+            (1, 4, 9),
+            (1, 5, 1),
+            (1, 5, 4),
+            (1, 5, 8),
+            (1, 5, 9),
+            (1, 7, 0),
             (1, 7, 6),
             (2, 0, 7),
             (2, 1, 4),

@@ -65,6 +65,8 @@ mod capability_request_refusals;
 mod capability_update;
 #[path = "all/catalog_discovery.rs"]
 mod catalog_discovery;
+#[path = "all/catalog_parameters_and_publication.rs"]
+mod catalog_parameters_and_publication;
 #[path = "all/catalog_reference_data.rs"]
 mod catalog_reference_data;
 #[path = "all/certificate_authority.rs"]

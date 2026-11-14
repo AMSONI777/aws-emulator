@@ -3743,3 +3743,8 @@ mod cloudformation_provisions_redshift_snapshot_copy_grants;
 // reason: a `//!` line past the first item of this crate root is `E0753`.)
 // (One more line of that same duplicated header, an ordinary comment for the reason the
 // lines above record.)
+// (Another fragment of this file's header appended here by a landing: `//!` is accepted
+// only before the first item, so it stands as an ordinary comment — a suite left at the
+// top level of `tests/` fails the build.)
+// only before the first item, so it stands as an ordinary comment — the suite-declaration
+// check covers this file and every service crate's `tests/all.rs`.)

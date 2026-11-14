@@ -22,7 +22,8 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use service_com_amazonaws_eks_awswesleyfrontend::state::{
-    ADDON_OWNER_MARKETPLACE, ADDON_PUBLISHER_EKS, MARKETPLACE_LISTING_ADDRESS,
+    ADDON_OWNER_MARKETPLACE, ADDON_PUBLISHER_EKS, ADDON_PUBLISHER_SAGEMAKER,
+    MARKETPLACE_LISTING_ADDRESS,
 };
 use smithy_server_runtime::MultiServiceRouter;
 
@@ -234,12 +235,11 @@ async fn every_marketplace_addon_publishes_its_sellers_own_listing() {
         if text(addon, "owner") == ADDON_OWNER_MARKETPLACE {
             continue;
         }
-        assert_eq!(
-            text(addon, "publisher"),
-            ADDON_PUBLISHER_EKS,
-            "case {addon_name}: an add-on Amazon EKS publishes is published by \
-             {ADDON_PUBLISHER_EKS:?}, got {:?}",
-            addon["publisher"]
+        let publisher = text(addon, "publisher");
+        assert!(
+            [ADDON_PUBLISHER_EKS, ADDON_PUBLISHER_SAGEMAKER].contains(&publisher.as_str()),
+            "case {addon_name}: an add-on that is not sold on Marketplace is published by Amazon \
+             EKS or by the Amazon Web Services service team that builds it, got {publisher:?}"
         );
         assert!(
             addon

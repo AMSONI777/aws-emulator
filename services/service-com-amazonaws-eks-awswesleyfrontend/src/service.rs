@@ -66,6 +66,7 @@ pub mod off_enum_member_contract;
 pub mod parameter_contract;
 pub mod precedence;
 pub mod request_pipeline;
+pub mod required_query_contract;
 pub mod resolve_conflicts_contract;
 pub mod tag_contract;
 
@@ -190,9 +191,22 @@ impl<Eng: Send + Sync + 'static> Service for EmulatedService<Eng> {
         // `override_routing_error` rather than a layer with nothing to run. The key
         // is resolved by the model's own codec, which is the one that carries this
         // service's route table.
-        let key = self.entry.protocol().routing_key(req).ok()?;
-        self.entry.routing_table().get(key)?;
-        Some(&self.pipeline as &dyn ErasedOperation)
+        //
+        // ONE exception, and it is a request this service DOES serve: a `@required`
+        // `@httpQuery` member is part of the route the codec matches, so a request
+        // that omits one resolves no routing key at all even though its method and
+        // path name an operation of this API. Such a request is claimed too, and the
+        // layer answers it with the modelled parameter refusal rather than letting it
+        // fall through to the not-implemented tail (see
+        // [`required_query_contract`]).
+        let served = self
+            .entry
+            .protocol()
+            .routing_key(req)
+            .ok()
+            .is_some_and(|key| self.entry.routing_table().get(key).is_some());
+        (served || required_query_contract::has_a_question(req))
+            .then_some(&self.pipeline as &dyn ErasedOperation)
     }
 
     fn override_protocol(&self) -> Option<&dyn smithy_server_runtime::ServerHttpProtocol> {

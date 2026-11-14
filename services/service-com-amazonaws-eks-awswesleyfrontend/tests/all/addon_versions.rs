@@ -29,7 +29,8 @@ use std::time::Duration;
 
 use service_com_amazonaws_eks_awswesleyfrontend::state::{
     self, addon_schema_not_found_message, ADDON_ANY_PLATFORM_VERSION, ADDON_OWNER_AWS,
-    ADDON_OWNER_COMMUNITY, ADDON_OWNER_MARKETPLACE, ADDON_PUBLISHER_EKS, CLUSTER_ACTIVATION_DELAY,
+    ADDON_OWNER_COMMUNITY, ADDON_OWNER_MARKETPLACE, ADDON_PUBLISHER_EKS,
+    ADDON_PUBLISHER_SAGEMAKER, CLUSTER_ACTIVATION_DELAY,
 };
 use smithy_server_runtime::MultiServiceRouter;
 
@@ -290,14 +291,14 @@ async fn the_published_catalog_is_reported_from_state() {
             );
         } else {
             // Amazon EKS builds and publishes the add-ons it manages and the
-            // community ones it curates alike, and neither is sold through AWS
-            // Marketplace.
-            assert_eq!(
-                addon["publisher"].as_str(),
-                Some(ADDON_PUBLISHER_EKS),
-                "case {case:?}: an add-on Amazon EKS publishes is published by \
-                 {ADDON_PUBLISHER_EKS:?}, got {:?}",
-                addon["publisher"]
+            // community ones it curates alike, and an add-on another Amazon Web
+            // Services service team builds for its own service is published under
+            // that service's own name; neither is sold through AWS Marketplace.
+            let publisher = string_member(addon, "publisher");
+            assert!(
+                [ADDON_PUBLISHER_EKS, ADDON_PUBLISHER_SAGEMAKER].contains(&publisher.as_str()),
+                "case {case:?}: an add-on that is not sold on Marketplace is published by Amazon \
+                 EKS or by the service team that builds it, got {publisher:?}"
             );
             assert!(
                 listing.is_none(),

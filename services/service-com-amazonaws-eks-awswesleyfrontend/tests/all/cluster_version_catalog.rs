@@ -663,8 +663,10 @@ async fn every_row_publishes_component_defaults_inside_their_constraints() {
             );
         }
 
-        // The pod-GC threshold: an integer default inside the range the MODEL
-        // publishes for `terminatedPodGcThreshold` (1..1000000, from
+        // The pod-GC threshold: an integer default inside the window the CATALOG
+        // publishes for `terminatedPodGcThreshold` — the values a control plane of
+        // this version may be configured with, which is narrower than the range the
+        // model lets the member carry (1..1000000, from
         // `smithy_query(query="shape", shape="PodGcControllerConfigRequest")`).
         let threshold = &config["kubeControllerManagerConfig"]["podGcControllerConfig"]
             ["terminatedPodGcThreshold"];
@@ -677,14 +679,24 @@ async fn every_row_publishes_component_defaults_inside_their_constraints() {
         let max = threshold["constraints"]["max"].as_i64().unwrap_or_else(|| {
             panic!("case {case}/terminatedPodGcThreshold: expected constraints.max, got {threshold:?}")
         });
+        // The window the catalog publishes is the one a control plane of this
+        // version may be CONFIGURED in: strictly inside the range the model lets
+        // the member carry, with the component's own default as its ceiling (the
+        // largest number of terminated pods a control plane keeps) and a floor
+        // above the modelled minimum.
+        assert!(
+            1 < min && min < max && max < 1_000_000,
+            "case {case}/terminatedPodGcThreshold: the published window must be a real window \
+             strictly inside the modelled range, got {min}..{max}"
+        );
         assert_eq!(
-            (min, max),
-            (1, 1_000_000),
-            "case {case}/terminatedPodGcThreshold: expected the modelled range, got {min}..{max}"
+            max, default_value,
+            "case {case}/terminatedPodGcThreshold: expected the component's own default as the \
+             published ceiling, got {max} against a default of {default_value}"
         );
         assert!(
             min <= default_value && default_value <= max,
-            "case {case}/terminatedPodGcThreshold: the default must sit inside the range, got \
+            "case {case}/terminatedPodGcThreshold: the default must sit inside the window, got \
              {default_value} in {min}..{max}"
         );
 

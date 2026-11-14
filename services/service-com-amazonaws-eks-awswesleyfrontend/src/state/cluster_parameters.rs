@@ -51,6 +51,10 @@ pub const SUBNET_ID_REQUIRED_MESSAGE: &str = "Subnet Id is required";
 const MEMBER_REQUIRED_SENTENCE: &[(&str, &str)] = &[
     ("roleArn", "The roleArn parameter is required"),
     ("resourcesVpcConfig", SUBNET_ID_REQUIRED_MESSAGE),
+    // The two add-on parameters, whose sentence names the parameter in WORDS
+    // rather than by its member spelling.
+    ("addonName", "The addon name parameter is required."),
+    ("addonVersion", "The addon version parameter is required."),
 ];
 
 /// The sentence a request that omits a parameter this API requires is refused with.

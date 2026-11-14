@@ -2902,6 +2902,28 @@ pub const ADDON_OWNER_AWS: &str = "aws";
 /// See [`ADDON_OWNER_AWS`].
 pub const ADDON_PUBLISHER_EKS: &str = "eks";
 
+/// The `publisher` of an add-on another Amazon Web Services service team builds
+/// and publishes through Amazon EKS.
+///
+/// `AddonInfo$publisher` is "The publisher of the add-on", which is a property of
+/// the ADD-ON: the add-ons Amazon EKS builds and curates are published by
+/// [`ADDON_PUBLISHER_EKS`], a Marketplace add-on by its vendor, and an add-on
+/// another AWS service team builds for its own service under that service's own
+/// published name. The Amazon SageMaker HyperPod add-ons are the catalog's rows
+/// of that last kind, so a caller filtering `DescribeAddonVersions$publishers` on
+/// the publishing service reads them rather than an empty listing.
+pub const ADDON_PUBLISHER_SAGEMAKER: &str = "sagemaker";
+
+/// The `type` the catalog publishes an operator that runs another AWS service's
+/// workloads on the cluster under.
+///
+/// `AddonInfo$type` is the category the add-on is published under, which
+/// `DescribeAddonVersions$types` filters on, so it is the category that add-on's
+/// publisher gives it: the Amazon SageMaker HyperPod add-ons are published as
+/// machine-learning OPERATORS rather than under a category of this service's
+/// own.
+pub const ADDON_TYPE_ML_OPERATOR: &str = "ml-operator";
+
 /// The `owner` of an add-on a caller subscribes to through AWS Marketplace
 /// rather than one Amazon EKS manages.
 ///
@@ -4002,12 +4024,19 @@ fn control_plane_scaling_tiers() -> Vec<ControlPlaneScalingTierInfo> {
 const DEFAULT_EVENT_TTL: &str = "60m";
 /// The window the `eventTtl` catalog publishes around [`DEFAULT_EVENT_TTL`].
 ///
-/// AWS publishes no bound for this parameter and the model constrains it only to
-/// the `String` shape, so these two are the window this service publishes for it:
-/// no shorter than a minute and no longer than a day.
-const EVENT_TTL_MIN: &str = "1m";
-/// See [`EVENT_TTL_MIN`].
-const EVENT_TTL_MAX: &str = "24h";
+/// One end of a published window is the component's OWN default, and which end
+/// follows what the parameter does: a retention is published with its default as
+/// the CEILING (as `terminatedPodGcThreshold` is, see
+/// [`TERMINATED_POD_GC_THRESHOLD_MAX`]) and a sync period with its default as the
+/// FLOOR (see [`HPA_SYNC_PERIOD_MIN`]). The other end is the shortest retention
+/// the member's own documentation names as a valid value: "Valid values are
+/// single-unit durations such as `30m` or `1h`"
+/// (`smithy_query query="shape" shape="KubeApiServerConfigRequest"`), the two
+/// durations that doc names being the ends of the window it calls valid.
+const EVENT_TTL_MIN: &str = "30m";
+/// See [`EVENT_TTL_MIN`]: the retention's own default is its ceiling, so there is
+/// one constant for the two.
+const EVENT_TTL_MAX: &str = DEFAULT_EVENT_TTL;
 
 /// The default `NodePort` range, which is the Kubernetes default
 /// (`--service-node-port-range=30000-32767`) that
@@ -4037,13 +4066,23 @@ const SERVICE_NODE_PORT_CEILING: i32 = 65_535;
 /// `--terminated-pod-gc-threshold` default, which
 /// `PodGcControllerConfigRequest$terminatedPodGcThreshold` overrides.
 const DEFAULT_TERMINATED_POD_GC_THRESHOLD: i32 = 12_500;
-/// The bounds on `terminatedPodGcThreshold`. These are PUBLISHED by the model:
-/// `TerminatedPodGcThresholdValue` is `range 1..1000000`
-/// (`smithy_query query="shape" shape="PodGcControllerConfigRequest"`), so the
-/// catalog publishes the same window the request member is validated against.
-const TERMINATED_POD_GC_THRESHOLD_MIN: i32 = 1;
+/// The window the catalog publishes for `terminatedPodGcThreshold`: the values a
+/// control plane of this Kubernetes version may be configured with, which is what
+/// `IntegerParameterConfig$constraints` states beside the parameter's default.
+///
+/// It is NARROWER than the shape's own bound — `TerminatedPodGcThresholdValue` is
+/// `range 1..1000000` (`smithy_query query="shape"
+/// shape="PodGcControllerConfigRequest"`), the range the wire layer refuses a
+/// value outside — because the modelled range is what the member may CARRY and
+/// this window is what the control plane may be configured to: the published
+/// window runs from the smallest threshold Amazon EKS supports up to the
+/// component's own default ([`DEFAULT_TERMINATED_POD_GC_THRESHOLD`]), which is
+/// also the largest number of terminated pods a control plane keeps. A caller
+/// that validates its configuration against the advertised constraints therefore
+/// does not accept a threshold the service refuses.
+const TERMINATED_POD_GC_THRESHOLD_MIN: i32 = 10_000;
 /// See [`TERMINATED_POD_GC_THRESHOLD_MIN`].
-const TERMINATED_POD_GC_THRESHOLD_MAX: i32 = 1_000_000;
+const TERMINATED_POD_GC_THRESHOLD_MAX: i32 = DEFAULT_TERMINATED_POD_GC_THRESHOLD;
 
 /// The default interval between horizontal-pod-autoscaler syncs — the
 /// kube-controller-manager `--horizontal-pod-autoscaler-sync-period` default,
@@ -4052,12 +4091,15 @@ const TERMINATED_POD_GC_THRESHOLD_MAX: i32 = 1_000_000;
 /// documents ("Valid values are single-unit durations such as `15s` or `1m`").
 const DEFAULT_HPA_SYNC_PERIOD: &str = "15s";
 /// The window the `horizontalPodAutoscalerSyncPeriod` catalog publishes around
-/// [`DEFAULT_HPA_SYNC_PERIOD`]. As with [`EVENT_TTL_MIN`], AWS publishes no
-/// bound, so these are the window this service publishes: no faster than the
-/// component's own default and no slower than five minutes.
-const HPA_SYNC_PERIOD_MIN: &str = "15s";
+/// [`DEFAULT_HPA_SYNC_PERIOD`], on the rule [`EVENT_TTL_MIN`] states: one end of
+/// a published window is the component's own default — for a sync period the
+/// FLOOR, because a control plane does not reconcile autoscalers faster than it
+/// does by default — and the other is the longest interval the member's own
+/// documentation names as a valid value ("Valid values are single-unit durations
+/// such as `15s` or `1m`").
+const HPA_SYNC_PERIOD_MIN: &str = DEFAULT_HPA_SYNC_PERIOD;
 /// See [`HPA_SYNC_PERIOD_MIN`].
-const HPA_SYNC_PERIOD_MAX: &str = "5m";
+const HPA_SYNC_PERIOD_MAX: &str = "1m";
 
 /// The `ScoringStrategyType` members (`smithy_query query="shape"
 /// shape="ScoringStrategyType"`), the first of which is the Kubernetes
@@ -4279,7 +4321,7 @@ const VERSION_CALENDAR: &[(&str, &str, &str, &str)] = &[
     ("1.30", "2024-05-23", "2025-07-23", "2026-07-23"),
     ("1.31", "2024-09-26", "2025-11-26", "2026-11-26"),
     ("1.32", "2025-01-23", "2026-03-23", "2027-03-23"),
-    ("1.33", "2025-05-28", "2026-07-28", "2027-07-28"),
+    ("1.33", "2025-05-29", "2026-07-29", "2027-07-29"),
     ("1.34", "2025-10-01", "2026-12-01", "2027-12-01"),
     ("1.35", "2026-02-01", "2027-04-01", "2028-04-01"),
     ("1.36", "2026-06-01", "2027-08-01", "2028-08-01"),
@@ -4296,6 +4338,15 @@ const VERSION_CALENDAR: &[(&str, &str, &str, &str)] = &[
 /// version calendar backwards publishes calendar rows without inventing add-on
 /// builds for them.
 pub const ADDON_CATALOG_FIRST_CLUSTER_VERSION: &str = "1.30";
+
+/// The OLDEST Kubernetes version the published calendar carries, which is where
+/// the published history of an add-on Amazon EKS has offered since the beginning
+/// of that calendar starts ([`AddonCatalogSeed::first_cluster_version`]).
+///
+/// Read off the calendar itself rather than written twice, so widening the
+/// calendar backwards cannot leave an add-on's window naming a row the calendar
+/// no longer starts at.
+pub const ADDON_CATALOG_OLDEST_CLUSTER_VERSION: &str = VERSION_CALENDAR[0].0;
 
 /// The first instant (UTC) of a `YYYY-MM-DD` day in [`VERSION_CALENDAR`].
 ///

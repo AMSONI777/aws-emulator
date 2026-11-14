@@ -151,10 +151,18 @@ impl<Eng: Send + Sync + 'static> ErasedOperation for RequestPipeline<Eng> {
                 // [`crate::service::body_codec`]).
                 let body = super::body_codec(svc, definition);
                 match protocol.routing_key(req).ok() {
-                    // A request naming no operation of this service is answered the way one
-                    // that names none is, rather than judged against an action nothing
-                    // serves.
-                    None => Ok(definition.routing_error_response(req)),
+                    // A request that names no operation of this service — but a
+                    // request whose method and path DO name one and whose query
+                    // string omits a parameter that operation requires resolves no
+                    // routing key either, because a required query binding is part
+                    // of the route: that one is this operation's own request, so it
+                    // is answered with the parameter refusal it earns rather than
+                    // with the answer a request naming no operation gets (see
+                    // [`super::required_query_contract`]).
+                    None => Ok(super::required_query_contract::refusal_response(
+                        definition, body, req,
+                    )
+                    .unwrap_or_else(|| definition.routing_error_response(req))),
                     Some(key) => {
                         match self.authorization_refusal(key, body, req, ctx, definition) {
                             Some(response) => Ok(response),
