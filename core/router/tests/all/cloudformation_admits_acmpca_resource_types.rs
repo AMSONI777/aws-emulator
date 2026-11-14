@@ -212,6 +212,36 @@ fn one_resource_template(resource_type: &str) -> String {
     json!({ "Resources": { "Subject": { "Type": resource_type } } }).to_string()
 }
 
+/// A template that DEPLOYS: a private CA beside a permission over it, both of this namespace,
+/// each declared with the properties its own deployment needs. What the admission rule is
+/// about is the type, so the bodies the rows submit carry no properties — but a stack an
+/// `UpdateStack` row is submitted against has to be one that really completed, which takes a
+/// body the owning service can serve.
+fn deployable_template() -> String {
+    json!({
+        "Resources": {
+            "Subject": {
+                "Type": "AWS::ACMPCA::CertificateAuthority",
+                "Properties": {
+                    "Type": "ROOT",
+                    "KeyAlgorithm": "RSA_2048",
+                    "SigningAlgorithm": "SHA256WITHRSA",
+                    "Subject": { "CommonName": "root.example-widgets.internal" }
+                }
+            },
+            "SubjectPermission": {
+                "Type": "AWS::ACMPCA::Permission",
+                "Properties": {
+                    "CertificateAuthorityArn": { "Ref": "Subject" },
+                    "Principal": "acm.amazonaws.com",
+                    "Actions": ["IssueCertificate", "GetCertificate", "ListPermissions"]
+                }
+            }
+        }
+    })
+    .to_string()
+}
+
 /// The same template in YAML, the other form a body may be written in.
 fn one_resource_yaml(resource_type: &str) -> String {
     ["Resources:", "  Subject:", &format!("    Type: {resource_type}"), ""].join("\n")
@@ -339,7 +369,7 @@ async fn every_published_private_ca_type_may_be_declared() {
 /// both resources are recorded under the types the template declared, and `UpdateStack`
 /// admits a template declaring one more of the same published types.
 #[tokio::test]
-async fn a_stack_deploys_a_private_ca_beside_a_declared_only_permission() {
+async fn a_stack_deploys_a_private_ca_beside_a_permission_over_it() {
     let router = build_router();
     let case = "a root CA with a permission over it";
     let stack_name = "private-ca-with-a-permission";
@@ -418,9 +448,10 @@ async fn a_stack_deploys_a_private_ca_beside_a_declared_only_permission() {
         "case {case:?}: expected the CA to be reported under the ARN that service minted, got \
          {ca_arn:?} in {reported}"
     );
-    // `CreatePermission` mints no identifier of its own (its output is empty), so what a
-    // permission reports is a physical resource id of CloudFormation's own making — what
-    // matters to a client is that the resource carries one.
+    // `CreatePermission` mints no identifier of its own (its output is empty): a grant is
+    // addressed by the CA-and-principal pair, which is what the resource reports — what the
+    // admission rule is about here is only that the resource carries an identifier. The pair
+    // itself is `cloudformation_grants_acmpca_permissions.rs`' own axis.
     let permission_id = identifiers.get("AcmPermission").cloned().unwrap_or_default();
     assert!(
         !permission_id.is_empty(),
@@ -589,16 +620,11 @@ async fn a_name_the_private_ca_namespace_does_not_publish_is_refused() {
     // submitted body, so the stack it names must be one that exists for the row to be about
     // the body at all.
     let deployed = "private-ca-refusals-base";
+    let base = deployable_template();
     let (status, answer) = cloudformation(
         &router,
         "CreateStack",
-        &[
-            ("StackName", deployed),
-            (
-                "TemplateBody",
-                &one_resource_template("AWS::ACMPCA::Permission"),
-            ),
-        ],
+        &[("StackName", deployed), ("TemplateBody", &base)],
     )
     .await;
     assert_eq!(
@@ -702,7 +728,7 @@ async fn a_name_the_private_ca_namespace_does_not_publish_is_refused() {
         let identifiers = physical_ids_of(&reported);
         assert_eq!(
             identifiers.keys().cloned().collect::<Vec<String>>(),
-            vec!["Subject".to_string()],
+            vec!["Subject".to_string(), "SubjectPermission".to_string()],
             "case {case:?}: expected the refused update to leave the stack's resources alone, \
              got {identifiers:?}"
         );

@@ -3009,3 +3009,11 @@ mod cloudformation_task_definition_runs_an_ecs_service;
 // compiles no suite of this target, so they stand as ordinary comments. Declare each suite
 // exactly ONCE: this is one crate root, so a second `mod` for the same name is `E0428`.
 // crate's `tests/all.rs`, so check there rather than leaving a note here.)
+// Declared here, in this same head region, for the reason the entry above records: a grant an
+// `AWS::ACMPCA::Permission` declares is made by CloudFormation and held by Amazon Web Services
+// Private CA, so only the assembled router can deploy one and then list it.
+#[path = "all/cloudformation_grants_acmpca_permissions.rs"]
+mod cloudformation_grants_acmpca_permissions;
+// `apigateway_cognito_authorizer_app_client_audience` are each declared ONCE, in the head
+// region of this file: two branches landing in the same window appended a second declaration
+// of each here, and a module declared twice compiles neither.)

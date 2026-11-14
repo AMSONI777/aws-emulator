@@ -2737,6 +2737,14 @@ pub fn replacement_properties(resource_type: &str) -> &'static [&'static str] {
         APPCONFIG_ENVIRONMENT => &["ApplicationId"],
         APPCONFIG_CONFIGURATION_PROFILE => &["ApplicationId", "LocationUri", "Type"],
         APPCONFIG_DEPLOYMENT_STRATEGY => &["ReplicateTo"],
+        // A grant on a private CA is made WHOLE and cannot be edited: Amazon Web Services
+        // Private CA publishes no call that changes one — `CreatePermission` refuses a
+        // request that re-asserts the same CA, principal and account for another action set,
+        // and the only way to a different grant is to revoke and grant again — so every
+        // property of the type is create-only and a declaration restating any of them asks
+        // for a different resource, which the deployment replaces. The two that are also the
+        // parts of its composite identity are in that position for the second reason as well.
+        ACMPCA_PERMISSION => &["Actions", "CertificateAuthorityArn", "Principal", "SourceAccount"],
         // A State Manager association may be paired with ONE node by the deprecated
         // `InstanceId`, which `CreateAssociation` takes and `UpdateAssociation` does not: the
         // node an association was created for cannot be changed on it, so a declaration

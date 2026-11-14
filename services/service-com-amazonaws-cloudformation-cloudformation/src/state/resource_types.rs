@@ -80,9 +80,9 @@
 
 use super::template::{
     DeclaredResource, Template, ACMPCA_CERTIFICATE, ACMPCA_CERTIFICATE_AUTHORITY,
-    ACMPCA_CERTIFICATE_AUTHORITY_ACTIVATION, AMPLIFYUIBUILDER_COMPONENT, AMPLIFYUIBUILDER_FORM,
-    AMPLIFYUIBUILDER_THEME, AMPLIFY_APP, APIGATEWAY_ACCOUNT, APIGATEWAY_BASE_PATH_MAPPING,
-    APIGATEWAY_DOMAIN_NAME, BRAKET_SPENDING_LIMIT, MWAA_ENVIRONMENT,
+    ACMPCA_CERTIFICATE_AUTHORITY_ACTIVATION, ACMPCA_PERMISSION, AMPLIFYUIBUILDER_COMPONENT,
+    AMPLIFYUIBUILDER_FORM, AMPLIFYUIBUILDER_THEME, AMPLIFY_APP, APIGATEWAY_ACCOUNT,
+    APIGATEWAY_BASE_PATH_MAPPING, APIGATEWAY_DOMAIN_NAME, BRAKET_SPENDING_LIMIT, MWAA_ENVIRONMENT,
 };
 
 /// The namespace Amazon Web Services' own resource types live under: a type spelled with
@@ -159,14 +159,13 @@ const TEMPLATE_FORMAT_ERROR_PREFIX: &str = "Template format error: ";
 /// (`AWS::<anything>::<anything>`), which would admit `AWS::SWF::Domain` again.
 pub const AWS_RESOURCE_TYPES: &[&str] = &[
     // Amazon Web Services Private CA. The certificate authority itself, a certificate one
-    // of its CAs issues and the activation of a CA with such a certificate are created in
-    // the owning service (`super::provisioner`); `AWS::ACMPCA::Permission` is recognised
-    // because the resource reference publishes it, and is left declared-only like every
-    // other catalogued type this emulator provisions nothing for.
+    // of its CAs issues, the activation of a CA with such a certificate and the permission a
+    // CA grants to a service principal are all created in the owning service
+    // (`super::provisioner`).
     ACMPCA_CERTIFICATE,
     ACMPCA_CERTIFICATE_AUTHORITY,
     ACMPCA_CERTIFICATE_AUTHORITY_ACTIVATION,
-    "AWS::ACMPCA::Permission",
+    ACMPCA_PERMISSION,
     // Amazon MQ
     "AWS::AmazonMQ::Broker",
     "AWS::AmazonMQ::Configuration",

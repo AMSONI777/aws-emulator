@@ -472,6 +472,7 @@ use super::provisioning::{
 };
 use super::template::{
     ACMPCA_CERTIFICATE, ACMPCA_CERTIFICATE_AUTHORITY, ACMPCA_CERTIFICATE_AUTHORITY_ACTIVATION,
+    ACMPCA_PERMISSION,
     ACM_ACME_ENDPOINT, ACM_CERTIFICATE, AMPLIFYUIBUILDER_COMPONENT, AMPLIFYUIBUILDER_FORM,
     AMPLIFYUIBUILDER_THEME, AMPLIFY_APP, AOSS_COLLECTION,
     AOSS_SECURITY_POLICY, APIGATEWAY_BASE_PATH_MAPPING, APIGATEWAY_DOMAIN_NAME, APIGATEWAYV2_API,
@@ -885,6 +886,11 @@ pub(super) enum Provisioner {
     /// the issued certificate into the CA, and `UpdateCertificateAuthority` applies the
     /// status the declaration asks for.
     AcmPcaCertificateAuthorityActivation,
+    /// `AWS::ACMPCA::Permission`: not a resource of that service's own either but the GRANT
+    /// one of its CAs makes to a service principal — `CreatePermission` makes it and
+    /// `DeletePermission` revokes it — identified by the CA-and-principal pair every call of
+    /// that service on one is addressed by.
+    AcmPcaPermission,
     Route53ResolverEndpoint,
     Route53ResolverRule,
     Route53ResolverRuleAssociation,
@@ -1121,6 +1127,7 @@ pub(super) fn provisioner_for(resource_type: &str) -> Option<Provisioner> {
         ACMPCA_CERTIFICATE_AUTHORITY_ACTIVATION => {
             Some(Provisioner::AcmPcaCertificateAuthorityActivation)
         }
+        ACMPCA_PERMISSION => Some(Provisioner::AcmPcaPermission),
         ROUTE53RESOLVER_ENDPOINT => Some(Provisioner::Route53ResolverEndpoint),
         ROUTE53RESOLVER_RULE => Some(Provisioner::Route53ResolverRule),
         ROUTE53RESOLVER_RULE_ASSOCIATION => Some(Provisioner::Route53ResolverRuleAssociation),
@@ -1530,6 +1537,9 @@ impl Provisioner {
             Self::AcmPcaCertificateAuthorityActivation => {
                 activate_certificate_authority(ctx, region, resource).await
             }
+            // `AWS::ACMPCA::Permission` publishes no `Tags` property either: a grant on a CA
+            // is no taggable resource, so no tags are propagated to one.
+            Self::AcmPcaPermission => create_ca_permission(ctx, region, resource).await,
             Self::Route53ResolverEndpoint => {
                 create_resolver_endpoint(ctx, region, resource, propagated).await
             }
@@ -3088,6 +3098,9 @@ impl Provisioner {
             Self::AcmPcaCertificateAuthorityActivation => {
                 deactivate_certificate_authority(ctx, region, physical_resource_id).await
             }
+            // A grant is revoked by the CA-and-principal pair that identifies it, both
+            // halves of which are on the resource's own declaration.
+            Self::AcmPcaPermission => revoke_ca_permission(ctx, region, resource).await,
             Self::Route53ResolverEndpoint => {
                 delete_resolver_endpoint(ctx, region, physical_resource_id).await
             }
@@ -3582,6 +3595,9 @@ impl Provisioner {
             Self::AcmPcaCertificateAuthorityActivation => {
                 activation_configuration(ctx, region, physical_resource_id).await
             }
+            // A grant is read out of the CA's own listing of its permissions, by the
+            // principal this record granted to.
+            Self::AcmPcaPermission => describe_ca_permission(ctx, region, resource).await,
             Self::Route53ResolverEndpoint => {
                 describe_resolver_endpoint(ctx, region, physical_resource_id).await
             }

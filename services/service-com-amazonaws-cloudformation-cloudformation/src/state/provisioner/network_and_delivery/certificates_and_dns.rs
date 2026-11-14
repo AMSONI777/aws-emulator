@@ -366,6 +366,198 @@ pub(crate) async fn describe_certificate_authority(
 }
 
 // ---------------------------------------------------------------------------
+// Amazon Web Services Private CA: AWS::ACMPCA::Permission
+// ---------------------------------------------------------------------------
+
+/// The properties of `AWS::ACMPCA::Permission` that are members of `CreatePermission` and of
+/// `DeletePermission` under the SAME names: the pair that identifies the grant
+/// ([`ACMPCA_PERMISSION_IDENTITY_MEMBERS`]) and, beside it, the actions the grant carries and
+/// the account it is assigned from ([`ACMPCA_PERMISSION_GRANT_MEMBERS`] —
+/// `SourceAccount` is a member of both calls, `Actions` of the create alone).
+pub(crate) const ACMPCA_PERMISSION_IDENTITY_MEMBERS: &[(&str, &str)] = &[
+    ("CertificateAuthorityArn", "CertificateAuthorityArn"),
+    ("Principal", "Principal"),
+];
+pub(crate) const ACMPCA_PERMISSION_GRANT_MEMBERS: &[(&str, &str)] =
+    &[("Actions", "Actions"), ("SourceAccount", "SourceAccount")];
+
+/// Grant the permission an `AWS::ACMPCA::Permission` declares, so a client that deployed the
+/// stack reads it back from `ListPermissions` on the CA — and can revoke it — rather than
+/// finding a CA that holds nothing.
+///
+/// This type is no entity with a life of its own: its properties ARE `CreatePermission`'s own
+/// members under the same names, and that one call is the whole deployment of one. That
+/// service is also what JUDGES the grant — a `Principal` it does not grant to, a CA it holds
+/// no record of, an action set that is not the whole of what a renewal needs — so a
+/// declaration it refuses fails the resource, and with it the stack, rather than being
+/// recorded as access nothing granted.
+///
+/// What the resource IS, is the pair it grants on, so the physical id answered here is that
+/// pair ([`super::template::composite_identity`]) read off the document the call was made
+/// with: a reference to a certificate authority of the same stack carries the ARN Amazon Web
+/// Services Private CA minted for it, which no naming rule could have computed.
+pub(crate) async fn create_ca_permission(
+    ctx: &smithy_server_runtime::OperationContext<'_>,
+    region: &str,
+    resource: &StoredResource,
+) -> Result<Created, Refusal> {
+    let mut request = ca_permission_identity(resource)?;
+    let properties = resource
+        .properties
+        .as_object()
+        .cloned()
+        .unwrap_or_else(Map::new);
+    copy_members(&properties, ACMPCA_PERMISSION_GRANT_MEMBERS, &mut request);
+    call_json_rpc(
+        ctx,
+        ACMPCA_SIGNING_NAME,
+        region,
+        AWS_JSON_1_1,
+        &format!("{ACMPCA_TARGET_PREFIX}.CreatePermission"),
+        &Value::Object(request),
+    )
+    .await?;
+    // The pair is computed again HERE, from the document the call was made with, because
+    // this pass is the one that owns the id: the declaration was resolved before that service
+    // had minted the CA's ARN, so the pair the naming rules stamped on the record carries the
+    // stand-in they computed, and the pair this resource really granted on is the one the
+    // re-pointed document names.
+    Ok(Created {
+        physical_resource_id: super::template::composite_identity(
+            &resource.resource_type,
+            &resource.properties,
+        ),
+        attributes: BTreeMap::new(),
+    })
+}
+
+/// Revoke the permission a stack granted, addressed by the CA-and-principal pair
+/// `DeletePermission` takes — beside the `SourceAccount` the grant was assigned from, which
+/// is a member of that call too and the same property the grant was made with.
+///
+/// A grant that service no longer holds — and a CA it no longer holds, which took the grant
+/// with it — answers `ResourceNotFoundException`, judged on the CODE and never on a message,
+/// and is already in the state the delete asks for.
+pub(crate) async fn revoke_ca_permission(
+    ctx: &smithy_server_runtime::OperationContext<'_>,
+    region: &str,
+    resource: &StoredResource,
+) -> Result<(), Refusal> {
+    let mut request = ca_permission_identity(resource)?;
+    if let Some(account) = property(resource, "SourceAccount") {
+        request.insert("SourceAccount".to_string(), Value::String(account));
+    }
+    match call_json_rpc(
+        ctx,
+        ACMPCA_SIGNING_NAME,
+        region,
+        AWS_JSON_1_1,
+        &format!("{ACMPCA_TARGET_PREFIX}.DeletePermission"),
+        &Value::Object(request),
+    )
+    .await
+    {
+        Ok(_) => Ok(()),
+        Err(refusal) if refusal.code == RESOURCE_NOT_FOUND => Ok(()),
+        Err(refusal) => Err(refusal),
+    }
+}
+
+/// The grant as Amazon Web Services Private CA reports it, for drift detection.
+///
+/// `ListPermissions` is that service's only read of a grant, so the CA's grants are listed
+/// and the one this record names is picked out of them by its principal: a grant that is no
+/// longer among them — and a CA that service no longer holds at all — was revoked, which is
+/// the same absence. What is reported is the two properties the read reports under the names
+/// the type declares them in: the actions the grant carries and the account it was assigned
+/// from.
+///
+/// A grant IS the SET of actions it allows — the order a request lists them in makes no
+/// difference to the access in force, and the read reports a grant's actions in their own
+/// order rather than the request's — so the reported actions are rendered in the
+/// DECLARATION's order while the two name the same set ([`granted_actions_against`]), and as
+/// that service reported them once they do not.
+pub(crate) async fn describe_ca_permission(
+    ctx: &smithy_server_runtime::OperationContext<'_>,
+    region: &str,
+    resource: &StoredResource,
+) -> Result<Option<Value>, Refusal> {
+    let ca_arn = required_property(resource, "CertificateAuthorityArn")?;
+    let principal = required_property(resource, "Principal")?;
+    let granted = match call_json_rpc(
+        ctx,
+        ACMPCA_SIGNING_NAME,
+        region,
+        AWS_JSON_1_1,
+        &format!("{ACMPCA_TARGET_PREFIX}.ListPermissions"),
+        &serde_json::json!({ "CertificateAuthorityArn": ca_arn }),
+    )
+    .await
+    {
+        Ok(answered) => answered,
+        Err(refusal) if refusal.code == RESOURCE_NOT_FOUND => return Ok(None),
+        Err(refusal) => return Err(refusal),
+    };
+    let Some(permission) = granted
+        .get("Permissions")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .find(|permission| {
+            permission.get("Principal").and_then(Value::as_str) == Some(principal.as_str())
+        })
+    else {
+        return Ok(None);
+    };
+    let mut reported = reported_as_properties(permission, ACMPCA_PERMISSION_GRANT_MEMBERS);
+    let declared = resource.properties.get("Actions");
+    if let (Some(reported), Some(actions)) = (
+        reported.as_object_mut(),
+        permission.get("Actions").map(|reported| {
+            granted_actions_against(declared, reported)
+        }),
+    ) {
+        reported.insert("Actions".to_string(), actions);
+    }
+    Ok(Some(reported))
+}
+
+/// The actions a grant carries, as the comparison with `declared` must read them: the
+/// declaration's own list while the two name the same SET of actions, and the reported list
+/// as it stands once they do not.
+fn granted_actions_against(declared: Option<&Value>, reported: &Value) -> Value {
+    let names = |value: Option<&Value>| -> Option<::std::collections::BTreeSet<String>> {
+        value?
+            .as_array()?
+            .iter()
+            .map(|action| action.as_str().map(ToString::to_string))
+            .collect::<Option<::std::collections::BTreeSet<String>>>()
+    };
+    match (names(declared), names(Some(reported))) {
+        (Some(declared_set), Some(reported_set)) if declared_set == reported_set => {
+            declared.cloned().unwrap_or_else(|| reported.clone())
+        }
+        _ => reported.clone(),
+    }
+}
+
+/// The pair that identifies one grant, as the members every call of that service on one takes
+/// them: the CA the grant is made on and the principal that holds it, both of them required
+/// properties of the type and both read off the resource's own declaration. A declaration
+/// missing either names no grant that could be made or addressed, so it is refused here
+/// rather than with a request Amazon Web Services Private CA would reject.
+fn ca_permission_identity(resource: &StoredResource) -> Result<Map<String, Value>, Refusal> {
+    let mut identity = Map::new();
+    for (property, member) in ACMPCA_PERMISSION_IDENTITY_MEMBERS {
+        identity.insert(
+            (*member).to_string(),
+            Value::String(required_property(resource, property)?),
+        );
+    }
+    Ok(identity)
+}
+
+// ---------------------------------------------------------------------------
 // Route 53 Resolver: AWS::Route53Resolver::ResolverEndpoint / ::ResolverRule /
 // ::ResolverRuleAssociation
 // ---------------------------------------------------------------------------
