@@ -5,6 +5,10 @@
 //! `crate::state`, and reports the names the store does not hold in
 //! `repositoriesNotFound`.
 //!
+//! The `repositories` list is sequenced on the repositories themselves — most recently
+//! created first — and not on the order the request's `repositoryNames` happened to
+//! list them in; `repositoriesNotFound` reports the absent names in request order.
+//!
 //! An empty `repositoryNames` array is served with empty lists rather than refused,
 //! which is what that member's own documentation states ("The array itself can be
 //! empty"); the modelled `RepositoryNamesRequiredException` answers a request that
@@ -210,17 +214,17 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
                 .map(|git| git.authority().to_string()),
         );
 
-        // One entry per name, in the order the request listed them: a name the store
-        // holds contributes the SAME metadata projection `GetRepository` reports, and a
-        // name it does not hold contributes to `repositoriesNotFound`. A repeated name
-        // names one repository, so it is reported once.
+        // One entry per name the request lists: a name the store holds contributes the
+        // SAME metadata projection `GetRepository` reports, and a name it does not hold
+        // contributes to `repositoriesNotFound`, in the order the request listed them. A
+        // repeated name names one repository, so it is reported once.
         //
         // An EMPTY list is served, not refused: `repositoryNames`'s own documentation
         // says "The array itself can be empty", and the modeled
         // `RepositoryNamesRequiredException` covers the member being absent — which the
         // boundary validator refuses first, the member being `@required` — so that
         // variant is intentionally unreachable from here.
-        let mut repositories: Vec<RepositoryMetadata> = Vec::new();
+        let mut found: Vec<&crate::state::Repository> = Vec::new();
         let mut repositories_not_found: Vec<String> = Vec::new();
         let mut seen: ::std::collections::HashSet<&str> = ::std::collections::HashSet::new();
         for name in &input.repository_names {
@@ -228,10 +232,33 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
                 continue;
             }
             match store.repositories.get(name) {
-                Some(repository) => repositories.push(repository.metadata(&endpoint)),
+                Some(repository) => found.push(repository),
                 None => repositories_not_found.push(name.clone()),
             }
         }
+
+        // `repositories` is NOT answered in the request's order: the service orders the
+        // repositories it found on the repositories themselves, most recently created
+        // first, so the same set of names answers the same sequence however the request
+        // happened to list them. The name is unique, so it breaks a tie between two
+        // repositories created in the same instant and keeps the sequence total; it runs
+        // the same way round as the primary key, as the sorted listing does for its
+        // descending direction.
+        //
+        // The model fixes no order for this list, so the key is read off what the service
+        // is observed to answer: the later-created of two repositories first. A
+        // descending name order is observationally the same for that pair, so an
+        // observation that separates the two keys would be a reason to revisit this.
+        found.sort_by(|left, right| {
+            left.creation_date
+                .cmp(&right.creation_date)
+                .then_with(|| left.name.cmp(&right.name))
+                .reverse()
+        });
+        let repositories: Vec<RepositoryMetadata> = found
+            .into_iter()
+            .map(|repository| repository.metadata(&endpoint))
+            .collect();
 
         Ok(BatchGetRepositoriesOutput {
             repositories: Some(repositories),

@@ -3490,3 +3490,5 @@ mod chime_deleted_meeting_tagging;
 // leaving a note here. (Ordinary line comments: an inner doc comment `//!` is only legal
 // before the first item of a crate root, so one in this appended tail is `E0753`.)
 // leaving a note here. (Ordinary comments: an inner doc comment `//!` is only legal before
+// (A leftover of that same appended note: it is a LINE comment here, for the reason the
+// entry above records.) this file and for every service crate's `tests/all.rs`.

@@ -10,10 +10,13 @@
 //! The rule under test is the one every batch read follows: for each name the request
 //! lists, the batch answers the SAME stored projection the single-resource read
 //! (`GetRepository`) answers, names it holds no repository for are reported in
-//! `repositoriesNotFound`, and the call changes nothing a later caller sees. The tables
-//! below span what the rule generalises over — how many names a request carries, their
-//! order, whether they are held or absent, repeated names, the empty array, and the
-//! published limit on the number of names — rather than one recorded request.
+//! `repositoriesNotFound`, and the call changes nothing a later caller sees. The
+//! `repositories` list is sequenced on the repositories themselves — most recently
+//! created first — so one set of names answers one sequence however the request ordered
+//! them. The tables below span what the rule generalises over — how many names a request
+//! carries, their order, whether they are held or absent, repeated names, the empty
+//! array, and the published limit on the number of names — rather than one recorded
+//! request.
 
 use serde_json::{json, Value};
 
@@ -34,14 +37,31 @@ fn seeded_repositories() -> Vec<(String, Option<String>)> {
     ]
 }
 
-/// One row of the batch table: the names one request lists, and which of them the
-/// service must report as found (in that order) and as not found.
+/// One row of the batch table: the names one request lists, which of them the service
+/// holds (as a SET — the answer's sequence comes from the repositories, not from this
+/// list) and which it holds no repository for.
 #[derive(Debug)]
 struct BatchCase {
     label: &'static str,
     requested: Vec<String>,
-    found: Vec<String>,
+    held: Vec<String>,
     not_found: Vec<String>,
+}
+
+/// The names in `held`, sequenced the way the service sequences the `repositories` list:
+/// most recently created first. `created` lists every seeded name in the order it was
+/// created.
+fn newest_first(held: &[String], created: &[String]) -> Vec<String> {
+    let mut ordered: Vec<String> = held.to_vec();
+    ordered.sort_by_key(|name| {
+        std::cmp::Reverse(
+            created
+                .iter()
+                .position(|seeded| seeded == name)
+                .unwrap_or_else(|| panic!("{name} was never seeded")),
+        )
+    });
+    ordered
 }
 
 fn batch_cases(seeded: &[String]) -> Vec<BatchCase> {
@@ -49,13 +69,29 @@ fn batch_cases(seeded: &[String]) -> Vec<BatchCase> {
         BatchCase {
             label: "one held name",
             requested: vec![seeded[0].clone()],
-            found: vec![seeded[0].clone()],
+            held: vec![seeded[0].clone()],
             not_found: Vec::new(),
         },
         BatchCase {
-            label: "every held name, in request order rather than store order",
+            label: "every held name, listed oldest-created first",
+            requested: seeded.to_vec(),
+            held: seeded.to_vec(),
+            not_found: Vec::new(),
+        },
+        BatchCase {
+            label: "every held name, listed the other way round",
             requested: seeded.iter().rev().cloned().collect(),
-            found: seeded.iter().rev().cloned().collect(),
+            held: seeded.to_vec(),
+            not_found: Vec::new(),
+        },
+        BatchCase {
+            label: "every held name, listed in ascending name order",
+            requested: {
+                let mut names = seeded.to_vec();
+                names.sort();
+                names
+            },
+            held: seeded.to_vec(),
             not_found: Vec::new(),
         },
         BatchCase {
@@ -66,7 +102,7 @@ fn batch_cases(seeded: &[String]) -> Vec<BatchCase> {
                 "absent.two".to_string(),
                 seeded[1].clone(),
             ],
-            found: vec![seeded[2].clone(), seeded[1].clone()],
+            held: vec![seeded[2].clone(), seeded[1].clone()],
             not_found: vec!["absent-one".to_string(), "absent.two".to_string()],
         },
         BatchCase {
@@ -77,20 +113,20 @@ fn batch_cases(seeded: &[String]) -> Vec<BatchCase> {
                 "absent-one".to_string(),
                 "absent-one".to_string(),
             ],
-            found: vec![seeded[0].clone()],
+            held: vec![seeded[0].clone()],
             not_found: vec!["absent-one".to_string()],
         },
         BatchCase {
             label: "only absent names",
             requested: vec!["absent-one".to_string(), "absent-three".to_string()],
-            found: Vec::new(),
+            held: Vec::new(),
             not_found: vec!["absent-one".to_string(), "absent-three".to_string()],
         },
         BatchCase {
             // `repositoryNames`'s own documentation: "The array itself can be empty."
             label: "the empty array",
             requested: Vec::new(),
-            found: Vec::new(),
+            held: Vec::new(),
             not_found: Vec::new(),
         },
     ]
@@ -157,8 +193,8 @@ async fn a_batch_read_reports_the_same_stored_metadata_as_the_single_read() {
         let repositories = list_at(&payload, "repositories");
         assert_eq!(
             names_of(&repositories),
-            case.found,
-            "case {label:?}: repositories must be the held names in request order, got {payload}"
+            newest_first(&case.held, &names),
+            "case {label:?}: repositories must be the held names most recently created first, got {payload}"
         );
         for entry in &repositories {
             let name = string_at(entry, "/repositoryName");
@@ -317,6 +353,149 @@ async fn the_batch_reports_what_a_later_write_persisted() {
         strings_of(&list_at(&deleted, "repositoriesNotFound")),
         vec![name.to_string()],
         "a deleted repository's name must be reported as not found, got {deleted}"
+    );
+}
+
+/// Every ordering of three names, so no row of the table is the sequence the service
+/// answers by accident.
+fn orderings(names: &[String]) -> Vec<Vec<String>> {
+    let mut rows: Vec<Vec<String>> = Vec::new();
+    for first in 0..names.len() {
+        for second in 0..names.len() {
+            if second == first {
+                continue;
+            }
+            for third in 0..names.len() {
+                if third == first || third == second {
+                    continue;
+                }
+                rows.push(vec![
+                    names[first].clone(),
+                    names[second].clone(),
+                    names[third].clone(),
+                ]);
+            }
+        }
+    }
+    rows
+}
+
+#[tokio::test]
+async fn the_list_is_sequenced_on_the_repositories_not_on_the_request() {
+    let router = emulator();
+
+    // Seeded oldest-created first. A rename moves a name but not the instant the
+    // repository was created, so the renamed repository keeps its place in the sequence;
+    // the names are picked so that neither ascending nor descending name order is the
+    // sequence the service must answer.
+    for name in ["b-one", "a-two"] {
+        ok(
+            &router,
+            "CreateRepository",
+            &json!({ "repositoryName": name }),
+        )
+        .await;
+    }
+    ok(
+        &router,
+        "UpdateRepositoryName",
+        &json!({ "oldName": "b-one", "newName": "z-one-renamed" }),
+    )
+    .await;
+    ok(
+        &router,
+        "CreateRepository",
+        &json!({ "repositoryName": "c-three" }),
+    )
+    .await;
+
+    let created: Vec<String> = ["z-one-renamed", "a-two", "c-three"]
+        .iter()
+        .map(|name| name.to_string())
+        .collect();
+    let expected = newest_first(&created, &created);
+    assert_eq!(
+        expected,
+        vec![
+            "c-three".to_string(),
+            "a-two".to_string(),
+            "z-one-renamed".to_string()
+        ],
+        "the seeded repositories must make creation order differ from both name orders"
+    );
+
+    // Each row lists the same three names in a different order, so a request-ordered
+    // answer would differ row to row; the service's answer must not.
+    let mut rows: Vec<Vec<String>> = orderings(&created);
+    // A repeated name and an absent name change neither the set nor the sequence.
+    rows.push(vec![
+        "a-two".to_string(),
+        "absent-repo".to_string(),
+        "a-two".to_string(),
+        "z-one-renamed".to_string(),
+        "c-three".to_string(),
+    ]);
+    for requested in &rows {
+        let payload = ok(
+            &router,
+            "BatchGetRepositories",
+            &json!({ "repositoryNames": requested }),
+        )
+        .await;
+        let entries = list_at(&payload, "repositories");
+        assert_eq!(
+            names_of(&entries),
+            expected,
+            "case {requested:?}: the repositories list must be the held repositories most \
+             recently created first, got {payload}"
+        );
+        // The same sequence read off the reported metadata: creationDate never rises
+        // from one entry to the next. Two entries may report ONE instant — the member's
+        // wire form carries less precision than the stored instant — so a tie is allowed
+        // here; the sequence itself is pinned by the assertion above.
+        let reported: Vec<(f64, String)> = entries
+            .iter()
+            .map(|entry| {
+                (
+                    entry
+                        .get("creationDate")
+                        .and_then(Value::as_f64)
+                        .unwrap_or_else(|| panic!("no creationDate in {entry}")),
+                    string_at(entry, "/repositoryName"),
+                )
+            })
+            .collect();
+        for pair in reported.windows(2) {
+            let (earlier, later) = (&pair[0], &pair[1]);
+            assert!(
+                earlier.0 >= later.0,
+                "case {requested:?}: {earlier:?} must not be reported before {later:?}"
+            );
+        }
+    }
+
+    // A repository created now joins the sequence at the front, which is what makes the
+    // order a property of the repositories rather than of this request.
+    ok(
+        &router,
+        "CreateRepository",
+        &json!({ "repositoryName": "b-four" }),
+    )
+    .await;
+    let mut requested = created.clone();
+    requested.insert(0, "b-four".to_string());
+    let payload = ok(
+        &router,
+        "BatchGetRepositories",
+        &json!({ "repositoryNames": requested }),
+    )
+    .await;
+    let mut with_newcomer = vec!["b-four".to_string()];
+    with_newcomer.extend(expected.clone());
+    assert_eq!(
+        names_of(&list_at(&payload, "repositories")),
+        with_newcomer,
+        "case {requested:?}: the newest repository must be reported first, got {payload}"
     );
 }
 

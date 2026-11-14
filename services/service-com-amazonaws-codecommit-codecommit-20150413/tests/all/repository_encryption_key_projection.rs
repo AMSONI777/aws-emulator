@@ -181,7 +181,9 @@ async fn every_projection_reports_the_repositorys_key_in_its_canonical_form() {
     }
 
     // The batch read projects the same repositories: one entry per requested
-    // name, in the order the request lists them, each carrying its own key.
+    // name, each carrying its own key. The batch sequences its list on the
+    // repositories themselves — most recently created first — which for these
+    // repositories, created in table order, is the reverse of that order.
     let requested: Vec<String> = cases.iter().rev().map(|case| case.name.clone()).collect();
     let payload = ok(
         &router,
@@ -200,7 +202,7 @@ async fn every_projection_reports_the_repositorys_key_in_its_canonical_form() {
             .map(|entry| string_at(entry, "/repositoryName"))
             .collect::<Vec<String>>(),
         requested,
-        "the batch must report the requested names in request order, got {payload}"
+        "the batch must report the requested repositories most recently created first, got {payload}"
     );
     for case in &cases {
         let label = &case.name;
