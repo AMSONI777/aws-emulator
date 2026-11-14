@@ -158,7 +158,7 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         // empty page.
         let record = store.datasets.get(&input.dataset_id).ok_or_else(|| {
             ListDatasetVersionsErrorModeled::ResourceNotFoundException(
-                crate::state::resource_not_found(crate::state::RESOURCE_DATASET),
+                crate::state::dataset_not_found(),
             )
         })?;
 

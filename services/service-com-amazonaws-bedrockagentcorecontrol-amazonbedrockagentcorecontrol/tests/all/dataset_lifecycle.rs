@@ -13,7 +13,7 @@
 //! object storage really holds.
 
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use bytes::Bytes;
 use serde_json::{json, Value};
@@ -32,6 +32,14 @@ const ACCOUNT: &str = "000000000000";
 /// The settle span `src/state/datasets.rs` gives the transition out of `CREATING`, plus
 /// slack, so a test can wait the clock out.
 const PAST_SETTLE: Duration = Duration::from_millis(3_300);
+
+/// How long a poll waits for a status the clock owes before giving up. Generous: it
+/// bounds a transition the emulator makes in seconds, so a loaded host still passes.
+const POLL_DEADLINE: Duration = Duration::from_secs(120);
+
+/// How long a poll waits between looks. Short enough that the loop is cheap, and never
+/// asserted on: the test waits for the CONDITION.
+const POLL_INTERVAL: Duration = Duration::from_millis(25);
 
 /// Every `DatasetSchemaType` value, from `smithy_query shape=DatasetSchemaType`.
 const SCHEMA_TYPES: [&str; 3] = [
@@ -151,6 +159,28 @@ impl Emulator {
             .body(Bytes::copy_from_slice(body))
             .expect("a well-formed request");
         self.router.dispatch(request).await.status().as_u16()
+    }
+
+    /// Look at the dataset until it reports a status the clock has SETTLED it in — any
+    /// status other than the transient `CREATING` — and answer that read. Waits for the
+    /// CONDITION: it polls until the status holds or [`POLL_DEADLINE`] passes, so it
+    /// never depends on how fast the host runs.
+    async fn poll_until_settled(&self, case: &str, dataset_id: &str) -> Answer {
+        let started = Instant::now();
+        loop {
+            let read = self.get_dataset(dataset_id).await;
+            if read.text("status") != "CREATING" {
+                return read;
+            }
+            assert!(
+                started.elapsed() < POLL_DEADLINE,
+                "case {case:?}: dataset {dataset_id} never left CREATING, last read was status \
+                 {:?} and body {}",
+                read.text("status"),
+                read.body
+            );
+            tokio::time::sleep(POLL_INTERVAL).await;
+        }
     }
 
     /// Store `body` at `key` in `bucket`, creating the bucket first, so an ingestion that
@@ -722,9 +752,12 @@ async fn a_replayed_client_token_mints_one_dataset_and_unknown_identifiers_are_n
 struct S3Row {
     case: &'static str,
     name: &'static str,
-    /// The bytes stored at the key the source names, when object storage holds the file.
-    file: Option<String>,
-    /// The examples the ingestion is expected to yield, or `None` when it must fail.
+    /// The bytes stored at the key the source names. Every row stores a file: a key
+    /// object storage holds nothing at is refused before a dataset exists to ingest
+    /// into, which `dataset_source_resolution.rs` covers.
+    file: String,
+    /// The examples the ingestion is expected to yield, or `None` when the file resolves
+    /// but yields no example.
     expected: Option<i64>,
 }
 
@@ -739,84 +772,77 @@ fn nested_line(arrays: usize) -> String {
 const BUCKET: &str = "agentcore-datasets";
 
 /// An Amazon S3 source is INGESTED out of this emulator's own object storage: the
-/// examples the dataset reports are the ones the file holds, and a file that yields none
-/// settles the dataset in `CREATE_FAILED` with the reason it failed.
+/// examples the dataset reports are the ones the file holds, and a file that resolves but
+/// yields no example settles the dataset in `CREATE_FAILED` with the reason it failed.
 ///
 /// The rows differ along what the rule generalises over: how many examples the file
 /// holds, whether blank lines separate them, the JSON form of a line (an object, a
-/// string), a file object storage holds nothing for, a file that is not JSONL, and an
-/// empty file.
+/// string), how deeply a line nests, a file that is not JSONL, and an empty file. A URI
+/// that resolves to no readable object at all is refused before anything is created,
+/// which `dataset_source_resolution.rs` covers.
 #[tokio::test]
 async fn an_s3_source_is_ingested_out_of_object_storage() {
-    let rows: [S3Row; 9] = [
+    let rows: [S3Row; 8] = [
         S3Row {
             case: "one example",
             name: "s3_one",
-            file: Some("{\"input\":\"a\"}\n".to_string()),
+            file: "{\"input\":\"a\"}\n".to_string(),
             expected: Some(1),
         },
         S3Row {
             case: "several examples",
             name: "s3_many",
-            file: Some("{\"input\":\"a\"}\n{\"input\":\"b\"}\n{\"input\":\"c\"}\n".to_string()),
+            file: "{\"input\":\"a\"}\n{\"input\":\"b\"}\n{\"input\":\"c\"}\n".to_string(),
             expected: Some(3),
         },
         S3Row {
             case: "blank lines between examples and no trailing newline",
             name: "s3_blank_lines",
-            file: Some("{\"input\":\"a\"}\n\n{\"input\":\"b\"}".to_string()),
+            file: "{\"input\":\"a\"}\n\n{\"input\":\"b\"}".to_string(),
             expected: Some(2),
         },
         S3Row {
             case: "an example that is a JSON string rather than an object",
             name: "s3_scalar",
-            file: Some("\"a single turn\"\n{\"input\":\"b\"}\n".to_string()),
+            file: "\"a single turn\"\n{\"input\":\"b\"}\n".to_string(),
             expected: Some(2),
         },
         S3Row {
             case: "an example nested to the depth an ingestion reads",
             name: "s3_nested",
             // 64 levels: the bound `src/state/datasets.rs` states for one example.
-            file: Some(nested_line(63)),
+            file: nested_line(63),
             expected: Some(1),
         },
         S3Row {
             case: "an example nested one level past the depth an ingestion reads",
             name: "s3_too_deep",
-            file: Some(nested_line(64)),
-            expected: None,
-        },
-        S3Row {
-            case: "a file object storage holds nothing for",
-            name: "s3_absent",
-            file: None,
+            file: nested_line(64),
             expected: None,
         },
         S3Row {
             case: "a line that is not JSON",
             name: "s3_not_json",
-            file: Some("{\"input\":\"a\"}\nnot json at all\n".to_string()),
+            file: "{\"input\":\"a\"}\nnot json at all\n".to_string(),
             expected: None,
         },
         S3Row {
             case: "an empty file",
             name: "s3_empty",
-            file: Some("\n  \n".to_string()),
+            file: "\n  \n".to_string(),
             expected: None,
         },
     ];
 
     let emulator = Emulator::with_object_storage();
-    // The datasets the table creates, so the clock-owed transition is waited out ONCE
-    // after the loop.
+    // The datasets the table creates, so the clock-owed transition is polled for ONCE
+    // per dataset after the loop rather than serialised row by row.
     let mut settling: Vec<(&str, String, Option<i64>)> = Vec::new();
 
     for row in &rows {
         let case = row.case;
         let key = format!("{}/examples.jsonl", row.name);
-        if let Some(file) = &row.file {
-            emulator.put_object(BUCKET, &key, file.as_bytes()).await;
-        }
+        emulator.put_object(BUCKET, &key, row.file.as_bytes()).await;
 
         let created = emulator
             .create_dataset(&json!({
@@ -839,9 +865,8 @@ async fn an_s3_source_is_ingested_out_of_object_storage() {
         settling.push((case, created.text("datasetId"), row.expected));
     }
 
-    tokio::time::sleep(PAST_SETTLE).await;
     for (case, id, expected) in settling {
-        let read = emulator.get_dataset(&id).await;
+        let read = emulator.poll_until_settled(case, &id).await;
         assert_eq!(
             read.status, 200,
             "case {case:?}: expected HTTP 200 from GetDataset, got {} and body {}",
@@ -893,46 +918,40 @@ async fn an_s3_source_is_ingested_out_of_object_storage() {
     }
 }
 
-/// An emulator assembled WITHOUT object storage cannot read a caller's JSONL file, so an
-/// Amazon S3 source ingests nothing: the dataset exists, holds no example and settles in
-/// `CREATE_FAILED` rather than reporting a success nothing backs.
+/// An emulator assembled WITHOUT object storage can resolve no caller JSONL file at all,
+/// so an Amazon S3 source names no readable object: the create is REFUSED with the
+/// modelled `ValidationException` naming the URI, and no dataset is left behind.
 #[tokio::test]
-async fn an_s3_source_ingests_nothing_without_object_storage() {
+async fn an_s3_source_is_refused_without_object_storage() {
     let case = "no object storage mounted";
     let emulator = Emulator::new();
 
-    let created = emulator
+    let uri = format!("s3://{BUCKET}/unreadable.jsonl");
+    let refused = emulator
         .create_dataset(&json!({
             "datasetName": "unreadable",
             "schemaType": SCHEMA_TYPES[0],
-            "source": {"s3Source": {"s3Uri": format!("s3://{BUCKET}/unreadable.jsonl")}},
+            "source": {"s3Source": {"s3Uri": uri}},
         }))
         .await;
     assert_eq!(
-        created.status, 202,
-        "case {case:?}: expected HTTP 202 from CreateDataset, got {} and body {}",
-        created.status, created.body
-    );
-    let id = created.text("datasetId");
-
-    tokio::time::sleep(PAST_SETTLE).await;
-    let read = emulator.get_dataset(&id).await;
-    assert_eq!(
-        read.text("status"),
-        "CREATE_FAILED",
-        "case {case:?}: a source nothing could read settles CREATE_FAILED, got {} and body {}",
-        read.text("status"),
-        read.body
+        (refused.status, refused.error_code().as_str()),
+        (400, "ValidationException"),
+        "case {case:?}: expected HTTP 400 ValidationException from CreateDataset, got {} {} and \
+         body {}",
+        refused.status,
+        refused.error_code(),
+        refused.body
     );
     assert_eq!(
-        read.body["exampleCount"],
-        json!(0),
-        "case {case:?}: a failed ingestion leaves no examples, got {}",
-        read.body["exampleCount"]
+        refused.text("message"),
+        format!("The specified S3 URI does not exist or is not accessible: {uri}"),
+        "case {case:?}: expected the refusal to name the URI the request carried, got {}",
+        refused.text("message")
     );
     assert!(
-        !read.text("failureReason").is_empty(),
-        "case {case:?}: a failed ingestion reports why, got {}",
-        read.body["failureReason"]
+        refused.body.get("datasetId").is_none(),
+        "case {case:?}: a refused create reports no dataset, got {}",
+        refused.body
     );
 }

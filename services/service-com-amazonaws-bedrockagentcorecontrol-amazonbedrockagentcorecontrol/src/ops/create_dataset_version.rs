@@ -193,7 +193,7 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         // it.
         let record = store.datasets.get_mut(&input.dataset_id).ok_or_else(|| {
             CreateDatasetVersionErrorModeled::ResourceNotFoundException(
-                crate::state::resource_not_found(crate::state::RESOURCE_DATASET),
+                crate::state::dataset_not_found(),
             )
         })?;
 

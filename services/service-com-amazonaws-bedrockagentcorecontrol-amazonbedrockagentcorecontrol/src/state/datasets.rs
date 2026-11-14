@@ -15,9 +15,14 @@
 //! inline source carries its examples in the request, and an Amazon S3 source
 //! names a JSONL file this emulator READS out of its own object storage, so the
 //! number of examples a dataset reports is the number it really holds either
-//! way. The SCHEMA check an inline batch has to pass before any of it is
-//! persisted is here as well ([`validate_inline_examples`]), so the create and
-//! any later write of examples cannot disagree about what an example must carry.
+//! way. An Amazon S3 source is RESOLVED before anything is persisted, so a URI
+//! object storage holds nothing readable at is the modelled validation refusal
+//! ([`s3_source_not_accessible`]) rather than a dataset that could never be
+//! populated; only what the file's CONTENT turns out to be is reported
+//! asynchronously. The SCHEMA check an inline batch has to pass before any of it
+//! is persisted is here as well ([`validate_inline_examples`]), so the create
+//! and any later write of examples cannot disagree about what an example must
+//! carry.
 
 use std::collections::{BTreeMap, HashMap};
 use std::time::{Duration, SystemTime};
@@ -27,19 +32,59 @@ use ::serde_json::Value;
 
 use crate::ops::types::{
     ConflictException, CreateDatasetInput, CreateDatasetOutput, CreateDatasetVersionOutput,
-    DataSourceType, DatasetSummary, DatasetVersionSummary, GetDatasetOutput, UpdateDatasetOutput,
-    ValidationException,
+    DataSourceType, DatasetSummary, DatasetVersionSummary, GetDatasetOutput,
+    ResourceNotFoundException, UpdateDatasetOutput, ValidationException,
 };
 
 use super::{sorted_map, timestamp, VALIDATION_REASON_FIELD_VALIDATION_FAILED};
 
 /// The ARN resource type a dataset carries — `DatasetArn` is
 /// `…:bedrock-agentcore:{region}:{account}:dataset/{datasetId}` (`smithy_query
-/// shape=DatasetArn`) — and the resource noun a missing dataset, or a missing
-/// VERSION of one, is reported by.
+/// shape=DatasetArn`).
 const ARN_TYPE_DATASET: &str = "dataset";
-pub const RESOURCE_DATASET: &str = "dataset";
+
+/// The resource noun a missing VERSION of a dataset is reported by through the
+/// service-wide [`super::resource_not_found`] sentence: a request that names a
+/// version this dataset never published failed on the `datasetVersion` it
+/// carried, not on the `datasetId`, so the dataset's own sentence
+/// ([`dataset_not_found`]) — which tells the caller to verify the `datasetId` —
+/// would misreport it.
 pub const RESOURCE_DATASET_VERSION: &str = "dataset version";
+
+/// The modelled not-found error for a `datasetId` this account holds no dataset
+/// for ("The specified dataset does not exist. Please verify the datasetId and
+/// try again.").
+///
+/// The dataset resource words this refusal in its OWN fixed sentence rather than
+/// through the service-wide [`super::resource_not_found`] template: the text is
+/// entirely fixed and names the request member the caller has to check. Nothing
+/// is interpolated — the identifier is the caller's own value and the remedy does
+/// not depend on it — so every dataset route that resolves a `datasetId` reports
+/// a missing dataset in exactly these words.
+pub fn dataset_not_found() -> ResourceNotFoundException {
+    ResourceNotFoundException {
+        message: Some(
+            "The specified dataset does not exist. Please verify the datasetId and try again."
+                .to_string(),
+        ),
+    }
+}
+
+/// The modelled validation error for an Amazon S3 source this emulator cannot
+/// resolve to a readable object ("The specified S3 URI does not exist or is not
+/// accessible: <s3Uri>").
+///
+/// The sentence is fixed and its one variable part is the URI the request's
+/// `source` carried, verbatim. The member the request got wrong is the URI
+/// itself, so `reason` says a field failed validation; the sentence already
+/// quotes the offending value, so there is no `fieldList` beside it.
+pub fn s3_source_not_accessible(uri: &str) -> ValidationException {
+    ValidationException {
+        message: format!("The specified S3 URI does not exist or is not accessible: {uri}"),
+        reason: VALIDATION_REASON_FIELD_VALIDATION_FAILED.to_string(),
+        field_list: None,
+    }
+}
 
 /// `DatasetStatus` members this service drives. The enum's full value list is
 /// `CREATING | UPDATING | DELETING | ACTIVE | CREATE_FAILED | UPDATE_FAILED |
@@ -263,34 +308,40 @@ pub enum DatasetIngestion {
 /// An inline source carries them in the request. An Amazon S3 source names a
 /// JSONL file in the caller's own bucket, which is READ out of this emulator's
 /// own object storage over the in-process callback, so the examples a dataset
-/// holds are the ones the file really holds. A file object storage holds nothing
-/// for — or one that is not a JSONL file of examples — is a failed ingestion:
-/// "Initial ingestion failed. DRAFT record exists but contains no examples"
-/// (`smithy_query shape=DatasetStatus`).
+/// holds are the ones the file really holds.
+///
+/// A source is RESOLVED before it is ingested: an address object storage holds
+/// no readable object at is the modelled refusal ([`s3_source_not_accessible`]),
+/// answered to the caller instead of a resource nothing could ever populate.
+/// What the file's CONTENT turns out to be is a different matter — a file that
+/// is not a JSONL batch of examples resolved fine and ingested nothing, which is
+/// the asynchronous "Initial ingestion failed. DRAFT record exists but contains
+/// no examples" (`smithy_query shape=DatasetStatus`).
 pub async fn ingest_dataset_source(
     ctx: &smithy_server_runtime::OperationContext<'_>,
     region: &str,
     source: &DataSourceType,
-) -> DatasetIngestion {
+) -> Result<DatasetIngestion, ValidationException> {
     match source {
         DataSourceType::inlineExamples(inline) => {
             if inline.examples.len() > MAX_DATASET_EXAMPLES {
-                return DatasetIngestion::Failed(too_many_examples_reason());
+                return Ok(DatasetIngestion::Failed(too_many_examples_reason()));
             }
-            DatasetIngestion::Ingested(inline.examples.clone())
+            Ok(DatasetIngestion::Ingested(inline.examples.clone()))
         }
         DataSourceType::s3Source(s3) => ingest_s3_file(ctx, region, &s3.s3_uri).await,
     }
 }
 
-/// The examples the JSONL file at `uri` holds.
+/// The examples the JSONL file at `uri` holds, or the refusal of a `uri` that
+/// resolves to no readable object.
 async fn ingest_s3_file(
     ctx: &smithy_server_runtime::OperationContext<'_>,
     region: &str,
     uri: &str,
-) -> DatasetIngestion {
+) -> Result<DatasetIngestion, ValidationException> {
     let Some((bucket, key)) = object_address(uri) else {
-        return DatasetIngestion::Failed(unreadable_reason(uri));
+        return Err(s3_source_not_accessible(uri));
     };
     let answer = super::s3_client(ctx, region)
         .get_object()
@@ -302,12 +353,13 @@ async fn ingest_s3_file(
         Ok(object) => {
             // The size of the file, bounded BEFORE its bytes are collected: what
             // object storage reports for the object is what reading it would
-            // allocate.
+            // allocate. The object itself resolved, so this is an ingestion that
+            // yielded nothing rather than an address naming nothing.
             if object
                 .content_length()
                 .is_some_and(|length| length > MAX_DATASET_FILE_BYTES)
             {
-                return DatasetIngestion::Failed(oversized_reason(uri));
+                return Ok(DatasetIngestion::Failed(oversized_reason(uri)));
             }
             object
         }
@@ -324,19 +376,19 @@ async fn ingest_s3_file(
                     key = ?key,
                     detail = %::aws_smithy_types::error::display::DisplayErrorContext(&error),
                     "the dataset file could not be read from this emulator's object storage, so \
-                     no examples were ingested",
+                     the source was refused as naming no readable object",
                 );
             }
-            // Either way nothing was ingested, so the dataset reports the
-            // ingestion as failed rather than an empty success.
-            return DatasetIngestion::Failed(unreadable_reason(uri));
+            // Either way the address resolved to nothing this caller can read,
+            // which the create refuses rather than reporting a dataset for.
+            return Err(s3_source_not_accessible(uri));
         }
     };
     let bytes = match object.body.collect().await {
         Ok(body) => {
             let bytes = body.into_bytes();
             if i64::try_from(bytes.len()).unwrap_or(i64::MAX) > MAX_DATASET_FILE_BYTES {
-                return DatasetIngestion::Failed(oversized_reason(uri));
+                return Ok(DatasetIngestion::Failed(oversized_reason(uri)));
             }
             bytes
         }
@@ -345,16 +397,16 @@ async fn ingest_s3_file(
                 bucket = ?bucket,
                 key = ?key,
                 detail = %error,
-                "the dataset file could not be read from this emulator's object storage, so no \
-                 examples were ingested",
+                "the dataset file could not be read from this emulator's object storage, so the \
+                 source was refused as naming no readable object",
             );
-            return DatasetIngestion::Failed(unreadable_reason(uri));
+            return Err(s3_source_not_accessible(uri));
         }
     };
     let Ok(text) = ::std::str::from_utf8(&bytes) else {
-        return DatasetIngestion::Failed(not_jsonl_reason(uri));
+        return Ok(DatasetIngestion::Failed(not_jsonl_reason(uri)));
     };
-    parse_jsonl_examples(uri, text)
+    Ok(parse_jsonl_examples(uri, text))
 }
 
 /// The examples a JSONL file holds: one example per non-blank line, in the order
@@ -396,15 +448,6 @@ fn parse_jsonl_examples(uri: &str, text: &str) -> DatasetIngestion {
         ));
     }
     DatasetIngestion::Ingested(examples)
-}
-
-/// Why a file this emulator could not read ingested nothing.
-fn unreadable_reason(uri: &str) -> String {
-    format!(
-        "The dataset file at {uri} could not be read, so no examples were ingested. Make sure \
-         that the object exists and that the service has access to it, then create the dataset \
-         again."
-    )
 }
 
 /// Why a file larger than this emulator reads ingested nothing.

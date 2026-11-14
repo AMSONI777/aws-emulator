@@ -195,9 +195,7 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         // The store is keyed by the `datasetId` the create minted; an id naming
         // no stored dataset is the modelled 404 rather than an empty envelope.
         let record = store.datasets.get(&input.dataset_id).ok_or_else(|| {
-            GetDatasetErrorModeled::ResourceNotFoundException(crate::state::resource_not_found(
-                crate::state::RESOURCE_DATASET,
-            ))
+            GetDatasetErrorModeled::ResourceNotFoundException(crate::state::dataset_not_found())
         })?;
 
         // "Use the datasetVersion query parameter to retrieve a specific

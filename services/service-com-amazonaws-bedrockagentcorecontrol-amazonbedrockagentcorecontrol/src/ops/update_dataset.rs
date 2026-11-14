@@ -194,9 +194,7 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         // The store is keyed by the `datasetId` the create minted; an id naming
         // no stored dataset is the modelled 404, and nothing is written for it.
         let record = store.datasets.get_mut(&input.dataset_id).ok_or_else(|| {
-            UpdateDatasetErrorModeled::ResourceNotFoundException(crate::state::resource_not_found(
-                crate::state::RESOURCE_DATASET,
-            ))
+            UpdateDatasetErrorModeled::ResourceNotFoundException(crate::state::dataset_not_found())
         })?;
 
         // A dataset whose own ingestion or last mutation is still in flight

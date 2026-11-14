@@ -47,6 +47,8 @@ mod dataset_lifecycle;
 mod dataset_metadata_update;
 #[path = "all/dataset_schema_validation.rs"]
 mod dataset_schema_validation;
+#[path = "all/dataset_source_resolution.rs"]
+mod dataset_source_resolution;
 #[path = "all/gateway_dependent_children.rs"]
 mod gateway_dependent_children;
 #[path = "all/gateway_endpoint_url.rs"]

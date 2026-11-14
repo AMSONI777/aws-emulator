@@ -261,15 +261,15 @@ async fn a_batch_with_a_schema_violating_example_is_refused_wholesale() {
 /// dataset round-trips: the read reports what the create ingested, the listing names it,
 /// and a published version is a numbered snapshot of the same examples.
 ///
-/// The rows differ along the schema type, the number of examples in the batch, and the
-/// source — including one whose examples are an Amazon S3 object rather than an inline
-/// batch, which this service holds none of its own.
+/// The rows differ along the schema type and the number of examples in the batch. A
+/// source whose examples are an Amazon S3 object is resolved against object storage
+/// before anything is created, which `dataset_source_resolution.rs` covers.
 #[tokio::test]
 async fn an_accepted_dataset_round_trips_through_its_reads() {
     let router = router();
 
     // (case, dataset name, schema type, source, the example count expected)
-    let rows: [(&str, &str, &str, Value, i64); 4] = [
+    let rows: [(&str, &str, &str, Value, i64); 3] = [
         (
             "the predefined schema, one example",
             "PredefinedOne",
@@ -295,13 +295,6 @@ async fn an_accepted_dataset_round_trips_through_its_reads() {
                 {"input": [{"role": "user", "content": "a turn"}]},
             ]}}),
             2,
-        ),
-        (
-            "an Amazon S3 source, whose examples stay in the caller's bucket",
-            "FromS3",
-            PREDEFINED,
-            json!({"s3Source": {"s3Uri": "s3://evaluation-batches/examples.jsonl"}}),
-            0,
         ),
     ];
 

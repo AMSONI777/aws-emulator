@@ -8,7 +8,10 @@
 //! comes from that record.
 //!
 //! An inline batch is checked against the dataset's schema BEFORE anything is persisted,
-//! so one example that omits a field the schema requires refuses the whole call.
+//! so one example that omits a field the schema requires refuses the whole call. An
+//! Amazon S3 source is RESOLVED the same way: a URI holding no readable object is the
+//! modelled `ValidationException`, naming the URI, rather than a dataset nothing could
+//! ever populate.
 //!
 //! The create is ASYNCHRONOUS: it reports `CREATING`, and the clock owes the transition
 //! to the status the ingestion earned — `ACTIVE`, or `CREATE_FAILED` for a source that
@@ -201,7 +204,13 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         // Amazon S3 source names a JSONL file in the caller's own bucket, which
         // this emulator reads out of its own object storage, so the number of
         // examples the dataset reports is the number it really holds.
-        let ingestion = crate::state::ingest_dataset_source(ctx, &region, &input.source).await;
+        //
+        // The source is RESOLVED before anything is created: a location holding
+        // no readable object is refused to the caller, naming the URI, rather
+        // than reported as a dataset that could never be populated.
+        let ingestion = crate::state::ingest_dataset_source(ctx, &region, &input.source)
+            .await
+            .map_err(CreateDatasetErrorModeled::ValidationException)?;
 
         let mut store = state.lock();
 
