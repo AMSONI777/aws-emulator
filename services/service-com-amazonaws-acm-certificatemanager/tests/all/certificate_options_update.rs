@@ -150,12 +150,13 @@ async fn update_options(
 /// Assert the validation evidence of one domain is the evidence `method` asks for, and
 /// carries none of the evidence the other methods ask for.
 ///
-/// `ValidationDomain` is not that evidence: every validation names the domain whose
-/// control is being proven (the one the request named for that name, else the name
-/// itself), whatever method proves it, so it is asserted here only to be that name or
-/// a dot-boundary superdomain of it. The mailbox list is the email-only member, and it
-/// stays empty until something sends mail — `ResendValidationEmail` is what records
-/// the addresses it wrote to.
+/// `ValidationDomain` is not that evidence: it is "the domain name that ACM used to send
+/// domain validation emails" (`DomainValidation$ValidationDomain` doc), so for a name
+/// validated by EMAIL it is asserted here only to be the domain whose control is proven
+/// (the one the request named for that name, else the name itself) or a dot-boundary
+/// superdomain of it, and for a method that sends no mail it is that name verbatim. The
+/// mailbox list is the email-only member, and it stays empty until something sends mail
+/// — `ResendValidationEmail` is what records the addresses it wrote to.
 fn assert_evidence(case: &str, validation: &Value, method: &str) {
     let domain = validation["DomainName"]
         .as_str()
@@ -164,13 +165,21 @@ fn assert_evidence(case: &str, validation: &Value, method: &str) {
     let validation_domain = validation["ValidationDomain"].as_str().unwrap_or_else(|| {
         panic!("case {case}: every validation names the domain it proves: {validation}")
     });
-    assert!(
-        validation_domain == proven
-            || proven
-                .strip_suffix(validation_domain)
-                .is_some_and(|higher_labels| higher_labels.ends_with('.')),
-        "case {case}: expected {proven} or a superdomain of it, got {validation_domain:?}"
-    );
+    if method == "EMAIL" {
+        assert!(
+            validation_domain == proven
+                || proven
+                    .strip_suffix(validation_domain)
+                    .is_some_and(|higher_labels| higher_labels.ends_with('.')),
+            "case {case}: expected {proven} or a superdomain of it, got {validation_domain:?}"
+        );
+    } else {
+        assert_eq!(
+            validation_domain, domain,
+            "case {case}: {method} validation sends no mail, so the entry reports its own \
+             name {domain}, got {validation_domain:?}"
+        );
+    }
     assert_eq!(
         validation["ValidationMethod"].as_str(),
         Some(method),

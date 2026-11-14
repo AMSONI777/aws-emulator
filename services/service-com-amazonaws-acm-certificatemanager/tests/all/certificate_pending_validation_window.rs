@@ -13,11 +13,13 @@
 //! `VALIDATION_TIMED_OUT` when the window elapses, and `FAILED` — with the
 //! `FailureReason` that "exists only when the certificate status is FAILED"
 //! (`CertificateDetail$FailureReason` doc) — when the request fails for one of the
-//! modelled request-failure reasons. An unpublished challenge is NOT one of them: the
-//! only names refused up front are those the registries reserve rather than delegate —
-//! a name at or under a special-use top-level label or a reserved documentation
-//! second-level name — and an ordinary registrable name under a delegated top-level
-//! label is a public domain whoever holds it.
+//! modelled request-failure reasons. An unpublished challenge is NOT one of them: a
+//! name is refused up front only when nothing the account holds could prove control of
+//! it — a name the registries reserve rather than delegate (at or under a special-use
+//! top-level label or a reserved documentation second-level name) and no hosted zone of
+//! the account answers for, or one the provider itself operates — while an ordinary
+//! registrable name under a delegated top-level label is a public domain whoever holds
+//! it.
 //!
 //! The tables span what the rule generalises over: the validation method (every modelled
 //! value and none), the number and form of the covered names (apex, `www.`, wildcard,
@@ -323,8 +325,8 @@ async fn an_unobserved_challenge_is_still_pending_past_every_owed_transition() {
 
 /// Assert that `name` is one of the names refused up front: the request still ENTERS
 /// `PENDING_VALIDATION`, owes its outcome within the settle span, and settles into
-/// `FAILED` with the `FailureReason` that exists only beside that status, on the
-/// certificate and on every covered name.
+/// `FAILED` with the `FailureReason` that exists only beside that status, carrying the
+/// failed verdict on the name ACM stopped at (the only name these rows cover).
 async fn assert_refused_up_front(name: &str) {
     let case = format!("the undelegated name {name}");
     let (router, engine) = router_with_engine();
@@ -392,12 +394,11 @@ async fn assert_waits_for_its_window(name: &str) {
     );
 }
 
-/// RULE: the ONLY names refused up front are those the registries reserve rather than
-/// delegate — a name at or under a special-use TOP-LEVEL label or a reserved
-/// documentation SECOND-LEVEL name — and such a request settles into `FAILED` with the
-/// `FailureReason` that exists only beside it, on the certificate and on every covered
-/// name. The same label somewhere a registry does delegate names a public domain, which
-/// waits instead.
+/// RULE: a name the registries reserve rather than delegate — at or under a special-use
+/// TOP-LEVEL label or a reserved documentation SECOND-LEVEL name — is refused up front,
+/// and such a request settles into `FAILED` with the `FailureReason` that exists only
+/// beside it. The same label somewhere a registry does delegate names a public domain,
+/// which waits instead.
 #[tokio::test]
 async fn only_a_name_outside_the_public_dns_is_refused_up_front() {
     for label in UNDELEGATED_TOP_LEVEL_LABELS {

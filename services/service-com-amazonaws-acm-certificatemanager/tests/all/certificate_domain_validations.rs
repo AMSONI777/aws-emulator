@@ -63,6 +63,10 @@ const INVALID_NEXT_TOKEN: &str = "Invalid next token.";
 /// (`com.amazonaws.acm#DomainStatus`).
 pub(crate) const PENDING_VALIDATION: &str = "PENDING_VALIDATION";
 
+/// The status a validation ACM reached a negative verdict on stands at
+/// (`com.amazonaws.acm#DomainStatus`).
+pub(crate) const FAILED: &str = "FAILED";
+
 /// The member of `DomainValidationSummary` that carries a domain's validation
 /// configuration, and the one no summary of an unmigrated domain carries
 /// (`smithy_query(query="shape", shape="com.amazonaws.acm#DomainValidationSummary")`).
@@ -362,12 +366,22 @@ async fn the_reported_status_follows_the_clock_owed_outcome() {
             "case {case}: the outcome changes statuses, never the set of names, got {terminal:?}"
         );
         let described = described_validations(&router, &arn).await;
-        for summary in &terminal {
+        for (index, summary) in terminal.iter().enumerate() {
             let domain = summary["DomainName"].as_str().unwrap_or_default();
+            // The clock-owed outcome of a request ACM refuses up front is the verdict on
+            // the ONE name it stopped at — the first it could not validate — so the
+            // names behind it keep the status they were waiting in, while an issuance
+            // proves every name at once.
+            let expected_status = if *expected == "FAILED" && index > 0 {
+                "PENDING_VALIDATION"
+            } else {
+                *expected
+            };
             assert_eq!(
                 summary["RequestedValidationConfiguration"]["ValidationStatus"].as_str(),
-                Some(*expected),
-                "case {case}/{domain}: expected the clock-owed status {expected}, got {summary}"
+                Some(expected_status),
+                "case {case}/{domain}: expected the clock-owed status {expected_status}, \
+                 got {summary}"
             );
             let record = described
                 .get(domain)

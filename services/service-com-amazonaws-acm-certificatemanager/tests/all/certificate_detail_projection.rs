@@ -339,11 +339,19 @@ async fn the_detail_reports_the_metadata_the_record_decides() {
                 "case {label:?}: expected ValidationMethod {}, got {validation}",
                 case.method
             );
-            let target = validation_target(name);
+            // "The domain name that ACM used to send domain validation emails"
+            // (`DomainValidation$ValidationDomain` doc): a mail SUFFIX for a name ACM
+            // validates by email, so without a wildcard label — and for a method that
+            // sends no mail, the entry's own name verbatim.
+            let expected_domain = if case.method == "EMAIL" {
+                validation_target(name)
+            } else {
+                *name
+            };
             assert_eq!(
                 validation["ValidationDomain"].as_str(),
-                Some(target),
-                "case {label:?}: expected ValidationDomain {target}, got {validation}"
+                Some(expected_domain),
+                "case {label:?}: expected ValidationDomain {expected_domain}, got {validation}"
             );
             let expected_emails = expected_validation_emails(case.method);
             assert_eq!(
@@ -461,9 +469,11 @@ async fn every_modelled_key_algorithm_is_described_as_its_x509_descriptor() {
     );
 }
 
-/// RULE: the validation domain reported for a name is the one the request named for
-/// that name in `DomainValidationOptions`, else the name itself with any wildcard
-/// label removed — whatever validation method the certificate uses.
+/// RULE: the validation domain reported for a name is "the domain name that ACM used to
+/// send domain validation emails" (`DomainValidation$ValidationDomain` doc) — for a
+/// certificate ACM validates by EMAIL, the one the request named for that name in
+/// `DomainValidationOptions`, else that name with any wildcard label removed — while a
+/// method that sends no mail reduces nothing and reports the name verbatim.
 #[tokio::test]
 async fn a_request_named_validation_domain_applies_to_that_name_only() {
     // Every modelled `ValidationMethod`
@@ -501,11 +511,17 @@ async fn a_request_named_validation_domain_applies_to_that_name_only() {
             .as_array()
             .unwrap_or_else(|| panic!("case {case}: no DomainValidationOptions in {detail}"));
 
-        let expected: [(&str, &str); 3] = [
-            (&domain, &chosen),
-            (&plain, &plain),
-            (&wildcard, validation_target(&wildcard)),
-        ];
+        // The mail suffix each name is written to, for the method that mails; for a
+        // method that sends no mail, each name's own value.
+        let expected: [(&str, &str); 3] = if method.unwrap_or("EMAIL") == "EMAIL" {
+            [
+                (&domain, &chosen),
+                (&plain, &plain),
+                (&wildcard, validation_target(&wildcard)),
+            ]
+        } else {
+            [(&domain, &domain), (&plain, &plain), (&wildcard, &wildcard)]
+        };
         let expected_emails = expected_validation_emails(method.unwrap_or("EMAIL"));
         assert_eq!(
             validations.len(),

@@ -4004,3 +4004,5 @@ mod cloudformation_cloudfront_fronted_rest_api;
 // suite left at the top level of `tests/` fails the build. (A plain comment: a `//!` line
 // in this tail is `E0753`.)
 // this file and for every service crate's `tests/all.rs`. (Plain comment, same reason.)
+// header that a landing appended here; past the first item a `//!` line is `E0753` and
+// reason the lines above record: past the first item a `//!` line is `E0753`.)

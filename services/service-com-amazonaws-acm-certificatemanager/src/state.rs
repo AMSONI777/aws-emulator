@@ -80,10 +80,10 @@
 //!
 //! A requested certificate's record carries the outcome the clock owes it and the
 //! instant it falls due ([`PendingValidation`]) — issuance for a request that needs no
-//! proof of domain control, the up-front refusal of a name the public DNS delegates to
-//! nobody ([`any_name_is_not_in_public_dns_in`]), and otherwise the timeout at the end of the
-//! documented [`VALIDATION_WINDOW`], which is what a request waiting for evidence from
-//! outside is owed. Beside it — for a certificate ACM validates by EMAIL — sits the
+//! proof of domain control, the up-front refusal of a name no evidence from the account
+//! could cover ([`first_unvalidatable_name_in`]), and otherwise the timeout at the end of
+//! the documented [`VALIDATION_WINDOW`], which is what a request waiting for evidence
+//! from outside is owed. Beside it — for a certificate ACM validates by EMAIL — sits the
 //! instant the initial validation mail it owes falls due
 //! ([`Certificate::pending_validation_email`]), and — for one `RenewCertificate` has
 //! been called for — the completion of the managed renewal it started ([`Renewal`]).
@@ -101,7 +101,7 @@
 pub mod acme_socket;
 mod dns_validation;
 
-pub use dns_validation::any_name_is_not_in_public_dns_in;
+pub use dns_validation::first_unvalidatable_name_in;
 
 use std::collections::{BTreeMap, HashMap, VecDeque};
 use std::time::{Duration, SystemTime};
@@ -191,12 +191,30 @@ pub const DOMAIN_STATUS_FAILED: &str = "FAILED";
 /// topic Certificate request fails" (`CertificateDetail$Status` doc). The reason ACM
 /// models for a request it cannot process without information it has to obtain
 /// elsewhere is `ADDITIONAL_VERIFICATION_REQUIRED`, which is what a request naming a
-/// domain the public DNS delegates to nobody carries
-/// ([`domain_is_not_in_public_dns`]). `FailureReason` "exists only when the
+/// name no delegation of the account's could ever cover carries
+/// ([`first_unvalidatable_name_in`]). `FailureReason` "exists only when the
 /// certificate status is FAILED" (`CertificateDetail$FailureReason` doc), so it is set
 /// only beside [`STATUS_FAILED`].
 pub const FAILURE_REASON_ADDITIONAL_VERIFICATION_REQUIRED: &str =
     "ADDITIONAL_VERIFICATION_REQUIRED";
+
+/// The longest FIRST domain name a certificate request may carry, in octets.
+///
+/// A DOCUMENTED bound, and a tighter one than the `DomainNameString` `@length` max of
+/// 253 that `RequestCertificateRequest$DomainName` targets: "In compliance with RFC
+/// 5280, the length of the domain name (technically, the Common Name) that you provide
+/// cannot exceed 64 octets (characters), including periods. To add a longer domain
+/// name, specify it in the Subject Alternative Name field, which supports names up to
+/// 253 octets in length" (`RequestCertificateRequest$DomainName` doc). It is the bound
+/// of the certificate's COMMON NAME, so it applies to the first domain name alone — a
+/// subject alternative name keeps the member's own 253.
+pub const FIRST_DOMAIN_NAME_OCTET_LIMIT: usize = 64;
+
+/// The refusal text of a first domain name past [`FIRST_DOMAIN_NAME_OCTET_LIMIT`]: ACM's
+/// own fixed sentence for that error class, which interpolates nothing from the request
+/// — neither the name it refused nor the bound — and so is one constant.
+pub const FIRST_DOMAIN_NAME_TOO_LONG_MESSAGE: &str =
+    "The first domain name can be no longer than 64 characters.";
 
 /// The span this emulator gives a transition it owes a REQUESTED certificate: the least
 /// time a transition the clock makes due on its own stays owed for.
@@ -297,7 +315,7 @@ pub const RESERVED_SECOND_LEVEL_NAMES: &[&str] =
 /// That is only half of whether the name has a holder: a name the ACCOUNT is itself
 /// authoritative for in the public DNS this emulator serves has one whatever the
 /// registries say, so the question a certificate request is decided by is
-/// [`any_name_is_not_in_public_dns_in`], which reads the DNS as well.
+/// [`first_unvalidatable_name_in`], which reads the DNS as well.
 ///
 /// A certificate request for a name NOBODY holds is one ACM cannot carry through at
 /// all, so it is refused up front rather than left waiting for evidence that cannot
@@ -317,16 +335,63 @@ pub const RESERVED_SECOND_LEVEL_NAMES: &[&str] =
 /// the name ACM actually proves control of ([`validation_target`]), so a wildcard is
 /// judged by the domain it covers.
 pub fn domain_is_not_in_public_dns(domain_name: &str) -> bool {
-    let name = validation_target(domain_name).to_ascii_lowercase();
-    RESERVED_TOP_LEVEL_LABELS
-        .iter()
-        .chain(RESERVED_SECOND_LEVEL_NAMES)
-        .any(|reserved| {
-            name == *reserved
-                || name
-                    .strip_suffix(reserved)
-                    .is_some_and(|higher| higher.ends_with('.'))
-        })
+    is_at_or_under(
+        domain_name,
+        RESERVED_TOP_LEVEL_LABELS
+            .iter()
+            .chain(RESERVED_SECOND_LEVEL_NAMES)
+            .copied(),
+    )
+}
+
+/// The domains the PROVIDER publishes its own service endpoints and resource hostnames
+/// under, and delegates to no customer account: an Elastic Load Balancing or S3 or API
+/// hostname and every other name under `amazonaws.com` (`amazonaws.com.cn` in the China
+/// partition) is answered for by the provider's own zones, as is a content-delivery
+/// distribution's `cloudfront.net` name, an application-platform environment's
+/// `elasticbeanstalk.com` name and an application suite's `awsapps.com` name.
+///
+/// A name under one of these belongs to the provider however the account is configured,
+/// which is what makes a public certificate request for it one no account can prove
+/// control of — see [`domain_is_provider_operated`]. Only whole domains the provider
+/// holds belong here: an ordinary registrable name is the holder's to prove.
+pub const PROVIDER_OPERATED_DOMAINS: &[&str] = &[
+    "amazonaws.com",
+    "amazonaws.com.cn",
+    "cloudfront.net",
+    "elasticbeanstalk.com",
+    "awsapps.com",
+];
+
+/// Whether `domain_name` sits at or under a domain the PROVIDER operates
+/// ([`PROVIDER_OPERATED_DOMAINS`]), so that the account could never be delegated it and
+/// no evidence of control over it could come from the account.
+///
+/// Unlike a name the registries merely reserve ([`domain_is_not_in_public_dns`]), a
+/// hosted zone of the account changes nothing here: the public DNS delegates these names
+/// to the provider, so a zone the account creates for one of them publishes nothing the
+/// public DNS resolves. A request naming such a name is therefore one ACM cannot carry
+/// into domain validation at all — it is among the requests that fail "upon being
+/// requested" (`CertificateDetail$Status` doc) and needs verification ACM has to obtain
+/// outside the account ([`FAILURE_REASON_ADDITIONAL_VERIFICATION_REQUIRED`]).
+///
+/// Matched on DOT BOUNDARIES and case-insensitively, as a DNS suffix is, and through the
+/// name ACM proves control of ([`validation_target`]), so a wildcard over one of these
+/// domains is judged by the domain it covers.
+pub fn domain_is_provider_operated(domain_name: &str) -> bool {
+    is_at_or_under(domain_name, PROVIDER_OPERATED_DOMAINS.iter().copied())
+}
+
+/// Whether `domain_name` is one of `suffixes` or a name under one.
+///
+/// The suffix relation itself is [`is_validation_domain_for`] — the dot-boundary,
+/// case-insensitive comparison, through the name ACM proves control of
+/// ([`validation_target`]), that every `ValidationDomain` member is judged by — so the
+/// two questions this file asks about a DNS suffix rest on ONE implementation of it.
+fn is_at_or_under<'a>(domain_name: &str, suffixes: impl IntoIterator<Item = &'a str>) -> bool {
+    suffixes
+        .into_iter()
+        .any(|suffix| is_validation_domain_for(suffix, domain_name))
 }
 
 /// How long after the domain-validation email was last sent ACM will send it again.
@@ -841,9 +906,11 @@ pub struct DomainValidationRecord {
     pub validation_status: String,
     /// A `ValidationMethod` value.
     pub validation_method: String,
-    /// The domain ACM proves control of for this name — "the domain name that ACM
-    /// used to send domain validation emails" — which is the name itself unless the
-    /// request named another in `DomainValidationOptions`.
+    /// `DomainValidation$ValidationDomain` for this name: "the domain name that ACM used
+    /// to send domain validation emails", so for a name ACM validates BY EMAIL it is the
+    /// mail SUFFIX — the name itself unless the request named another in
+    /// `DomainValidationOptions` — and for a method that sends no mail it is this
+    /// entry's own domain name verbatim ([`domain_validation_record`]).
     pub validation_domain: Option<String>,
     /// The validation domain the certificate was REQUESTED with for this name
     /// (`DomainValidationOption$ValidationDomain`), kept whatever method is in force,
@@ -869,7 +936,7 @@ pub struct DomainValidationRecord {
 /// Decided by the call that starts the transition, from what the request asks for, and
 /// revised by the proof the DNS later carries (`dns_validation`); applied when the
 /// transition falls due.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ValidationOutcome {
     /// The certificate is issued: "If you are requesting a private certificate,
     /// domain validation is not required" (`RequestCertificate` doc), so there is
@@ -877,13 +944,22 @@ pub enum ValidationOutcome {
     /// request whose domains the published DNS has since proven (`dns_validation`).
     Issued,
     /// The request fails with [`FAILURE_REASON_ADDITIONAL_VERIFICATION_REQUIRED`]
-    /// before ACM waits on anything: the request names a domain the public DNS
-    /// delegates to nobody ([`domain_is_not_in_public_dns`]), which is one of the
-    /// reasons a request fails "upon being requested" rather than entering
-    /// `PENDING_VALIDATION` (`CertificateDetail$Status` doc). A name the public DNS
-    /// DOES delegate never reaches this outcome, however long its challenge goes
-    /// unpublished: that wait is [`Self::TimedOut`].
-    Failed,
+    /// before ACM waits on anything: it names a domain no evidence from this account
+    /// could ever cover ([`first_unvalidatable_name_in`]), which is one of the reasons a
+    /// request fails "upon being requested" rather than entering `PENDING_VALIDATION`
+    /// (`CertificateDetail$Status` doc). A name whose holder COULD publish the evidence
+    /// never reaches this outcome, however long its challenge goes unpublished: that
+    /// wait is [`Self::TimedOut`].
+    ///
+    /// It carries the name ACM stopped at, because the verdict is that name's: "each
+    /// domain name that you specify must be validated" (`RequestCertificate` doc), so
+    /// one name ACM cannot validate ends the whole request and the names it never
+    /// reached a verdict on keep the `DomainStatus` they were waiting in
+    /// ([`Certificate::fail`]).
+    Failed {
+        /// The first name the request covers whose control the account cannot prove.
+        unvalidatable_name: String,
+    },
     /// The request times out unvalidated: "If you are requesting a public certificate,
     /// each domain name that you specify must be validated to verify that you own or
     /// control the domain" (`RequestCertificate` doc) — proof that arrives out of band —
@@ -902,9 +978,9 @@ impl ValidationOutcome {
     /// How long after the request this outcome falls due: an outcome ACM reaches on its
     /// own after [`VALIDATION_SETTLE_DELAY`], and the unvalidated timeout at the end of
     /// the documented [`VALIDATION_WINDOW`].
-    pub fn settles_in(self) -> Duration {
+    pub fn settles_in(&self) -> Duration {
         match self {
-            Self::Issued | Self::Failed => VALIDATION_SETTLE_DELAY,
+            Self::Issued | Self::Failed { .. } => VALIDATION_SETTLE_DELAY,
             Self::TimedOut => VALIDATION_WINDOW,
         }
     }
@@ -1143,8 +1219,11 @@ impl Certificate {
         self.pending_validation_email = None;
         match pending.outcome {
             ValidationOutcome::Issued => self.issue(pending.due_at),
-            ValidationOutcome::Failed => {
-                self.fail(FAILURE_REASON_ADDITIONAL_VERIFICATION_REQUIRED);
+            ValidationOutcome::Failed { unvalidatable_name } => {
+                self.fail(
+                    FAILURE_REASON_ADDITIONAL_VERIFICATION_REQUIRED,
+                    &unvalidatable_name,
+                );
             }
             ValidationOutcome::TimedOut => self.time_out(),
         }
@@ -1310,8 +1389,16 @@ impl Certificate {
             .collect();
     }
 
-    /// Record this certificate's request as failed for `reason`: no domain was
-    /// proven, and nothing was issued, so the issuance members stay absent.
+    /// Record this certificate's request as failed for `reason`, on the name ACM could
+    /// not validate.
+    ///
+    /// Nothing was proven and nothing was issued, so the issuance members stay absent.
+    /// `ValidationStatus` "is the validation status of the domain name"
+    /// (`DomainValidation$ValidationStatus` doc) — a verdict about ONE name — and the
+    /// verdict ACM reached is about `unvalidatable_name`: "each domain name that you
+    /// specify must be validated" (`RequestCertificate` doc), so that one name ends the
+    /// request and every name behind it is left in the `DomainStatus` it was waiting in,
+    /// never having been judged.
     ///
     /// `ValidationEmails` is "a list of email addresses that ACM used to send domain
     /// validation emails" (`DomainValidation$ValidationEmails` doc) — a record of mail
@@ -1319,10 +1406,14 @@ impl Certificate {
     /// left exactly as the dispatches that wrote it left it. A request that failed
     /// before its mail went out never had one: the owed dispatch is dropped by
     /// [`Self::materialize_due`], so that list is still empty.
-    fn fail(&mut self, reason: &str) {
+    fn fail(&mut self, reason: &str, unvalidatable_name: &str) {
         self.status = STATUS_FAILED.to_string();
         self.failure_reason = Some(reason.to_string());
-        for validation in &mut self.domain_validations {
+        if let Some(validation) = self
+            .domain_validations
+            .iter_mut()
+            .find(|validation| same_domain(&validation.domain_name, unvalidatable_name))
+        {
             validation.validation_status = DOMAIN_STATUS_FAILED.to_string();
         }
     }
@@ -1333,10 +1424,12 @@ impl Certificate {
     /// issued.
     ///
     /// `FailureReason` stays absent — it "exists only when the certificate status is
-    /// FAILED" (`CertificateDetail$FailureReason` doc) — and each domain's
-    /// `ValidationStatus` is the `DomainStatus` of a validation that did not complete,
-    /// exactly as in [`Self::fail`]. The mailbox lists are left as the dispatches that
-    /// wrote them left them, for the same reason.
+    /// FAILED" (`CertificateDetail$FailureReason` doc) — and every domain's
+    /// `ValidationStatus` is the `DomainStatus` of a validation that did not complete:
+    /// ACM attempted every one of them for the whole window and proved none, so each
+    /// name has its own unproven verdict — unlike the up-front failure of
+    /// [`Self::fail`], which ends the request on ONE name. The mailbox lists are left as
+    /// the dispatches that wrote them left them, for the same reason.
     fn time_out(&mut self) {
         self.status = STATUS_VALIDATION_TIMED_OUT.to_string();
         self.failure_reason = None;
@@ -3486,17 +3579,22 @@ pub fn domain_validation_record(
         domain_name: domain_name.to_string(),
         validation_status: DOMAIN_STATUS_PENDING_VALIDATION.to_string(),
         validation_method: validation_method.to_string(),
-        // The domain whose control is being proven, whatever the method proves it
-        // with: the one the request named for this name, else the name itself. It is
-        // also the SUFFIX of the mailboxes ACM writes to, and a mail suffix carries no
-        // wildcard label — a certificate that validates `*.example.com` through itself
-        // is mailed at `example.com`, the domain ACM proves control of.
-        validation_domain: Some(
+        // "The domain name that ACM used to send domain validation emails"
+        // (`DomainValidation$ValidationDomain` doc): for a name ACM validates BY EMAIL
+        // that is the SUFFIX of the mailboxes it writes to — the one the request named
+        // for this name, else the name itself — and a mail suffix carries no wildcard
+        // label, so a certificate that validates `*.example.com` through itself is
+        // mailed at `example.com`, the domain ACM proves control of. A method that
+        // sends no mail reduces nothing: the entry reports its OWN domain name
+        // verbatim, wildcard label included.
+        validation_domain: Some(if validation_method == VALIDATION_METHOD_EMAIL {
             validation_domain
                 .map(validation_target)
                 .unwrap_or(target)
-                .to_string(),
-        ),
+                .to_string()
+        } else {
+            domain_name.to_string()
+        }),
         requested_validation_domain: validation_domain.map(str::to_string),
         // Minting a validation sends no mail: the mailbox list names the messages ACM
         // HAS sent, which is what [`Certificate::dispatch_validation_email`] and

@@ -119,6 +119,8 @@ mod dns_validation_published_record;
 mod domain_validation_summary_members;
 #[path = "all/email_validation_dispatch.rs"]
 mod email_validation_dispatch;
+#[path = "all/first_domain_name_length_bound.rs"]
+mod first_domain_name_length_bound;
 #[path = "all/generic_tagging_certificate_refusal_text.rs"]
 mod generic_tagging_certificate_refusal_text;
 #[path = "all/imported_certificate_arn_is_a_reference.rs"]
@@ -158,6 +160,8 @@ mod stated_enum_value_sets;
 mod tag_discovered_zone_certificate_issuance;
 #[path = "all/tag_surface_refusal_subject.rs"]
 mod tag_surface_refusal_subject;
+#[path = "all/unvalidatable_name_certificate_failure.rs"]
+mod unvalidatable_name_certificate_failure;
 #[path = "all/validation_domain_superdomain.rs"]
 mod validation_domain_superdomain;
 #[path = "all/validation_mail_dispatch_span.rs"]

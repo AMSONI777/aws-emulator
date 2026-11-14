@@ -6,7 +6,7 @@
 //! RULE under test: `PENDING_VALIDATION` is the status a request WAITS in, and what it
 //! waits for is fixed by the request. The clock owes a terminal status — `ISSUED` when
 //! the request needs no proof of domain ownership, `FAILED` with its `FailureReason`
-//! when it names a domain the public DNS delegates to nobody, and
+//! when it names a domain nothing the account holds could prove control of, and
 //! `VALIDATION_TIMED_OUT` at the end of the documented 72-hour validation window
 //! otherwise — and every reader reports that outcome once it has fallen due, so a
 //! client polling for a terminal status terminates.
@@ -178,11 +178,6 @@ fn assert_terminal(case: &str, detail: &Value, expected: &str, method: &str) {
                 );
             }
             for validation in validations(case, detail) {
-                assert_eq!(
-                    validation["ValidationStatus"].as_str(),
-                    Some("FAILED"),
-                    "case {case}: a domain left unproven is FAILED, got {validation}"
-                );
                 // "A list of email addresses that ACM used to send domain validation
                 // emails" (`DomainValidation$ValidationEmails` doc): for DNS or HTTP
                 // validation ACM sends no mail and the member does not apply.
@@ -199,6 +194,38 @@ fn assert_terminal(case: &str, detail: &Value, expected: &str, method: &str) {
                         "case {case}: {method} validation sends no mail, got {validation}"
                     );
                 }
+            }
+            // "The validation status of the domain name"
+            // (`DomainValidation$ValidationStatus` doc) is a verdict about ONE name. A
+            // request that waited its window out was attempted for every name, so every
+            // one is unproven; one ACM refused up front stopped at the first name it
+            // could not validate, so exactly that one is FAILED and the names behind it
+            // are left waiting, never having been judged.
+            let entries = validations(case, detail);
+            let statuses: Vec<&str> = entries
+                .iter()
+                .map(|validation| validation["ValidationStatus"].as_str().unwrap_or_default())
+                .collect();
+            if expected == "FAILED" {
+                let failed = statuses.iter().filter(|status| **status == "FAILED").count();
+                assert_eq!(
+                    failed, 1,
+                    "case {case}: a request refused up front carries the failed verdict on \
+                     the one name it stopped at, got {statuses:?}"
+                );
+                assert!(
+                    statuses
+                        .iter()
+                        .all(|status| ["FAILED", "PENDING_VALIDATION"].contains(status)),
+                    "case {case}: a name ACM never judged is still PENDING_VALIDATION, \
+                     got {statuses:?}"
+                );
+            } else {
+                assert!(
+                    statuses.iter().all(|status| *status == "FAILED"),
+                    "case {case}: every domain of a timed-out request is left unproven, \
+                     got {statuses:?}"
+                );
             }
             // Nothing was issued, so no issuance member exists. The X.509 key-usage
             // lists are not among them: a certificate ACM has not issued reports them

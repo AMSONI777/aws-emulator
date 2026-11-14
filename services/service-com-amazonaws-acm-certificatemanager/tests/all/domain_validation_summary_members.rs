@@ -28,7 +28,7 @@ use serde_json::{json, Value};
 
 use crate::certificate_domain_validations::{
     assert_summary_matches_record, described_validations, names, summaries,
-    CONFIGURATION_MEMBER, DEFAULT_VALIDATION_METHOD, PENDING_VALIDATION, PRIVATE_CA_ARN,
+    CONFIGURATION_MEMBER, DEFAULT_VALIDATION_METHOD, FAILED, PENDING_VALIDATION, PRIVATE_CA_ARN,
     UNREPORTED_CONFIGURATION_MEMBER, VALIDATION_METHODS,
 };
 use crate::certificate_lifecycle::{
@@ -130,9 +130,9 @@ fn assert_configuration_member(case: &str, summary: &Value, method: &str, status
 
 /// The rows the member rule is asserted over: every modelled method and the absence of
 /// one, against a public request (whose names the registries reserve, so nobody can
-/// publish the evidence and every domain ends `FAILED`) and against a private-CA
-/// request (which needs no proof of domain control at all, so every domain ends
-/// `SUCCESS`), over one name and over three.
+/// publish the evidence and the request fails on the first of them) and against a
+/// private-CA request (which needs no proof of domain control at all, so every domain
+/// ends `SUCCESS`), over one name and over three.
 fn member_cases() -> Vec<MemberCase<'static>> {
     let mut cases: Vec<MemberCase<'static>> = Vec::new();
     for method in VALIDATION_METHODS {
@@ -223,10 +223,18 @@ async fn every_summary_reports_the_requested_configuration() {
             "case {case}: the outcome changes statuses, never the set of names, got {settled:?}"
         );
         let described = described_validations(&router, &arn).await;
-        for summary in &settled {
+        for (index, summary) in settled.iter().enumerate() {
             let domain = summary["DomainName"].as_str().unwrap_or_default();
             let row = format!("{case}/{domain}/terminal");
-            assert_configuration_member(&row, summary, method, terminal);
+            // A request ACM refuses up front carries the failed verdict on the one name
+            // it stopped at — the first it could not validate — so the names behind it
+            // keep the status they were waiting in, while an issuance proves them all.
+            let status = if terminal == FAILED && index > 0 {
+                PENDING_VALIDATION
+            } else {
+                terminal
+            };
+            assert_configuration_member(&row, summary, method, status);
 
             // The other reader of the same stored record reports the same values, so
             // the member cannot be carrying a projection of its own.

@@ -16,10 +16,12 @@
 //! challenge nobody published yet.
 //!
 //! The same store answers the other DNS question a public request turns on: whether the
-//! names it covers are in the public DNS at all ([`any_name_is_not_in_public_dns_in`]).
-//! A name the registries reserve is held by nobody UNLESS the account is itself
-//! authoritative for it here — a public hosted zone is a delegation the account publishes
-//! the name from — and only a name with no holder at all is the up-front request failure.
+//! names it covers are ones the account could prove control of at all
+//! ([`first_unvalidatable_name_in`]). A name the registries reserve is held by nobody
+//! UNLESS the account is itself authoritative for it here — a public hosted zone is a
+//! delegation the account publishes the name from — while a name the PROVIDER operates
+//! ([`domain_is_provider_operated`]) is delegated to the provider whatever the account
+//! holds; either is the up-front request failure.
 //!
 //! Whether the record is published is the DNS service's fact, not this one's, so it is
 //! READ from the Route 53 store in the shared engine: the record set has to carry the
@@ -86,16 +88,20 @@ impl ComAmazonawsAcmCertificatemanagerState {
     }
 }
 
-/// Whether any of `domain_names` names no domain in the public DNS at all, so that
-/// NOBODY could publish evidence of control over it.
+/// The FIRST name in `domain_names` whose control this account could not prove — in the
+/// order the certificate covers them — or `None` when every name is one ACM can carry
+/// into domain validation.
 ///
-/// Two facts decide it, and a name needs both to be unholdable:
+/// Two kinds of name qualify:
 ///
-/// * the registries reserve the name rather than delegating it
-///   ([`domain_is_not_in_public_dns`]), and
-/// * no PUBLIC hosted zone of the account is authoritative for it
-///   ([`zone_delegates`]) — a zone the account holds is a delegation it publishes the
-///   name from, so the name has a holder, and that holder is the caller.
+/// * one the PROVIDER operates ([`domain_is_provider_operated`]), which the public DNS
+///   delegates to the provider rather than to any account, so nothing the account holds
+///   could answer for it;
+/// * one the registries reserve rather than delegating
+///   ([`domain_is_not_in_public_dns`]) that no PUBLIC hosted zone of the account is
+///   authoritative for either ([`zone_delegates`]) — a zone the account holds is a
+///   delegation it publishes the name from, so the name has a holder, and that holder is
+///   the caller.
 ///
 /// Which names are delegated is the DNS service's fact, not this one's, exactly as
 /// whether a challenge is published is: it is READ from the Route 53 store in the shared
@@ -105,37 +111,49 @@ impl ComAmazonawsAcmCertificatemanagerState {
 ///
 /// This is what a certificate request is refused up front for ("unless it fails for any
 /// of the reasons given in the troubleshooting topic Certificate request fails",
-/// `CertificateDetail$Status` doc) — and one unholdable name is enough, since "each
-/// domain name that you specify must be validated" (`RequestCertificate` doc). Every
-/// other public request names domains whose holder COULD publish the evidence, so it
-/// enters `PENDING_VALIDATION` and waits the documented [`VALIDATION_WINDOW`] out — or
-/// reaches issuance once the challenge is published ([`resolve_dns_validation`]).
+/// `CertificateDetail$Status` doc) — and the FIRST such name is enough, since "each
+/// domain name that you specify must be validated" (`RequestCertificate` doc): ACM stops
+/// there, so that name carries the failed verdict and the names behind it are never
+/// judged ([`Certificate::fail`]). Every other public request names domains whose holder
+/// COULD publish the evidence, so it enters `PENDING_VALIDATION` and waits the documented
+/// [`VALIDATION_WINDOW`] out — or reaches issuance once the challenge is published
+/// ([`resolve_dns_validation`]).
 ///
 /// LOCK ORDER: the ACM store is held by the handler that calls in and the DNS store is
 /// taken under it, the same order [`ComAmazonawsAcmCertificatemanagerState::materialize_due_in`]
 /// uses.
-pub fn any_name_is_not_in_public_dns_in<Eng: ::std::marker::Send + ::std::marker::Sync + 'static>(
+pub fn first_unvalidatable_name_in<Eng: ::std::marker::Send + ::std::marker::Sync + 'static>(
     engine: &Eng,
     domain_names: &[String],
-) -> bool {
-    // The name ACM proves control of, for each name the registries reserve — the only
-    // ones a delegation of the account's could still answer for.
-    let reserved: Vec<&str> = domain_names
-        .iter()
-        .filter(|name| domain_is_not_in_public_dns(name))
-        .map(|name| validation_target(name))
-        .collect();
-    if reserved.is_empty() {
-        return false;
-    }
-    // An engine carrying no DNS store holds no zone, so it delegates nothing.
-    let Some(zones) = dns_store::service_state(engine) else {
-        return true;
+) -> Option<String> {
+    // Which of the names the registries reserve the ACCOUNT publishes itself — the only
+    // ones a delegation of the account's could answer for. Looked up under one
+    // acquisition of the DNS store, and only when such a name is present at all; an
+    // engine carrying no DNS store holds no zone, so it delegates nothing.
+    let mut delegated: Vec<&str> = Vec::new();
+    let reserved = || {
+        domain_names
+            .iter()
+            .filter(|name| domain_is_not_in_public_dns(name))
     };
-    let zones = zones.lock();
-    reserved
+    if reserved().next().is_some() {
+        if let Some(zones) = dns_store::service_state(engine) {
+            let zones = zones.lock();
+            for name in reserved() {
+                let target = validation_target(name);
+                if zones.zones.values().any(|zone| zone_delegates(zone, target)) {
+                    delegated.push(name.as_str());
+                }
+            }
+        }
+    }
+    domain_names
         .iter()
-        .any(|name| !zones.zones.values().any(|zone| zone_delegates(zone, name)))
+        .find(|name| {
+            domain_is_provider_operated(name)
+                || (domain_is_not_in_public_dns(name) && !delegated.contains(&name.as_str()))
+        })
+        .cloned()
 }
 
 /// Whether `zone` is a PUBLIC hosted zone authoritative for `domain_name`: its apex is
@@ -174,12 +192,12 @@ fn resolve_dns_validation(
     let Some(owed) = certificate
         .pending_validation
         .as_ref()
-        .map(|pending| pending.outcome)
+        .map(|pending| pending.outcome.clone())
     else {
         return;
     };
     let proven = certificate_is_proven(certificate, zones);
-    match (proven, owed) {
+    match (proven, &owed) {
         (true, ValidationOutcome::TimedOut) => {
             certificate.pending_validation = Some(PendingValidation {
                 due_at: now + VALIDATION_SETTLE_DELAY,

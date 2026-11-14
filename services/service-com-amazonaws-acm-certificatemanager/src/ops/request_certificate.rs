@@ -1,7 +1,9 @@
 // SPDX-License-Identifier: CC0-1.0
 
 //! @op RequestCertificate
-//! IMPLEMENTED: validates the request's `DomainValidationOptions` (each entry must
+//! IMPLEMENTED: refuses a first `DomainName` past the documented 64-octet common-name
+//! bound ([`crate::state::FIRST_DOMAIN_NAME_OCTET_LIMIT`]), validates the request's
+//! `DomainValidationOptions` (each entry must
 //! name a domain the certificate covers, with a `ValidationDomain` equal to that
 //! domain or a superdomain of it), mints a certificate ARN, persists the certificate
 //! record (status `PENDING_VALIDATION`, type `AMAZON_ISSUED`) with one validation
@@ -237,6 +239,28 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
                 "the acm certificate store is unavailable",
             ));
         };
+
+        // "In compliance with RFC 5280, the length of the domain name (technically,
+        // the Common Name) that you provide cannot exceed 64 octets (characters),
+        // including periods. To add a longer domain name, specify it in the Subject
+        // Alternative Name field, which supports names up to 253 octets in length"
+        // (`RequestCertificateRequest$DomainName` doc): the FIRST domain name becomes
+        // the certificate's common name and carries that tighter bound, while the
+        // member's own `@length` max of 253 is what a subject alternative name may
+        // use. Such a name describes a certificate that cannot exist, so the request is
+        // refused before anything is stored.
+        if input.domain_name.len() > crate::state::FIRST_DOMAIN_NAME_OCTET_LIMIT {
+            return Err(
+                RequestCertificateErrorModeled::InvalidDomainValidationOptionsException(
+                    InvalidDomainValidationOptionsException {
+                        message: Some(
+                            crate::state::FIRST_DOMAIN_NAME_TOO_LONG_MESSAGE.to_string(),
+                        ),
+                    },
+                )
+                .into(),
+            );
+        }
 
         // The certificate's name set: DomainName first, then the requested SANs, with
         // duplicates dropped — a name appears once in a certificate however often the
@@ -489,24 +513,24 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
 /// * "If you are requesting a private certificate, domain validation is not required"
 ///   (`RequestCertificate` doc), so a request naming a private certificate authority
 ///   has nothing left to prove and is ISSUED.
-/// * A request naming a domain the public DNS delegates to nobody — a name the
-///   registries reserve rather than delegate, at or under a special-use top-level label
-///   or a reserved documentation second-level name, and which no public hosted zone of
-///   the account is authoritative for either
-///   ([`crate::state::any_name_is_not_in_public_dns_in`]) — is one of the requests that
-///   fail "upon being requested" instead of entering `PENDING_VALIDATION`
-///   (`CertificateDetail$Status` doc), with the reason ACM models for a request it
-///   cannot process without information it has to obtain elsewhere.
-/// * Every other public request names domains the public DNS delegates, so their
-///   holder COULD publish the evidence: "each domain name that you specify must be
-///   validated to verify that you own or control the domain" (`RequestCertificate`
-///   doc), which happens out of band. ACM waits for it — "ACM makes repeated attempts
-///   to validate a certificate for 72 hours and then times out"
-///   (`CertificateDetail$Status` doc) — so the request stays `PENDING_VALIDATION` with
-///   its evidence live for the whole documented window, and the outcome the REQUEST
-///   leaves it owed is that timeout. A challenge nobody has published is not a request
-///   failure, which is what keeps every operation that acts on a pending validation
-///   (`ResendValidationEmail`, the published CNAME) reachable.
+/// * A request naming a domain no evidence from this account could cover — a name the
+///   PROVIDER itself operates and delegates to no account, or one the registries
+///   reserve rather than delegate which no public hosted zone of the account is
+///   authoritative for either ([`crate::state::first_unvalidatable_name_in`]) — is one
+///   of the requests that fail "upon being requested" instead of entering
+///   `PENDING_VALIDATION` (`CertificateDetail$Status` doc), with the reason ACM models
+///   for a request it cannot process without information it has to obtain elsewhere.
+///   The FIRST such name is the one ACM stops at, and the outcome carries it, because
+///   the failed verdict is that name's own.
+/// * Every other public request names domains whose holder COULD publish the evidence:
+///   "each domain name that you specify must be validated to verify that you own or
+///   control the domain" (`RequestCertificate` doc), which happens out of band. ACM
+///   waits for it — "ACM makes repeated attempts to validate a certificate for 72
+///   hours and then times out" (`CertificateDetail$Status` doc) — so the request stays
+///   `PENDING_VALIDATION` with its evidence live for the whole documented window, and
+///   the outcome the REQUEST leaves it owed is that timeout. A challenge nobody has
+///   published is not a request failure, which is what keeps every operation that acts
+///   on a pending validation (`ResendValidationEmail`, the published CNAME) reachable.
 ///
 /// The last one is the outcome the proof can still change: once the CNAME this service
 /// handed out for every covered name is published, the certificate is owed an issuance
@@ -520,8 +544,10 @@ fn validation_outcome<Eng: ::std::marker::Send + ::std::marker::Sync + 'static>(
 ) -> crate::state::ValidationOutcome {
     if input.certificate_authority_arn.is_some() {
         crate::state::ValidationOutcome::Issued
-    } else if crate::state::any_name_is_not_in_public_dns_in(engine, names) {
-        crate::state::ValidationOutcome::Failed
+    } else if let Some(unvalidatable_name) =
+        crate::state::first_unvalidatable_name_in(engine, names)
+    {
+        crate::state::ValidationOutcome::Failed { unvalidatable_name }
     } else {
         crate::state::ValidationOutcome::TimedOut
     }
