@@ -18,14 +18,20 @@
 //!   name nothing ever created;
 //! * the selections a create carries are stored verbatim and reported back by
 //!   both reads through the two projections below, so the configuration a
-//!   create stored and the one a read reports can never differ.
+//!   create stored and the one a read reports can never differ;
+//! * an update rewrites the MUTABLE body of the configuration a name already
+//!   addresses — the vault it applies to and its selections — and records the
+//!   instant it did ([`TieringConfigurationRecord::apply_update`]); the name,
+//!   the ARN and the creation instant are the resource's identity and an update
+//!   never changes them.
 
 use std::collections::BTreeMap;
 use std::time::SystemTime;
 
 use super::ComAmazonawsBackupCryocontrollerusermanagerState;
 use crate::ops::types::{
-    ResourceSelection, TieringConfiguration, TieringConfigurationsListMember,
+    ResourceSelection, TieringConfiguration, TieringConfigurationInputForUpdate,
+    TieringConfigurationsListMember,
 };
 
 /// The most tiering configurations this emulator keeps.
@@ -75,6 +81,21 @@ impl TieringConfigurationRecord {
         }
     }
 
+    /// Rewrite the parts of this configuration an update may change, and
+    /// record the instant it changed them.
+    ///
+    /// The name "cannot be updated after it is created" (the update's model
+    /// doc) and the ARN and the creation instant are derived from it, so the
+    /// body an update carries — the vault the configuration applies to and its
+    /// selections — is all this rewrites. Stored as submitted, exactly as a
+    /// create stores its body, so the two reads report an updated
+    /// configuration the same way they report a created one.
+    pub fn apply_update(&mut self, body: TieringConfigurationInputForUpdate, now: SystemTime) {
+        self.backup_vault_name = body.backup_vault_name;
+        self.resource_selection = body.resource_selection;
+        self.last_updated_time = Some(now);
+    }
+
     /// The same configuration as the LISTING reports it: the summary members
     /// the list shape declares, taken from the same stored record the read
     /// projects, so a listed configuration and the read of it agree.
@@ -103,6 +124,19 @@ impl ComAmazonawsBackupCryocontrollerusermanagerState {
     ) -> Result<&TieringConfigurationRecord, crate::ops::types::ResourceNotFoundException> {
         self.tiering_configurations
             .get(name)
+            .ok_or_else(super::tiering_configuration_not_found)
+    }
+
+    /// Resolve the tiering configuration a `TieringConfigurationName`
+    /// addresses FOR WRITING, or the modelled refusal for one this account does
+    /// not hold — the same resolution, and so the same refusal, the read and
+    /// the delete answer.
+    pub fn stored_tiering_configuration_mut(
+        &mut self,
+        name: &str,
+    ) -> Result<&mut TieringConfigurationRecord, crate::ops::types::ResourceNotFoundException> {
+        self.tiering_configurations
+            .get_mut(name)
             .ok_or_else(super::tiering_configuration_not_found)
     }
 

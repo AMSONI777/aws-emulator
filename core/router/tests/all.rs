@@ -3224,3 +3224,5 @@ mod cloudformation_bucket_handles_drive_their_owning_services;
 // first item, so a `//!` line in this tail is `E0753` and compiles no suite.)
 // this file and for every service crate's `tests/all.rs`. (Ordinary comment, for the
 // reason the note above records.)
+// this file and for every service crate's `tests/all.rs`. (An ordinary comment: an inner doc
+// comment is only legal before the first item of this crate root.)

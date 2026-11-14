@@ -87,6 +87,8 @@ mod state_roundtrip;
 mod supported_resource_types;
 #[path = "all/tiering_configuration.rs"]
 mod tiering_configuration;
+#[path = "all/tiering_configuration_update.rs"]
+mod tiering_configuration_update;
 #[path = "all/vault_and_backup_job.rs"]
 mod vault_and_backup_job;
 #[path = "all/vault_access_policy.rs"]

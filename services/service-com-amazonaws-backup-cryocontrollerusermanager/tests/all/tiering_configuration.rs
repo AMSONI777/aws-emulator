@@ -30,16 +30,16 @@ use crate::vault_and_backup_job::{call, create_vault, error_code, router, string
 
 /// The sentence this service states for "the tiering configuration asked about
 /// is not one this account holds" — fixed text, naming no part of the request.
-const NOT_FOUND: &str = "Cannot find tiering configuration";
+pub(crate) const NOT_FOUND: &str = "Cannot find tiering configuration";
 
 /// The least `TieringDownSettingsInDays` the model's `@range` admits, and the
 /// most: "must be a positive integer between 60 and 36500 days" (model doc for
 /// the member, whose `@range` is `min: 60, max: 36500`).
-const MIN_TIERING_DAYS: i64 = 60;
-const MAX_TIERING_DAYS: i64 = 36_500;
+pub(crate) const MIN_TIERING_DAYS: i64 = 60;
+pub(crate) const MAX_TIERING_DAYS: i64 = 36_500;
 
 /// `PUT /tiering-configurations`, as the model binds the create.
-async fn create_tiering(router: &MultiServiceRouter, body: &Value) -> (u16, Value) {
+pub(crate) async fn create_tiering(router: &MultiServiceRouter, body: &Value) -> (u16, Value) {
     call(
         router,
         "PUT",
@@ -50,7 +50,7 @@ async fn create_tiering(router: &MultiServiceRouter, body: &Value) -> (u16, Valu
 }
 
 /// `GET /tiering-configurations/{TieringConfigurationName}`.
-async fn get_tiering(router: &MultiServiceRouter, name: &str) -> (u16, Value) {
+pub(crate) async fn get_tiering(router: &MultiServiceRouter, name: &str) -> (u16, Value) {
     call(
         router,
         "GET",
@@ -61,7 +61,7 @@ async fn get_tiering(router: &MultiServiceRouter, name: &str) -> (u16, Value) {
 }
 
 /// `DELETE /tiering-configurations/{TieringConfigurationName}`.
-async fn delete_tiering(router: &MultiServiceRouter, name: &str) -> (u16, Value) {
+pub(crate) async fn delete_tiering(router: &MultiServiceRouter, name: &str) -> (u16, Value) {
     call(
         router,
         "DELETE",
@@ -72,7 +72,7 @@ async fn delete_tiering(router: &MultiServiceRouter, name: &str) -> (u16, Value)
 }
 
 /// `GET /tiering-configurations{query}`.
-async fn list_tiering(router: &MultiServiceRouter, query: &str) -> (u16, Value) {
+pub(crate) async fn list_tiering(router: &MultiServiceRouter, query: &str) -> (u16, Value) {
     call(
         router,
         "GET",
@@ -83,7 +83,7 @@ async fn list_tiering(router: &MultiServiceRouter, query: &str) -> (u16, Value) 
 }
 
 /// A create body naming `name`, applying to `vault`, with `selections`.
-fn create_body(name: &str, vault: &str, selections: Value) -> Value {
+pub(crate) fn create_body(name: &str, vault: &str, selections: Value) -> Value {
     json!({
         "TieringConfiguration": {
             "TieringConfigurationName": name,
@@ -95,7 +95,7 @@ fn create_body(name: &str, vault: &str, selections: Value) -> Value {
 
 /// One resource selection: "currently limited to `S3`" is what the model
 /// documents for a tiering configuration's `ResourceType`.
-fn selection(resources: Value, days: i64) -> Value {
+pub(crate) fn selection(resources: Value, days: i64) -> Value {
     json!({
         "Resources": resources,
         "ResourceType": "S3",
