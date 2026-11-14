@@ -201,13 +201,7 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         } = resolve(&guard, &input)?;
 
         let result = guard
-            .issue_client_token(
-                &user_pool_id,
-                &input.client_id,
-                &scopes,
-                now,
-                ctx.parts(),
-            )
+            .issue_client_token(&user_pool_id, &input.client_id, &scopes, now)
             .ok_or_else(internal_error)?;
         Ok(GetClientTokenOutput {
             client_authentication_result: Some(result),

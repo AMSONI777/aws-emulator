@@ -309,7 +309,6 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> GetTokensFromRefr
                         now,
                         &input.refresh_token,
                         ctx.credential_store(),
-                        ctx.parts(),
                         &overrides,
                     )
                     .ok_or_else(internal_error)?
@@ -321,7 +320,6 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> GetTokensFromRefr
                     &username,
                     now,
                     &input.refresh_token,
-                    ctx.parts(),
                     &overrides,
                 )
                 .ok_or_else(internal_error)?,

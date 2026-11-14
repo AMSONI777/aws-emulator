@@ -7,9 +7,10 @@
 //! The rules under test:
 //!
 //! * `<iss>/.well-known/openid-configuration` answers 200 `application/json`
-//!   with a discovery document whose `issuer` IS that `iss` and whose every
-//!   endpoint sits under it — the only part of each value that varies is the
-//!   issuer itself — and which advertises the algorithm the pool's tokens are
+//!   with a discovery document whose `issuer` IS that `iss` — the pool's own
+//!   regional issuer, whatever endpoint the document was fetched on — and whose
+//!   every endpoint sits under it, so the only part of each value that varies is
+//!   the issuer itself; it advertises the algorithm the pool's tokens are
 //!   actually signed with.
 //! * A well-formed pool id no pool carries is answered 404 with a body naming
 //!   that pool, on every well-known path the endpoint serves, rather than with
@@ -232,7 +233,9 @@ async fn a_pools_discovery_document_names_its_issuer_and_its_endpoints() {
     ];
 
     for (case, signed_in, host) in rows {
-        let issuer = format!("https://{host}/{}", signed_in.user_pool_id);
+        // A pool's issuer is its own, so the document names the same one on every
+        // endpoint it is fetched at.
+        let issuer = format!("https://{PUBLISHED_HOST}/{}", signed_in.user_pool_id);
         let (status, media_type, body) = get(
             &router,
             host,
@@ -278,16 +281,14 @@ async fn a_pools_discovery_document_names_its_issuer_and_its_endpoints() {
             );
         }
 
-        // The document's `issuer` is the `iss` claim of the pool's own tokens
-        // when the token was minted on the same endpoint, which is what lets a
-        // relying party configured from this document accept them.
-        if host == PUBLISHED_HOST {
-            assert_eq!(
-                document["issuer"].as_str(),
-                Some(issuer_of(signed_in).as_str()),
-                "case {case:?}: the document's issuer must be the token's iss claim, got {document}"
-            );
-        }
+        // The document's `issuer` is the `iss` claim of the pool's own tokens,
+        // which is what lets a relying party configured from this document accept
+        // them.
+        assert_eq!(
+            document["issuer"].as_str(),
+            Some(issuer_of(signed_in).as_str()),
+            "case {case:?}: the document's issuer must be the token's iss claim, got {document}"
+        );
 
         // The fixed lists a user pool advertises.
         for (member, expected) in [

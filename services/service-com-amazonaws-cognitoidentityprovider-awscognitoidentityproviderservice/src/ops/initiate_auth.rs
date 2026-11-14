@@ -758,7 +758,6 @@ async fn password_sign_in(
                     &username,
                     now,
                     ctx.credential_store(),
-                    ctx.parts(),
                     &overrides,
                 )
                 .ok_or_else(internal_error)?;
@@ -1149,7 +1148,6 @@ async fn refresh_sign_in(
             &username,
             now,
             refresh_token,
-            ctx.parts(),
             &overrides,
         )
         .ok_or_else(internal_error)?;

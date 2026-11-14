@@ -628,7 +628,6 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> AdminRespondToAut
                 &username,
                 now,
                 ctx.credential_store(),
-                ctx.parts(),
                 &overrides,
             )
             .ok_or_else(internal_error)?;

@@ -43,17 +43,17 @@ impl UserPool {
     /// This pool's OpenID Connect discovery document, as served at
     /// `<issuer>/.well-known/openid-configuration`.
     ///
-    /// Every endpoint it names sits under the pool's own issuer on `endpoint`
-    /// ([`UserPool::issuer`]), which is the address the caller reached this
-    /// service at: a relying party that bootstraps from this document therefore
-    /// resolves the same host it is already talking to, and the key set it finds
-    /// is the one that verifies the tokens that issuer mints. The signing
+    /// Every endpoint it names sits under the pool's own issuer
+    /// ([`UserPool::issuer`]), the issuer this pool's tokens announce: a relying
+    /// party that bootstraps from this document therefore checks the `iss` claim
+    /// of a token against the issuer the pool itself states, and the key set it
+    /// finds is the one that verifies the tokens that issuer mints. The signing
     /// algorithm it advertises is read from the token signer itself, so the
     /// document cannot announce an algorithm the pool does not sign with.
     ///
     /// A pure read: it renders stored state and changes nothing.
-    pub fn openid_configuration(&self, endpoint: &str) -> serde_json::Value {
-        let issuer = self.issuer(endpoint);
+    pub fn openid_configuration(&self) -> serde_json::Value {
+        let issuer = self.issuer();
         serde_json::json!({
             "authorization_endpoint": format!("{issuer}/authorize"),
             "end_session_endpoint": format!("{issuer}/logout"),
@@ -61,7 +61,7 @@ impl UserPool {
                 super::tokens::TOKEN_SIGNING_ALGORITHM,
             ],
             "issuer": issuer,
-            "jwks_uri": self.jwks_uri(endpoint),
+            "jwks_uri": self.jwks_uri(),
             "response_types_supported": RESPONSE_TYPES_SUPPORTED,
             "revocation_endpoint": format!("{issuer}/revoke"),
             "scopes_supported": SCOPES_SUPPORTED,

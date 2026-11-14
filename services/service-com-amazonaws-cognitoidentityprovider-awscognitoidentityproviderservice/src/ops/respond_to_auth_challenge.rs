@@ -568,7 +568,6 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> RespondToAuthChal
                 &username,
                 now,
                 ctx.credential_store(),
-                ctx.parts(),
                 &overrides,
             )
             .ok_or_else(internal_error)?;

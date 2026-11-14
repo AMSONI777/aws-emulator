@@ -1,28 +1,35 @@
 // SPDX-License-Identifier: CC0-1.0
 
 //! The ISSUER a user-pool token announces, over the endpoints a caller reaches this
-//! service on.
+//! service on and the issuer configurations a pool can hold.
 //!
 //! The RULE the rows assert, one level above any single deployment:
 //!
-//! > A user-pool token's `iss` claim is the user-pool endpoint the request that minted it
-//! > was served on, with the minting pool's id appended — `<endpoint>/<UserPoolId>` — so
-//! > the issuer a token announces is the address its holder is already talking to, and
-//! > `<iss>/.well-known/jwks.json` is served there.
+//! > A user-pool token's `iss` claim is the minting pool's OWN regional issuer —
+//! > `https://cognito-idp.<region>.amazonaws.com/<UserPoolId>`, and
+//! > `https://issuer-cognito-idp.<region>.amazonaws.com/<UserPoolId>` for a pool
+//! > configured with the `UPDATED` issuer type — rendered from the pool's stored Region,
+//! > issuer configuration and id, whatever address the minting request was sent to. The
+//! > pool's discovery document names that same issuer, and its key set is published under
+//! > it.
 //!
 //! The issuer is token content, which this service's model does not describe: `smithy_query`
 //! on `InitiateAuth` / `AdminInitiateAuth` / `GetClientToken` models only the token members
-//! as opaque strings, and `IssuerConfigurationType.Type` is the only place the model states
-//! an issuer at all — "the issuer URL is hosted in the user pool's region", the published
-//! `https://cognito-idp.[region].amazonaws.com/[userPoolId]` form, which is exactly this
-//! rule for a caller that reaches the service at AWS's own hostname.
+//! as opaque strings, and `IssuerConfigurationType.Type`
+//! (`smithy_query(query="shape",shape="IssuerConfigurationType")`) is the only place the
+//! model states an issuer at all — "the issuer URL is hosted in the user pool's region …
+//! Original issuers have the format of
+//! `https://cognito-idp.[region].amazonaws.com/[userPoolId]`" and "updated issuers have the
+//! format of `https://issuer-cognito-idp.[region].amazonaws.com/[userPoolId]`, where region
+//! is the primary Amazon Web Services Region of your user pool".
 //!
 //! The rows span what the rule generalises over: WHICH address the minting request reached
-//! (the published regional endpoint of the pool's own region, a loopback address with a
-//! port, a named local endpoint with a port, a bracketed IPv6 literal, an address that is
-//! no host at all, a request naming no host), WHICH minting path answered (a sign-in, an
-//! admin sign-in, a refresh, a machine-to-machine grant) and WHICH token of it carries the
-//! claim (the id token and the access token).
+//! (the pool's published regional endpoint, a loopback address with a port, a named local
+//! endpoint with a port, a bracketed IPv6 literal, an address that is no host at all, a
+//! request naming no host), WHICH Region the pool lives in, WHICH issuer configuration it
+//! holds, WHICH minting path answered (a sign-in, an admin sign-in, a refresh, a
+//! machine-to-machine grant) and WHICH token of it carries the claim (the id token and the
+//! access token).
 
 use std::sync::Arc;
 
@@ -40,9 +47,12 @@ const TARGET_PREFIX: &str = "AWSCognitoIdentityProviderService";
 /// This service's SigV4 signing name, the 4th field of a credential scope.
 const SIGNING_NAME: &str = "cognito-idp";
 
-/// The region every call of this suite is signed for, so the region each pool it creates
-/// lives in and the region of each pool's published endpoint.
+/// The region most calls of this suite are signed for, so the region the pools they
+/// create live in and the region of each pool's issuer.
 const REGION: &str = "us-east-1";
+
+/// Another region, to pin that the issuer's region label is the POOL's and not a constant.
+const OTHER_REGION: &str = "eu-west-1";
 
 /// This service's published endpoint host in [`REGION`].
 const PUBLISHED_HOST: &str = "cognito-idp.us-east-1.amazonaws.com";
@@ -68,19 +78,21 @@ fn router_and_engine() -> (MultiServiceRouter, Arc<engine::InMemoryEngine>) {
     (router, engine)
 }
 
-/// A credential scope naming this service in [`REGION`], which is what routes a call here
-/// whatever host it addressed.
-fn authorization() -> String {
+/// A credential scope naming this service in `region`, which is what routes a call here
+/// whatever host it addressed — and what decides the Region a created pool lives in.
+fn authorization(region: &str) -> String {
     format!(
-        "AWS4-HMAC-SHA256 Credential=AKIDEXAMPLE/20260101/{REGION}/{SIGNING_NAME}/aws4_request, \
+        "AWS4-HMAC-SHA256 Credential=AKIDEXAMPLE/20260101/{region}/{SIGNING_NAME}/aws4_request, \
          SignedHeaders=host;x-amz-date, Signature=0000"
     )
 }
 
-/// Call `operation` on the endpoint `host` addresses, requiring success, and return its
-/// response body. `host` is `None` for a request that names no host at all.
-async fn ok(
+/// Call `operation` on the endpoint `host` addresses, signed for `region`, requiring
+/// success, and return its response body. `host` is `None` for a request that names no
+/// host at all.
+async fn ok_in(
     router: &MultiServiceRouter,
+    region: &str,
     host: Option<&str>,
     operation: &str,
     body: &Value,
@@ -90,7 +102,7 @@ async fn ok(
         .uri("/")
         .header("content-type", "application/x-amz-json-1.1")
         .header("x-amz-target", format!("{TARGET_PREFIX}.{operation}"))
-        .header("authorization", authorization());
+        .header("authorization", authorization(region));
     if let Some(host) = host {
         request = request.header("host", host);
     }
@@ -113,6 +125,16 @@ async fn ok(
         "{operation} on host {host:?} must succeed, got {status} with {payload}"
     );
     payload
+}
+
+/// [`ok_in`] for the suite's main [`REGION`].
+async fn ok(
+    router: &MultiServiceRouter,
+    host: Option<&str>,
+    operation: &str,
+    body: &Value,
+) -> Value {
+    ok_in(router, REGION, host, operation, body).await
 }
 
 /// The claim set of a compact JWS, decoded from its second segment.
@@ -155,48 +177,91 @@ fn claim(token: &str, name: &str) -> String {
         .to_string()
 }
 
+/// The issuer a pool of `region` with the issuer type `issuer_type` publishes for the pool
+/// `pool_id`.
+///
+/// The two forms are the ones `IssuerConfigurationType.Type` states
+/// (`smithy_query(query="shape",shape="IssuerConfigurationType")`): the original
+/// `https://cognito-idp.[region].amazonaws.com/[userPoolId]`, and the updated
+/// `https://issuer-cognito-idp.[region].amazonaws.com/[userPoolId]`.
+fn expected_issuer(region: &str, issuer_type: &str, pool_id: &str) -> String {
+    let host_prefix = if issuer_type == "UPDATED" {
+        "issuer-cognito-idp"
+    } else {
+        "cognito-idp"
+    };
+    format!("https://{host_prefix}.{region}.amazonaws.com/{pool_id}")
+}
+
+/// The SHAPE a Cognito issuer has, asserted beside the exact value so a row states what
+/// about the value is the requirement: the scheme is `https`, the host's first two labels
+/// are this service's endpoint prefix (possibly with the updated issuer's own label in
+/// front of it) and the pool's Region, at least one further non-empty label follows, the
+/// whole path is `/<UserPoolId>`, and there is no query and no fragment.
+fn assert_issuer_shape(case: &str, issuer: &str, region: &str, pool_id: &str) {
+    assert!(
+        !issuer.contains('?') && !issuer.contains('#'),
+        "case {case:?}: an issuer carries no query and no fragment, got {issuer:?}"
+    );
+    let authority_and_path = issuer
+        .strip_prefix("https://")
+        .unwrap_or_else(|| panic!("case {case:?}: an issuer is an https URL, got {issuer:?}"));
+    let (authority, path) = authority_and_path
+        .split_once('/')
+        .unwrap_or_else(|| panic!("case {case:?}: an issuer carries a path, got {issuer:?}"));
+    assert_eq!(
+        path, pool_id,
+        "case {case:?}: the issuer's whole path is the pool's id, got {issuer:?}"
+    );
+    let labels: Vec<&str> = authority.split('.').collect();
+    assert!(
+        labels.len() >= 3 && labels.iter().all(|label| !label.is_empty()),
+        "case {case:?}: an issuer host carries the service, the region and a domain, got \
+         {authority:?}"
+    );
+    assert!(
+        labels[0].ends_with(SIGNING_NAME),
+        "case {case:?}: the issuer host's first label names this service, got {authority:?}"
+    );
+    assert_eq!(
+        labels[1], region,
+        "case {case:?}: the issuer host's second label is the pool's region, got {authority:?}"
+    );
+}
+
 /// One endpoint a caller reaches this service on.
 struct EndpointCase {
     case: &'static str,
     /// The `Host` header the minting request carries, `None` for one naming no host.
     host: Option<&'static str>,
-    /// The authority the tokens that request mints must name as their issuer.
-    authority: &'static str,
 }
 
-/// The endpoints the rows below mint on. Each pool is CREATED on the published endpoint
-/// and minted on the row's, so what the issuer names is the endpoint of the minting
-/// request rather than of the create.
+/// The endpoints the rows below mint on. Every one of them mints the SAME issuer, because
+/// the issuer is the pool's own and not the address its caller used.
 const ENDPOINTS: &[EndpointCase] = &[
     EndpointCase {
         case: "the pool's own published regional endpoint",
         host: Some(PUBLISHED_HOST),
-        authority: PUBLISHED_HOST,
     },
     EndpointCase {
         case: "a loopback address with a port, which is how this emulator is reached",
         host: Some("127.0.0.1:9297"),
-        authority: "127.0.0.1:9297",
     },
     EndpointCase {
         case: "a named local endpoint with a port",
         host: Some("localhost:4566"),
-        authority: "localhost:4566",
     },
     EndpointCase {
         case: "a bracketed IPv6 loopback endpoint",
         host: Some("[::1]:9297"),
-        authority: "[::1]:9297",
     },
     EndpointCase {
         case: "a value no host is shaped like, which addresses no endpoint",
         host: Some("not a host"),
-        authority: PUBLISHED_HOST,
     },
     EndpointCase {
         case: "a request naming no host at all",
         host: None,
-        authority: PUBLISHED_HOST,
     },
 ];
 
@@ -300,17 +365,18 @@ async fn fixture(router: &MultiServiceRouter, pool_name: &str, username: &str) -
     }
 }
 
-/// Every token minted for a request announces, as its issuer, the endpoint that request
-/// was served on with the pool's id appended — on each minting path and for each signed
-/// token of it.
+/// Every token minted for a request announces, as its issuer, the minting pool's own
+/// regional issuer — on each minting path, for each signed token of it, and whatever
+/// address the request was sent to.
 #[tokio::test]
-async fn a_minted_token_issues_from_the_endpoint_its_request_was_served_on() {
+async fn a_minted_token_issues_from_the_pools_own_regional_issuer() {
     let (router, _engine) = router_and_engine();
     let pool = fixture(&router, "issuer-endpoint-pool", "wren").await;
+    // A pool created with no `IssuerConfiguration` issues the ORIGINAL way.
+    let expected = expected_issuer(REGION, "ORIGINAL", &pool.user_pool_id);
 
     for row in ENDPOINTS {
         let case = row.case;
-        let expected = format!("https://{}/{}", row.authority, pool.user_pool_id);
 
         // A sign-in: the id token and the access token of one unsigned USER_PASSWORD_AUTH
         // call, which is the flow a client with no credentials uses.
@@ -336,18 +402,8 @@ async fn a_minted_token_issues_from_the_endpoint_its_request_was_served_on() {
                 "case {case:?} / InitiateAuth {member}: expected iss {expected:?}, \
                  got {actual:?}"
             );
+            assert_issuer_shape(case, &actual, REGION, &pool.user_pool_id);
         }
-        // The claim is composed of the endpoint and the POOL, so its last path segment is
-        // the id of the pool that minted it and nothing else is in the path.
-        let id_token = result["IdToken"].as_str().expect("an id token");
-        assert_eq!(
-            claim(id_token, "iss")
-                .rsplit('/')
-                .next()
-                .unwrap_or_default(),
-            pool.user_pool_id,
-            "case {case:?}: the issuer's last segment is the minting pool's id"
-        );
 
         // A refresh on the same endpoint mints a fresh pair, which issues from there too.
         let refresh_token = result["RefreshToken"]
@@ -422,11 +478,180 @@ async fn a_minted_token_issues_from_the_endpoint_its_request_was_served_on() {
     }
 }
 
-/// The issuer a token announces is a location its holder can FETCH the pool's key set
-/// from: an anonymous GET of `<iss>/.well-known/jwks.json`, on the endpoint the issuer
-/// names, serves the key the token's `kid` names.
+/// The issuer a pool announces is composed of the pool's OWN Region and issuer
+/// configuration: the rows differ along the Region the pool was created in and the
+/// `IssuerConfiguration.Type` it holds, including a pool that is reconfigured after it has
+/// already minted tokens.
 #[tokio::test]
-async fn a_tokens_issuer_leads_to_the_key_set_on_the_endpoint_it_names() {
+async fn the_issuer_is_the_pools_region_and_configured_issuer_type() {
+    let (router, _engine) = router_and_engine();
+
+    // The issuer types are the modelled set
+    // (`smithy_query(query="shape",shape="IssuerConfigurationType")`: ORIGINAL and
+    // UPDATED), beside a pool that configures none and so issues the default way.
+    let rows: &[(&str, &str, Option<&str>, &str)] = &[
+        (
+            "a pool configuring no issuer type",
+            REGION,
+            None,
+            "ORIGINAL",
+        ),
+        (
+            "a pool configured with the original issuer",
+            REGION,
+            Some("ORIGINAL"),
+            "ORIGINAL",
+        ),
+        (
+            "a pool configured with the updated issuer",
+            REGION,
+            Some("UPDATED"),
+            "UPDATED",
+        ),
+        (
+            "a pool of another region configuring no issuer type",
+            OTHER_REGION,
+            None,
+            "ORIGINAL",
+        ),
+        (
+            "a pool of another region with the updated issuer",
+            OTHER_REGION,
+            Some("UPDATED"),
+            "UPDATED",
+        ),
+    ];
+
+    for (index, (case, region, configured, effective)) in rows.iter().enumerate() {
+        let mut create = json!({ "PoolName": format!("issuer-type-pool-{index}") });
+        if let Some(issuer_type) = configured {
+            create["IssuerConfiguration"] = json!({ "Type": issuer_type });
+        }
+        // Every call of a row is signed for the row's region, so the pool lives there.
+        let created = ok_in(&router, region, Some(PUBLISHED_HOST), "CreateUserPool", &create).await;
+        let user_pool_id = created["UserPool"]["Id"]
+            .as_str()
+            .unwrap_or_else(|| panic!("case {case:?}: a minted pool id, got {created}"))
+            .to_string();
+        let client_id = ok_in(
+            &router,
+            region,
+            Some(PUBLISHED_HOST),
+            "CreateUserPoolClient",
+            &json!({
+                "UserPoolId": user_pool_id,
+                "ClientName": "issuer-type-client",
+                "ExplicitAuthFlows": ["ALLOW_ADMIN_USER_PASSWORD_AUTH"],
+            }),
+        )
+        .await["UserPoolClient"]["ClientId"]
+            .as_str()
+            .unwrap_or_else(|| panic!("case {case:?}: a minted client id"))
+            .to_string();
+        ok_in(
+            &router,
+            region,
+            Some(PUBLISHED_HOST),
+            "AdminCreateUser",
+            &json!({ "UserPoolId": user_pool_id, "Username": "finch" }),
+        )
+        .await;
+        ok_in(
+            &router,
+            region,
+            Some(PUBLISHED_HOST),
+            "AdminSetUserPassword",
+            &json!({
+                "UserPoolId": user_pool_id,
+                "Username": "finch",
+                "Password": GOOD_PASSWORD,
+                "Permanent": true,
+            }),
+        )
+        .await;
+
+        // The minting request is sent to the EMULATOR's own address, so a row that passes
+        // cannot be reading the issuer off the host it addressed.
+        let signed_in = ok_in(
+            &router,
+            region,
+            Some("127.0.0.1:9297"),
+            "AdminInitiateAuth",
+            &json!({
+                "UserPoolId": user_pool_id,
+                "ClientId": client_id,
+                "AuthFlow": "ADMIN_USER_PASSWORD_AUTH",
+                "AuthParameters": { "USERNAME": "finch", "PASSWORD": GOOD_PASSWORD },
+            }),
+        )
+        .await;
+        let token = signed_in["AuthenticationResult"]["IdToken"]
+            .as_str()
+            .unwrap_or_else(|| panic!("case {case:?}: a sign-in returns an IdToken"));
+        let actual = claim(token, "iss");
+        let expected = expected_issuer(region, effective, &user_pool_id);
+        assert_eq!(
+            actual, expected,
+            "case {case:?}: expected iss {expected:?}, got {actual:?}"
+        );
+        assert_issuer_shape(case, &actual, region, &user_pool_id);
+
+        // The pool's own id names its Region, so the issuer's region label and the pool it
+        // names agree.
+        assert!(
+            user_pool_id.starts_with(&format!("{region}_")),
+            "case {case:?}: a pool id names its region, got {user_pool_id:?}"
+        );
+
+        // Reconfiguring the pool moves the issuer its NEXT tokens announce, which is what
+        // reading the claim off stored state means.
+        let reconfigured = if *effective == "UPDATED" {
+            "ORIGINAL"
+        } else {
+            "UPDATED"
+        };
+        ok_in(
+            &router,
+            region,
+            Some(PUBLISHED_HOST),
+            "UpdateUserPool",
+            &json!({
+                "UserPoolId": user_pool_id,
+                "IssuerConfiguration": { "Type": reconfigured },
+            }),
+        )
+        .await;
+        let after = ok_in(
+            &router,
+            region,
+            Some("127.0.0.1:9297"),
+            "AdminInitiateAuth",
+            &json!({
+                "UserPoolId": user_pool_id,
+                "ClientId": client_id,
+                "AuthFlow": "ADMIN_USER_PASSWORD_AUTH",
+                "AuthParameters": { "USERNAME": "finch", "PASSWORD": GOOD_PASSWORD },
+            }),
+        )
+        .await;
+        let token = after["AuthenticationResult"]["IdToken"]
+            .as_str()
+            .unwrap_or_else(|| panic!("case {case:?}: a sign-in returns an IdToken"));
+        let actual = claim(token, "iss");
+        let expected = expected_issuer(region, reconfigured, &user_pool_id);
+        assert_eq!(
+            actual, expected,
+            "case {case:?} after reconfiguration to {reconfigured}: expected iss \
+             {expected:?}, got {actual:?}"
+        );
+    }
+}
+
+/// The issuer a token announces is where the pool publishes what verifies it: the pool's
+/// discovery document names that same issuer, and the key set under it serves the key the
+/// token's `kid` names — fetched on whatever endpoint the holder reaches this emulator at.
+#[tokio::test]
+async fn a_tokens_issuer_is_the_discovery_root_of_the_pools_key_set() {
     let (router, _engine) = router_and_engine();
     let pool = fixture(&router, "issuer-discovery-pool", "quinn").await;
 
@@ -453,64 +678,102 @@ async fn a_tokens_issuer_leads_to_the_key_set_on_the_endpoint_it_names() {
             .unwrap_or_else(|| panic!("case {case:?}: a signed token names its key by kid"))
             .to_string();
 
-        // A verifier follows the issuer itself: the authority it names is the endpoint the
-        // request is addressed to, and the rest of it is the path.
-        let authority = issuer
+        // A verifier follows the issuer's PATH to the two documents it bootstraps from,
+        // on the endpoint it reaches this emulator at — here the address of the minting
+        // request, so the documents are fetched wherever the holder is talking.
+        let path = issuer
             .strip_prefix("https://")
-            .unwrap_or_else(|| panic!("case {case:?}: an issuer is an https URL, got {issuer:?}"));
-        let (authority, path) = authority
-            .split_once('/')
-            .unwrap_or_else(|| panic!("case {case:?}: an issuer carries the pool in its path"));
-        let discovery = format!("/{path}/.well-known/jwks.json");
+            .and_then(|authority_and_path| authority_and_path.split_once('/'))
+            .map(|(_authority, path)| path.to_string())
+            .unwrap_or_else(|| panic!("case {case:?}: an issuer carries a path, got {issuer:?}"));
+        let fetch_host = row.host.unwrap_or(PUBLISHED_HOST);
+        let fetch_host = if fetch_host == "not a host" {
+            PUBLISHED_HOST
+        } else {
+            fetch_host
+        };
 
-        // NO credential: a key set is public, exactly as AWS serves it.
-        let request = http::Request::builder()
-            .method("GET")
-            .uri(&discovery)
-            .header("host", authority)
-            .body(Bytes::new())
-            .expect("the request is well formed");
-        let response = router.dispatch(request).await;
-        let status = response.status().as_u16();
-        assert_eq!(
-            status,
-            200,
-            "case {case:?}: GET https://{authority}{discovery} must serve the pool's key \
-             set, got {status} with {:?}",
-            String::from_utf8_lossy(response.body())
-        );
-        let served: Value = serde_json::from_slice(response.body()).unwrap_or_else(|error| {
-            panic!(
-                "case {case:?}: the key set must be JSON ({error}): {:?}",
+        // NO credential: these documents are public, exactly as AWS serves them.
+        for (document, member) in [
+            (".well-known/openid-configuration", Some("issuer")),
+            (".well-known/jwks.json", None),
+        ] {
+            let target = format!("/{path}/{document}");
+            let request = http::Request::builder()
+                .method("GET")
+                .uri(&target)
+                .header("host", fetch_host)
+                .body(Bytes::new())
+                .expect("the request is well formed");
+            let response = router.dispatch(request).await;
+            let status = response.status().as_u16();
+            assert_eq!(
+                status,
+                200,
+                "case {case:?}: GET https://{fetch_host}{target} must be served, got {status} \
+                 with {:?}",
                 String::from_utf8_lossy(response.body())
-            )
-        });
-        let names_the_key = served["keys"]
-            .as_array()
-            .unwrap_or_else(|| panic!("case {case:?}: a key set has a keys list, got {served}"))
-            .iter()
-            .any(|key| key["kid"].as_str() == Some(kid.as_str()));
-        assert!(
-            names_the_key,
-            "case {case:?}: the key set at the announced issuer must hold the token's key \
-             {kid:?}, got {served}"
-        );
+            );
+            let served: Value = serde_json::from_slice(response.body()).unwrap_or_else(|error| {
+                panic!(
+                    "case {case:?}: {document} must be JSON ({error}): {:?}",
+                    String::from_utf8_lossy(response.body())
+                )
+            });
+            match member {
+                // The discovery document names the issuer the token names, and the key set
+                // under it.
+                Some(member) => {
+                    assert_eq!(
+                        served[member].as_str(),
+                        Some(issuer.as_str()),
+                        "case {case:?}: the document's {member} must be the token's iss \
+                         ({issuer:?}), got {served}"
+                    );
+                    assert_eq!(
+                        served["jwks_uri"].as_str(),
+                        Some(format!("{issuer}/.well-known/jwks.json").as_str()),
+                        "case {case:?}: the key set sits under the issuer, got {served}"
+                    );
+                }
+                // The key set holds the key the token was signed with.
+                None => {
+                    let names_the_key = served["keys"]
+                        .as_array()
+                        .unwrap_or_else(|| {
+                            panic!("case {case:?}: a key set has a keys list, got {served}")
+                        })
+                        .iter()
+                        .any(|key| key["kid"].as_str() == Some(kid.as_str()));
+                    assert!(
+                        names_the_key,
+                        "case {case:?}: the key set under the announced issuer must hold the \
+                         token's key {kid:?}, got {served}"
+                    );
+                }
+            }
+        }
     }
 }
 
 /// The reading every verifier of a user-pool token shares: which issuers name one pool.
 ///
-/// Each row is an issuer a holder could present, and whether it names the pool. The
-/// endpoints a token really issues from are the rows of [`ENDPOINTS`], so the minted
-/// values are accepted here by construction; the rest are values no endpoint of this pool
-/// mints.
+/// Each row is an issuer a holder could present, and whether it names the pool. The issuer
+/// a pool really mints is its own regional one, which both issuer types below state; the
+/// addresses of this emulator are accepted beside them, because that is how a verifier
+/// configured from this emulator's own endpoint names the pool.
 #[test]
-fn an_issuer_names_a_pool_only_on_an_endpoint_that_serves_it() {
+fn an_issuer_names_a_pool_only_where_that_pool_is_served() {
     let pool_id = "us-east-1_abc123def";
     let rows: &[(&str, String, bool)] = &[
         (
-            "the pool's published regional endpoint",
+            "the pool's published regional issuer",
             format!("https://{PUBLISHED_HOST}/{pool_id}"),
+            true,
+        ),
+        (
+            "the updated issuer of the pool's own region",
+            format!("https://issuer-cognito-idp.{REGION}.amazonaws.com/{pool_id}"),
             true,
         ),
         (
@@ -539,17 +802,22 @@ fn an_issuer_names_a_pool_only_on_an_endpoint_that_serves_it() {
             true,
         ),
         (
-            "this service's published endpoint in another region, where the pool is not",
-            format!("https://cognito-idp.eu-west-1.amazonaws.com/{pool_id}"),
+            "this service's published issuer in another region, where the pool is not",
+            format!("https://cognito-idp.{OTHER_REGION}.amazonaws.com/{pool_id}"),
+            false,
+        ),
+        (
+            "the updated issuer of another region",
+            format!("https://issuer-cognito-idp.{OTHER_REGION}.amazonaws.com/{pool_id}"),
             false,
         ),
         (
             "another service's endpoint",
-            format!("https://s3.us-east-1.amazonaws.com/{pool_id}"),
+            format!("https://s3.{REGION}.amazonaws.com/{pool_id}"),
             false,
         ),
         (
-            "the published endpoint of a different pool",
+            "the published issuer of a different pool",
             format!("https://{PUBLISHED_HOST}/us-east-1_999zzz000"),
             false,
         ),

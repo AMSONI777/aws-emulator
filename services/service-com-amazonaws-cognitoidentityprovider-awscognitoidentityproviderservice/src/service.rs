@@ -1136,16 +1136,10 @@ impl<Eng: Send + Sync + 'static> Service for EmulatedService<Eng> {
             match document {
                 WellKnownDocument::KeySet => pool.jwks(),
                 // The discovery document names its issuer and every endpoint
-                // under it, so it is rendered for the endpoint THIS request
-                // reached — the same endpoint the `iss` claim of a token served
-                // here names.
-                WellKnownDocument::OpenIdConfiguration => {
-                    pool.openid_configuration(&crate::state::served_endpoint_of(
-                        req.uri(),
-                        req.headers().get("host"),
-                        &pool.region,
-                    ))
-                }
+                // under it, which is the pool's OWN issuer — the one the `iss`
+                // claim of its tokens names, whatever endpoint this request
+                // reached the document on.
+                WellKnownDocument::OpenIdConfiguration => pool.openid_configuration(),
             }
         };
         json_response(200, &rendered.to_string())

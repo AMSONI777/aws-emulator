@@ -79,7 +79,7 @@ use crate::ops::types::{
     CodeDeliveryDetailsType, CompromisedCredentialsRiskConfigurationType, CustomDomainConfigType,
     DeviceConfigurationType, DeviceSecretVerifierConfigType, DeviceType, DomainDescriptionType,
     EmailConfigurationType, EmailMfaConfigType, GroupType, IdentityProviderType,
-    IssuerConfigurationType,
+    IssuerConfigurationType, ISSUER_TYPE_VALUES,
     KeyConfigurationType, LambdaConfigType, LimitDefinitionType, LimitType,
     LogConfigurationType, LogDeliveryConfigurationType,
     MFAOptionType, NewDeviceMetadataType,
@@ -2095,9 +2095,9 @@ impl ComAmazonawsCognitoidentityproviderAwscognitoidentityproviderserviceState {
     ///
     /// Every claim comes from stored state: the `sub` and `username` from the
     /// stored user, its `cognito:groups` from the groups the stored user belongs
-    /// to, `client_id` from the stored app client, the issuer from the endpoint
-    /// this request is served on and the stored pool's id
-    /// ([`UserPool::issuer`]), and each lifetime from the app client's validity
+    /// to, `client_id` from the stored app client, the issuer from the stored
+    /// pool's Region, issuer configuration and id ([`UserPool::issuer`]), and
+    /// each lifetime from the app client's validity
     /// settings — each of them as the pool's pre-token-generation function left it
     /// (`overrides`, which is what that function answered and
     /// [`lambda_triggers::TokenOverrides::none`] for a generation that invoked none). The
@@ -2120,7 +2120,6 @@ impl ComAmazonawsCognitoidentityproviderAwscognitoidentityproviderserviceState {
         username: &str,
         now: SystemTime,
         credentials: &::emulator_server::CredentialStore,
-        parts: &::http::request::Parts,
         overrides: &lambda_triggers::TokenOverrides,
     ) -> Option<AuthenticationResultType> {
         let refresh_token = mint_refresh_token(credentials, self.refresh_token_key())?;
@@ -2131,7 +2130,6 @@ impl ComAmazonawsCognitoidentityproviderAwscognitoidentityproviderserviceState {
             now,
             Some(refresh_token),
             None,
-            parts,
             overrides,
         )
     }
@@ -2151,7 +2149,6 @@ impl ComAmazonawsCognitoidentityproviderAwscognitoidentityproviderserviceState {
         now: SystemTime,
         presented_refresh_token: &str,
         credentials: &::emulator_server::CredentialStore,
-        parts: &::http::request::Parts,
         overrides: &lambda_triggers::TokenOverrides,
     ) -> Option<AuthenticationResultType> {
         let lineage = self.token_lineage(presented_refresh_token);
@@ -2163,7 +2160,6 @@ impl ComAmazonawsCognitoidentityproviderAwscognitoidentityproviderserviceState {
             now,
             Some(refresh_token),
             lineage,
-            parts,
             overrides,
         )
     }
@@ -2185,7 +2181,6 @@ impl ComAmazonawsCognitoidentityproviderAwscognitoidentityproviderserviceState {
         username: &str,
         now: SystemTime,
         presented_refresh_token: &str,
-        parts: &::http::request::Parts,
         overrides: &lambda_triggers::TokenOverrides,
     ) -> Option<AuthenticationResultType> {
         let lineage = self.token_lineage(presented_refresh_token);
@@ -2196,7 +2191,6 @@ impl ComAmazonawsCognitoidentityproviderAwscognitoidentityproviderserviceState {
             now,
             None,
             lineage,
-            parts,
             overrides,
         )
     }
@@ -2237,16 +2231,11 @@ impl ComAmazonawsCognitoidentityproviderAwscognitoidentityproviderserviceState {
         client_id: &str,
         scopes: &[String],
         now: SystemTime,
-        parts: &::http::request::Parts,
     ) -> Option<ClientAuthenticationResultType> {
         let (issuer, signing_keys, access_ttl) = {
             let pool = self.user_pools.get(user_pool_id)?;
             let client = pool.clients.get(client_id)?;
-            (
-                pool.issuer(&served_endpoint(parts, &pool.region)),
-                pool.signing_keys.clone(),
-                client.access_token_ttl(),
-            )
+            (pool.issuer(), pool.signing_keys.clone(), client.access_token_ttl())
         };
 
         let issued_at = unix_seconds(now);
@@ -2332,11 +2321,11 @@ impl ComAmazonawsCognitoidentityproviderAwscognitoidentityproviderserviceState {
     /// refresh token a refresh presented — and `None` starts a new one, which is
     /// what a first sign-in does.
     ///
-    /// `parts` is the request being served, which is what the `iss` claim names:
-    /// the user-pool endpoint this call reached ([`served_endpoint`]) with the
-    /// pool's id appended, so the issuer a token announces is the address its
-    /// holder is already talking to and the one a verifier resolves the pool's
-    /// key set from.
+    /// The `iss` claim is the minting pool's own issuer ([`UserPool::issuer`]):
+    /// the regional user-pool issuer its stored Region, issuer configuration and
+    /// id render, so a token announces the same issuer however its holder
+    /// addressed this emulator, and that issuer is the discovery root a verifier
+    /// resolves the pool's key set from.
     #[allow(clippy::too_many_arguments)]
     fn mint_tokens(
         &mut self,
@@ -2346,7 +2335,6 @@ impl ComAmazonawsCognitoidentityproviderAwscognitoidentityproviderserviceState {
         now: SystemTime,
         refresh_token: Option<String>,
         lineage: Option<String>,
-        parts: &::http::request::Parts,
         overrides: &lambda_triggers::TokenOverrides,
     ) -> Option<AuthenticationResultType> {
         let TokenInputs {
@@ -2365,7 +2353,7 @@ impl ComAmazonawsCognitoidentityproviderAwscognitoidentityproviderserviceState {
             let client = pool.clients.get(client_id)?;
             let user = pool.user(username)?;
             TokenInputs {
-                issuer: pool.issuer(&served_endpoint(parts, &pool.region)),
+                issuer: pool.issuer(),
                 sub: user.sub.clone(),
                 stored_username: user.username.clone(),
                 // The attributes this app client has READ ACCESS to are the ones
@@ -3199,6 +3187,14 @@ pub const DEFAULT_EMAIL_SENDING_ACCOUNT: &str = "COGNITO_DEFAULT";
 /// which is the issuer every pool's tokens carry until one is configured
 /// otherwise. One of [`crate::ops::types::ISSUER_TYPE_VALUES`].
 pub const DEFAULT_ISSUER_TYPE: &str = "ORIGINAL";
+
+/// The `IssuerConfiguration.Type` of a pool whose issuer is the UPDATED one:
+/// "recommended for all user pools, including for multi-Region replication.
+/// Updated issuers host the same JWKS content in multiple regions"
+/// (`IssuerConfigurationType.Type` in this service's model), which is hosted on a
+/// host of its own in the pool's primary Region. One of
+/// [`crate::ops::types::ISSUER_TYPE_VALUES`].
+pub const UPDATED_ISSUER_TYPE: &str = "UPDATED";
 
 /// The `KeyConfiguration.KeyType` a pool that names no key gets: "a key owned by
 /// Amazon Web Services in Key Management Service"

@@ -9,11 +9,11 @@
 //!
 //! The RULE the rows assert, one level above any single deployment:
 //!
-//! > A user-pool token's `iss` claim is the user-pool endpoint the request that minted it
-//! > was served on, with the pool's id appended. An authorizer resolves the pool a token
-//! > claims by that whole issuer, so it admits a token minted on ANY endpoint this
-//! > emulator serves the pool at, and the claims it publishes reach the integration
-//! > verbatim — `iss` included.
+//! > A user-pool token's `iss` claim is the minting pool's OWN regional issuer, composed
+//! > of the pool's Region and id, whatever address the minting request was sent to. An
+//! > authorizer resolves the pool a token claims by that whole issuer, so it admits a
+//! > token the pool minted for a request on ANY endpoint this emulator serves it at, and
+//! > the claims it publishes reach the integration verbatim — `iss` included.
 //!
 //! The rows span what the rule generalises over: WHICH endpoint minted the token (the
 //! pool's published regional endpoint, and the emulator's own address, which is the only
@@ -369,7 +369,9 @@ fn a_cognito_authorizer_admits_a_token_minted_on_the_endpoint_its_holder_reached
                     )
                     .await;
                     let result = &signed_in["AuthenticationResult"];
-                    let expected_issuer = format!("https://{host}/{pool_id}");
+                    // The pool's issuer is its own, so a token minted on any endpoint of
+                    // this emulator announces the pool's published regional issuer.
+                    let expected_issuer = format!("https://{published}/{pool_id}");
                     for member in ["IdToken", "AccessToken"] {
                         let token = result[member]
                             .as_str()

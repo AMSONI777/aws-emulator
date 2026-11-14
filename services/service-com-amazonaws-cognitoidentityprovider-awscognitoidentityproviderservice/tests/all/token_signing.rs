@@ -816,14 +816,14 @@ async fn a_pool_serves_its_key_set_at_its_well_known_path() {
     .await;
 
     // The location is the one the token's issuer leads a verifier to, composed
-    // from the endpoint this suite's requests reach the service on.
+    // from the pool's own regional issuer.
     let jwks_uri = {
         let service_state = state::service_state(&*engine).expect("this service's state");
         let guard = service_state.lock();
         guard
             .pool(&row.user_pool_id)
             .expect("the stored pool")
-            .jwks_uri("https://cognito-idp.us-east-1.amazonaws.com")
+            .jwks_uri()
     };
     assert_eq!(
         jwks_uri,
