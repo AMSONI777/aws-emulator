@@ -26,6 +26,7 @@ import io
 import json
 
 import boto3
+from awsglue import _bookmark
 from pyspark import filesystem
 
 # How much of a table ONE read takes. The bounds that decide what a RUN may spend are the
@@ -61,6 +62,19 @@ class TableTooLarge(Exception):
 # The format options a read of objects under a path HONOURS: the delimiter between cells,
 # the quote character around one, and whether the objects carry a header line.
 HONOURED_FORMAT_OPTIONS = ("separator", "delimiter", "quoteChar", "withHeader")
+
+
+def truthy(value):
+    """A connection option's flag, whether it arrived as a boolean or as its text.
+
+    A client names such an option either way — `{"recurse": True}` and `{"recurse": "true"}`
+    ask for the same thing — so both are read here, and anything else is the flag unset.
+    """
+    if isinstance(value, bool):
+        return value
+    if value is None:
+        return False
+    return str(value).strip().lower() in ("true", "1")
 
 
 def refuse_unhonoured(given, honoured, what):
@@ -170,11 +184,22 @@ def _layout(table, descriptor):
     }
 
 
-def _data_keys(bucket, prefix, left):
-    """The `(key, size)` pairs under one prefix that hold a table's data, at most `left`.
+def _within(prefix, key):
+    """Where `key` sits under `prefix`: the part of it below the prefix's own level."""
+    rest = key[len(prefix):]
+    return rest[1:] if rest.startswith("/") else rest
+
+
+def _data_keys(bucket, prefix, left, recurse=True):
+    """The `(key, size, modified)` objects under one prefix that hold data, at most `left`.
 
     The SIZE comes from the listing, so how much a read is about to take is known before
-    anything is fetched (see `_object_text`).
+    anything is fetched (see `_object_text`), and the MODIFIED instant is what a bookmarked
+    read tells an object it has already processed from a new one (`_bookmark`).
+
+    `recurse` is whether the read descends the sub-prefixes under the prefix it was given:
+    with it unset only the objects at that prefix's own level are read, which is what a read
+    that was not asked to recurse takes.
     """
     keys = []
     token = None
@@ -188,6 +213,8 @@ def _data_keys(bucket, prefix, left):
             name = key.rsplit("/", 1)[-1]
             if not name or name.startswith(MARKER_PREFIXES):
                 continue
+            if not recurse and "/" in _within(prefix, key):
+                continue
             size = int(entry.get("Size") or 0)
             if size <= 0:
                 continue
@@ -199,7 +226,7 @@ def _data_keys(bucket, prefix, left):
                     "one read of a table takes at most %d of the objects at its location"
                     % (MAX_OBJECTS,)
                 )
-            keys.append((key, size))
+            keys.append((key, size, int(entry.get("LastModified") or 0)))
         token = listed.get("NextContinuationToken")
         if not token or not listed.get("IsTruncated"):
             return keys
@@ -300,10 +327,17 @@ def _json_rows(text, columns, layout):
         yield record
 
 
-def _rows_under(location, columns, layout, left_rows, left_bytes):
-    """Every row the objects under one location hold, within what is left of the bounds."""
+def _rows_under(location, columns, layout, left_rows, left_bytes, transformation_ctx=""):
+    """Every row the objects under one location hold, within what is left of the bounds.
+
+    `transformation_ctx` is the context the read was named under, which is what a bookmarked
+    run resumes against: with the bookmark in force the read takes only the objects that are
+    new to that context (`_bookmark.unread`).
+    """
     bucket, prefix = _split_uri(location)
-    keys = _data_keys(bucket, prefix, MAX_OBJECTS)
+    keys = _bookmark.unread(
+        transformation_ctx, _data_keys(bucket, prefix, MAX_OBJECTS)
+    )
     classification = layout["classification"]
     if classification in JSON_CLASSIFICATIONS:
         parse = _json_rows
@@ -315,7 +349,7 @@ def _rows_under(location, columns, layout, left_rows, left_bytes):
             "layout it can resolve into rows" % (classification,)
         )
     rows = []
-    for key, size in keys:
+    for key, size, _modified in keys:
         text, taken = _object_text(bucket, key, size, left_bytes)
         left_bytes -= taken
         # The rows come one at a time, and the bound is checked BEFORE each is kept — so a
@@ -358,7 +392,8 @@ def _partitions(database, table_name, catalog_id, predicate):
 
 
 def read_catalog_table(
-    database, table_name, catalog_id=None, push_down_predicate="", additional_options=None
+    database, table_name, catalog_id=None, push_down_predicate="",
+    additional_options=None, transformation_ctx=""
 ):
     """The columns and the records of one catalog table.
 
@@ -404,6 +439,7 @@ def read_catalog_table(
                 _layout(table, partition_descriptor),
                 left_rows - len(records),
                 left_bytes,
+                transformation_ctx,
             )
             for row in rows:
                 row.update(held)
@@ -415,7 +451,9 @@ def read_catalog_table(
                 "the table %s.%s declares no location to read its data from"
                 % (database, table_name)
             )
-        records, left_bytes = _rows_under(location, columns, layout, left_rows, left_bytes)
+        records, left_bytes = _rows_under(
+            location, columns, layout, left_rows, left_bytes, transformation_ctx
+        )
     return (columns + partition_keys, records)
 
 
@@ -425,12 +463,18 @@ def table_format(table):
     return _layout(table, descriptor)["classification"] or "csv"
 
 
-def read_s3_paths(paths, format=None, format_options=None):
+def read_s3_paths(
+    paths, format=None, format_options=None, recurse=False, transformation_ctx=""
+):
     """The columns and records the objects under `paths` hold, in the format named.
 
     The columns of delimited text are the ones its header names when the read was told the
     objects carry one, and `col0`, `col1`, … otherwise — which is what the Glue reader calls
     the columns of headerless text.
+
+    `recurse` is whether the read descends the sub-prefixes under each path, and
+    `transformation_ctx` the context a bookmarked run resumes against — with the bookmark in
+    force the read takes only the objects that are new to that context.
     """
     options = dict(format_options or {})
     refuse_unhonoured(
@@ -447,7 +491,10 @@ def read_s3_paths(paths, format=None, format_options=None):
     left_bytes = MAX_BYTES
     for path in list(paths or []):
         bucket, prefix = _split_uri(path)
-        for key, size in _data_keys(bucket, prefix, MAX_OBJECTS):
+        listed = _bookmark.unread(
+            transformation_ctx, _data_keys(bucket, prefix, MAX_OBJECTS, recurse)
+        )
+        for key, size, _modified in listed:
             text, taken = _object_text(bucket, key, size, left_bytes)
             left_bytes -= taken
             if kind in JSON_CLASSIFICATIONS:

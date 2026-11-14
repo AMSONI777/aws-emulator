@@ -405,6 +405,31 @@ pub fn job_run_script_bound_reached(bound: &str) -> String {
     format!("The job script was stopped because it ran past {bound}.")
 }
 
+/// What ONE execution of a job's script came to, with the bookmark it committed.
+///
+/// The outcome is what the state the clock owes the run reports
+/// ([`JobRunEntry::record_execution`]); the bookmark is what the script's own `job.commit()`
+/// asked the service to store for the next run of the job, and `None` for a run that
+/// committed none — a script that did not commit, one the bookmark was not enabled for, and
+/// every execution no script answered for.
+#[derive(Debug, Clone)]
+pub struct JobScriptExecution {
+    /// What the execution came to.
+    pub outcome: JobRunOutcome,
+    /// The position the run's own reads reached, as its commit left it.
+    pub committed_bookmark: Option<String>,
+}
+
+impl From<JobRunOutcome> for JobScriptExecution {
+    /// An outcome reached without any script answering, which commits no bookmark.
+    fn from(outcome: JobRunOutcome) -> Self {
+        Self {
+            outcome,
+            committed_bookmark: None,
+        }
+    }
+}
+
 /// What ONE execution of a job's script came to, which is what the state the clock owes the
 /// run reports ([`JobRunEntry::record_execution`]).
 #[derive(Debug, Clone)]
@@ -472,6 +497,15 @@ pub struct JobScriptPlan {
     /// Apache Spark and Python that Glue supports", so it is what decides the Spark the
     /// script is run against ([`crate::state::glue_etl`]).
     pub glue_version: String,
+    /// The JOB BOOKMARK this job's last committed run left — "a point that a job can resume
+    /// processing" (`JobBookmarkEntry`) — and `None` for a job whose bookmark holds no
+    /// position: one no committed run has written and one a reset has cleared.
+    ///
+    /// It is handed to the run so a script whose `--job-bookmark-option` enables the
+    /// bookmark reads only what is new to each of its transformation contexts, and what that
+    /// run's own `job.commit()` reaches is stored back against the job
+    /// ([`crate::state::JobBookmarkState::record_commit`]).
+    pub bookmark: Option<String>,
 }
 
 impl JobScriptPlan {
@@ -491,6 +525,10 @@ impl JobScriptPlan {
             timeout_minutes: run.timeout,
             role_arn: glue_role_reference(&job.role).arn,
             glue_version: run.glue_version.clone(),
+            bookmark: job
+                .bookmark
+                .as_ref()
+                .and_then(|bookmark| bookmark.job_bookmark.clone()),
         })
     }
 
@@ -643,7 +681,7 @@ pub async fn perform_owed_job_runs<Eng: ::std::marker::Send + ::std::marker::Syn
                 }
             };
 
-            let Some(outcome) = perform_job_script(
+            let Some(execution) = perform_job_script(
                 engine,
                 ctx,
                 region,
@@ -667,12 +705,21 @@ pub async fn perform_owed_job_runs<Eng: ::std::marker::Send + ::std::marker::Syn
                 break;
             };
             if let Some(run) = job.run_mut(&plan.run_id) {
-                run.record_execution(&outcome, SystemTime::now());
+                run.record_execution(&execution.outcome, SystemTime::now());
+            }
+            // "job.commit() … updates the state of the job bookmark": the position the
+            // script's own commit reached is stored against the job, so the NEXT run of it
+            // resumes from there. A run that committed none leaves the bookmark where it is,
+            // and a reset is what drops it.
+            if let Some(position) = execution.committed_bookmark {
+                job.bookmark
+                    .get_or_insert_with(JobBookmarkState::default)
+                    .record_commit(position);
             }
             ::tracing::info!(
                 job = %plan.job_name,
                 run = %plan.run_id,
-                state = %outcome.job_run_state(),
+                state = %execution.outcome.job_run_state(),
                 "ran a Glue job run's script"
             );
         }
@@ -695,7 +742,8 @@ pub async fn perform_owed_job_runs<Eng: ::std::marker::Send + ::std::marker::Syn
     );
 }
 
-/// Run ONE job script and answer what it came to, or `None` when nothing ran it.
+/// Run ONE job script and answer what it came to, with the bookmark it committed, or `None`
+/// when nothing ran it.
 ///
 /// Every answer is grounded in what really happened: the object store's own refusal for a
 /// script it does not serve, the exception the script raised, or the bound the interpreter
@@ -711,7 +759,7 @@ async fn perform_job_script<Eng: ::std::marker::Send + ::std::marker::Sync + 'st
     region: &str,
     plan: &JobScriptPlan,
     left_of_the_call: Duration,
-) -> Option<JobRunOutcome> {
+) -> Option<JobScriptExecution> {
     // A job run is performed BY Glue acting as the job's `Role` ("the name or Amazon
     // Resource Name (ARN) of the IAM role associated with this job", `Job$Role`), so the
     // run is admitted only once this emulator's own IAM has been asked whether Glue can
@@ -726,15 +774,13 @@ async fn perform_job_script<Eng: ::std::marker::Send + ::std::marker::Sync + 'st
             run = %plan.run_id,
             "a Glue job run's execution role cannot be assumed by Glue, so nothing was run"
         );
-        return Some(JobRunOutcome::Failed(messages::job_run_role_not_assumable(
-            &plan.role_arn,
-        )));
+        return Some(
+            JobRunOutcome::Failed(messages::job_run_role_not_assumable(&plan.role_arn)).into(),
+        );
     }
     let language = plan.job_language();
     if language != PYTHON_JOB_LANGUAGE {
-        return Some(JobRunOutcome::Failed(job_run_language_not_runnable(
-            &language,
-        )));
+        return Some(JobRunOutcome::Failed(job_run_language_not_runnable(&language)).into());
     }
     let Some(location) = plan
         .script_location
@@ -742,21 +788,25 @@ async fn perform_job_script<Eng: ::std::marker::Send + ::std::marker::Sync + 'st
         .map(str::trim)
         .filter(|location| !location.is_empty())
     else {
-        return Some(JobRunOutcome::Failed(
-            JOB_RUN_NO_SCRIPT_LOCATION.to_string(),
-        ));
+        return Some(JobRunOutcome::Failed(JOB_RUN_NO_SCRIPT_LOCATION.to_string()).into());
     };
     let Some((bucket, key)) = split_s3_location(location) else {
-        return Some(JobRunOutcome::Failed(job_run_script_unreadable(
-            location,
-            "the location does not name an Amazon S3 object",
-        )));
+        return Some(
+            JobRunOutcome::Failed(job_run_script_unreadable(
+                location,
+                "the location does not name an Amazon S3 object",
+            ))
+            .into(),
+        );
     };
     if key.is_empty() || key.ends_with('/') {
-        return Some(JobRunOutcome::Failed(job_run_script_unreadable(
-            location,
-            "the location does not name an Amazon S3 object",
-        )));
+        return Some(
+            JobRunOutcome::Failed(job_run_script_unreadable(
+                location,
+                "the location does not name an Amazon S3 object",
+            ))
+            .into(),
+        );
     }
     // The script is FETCHED by Glue acting as that same role, so the read is made with a
     // SESSION of it ([`execution_role_identity`], the one mint this workspace has for an
@@ -785,9 +835,7 @@ async fn perform_job_script<Eng: ::std::marker::Send + ::std::marker::Sync + 'st
                 "the object store refused a Glue job run's script to the role the job runs \
                  as, so nothing was run"
             );
-            return Some(JobRunOutcome::Failed(job_run_script_not_accessible(
-                location,
-            )));
+            return Some(JobRunOutcome::Failed(job_run_script_not_accessible(location)).into());
         }
         Err(ScriptNotRead::Unreadable(detail)) => {
             ::tracing::debug!(
@@ -797,9 +845,9 @@ async fn perform_job_script<Eng: ::std::marker::Send + ::std::marker::Sync + 'st
                 detail = %detail,
                 "a Glue job run's script could not be read"
             );
-            return Some(JobRunOutcome::Failed(job_run_script_unreadable(
-                location, &detail,
-            )));
+            return Some(
+                JobRunOutcome::Failed(job_run_script_unreadable(location, &detail)).into(),
+            );
         }
     };
 
@@ -911,7 +959,8 @@ async fn read_script(
         .map_err(|_| ScriptNotRead::Unreadable("the script is not text".to_string()))
 }
 
-/// Run `source` as the job's script, on a thread of its own, and answer what it came to.
+/// Run `source` as the job's script, on a thread of its own, and answer what it came to
+/// together with the bookmark its own commit left.
 ///
 /// The interpreter is synchronous and CPU-bound, so it runs on a thread with a stack of its
 /// own rather than on the async runtime, and the caller's wait for it is the host backstop
@@ -934,7 +983,7 @@ async fn run_script(
     key: &str,
     access: Option<AwsAccess>,
     permit: ::tokio::sync::OwnedSemaphorePermit,
-) -> JobRunOutcome {
+) -> JobScriptExecution {
     let budget = job_script_budget(plan.timeout_minutes);
     // Where the script is reported to run from: the path a job script is placed at on the
     // worker that runs it, which is what its own traceback frames name.
@@ -943,6 +992,9 @@ async fn run_script(
         "path": path,
         "source": source,
         "arguments": plan.command_line_arguments(),
+        // The point this job's last committed run left, which a run the bookmark is enabled
+        // for resumes its source reads from ([`crate::state::glue_etl`]).
+        "bookmark": plan.bookmark,
     })
     .to_string();
     let modules = ::std::iter::once(PackageModule {
@@ -999,19 +1051,40 @@ async fn run_script(
     if let Err(error) = spawned {
         return JobRunOutcome::EndedInError(format!(
             "the thread the job script runs on could not be started: {error}"
-        ));
+        ))
+        .into();
     }
     match ::tokio::time::timeout(JOB_SCRIPT_HOST_WAIT, receiver).await {
-        Ok(Ok(finished)) => read_outcome(&finished.completion),
+        Ok(Ok(finished)) => JobScriptExecution {
+            outcome: read_outcome(&finished.completion),
+            committed_bookmark: committed_bookmark(&finished.completion),
+        },
         Ok(Err(_)) => JobRunOutcome::EndedInError(
             "the thread the job script ran on ended without reporting".to_string(),
-        ),
+        )
+        .into(),
         // The thread has still not answered a grace period past the host time one run may
         // take — which the engine has by then stopped the run on — so it is given up on and
         // the run reports that this emulator has no outcome for it. Nothing of the script's
         // own span ran out, so it is not reported as terminated for taking too long.
-        Err(_elapsed) => JobRunOutcome::EndedInError(job_run_script_unanswered()),
+        Err(_elapsed) => JobRunOutcome::EndedInError(job_run_script_unanswered()).into(),
     }
+}
+
+/// The bookmark the script's own `job.commit()` left for the service to store, read off what
+/// the execution ANSWERED — and `None` for a run that committed none and for every completion
+/// no script answered for.
+///
+/// The answer is the entry module's ([`SCRIPT_ENTRY_SOURCE`]), and its size is bounded by
+/// what one run may answer with ([`MAX_JOB_SCRIPT_ANSWER_BYTES`]), so what is stored against
+/// a job is bounded by that same ceiling.
+fn committed_bookmark(completion: &python::Completion) -> Option<String> {
+    let python::Completion::Returned(answer) = completion else {
+        return None;
+    };
+    let answered: ::serde_json::Value = ::serde_json::from_str(answer).ok()?;
+    let committed = answered.get("bookmark")?.as_str()?;
+    (!committed.is_empty()).then(|| committed.to_string())
 }
 
 /// What the run reports for a script the interpreter answered for.
@@ -1079,6 +1152,10 @@ const SCRIPT_ENTRY_FUNCTION: &str = "run";
 /// run — as the `__main__` module, with the job's arguments on `sys.argv` — and lets
 /// whatever the script raises travel out to the engine, which is what reports it.
 ///
+/// It is also the two ends of the JOB BOOKMARK: the point the job's last committed run left
+/// is taken up before the script runs, and what the script's own `job.commit()` reached is
+/// what the module ANSWERS with, for the service to store against the job.
+///
 /// Nothing here is a bound or a containment: both are the engine's, in host code no script
 /// can reach.
 const SCRIPT_ENTRY_SOURCE: &str = r#"
@@ -1086,16 +1163,24 @@ const SCRIPT_ENTRY_SOURCE: &str = r#"
 
 import sys
 
+from awsglue import _bookmark
+
 
 def run(event, context):
     # The command line a job script resolves its arguments off: the script's own path
     # followed by the job's arguments, which is what AWS Glue hands the script.
     sys.argv = [event["path"]] + list(event["arguments"])
+    # The job bookmark this job's last committed run left: a run whose
+    # `--job-bookmark-option` enables it reads only what is new to each of its
+    # transformation contexts, from this point.
+    _bookmark.begin(event.get("bookmark"))
     # A script is run as a program, so its globals are those of the main module and its
     # `if __name__ == "__main__":` guard holds, exactly as on a Glue worker.
     script_globals = {"__name__": "__main__", "__file__": event["path"]}
     exec(compile(event["source"], event["path"], "exec"), script_globals)
-    return None
+    # What the run answers with is the bookmark the script's own commit left, which the
+    # service stores for the next run of this job; a script that committed none answers none.
+    return {"bookmark": _bookmark.committed()}
 "#;
 
 // `awsglue` and the Spark runtime under it live in [`crate::state::glue_etl`], which is

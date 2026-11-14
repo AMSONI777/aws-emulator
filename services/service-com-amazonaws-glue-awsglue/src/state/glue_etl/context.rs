@@ -13,6 +13,11 @@ from awsglue.data_source import DataSource
 from awsglue.dynamicframe import DynamicFrame, DynamicFrameReader, DynamicFrameWriter
 from pyspark.sql import SparkSession
 
+# The connection options a read of Amazon S3 paths HONOURS: the paths it reads, and whether
+# it descends the sub-prefixes under them. Every other option changes what a read DOES, and
+# this reader performs none of them, so one it is given is refused naming it.
+HONOURED_S3_READ_OPTIONS = ("path", "paths", "recurse")
+
 
 class _Logger(object):
     """`glueContext.get_logger()`: the logger a script writes its own messages through.
@@ -118,6 +123,7 @@ class GlueContext(object):
             catalog_id=catalog_id,
             push_down_predicate=push_down_predicate,
             additional_options=additional_options,
+            transformation_ctx=transformation_ctx,
         )
         return DynamicFrame(
             records, self, transformation_ctx or "%s_%s" % (named, table), columns
@@ -148,13 +154,21 @@ class GlueContext(object):
             )
         _table_data.refuse_unhonoured(
             options,
-            ("path", "paths"),
+            HONOURED_S3_READ_OPTIONS,
             "reads a frame from the Amazon S3 paths its connection options name",
         )
         paths = options.get("paths") or ([options["path"]] if options.get("path") else [])
         if not paths:
             raise ValueError("a frame read from Amazon S3 names the paths to read")
-        columns, records = _table_data.read_s3_paths(paths, format, format_options)
+        columns, records = _table_data.read_s3_paths(
+            paths,
+            format,
+            format_options,
+            # "recurse": whether the read descends the sub-prefixes under the paths it was
+            # given, which a read that does not ask for it does not do.
+            recurse=_table_data.truthy(options.get("recurse")),
+            transformation_ctx=transformation_ctx,
+        )
         return DynamicFrame(records, self, transformation_ctx, columns)
 
     def create_dynamic_frame_from_rdd(self, data, name, schema=None, sample_ratio=None,
@@ -517,6 +531,8 @@ def _register(database, table_name, catalog_id, partition_keys, written):
 pub(super) const JOB_SOURCE: &str = r#"
 """The job one script run belongs to, as the script initialises and commits it."""
 
+from awsglue import _bookmark
+
 
 class Job(object):
     """`Job(glueContext)`: the run's own bookkeeping, as a script drives it."""
@@ -549,9 +565,16 @@ class Job(object):
         return dict(self._arguments)
 
     def commit(self):
-        """"Commits the job": the point the script declares its work complete."""
+        """"Commits the job": the point the script declares its work complete.
+
+        This is also where the JOB BOOKMARK advances: "job.commit() … updates the state of
+        the job bookmark", so the point each of this run's bookmarked reads reached becomes
+        the point the next run of the job resumes from. A run the bookmark is paused or
+        disabled for advances nothing ([`_bookmark.commit`]).
+        """
         if self._name is None:
             raise RuntimeError("commit() is called on a job that was never initialised")
+        _bookmark.commit()
         self._committed = True
         return None
 

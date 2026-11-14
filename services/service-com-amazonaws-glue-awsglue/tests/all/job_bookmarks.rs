@@ -249,10 +249,13 @@ async fn a_reset_clears_the_bookmark_and_leaves_it_readable() {
         Some("etl_job"),
         "the reset entry must name its job, got {reset}"
     );
+    // RECORDED: the run counter is monotonic across a reset rather than zeroed, so the entry
+    // the reset answers reports a run number past the last run's — two runs wrote this
+    // bookmark, so the reset reports the third.
     assert_eq!(
         entry["Run"].as_i64(),
-        Some(0),
-        "the reset clears the run counter, got {reset}"
+        Some(3),
+        "the reset advances the run counter rather than rewinding it, got {reset}"
     );
     assert_eq!(
         entry["Version"].as_i64(),
@@ -275,8 +278,8 @@ async fn a_reset_clears_the_bookmark_and_leaves_it_readable() {
     let resumed = get_bookmark(&router, "etl_job", None).await.1;
     assert_eq!(
         resumed["JobBookmarkEntry"]["Run"].as_i64(),
-        Some(1),
-        "the run after a reset is the first of the new version, got {resumed}"
+        Some(4),
+        "the run after a reset advances the counter the reset left, got {resumed}"
     );
     assert_eq!(
         resumed["JobBookmarkEntry"]["RunId"].as_str(),

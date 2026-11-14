@@ -373,6 +373,9 @@ pub struct JobBookmarkState {
     pub run_id: Option<String>,
     /// "The bookmark itself" — the position a resumed run reads from — and `None` for a
     /// bookmark no run has written a position into, which is the state a reset leaves.
+    ///
+    /// A position is written by the COMMIT of a run whose script ran with the bookmark
+    /// enabled ([`Self::record_commit`]), so a job whose runs never committed one has none.
     pub job_bookmark: Option<String>,
 }
 
@@ -397,20 +400,37 @@ impl JobBookmarkState {
         }
     }
 
-    /// Reset this bookmark: "Resets a bookmark entry" (`ResetJobBookmark`), so the
-    /// position a further run would resume from is dropped and the run counter starts
-    /// again, under the next version of the bookmark.
+    /// Record the position a run's own COMMIT left: "The bookmark itself" — the point a
+    /// further run of the job resumes processing from.
     ///
-    /// NOT recorded: what is pinned is that the reset clears the position the next run
-    /// would have resumed from and that the entry stays readable afterwards, which is what
-    /// a client resets a bookmark to achieve.
+    /// "Glue tracks data that has already been processed during a previous run of an ETL job
+    /// by persisting state information from the job run", and `job.commit()` is what writes
+    /// it — so this is called for a run whose script committed, with the position that run's
+    /// own reads reached ([`super::job_script`]). A run that committed nothing leaves the
+    /// position where it is, and a reset is what drops it ([`Self::reset`]).
+    pub fn record_commit(&mut self, position: String) {
+        self.job_bookmark = Some(position);
+    }
+
+    /// Reset this bookmark: "Resets a bookmark entry" (`ResetJobBookmark`), so the
+    /// position a further run would resume from is dropped and the next version of the
+    /// bookmark begins.
+    ///
+    /// The entry a reset leaves reports an EMPTY position rather than none: the reset wrote
+    /// the position, and what it wrote holds nothing, so a further run resumes from nothing
+    /// and reads its whole source again. A bookmark no run has written a position into at all
+    /// still reports none ([`Self::record_commit`] is the only thing that writes one).
+    ///
+    /// RECORDED: the run counter is MONOTONIC across a reset rather than rewound — the reset
+    /// advances it, so the entry it answers reports a run number past the last run's and no
+    /// two writes of a job's bookmark are reported under the same count.
     pub fn reset(&mut self) {
         self.version = self.version.saturating_add(1);
-        self.run = 0;
+        self.run = self.run.saturating_add(1);
         self.attempt = 0;
         self.previous_run_id = None;
         self.run_id = None;
-        self.job_bookmark = None;
+        self.job_bookmark = Some(String::new());
     }
 
     /// This bookmark in the `JobBookmarkEntry` shape every operation that answers one

@@ -27,7 +27,10 @@
 //! * a frame's transformations and actions are COMPUTED over those records, in this process,
 //!   by the script's own functions ([`frames`]);
 //! * a frame WRITTEN out leaves real objects in the object store, through the same shared
-//!   filesystem a Spark program's own writes go through ([`context`]).
+//!   filesystem a Spark program's own writes go through ([`context`]);
+//! * a run the JOB BOOKMARK is enabled for reads only the source objects that are new to each
+//!   transformation context, against the point the job's last committed run really left
+//!   ([`bookmark`]), and what its `job.commit()` reaches is what the service then stores.
 //!
 //! A surface a script reaches for that this library does not supply raises the way a missing
 //! attribute or an absent module raises, so the run FAILS carrying that error rather than
@@ -41,6 +44,7 @@
 //! bound on how much of a table ONE read takes ([`table_data`]), because that read is made
 //! against this emulator.
 
+mod bookmark;
 mod context;
 mod frames;
 mod table_data;
@@ -62,6 +66,7 @@ pub fn glue_etl_modules(glue_version: &str) -> Vec<PackageModule> {
             "awsglue/_table_data.py",
             table_data::TABLE_DATA_SOURCE.to_string(),
         ),
+        ("awsglue/_bookmark.py", bookmark::BOOKMARK_SOURCE.to_string()),
         (
             "awsglue/dynamicframe.py",
             frames::DYNAMICFRAME_SOURCE.to_string(),
