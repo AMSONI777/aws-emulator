@@ -52,7 +52,7 @@ use crate::distribution_tags::{
 use crate::distributions_by_web_acl_id::encode_label;
 use crate::key_value_store_lifecycle::{escape, is_version_token, member};
 use crate::resource_policy_lifecycle::{
-    get_resource_policy, policy, put_resource_policy, reported_document,
+    get_resource_policy, policy, put_resource_policy, reported_document, stored,
 };
 
 // ---------------------------------------------------------------------------
@@ -770,7 +770,7 @@ async fn the_minted_arn_is_one_the_resource_policy_surface_accepts() {
     let created = create_vpc_origin(&router, &endpoint.xml()).await;
     let (_, arn) = assert_record(&created, &endpoint, VPC_ORIGIN_STATUS_DEPLOYING, "the create");
 
-    let document = policy("share-the-vpc-origin");
+    let document = policy(&arn, "share-the-vpc-origin");
     let written = put_resource_policy(&router, &arn, &document).await;
     assert_eq!(
         written.status, 200,
@@ -783,9 +783,10 @@ async fn the_minted_arn_is_one_the_resource_policy_surface_accepts() {
         "case the minted ARN: expected HTTP 200 from the read, got {} with {}",
         read.status, read.raw
     );
+    let expected = stored(&document);
     assert_eq!(
         reported_document(&read),
-        document.as_str(),
+        expected.as_str(),
         "case the minted ARN: expected the document the write persisted, got {:?}",
         reported_document(&read)
     );

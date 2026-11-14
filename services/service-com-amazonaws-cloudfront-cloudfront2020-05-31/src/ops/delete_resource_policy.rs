@@ -5,7 +5,8 @@
 //! Removes the resource policy attached to the CloudFront resource `ResourceArn` names,
 //! from [`crate::state`]'s resource-policy slice — the one a `PutResourcePolicy` wrote. A
 //! MUTATION the spec states this call makes: after it, the resource carries no policy, so a
-//! `GetResourcePolicy` on that ARN answers not-found until another write attaches one.
+//! `GetResourcePolicy` on that ARN reports the empty document until another write attaches
+//! one.
 //!
 //! The surface attaches policies to ONE resource type
 //! ([`crate::state::RESOURCE_POLICY_RESOURCE_TYPE`]), and the `ResourceArn` is judged as an
@@ -19,8 +20,9 @@
 //! accepted type that names no resource this service holds is reported ABSENT, 404
 //! `EntityNotFound` ([`crate::state::resource_policy_resource_absent`]), since there is no
 //! resource to remove a policy from.
-//! An ARN the surface does accept, carrying no policy, is 404 `EntityNotFound`: there is
-//! nothing to remove, so the store is left exactly as it was.
+//! An ARN the surface does accept, naming a resource that carries no policy, SUCCEEDS: the
+//! removal is idempotent over an absent policy, so the store is left exactly as it was and
+//! the 200 empty output is answered.
 //!
 //! ## Shape of an operation
 //!
@@ -213,15 +215,10 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
             .into());
         }
 
-        // The EXISTENCE answer for a resource the surface does attach policies to, which is
-        // what the gate above leaves it: an ARN the surface accepts, carrying no policy, has
-        // nothing for this call to remove.
-        if !store.delete_resource_policy(&input.resource_arn) {
-            return Err(DeleteResourcePolicyErrorModeled::EntityNotFound(
-                crate::state::resource_policy_not_found(),
-            )
-            .into());
-        }
+        // The resource is there, so its policy is removed — and a resource that carried none
+        // is left exactly as it was: there was nothing to remove, which is the state the
+        // caller asked for, so the removal is idempotent rather than refused.
+        store.delete_resource_policy(&input.resource_arn);
 
         Ok(DeleteResourcePolicyOutput)
     }

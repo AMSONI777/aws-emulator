@@ -9,12 +9,14 @@
 //! ONE resource type it attaches policies to, so for the delete
 //!
 //! * a `ResourceArn` the surface accepts that carries a policy loses it: the delete answers
-//!   HTTP 200 and from then on the resource carries no policy, so a read answers
-//!   `EntityNotFound` until another write attaches one — and no other resource's policy is
-//!   touched, since a policy is keyed by the ARN it was attached to alone;
-//! * an accepted `ResourceArn` carrying no policy is `EntityNotFound` (404) with
-//!   [`RESOURCE_POLICY_NOT_FOUND_MESSAGE`] — there is nothing to remove, so a repeated
-//!   delete is refused rather than answered a second success;
+//!   HTTP 200 and from then on the resource carries no policy, so a read reports the empty
+//!   document ([`EMPTY_RESOURCE_POLICY_DOCUMENT`]) until another write attaches one — and no
+//!   other resource's policy is touched, since a policy is keyed by the ARN it was attached
+//!   to alone;
+//! * an accepted `ResourceArn` naming a resource that carries no policy SUCCEEDS the same
+//!   way: the removal is idempotent over an absent policy, so a repeated delete is answered
+//!   200 with the empty output rather than refused, and the following read still reports the
+//!   empty document;
 //! * a `ResourceArn` that is no ARN at all is refused on its FORM (400 `InvalidArgument`,
 //!   [`MALFORMED_ARN_MESSAGE`]); an ARN naming any resource type other than the one the
 //!   surface attaches policies to is refused on that TYPE (400 `InvalidArgument`,
@@ -34,8 +36,8 @@
 //! request helpers are the ones [`crate::resource_policy_lifecycle`] already writes.
 
 use service_com_amazonaws_cloudfront_cloudfront2020_05_31::state::{
-    INVALID_RESOURCE_POLICY_RESOURCE_TYPE_MESSAGE, MALFORMED_ARN_MESSAGE,
-    NO_SUCH_RESOURCE_MESSAGE, RESOURCE_POLICY_NOT_FOUND_MESSAGE, RESOURCE_POLICY_RESOURCE_TYPE,
+    EMPTY_RESOURCE_POLICY_DOCUMENT, INVALID_RESOURCE_POLICY_RESOURCE_TYPE_MESSAGE,
+    MALFORMED_ARN_MESSAGE, NO_SUCH_RESOURCE_MESSAGE, RESOURCE_POLICY_RESOURCE_TYPE,
     TAGGABLE_RESOURCE_TYPES,
 };
 use smithy_server_runtime::MultiServiceRouter;
@@ -44,7 +46,7 @@ use crate::distribution_lifecycle::{call, create_distribution, emulator, Answer,
 use crate::distribution_tenant_lifecycle::escape;
 use crate::resource_policy_lifecycle::{
     created_vpc_origin_arn, distribution_config, get_resource_policy, message, policy,
-    put_resource_policy, reported_document, OTHER_RESOURCE_TYPES,
+    put_resource_policy, reported_document, stored, OTHER_RESOURCE_TYPES,
 };
 
 /// `POST /2020-05-31/delete-resource-policy`, removing the policy attached to `arn`.
@@ -73,58 +75,72 @@ pub(crate) async fn delete_resource_policy(router: &MultiServiceRouter, arn: &st
 /// document attached to it.
 ///
 /// Each ARN is one a `CreateVpcOrigin` really minted, since a policy is attached to a
-/// resource that EXISTS. The rows differ along the endpoint configuration's name, and along
-/// the content and size of the document.
+/// resource that EXISTS, and each document NAMES that ARN, so it is written once the create
+/// has minted one. The rows differ along the endpoint configuration's name, and along the
+/// content and size of the document.
 async fn rows(router: &MultiServiceRouter) -> Vec<(&'static str, String, String)> {
-    let bulky = format!(
-        "{{\"Version\":\"2008-10-17\",\"Statement\":[{}]}}",
-        (0..40)
-            .map(|index| format!(
-                "{{\"Effect\":\"Allow\",\"Sid\":\"statement{index}\",\"Action\":\"cloudfront:*\"}}"
-            ))
-            .collect::<Vec<_>>()
-            .join(",")
-    );
-    let table: Vec<(&'static str, String, String)> = vec![
+    type Document = Box<dyn Fn(&str) -> String>;
+    let table: Vec<(&'static str, String, Document)> = vec![
         (
             "a document a caller would write",
             "vo-delete-1".to_string(),
-            policy("minted"),
+            Box::new(|arn| policy(arn, "minted")),
         ),
         (
             "a statement id in upper case",
             "vo-delete-upper".to_string(),
-            policy("UPPER"),
+            Box::new(|arn| policy(arn, "UPPER")),
         ),
         (
             "a one-character resource name",
             "7".to_string(),
-            policy("short"),
+            Box::new(|arn| policy(arn, "short")),
         ),
         (
             "a resource name of sixty-four characters",
             "d".repeat(64),
-            policy("long-name"),
+            Box::new(|arn| policy(arn, "long-name")),
         ),
         (
             "a resource name carrying separators",
             "vo.delete_5".to_string(),
-            policy("separators"),
+            Box::new(|arn| policy(arn, "separators")),
         ),
         (
-            "an empty JSON object",
-            "vo-delete-empty-object".to_string(),
-            "{}".to_string(),
+            "a document whose principal is every principal",
+            "vo-delete-wide".to_string(),
+            Box::new(|arn| {
+                format!(
+                    "{{\"Version\":\"2012-10-17\",\"Statement\":[{{\"Effect\":\"Allow\",\
+                     \"Principal\":\"*\",\"Action\":\"cloudfront:GetVpcOrigin\",\
+                     \"Resource\":\"{arn}\"}}]}}"
+                )
+            }),
         ),
         (
             "a document of forty statements",
             "vo-delete-bulky".to_string(),
-            bulky,
+            Box::new(|arn| {
+                format!(
+                    "{{\"Version\":\"2012-10-17\",\"Statement\":[{}]}}",
+                    (0..40)
+                        .map(|index| format!(
+                            "{{\"Effect\":\"Allow\",\"Sid\":\"statement{index}\",\
+                             \"Principal\":{{\"AWS\":\"arn:aws:iam::111122223333:root\"}},\
+                             \"Action\":\"cloudfront:GetVpcOrigin\",\
+                             \"Resource\":\"{arn}\"}}"
+                        ))
+                        .collect::<Vec<_>>()
+                        .join(",")
+                )
+            }),
         ),
     ];
     let mut out = Vec::new();
     for (case, name, document) in table {
-        out.push((case, created_vpc_origin_arn(router, &name).await, document));
+        let arn = created_vpc_origin_arn(router, &name).await;
+        let written = document(&arn);
+        out.push((case, arn, written));
     }
     out
 }
@@ -164,29 +180,23 @@ async fn deleting_the_policy_of_an_accepted_arn_removes_only_that_policy() {
             deleted.raw
         );
 
-        // The resource carries no policy any more: the READ is what the delete changed.
+        // The resource carries no policy any more: the READ is what the delete changed, and
+        // it reports the empty document rather than a refusal.
         let read = get_resource_policy(&router, arn).await;
         assert_eq!(
-            read.status, 404,
-            "case {case}: expected HTTP 404 reading the deleted policy, got {} ({})",
+            read.status, 200,
+            "case {case}: expected HTTP 200 reading the deleted policy, got {} ({})",
             read.status, read.raw
         );
         assert_eq!(
-            read.error_code(),
-            "EntityNotFound",
-            "case {case}: expected EntityNotFound reading the deleted policy, got {:?} ({})",
-            read.error_code(),
-            read.raw
-        );
-        assert_eq!(
-            message(&read),
-            RESOURCE_POLICY_NOT_FOUND_MESSAGE,
-            "case {case}: expected message {RESOURCE_POLICY_NOT_FOUND_MESSAGE:?}, got {:?}",
-            message(&read)
+            reported_document(&read),
+            EMPTY_RESOURCE_POLICY_DOCUMENT,
+            "case {case}: expected the empty document after the delete, got {:?}",
+            reported_document(&read)
         );
 
         // Nothing but that one key moved: every row not yet deleted still reads back with
-        // the document it was attached, and every row already deleted is still gone.
+        // the document it was attached, and every row already deleted still reads empty.
         for (other_case, other_arn, other_document) in &rows {
             let other = get_resource_policy(&router, other_arn).await;
             if other_arn == arn {
@@ -196,41 +206,35 @@ async fn deleting_the_policy_of_an_accepted_arn_removes_only_that_policy() {
                 .iter()
                 .take(index)
                 .any(|(_, deleted_arn, _)| deleted_arn == other_arn);
-            if already_deleted {
-                assert_eq!(
-                    other.status, 404,
-                    "case {case} then {other_case}: expected HTTP 404 for an already deleted \
-                     policy, got {} ({})",
-                    other.status, other.raw
-                );
+            assert_eq!(
+                other.status, 200,
+                "case {case} then {other_case}: expected HTTP 200, got {} ({})",
+                other.status, other.raw
+            );
+            let expected = if already_deleted {
+                EMPTY_RESOURCE_POLICY_DOCUMENT.to_string()
             } else {
-                assert_eq!(
-                    other.status, 200,
-                    "case {case} then {other_case}: expected HTTP 200 for a policy no delete \
-                     named, got {} ({})",
-                    other.status, other.raw
-                );
-                assert_eq!(
-                    reported_document(&other),
-                    other_document.as_str(),
-                    "case {case} then {other_case}: expected the document \
-                     {other_document:?}, got {:?}",
-                    reported_document(&other)
-                );
-            }
+                stored(other_document)
+            };
+            assert_eq!(
+                reported_document(&other),
+                expected.as_str(),
+                "case {case} then {other_case}: expected the document {expected:?}, got {:?}",
+                reported_document(&other)
+            );
         }
     }
 }
 
 #[tokio::test]
-async fn deleting_a_policy_an_accepted_arn_does_not_carry_is_entity_not_found() {
+async fn deleting_a_policy_an_accepted_arn_does_not_carry_succeeds_as_a_no_op() {
     let router = emulator();
 
     // Rows spanning the ways an accepted ARN comes to carry no policy: never written,
     // written and already deleted, deleted twice, and an ARN beside one that does carry a
     // policy.
     let neighbour = created_vpc_origin_arn(&router, "vo-keeps-its-policy").await;
-    let kept = policy("kept");
+    let kept = policy(&neighbour, "kept");
     let written = put_resource_policy(&router, &neighbour, &kept).await;
     assert_eq!(
         written.status, 200,
@@ -242,7 +246,7 @@ async fn deleting_a_policy_an_accepted_arn_does_not_carry_is_entity_not_found() 
     let once_written = created_vpc_origin_arn(&router, "vo-written-once").await;
     let twice_deleted = created_vpc_origin_arn(&router, "vo-deleted-twice").await;
     for arn in [&once_written, &twice_deleted] {
-        let put = put_resource_policy(&router, arn, &policy("to-be-removed")).await;
+        let put = put_resource_policy(&router, arn, &policy(arn, "to-be-removed")).await;
         assert_eq!(
             put.status, 200,
             "case preparing {arn}: expected HTTP 200 from the write, got {} ({})",
@@ -270,31 +274,36 @@ async fn deleting_a_policy_an_accepted_arn_does_not_carry_is_entity_not_found() 
     for (case, arn) in &rows {
         let answer = delete_resource_policy(&router, arn).await;
         assert_eq!(
-            answer.status, 404,
-            "case {case}: expected HTTP 404, got {} ({})",
+            answer.status, 200,
+            "case {case}: expected HTTP 200, got {} ({})",
             answer.status, answer.raw
         );
         assert_eq!(
             answer.error_code(),
-            "EntityNotFound",
-            "case {case}: expected EntityNotFound, got {:?} ({})",
+            "",
+            "case {case}: expected the delete to report no error, got {:?} ({})",
             answer.error_code(),
             answer.raw
         );
+
+        // And the resource still carries no policy: the no-op removed nothing and attached
+        // nothing.
+        let read = get_resource_policy(&router, arn).await;
         assert_eq!(
-            message(&answer),
-            RESOURCE_POLICY_NOT_FOUND_MESSAGE,
-            "case {case}: expected message {RESOURCE_POLICY_NOT_FOUND_MESSAGE:?}, got {:?}",
-            message(&answer)
+            reported_document(&read),
+            EMPTY_RESOURCE_POLICY_DOCUMENT,
+            "case {case}: expected the empty document, got {:?}",
+            reported_document(&read)
         );
     }
 
-    // None of those refusals removed the policy the neighbouring resource does carry.
+    // None of those removals touched the policy the neighbouring resource does carry.
     let read = get_resource_policy(&router, &neighbour).await;
+    let expected = stored(&kept);
     assert_eq!(
         reported_document(&read),
-        kept.as_str(),
-        "case after the not-found deletes: expected the document {kept:?}, got {:?}",
+        expected.as_str(),
+        "case after the no-op deletes: expected the document {expected:?}, got {:?}",
         reported_document(&read)
     );
 }
@@ -310,7 +319,7 @@ async fn deleting_under_an_arn_the_surface_does_not_accept_is_refused() {
     // The policy the gate must leave alone: every refusal below is decided before anything
     // is removed.
     let kept_arn = created_vpc_origin_arn(&router, "vo-survives-the-gate").await;
-    let kept = policy("survivor");
+    let kept = policy(&kept_arn, "survivor");
     let written = put_resource_policy(&router, &kept_arn, &kept).await;
     assert_eq!(
         written.status, 200,
@@ -497,10 +506,11 @@ async fn deleting_under_an_arn_the_surface_does_not_accept_is_refused() {
         "case after the refusals: expected HTTP 200, got {} ({})",
         read.status, read.raw
     );
+    let expected = stored(&kept);
     assert_eq!(
         reported_document(&read),
-        kept.as_str(),
-        "case after the refusals: expected the document {kept:?}, got {:?}",
+        expected.as_str(),
+        "case after the refusals: expected the document {expected:?}, got {:?}",
         reported_document(&read)
     );
 }
@@ -516,8 +526,17 @@ async fn a_resource_takes_a_new_policy_after_its_policy_is_deleted() {
 
     // Attach, remove and attach again, several times over and with a different document
     // each round: the delete removes the policy rather than the key's ability to carry one,
-    // so each round reads back its own document.
-    let documents = [policy("first"), "{}".to_string(), policy("third")];
+    // so each round reads back its own document and the round's removal leaves the resource
+    // reporting the empty document again.
+    let documents = [
+        policy(&arn, "first"),
+        format!(
+            "{{\"Version\":\"2012-10-17\",\"Statement\":[{{\"Effect\":\"Allow\",\
+             \"Principal\":{{\"AWS\":\"arn:aws:iam::111122223333:root\"}},\
+             \"Action\":[\"cloudfront:GetVpcOrigin\"],\"Resource\":\"{arn}\"}}]}}"
+        ),
+        policy(&arn, "third"),
+    ];
     for (round, document) in documents.iter().enumerate() {
         let written = put_resource_policy(&router, &arn, document).await;
         assert_eq!(
@@ -526,10 +545,11 @@ async fn a_resource_takes_a_new_policy_after_its_policy_is_deleted() {
             written.status, written.raw
         );
         let read = get_resource_policy(&router, &arn).await;
+        let expected = stored(document);
         assert_eq!(
             reported_document(&read),
-            document.as_str(),
-            "case round {round}: expected the document {document:?}, got {:?}",
+            expected.as_str(),
+            "case round {round}: expected the document {expected:?}, got {:?}",
             reported_document(&read)
         );
 
@@ -541,9 +561,15 @@ async fn a_resource_takes_a_new_policy_after_its_policy_is_deleted() {
         );
         let absent = get_resource_policy(&router, &arn).await;
         assert_eq!(
-            absent.status, 404,
-            "case round {round}: expected HTTP 404 after the delete, got {} ({})",
+            absent.status, 200,
+            "case round {round}: expected HTTP 200 after the delete, got {} ({})",
             absent.status, absent.raw
+        );
+        assert_eq!(
+            reported_document(&absent),
+            EMPTY_RESOURCE_POLICY_DOCUMENT,
+            "case round {round}: expected the empty document after the delete, got {:?}",
+            reported_document(&absent)
         );
     }
 }

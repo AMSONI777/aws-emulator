@@ -312,6 +312,8 @@ mod request_validation_limits;
 mod resource_policy_absent_resource;
 #[path = "all/resource_policy_delete.rs"]
 mod resource_policy_delete;
+#[path = "all/resource_policy_document.rs"]
+mod resource_policy_document;
 #[path = "all/resource_policy_lifecycle.rs"]
 mod resource_policy_lifecycle;
 #[path = "all/response_headers_policy_config_read.rs"]

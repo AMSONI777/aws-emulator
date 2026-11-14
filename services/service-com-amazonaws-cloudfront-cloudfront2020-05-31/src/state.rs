@@ -3934,3 +3934,10 @@ pub use edge_endpoint::*;
 /// every name reachable as `crate::state::<name>`.
 mod announced_url;
 pub use announced_url::*;
+
+/// The policy DOCUMENT of the resource-policy surface: what a submitted document has to be
+/// for the surface to attach it, the canonical form a stored one is reported in, and the
+/// empty document a resource carrying no policy reads as. A SUBMODULE for the same reason
+/// [`functions`] is one; `pub use` keeps every name reachable as `crate::state::<name>`.
+mod resource_policies;
+pub use resource_policies::*;

@@ -36,10 +36,10 @@
 //! than copied.
 
 use service_com_amazonaws_cloudfront_cloudfront2020_05_31::state::{
-    id_format_invalid_message, ANYCAST_IP_LIST_NOT_FOUND_MESSAGE,
+    id_format_invalid_message, ANYCAST_IP_LIST_NOT_FOUND_MESSAGE, EMPTY_RESOURCE_POLICY_DOCUMENT,
     INVALID_RESOURCE_POLICY_ARN_MESSAGE, INVALID_RESOURCE_POLICY_RESOURCE_TYPE_MESSAGE,
     IP_ADDRESS_TYPE_IPV4, IP_ADDRESS_TYPE_IPV6, MALFORMED_ARN_MESSAGE, NO_SUCH_RESOURCE_MESSAGE,
-    RESOURCE_POLICY_NOT_FOUND_MESSAGE, RESOURCE_POLICY_RESOURCE_TYPE,
+    RESOURCE_POLICY_RESOURCE_TYPE,
 };
 use smithy_server_runtime::MultiServiceRouter;
 
@@ -51,7 +51,7 @@ use crate::public_key_lifecycle::{create_key, pem, Key};
 use crate::resource_policy_delete::delete_resource_policy;
 use crate::resource_policy_lifecycle::{
     created_vpc_origin_arn, distribution_config, get_resource_policy, message, policy,
-    put_resource_policy, reported_document,
+    put_resource_policy, reported_document, stored,
 };
 
 // ---------------------------------------------------------------------------
@@ -331,7 +331,7 @@ async fn ask_each_operation(router: &MultiServiceRouter, arn: &str) -> Vec<(&'st
     vec![
         (
             "PutResourcePolicy",
-            put_resource_policy(router, arn, &policy("precedence-suite")).await,
+            put_resource_policy(router, arn, &policy(arn, "precedence-suite")).await,
         ),
         ("GetResourcePolicy", get_resource_policy(router, arn).await),
         (
@@ -378,7 +378,7 @@ async fn the_resource_policy_surface_judges_the_resource_type_before_the_store()
     // The policy every refusal below has to leave exactly as it is: the surface accepts this
     // ARN, so no row may write under it or remove what it carries.
     let kept_arn = created_vpc_origin_arn(&router, "vo-precedence-survivor").await;
-    let kept = policy("survivor");
+    let kept = policy(&kept_arn, "survivor");
     let written = put_resource_policy(&router, &kept_arn, &kept).await;
     assert_eq!(
         written.status, 200,
@@ -417,7 +417,8 @@ async fn the_resource_policy_surface_judges_the_resource_type_before_the_store()
         for (operation, answer) in ask_each_operation(&router, existing).await {
             let absent_answer = match operation {
                 "PutResourcePolicy" => {
-                    put_resource_policy(&router, &absent, &policy("precedence-suite")).await
+                    put_resource_policy(&router, &absent, &policy(&absent, "precedence-suite"))
+                        .await
                 }
                 "GetResourcePolicy" => get_resource_policy(&router, &absent).await,
                 _ => delete_resource_policy(&router, &absent).await,
@@ -528,13 +529,15 @@ async fn the_resource_policy_surface_judges_the_resource_type_before_the_store()
     }
 
     // None of the refusals wrote or removed anything: the one policy the store holds reads
-    // back byte for byte, and the ARN the surface accepts is still served — the removal
-    // answers 200 and leaves the resource carrying no policy.
+    // back in the form the write persisted it, and the ARN the surface accepts is still
+    // served — the removal answers 200 and leaves the resource reporting the empty document,
+    // whether or not it carried a policy when the removal arrived.
     let read = get_resource_policy(&router, &kept_arn).await;
+    let expected = stored(&kept);
     assert_eq!(
         reported_document(&read),
-        kept.as_str(),
-        "case after the refusals: expected the document {kept:?}, got {:?}",
+        expected.as_str(),
+        "case after the refusals: expected the document {expected:?}, got {:?}",
         reported_document(&read)
     );
     let removed = delete_resource_policy(&router, &kept_arn).await;
@@ -545,15 +548,15 @@ async fn the_resource_policy_surface_judges_the_resource_type_before_the_store()
     );
     let again = delete_resource_policy(&router, &kept_arn).await;
     assert_eq!(
-        again.status, 404,
-        "case the accepted ARN removed twice: expected HTTP 404, got {} ({})",
+        again.status, 200,
+        "case the accepted ARN removed twice: expected HTTP 200, got {} ({})",
         again.status, again.raw
     );
+    let read = get_resource_policy(&router, &kept_arn).await;
     assert_eq!(
-        message(&again),
-        RESOURCE_POLICY_NOT_FOUND_MESSAGE,
-        "case the accepted ARN removed twice: expected message \
-         {RESOURCE_POLICY_NOT_FOUND_MESSAGE:?}, got {:?}",
-        message(&again)
+        reported_document(&read),
+        EMPTY_RESOURCE_POLICY_DOCUMENT,
+        "case the accepted ARN removed twice: expected the empty document, got {:?}",
+        reported_document(&read)
     );
 }

@@ -17,7 +17,12 @@
 //! ([`crate::state::INVALID_RESOURCE_POLICY_ARN_MESSAGE`]); and an ARN of the accepted type
 //! that names no resource this service holds is reported ABSENT, 404 `EntityNotFound`
 //! ([`crate::state::resource_policy_resource_absent`]).
-//! An ARN the surface does accept, carrying no policy, is 404 `EntityNotFound`.
+//!
+//! An ARN the surface does accept, naming a resource that carries no policy, is no refusal
+//! at all: a policy is a property OF the resource, so the read answers 200 with the echoed
+//! `ResourceArn` and the empty document
+//! ([`crate::state::EMPTY_RESOURCE_POLICY_DOCUMENT`]) — which is where a client that reads
+//! the current policy, adds a statement and writes it back starts from.
 //!
 //! ## Shape of an operation
 //!
@@ -189,16 +194,17 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
             .into());
         }
 
-        let Some(document) = store.resource_policy(&input.resource_arn) else {
-            return Err(GetResourcePolicyErrorModeled::EntityNotFound(
-                crate::state::resource_policy_not_found(),
-            )
-            .into());
-        };
+        // The resource is there, so its policy is reported whatever it says — including the
+        // EMPTY document for a resource nothing has been attached to, which is a policy that
+        // grants nothing rather than a missing entity.
+        let document = store
+            .resource_policy(&input.resource_arn)
+            .unwrap_or(crate::state::EMPTY_RESOURCE_POLICY_DOCUMENT);
 
         Ok(GetResourcePolicyOutput {
             // The ARN the policy is attached to, and the document as it was stored — never
-            // a re-derivation of either.
+            // a re-derivation of either. The canonical form is the one the WRITE rendered,
+            // so a read renders nothing of its own.
             policy_document: Some(document.to_string()),
             resource_arn: Some(input.resource_arn.clone()),
         })

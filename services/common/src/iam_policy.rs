@@ -175,11 +175,69 @@ pub const ARN_PREFIX: &str = "arn:";
 /// applied beside [`resource_policy_defect`] rather than instead of it. The value is
 /// reported as submitted, so a caller can name it in the refusal it words.
 pub fn non_arn_resource(text: &str) -> Option<String> {
-    let document = ::serde_json::from_str::<::serde_json::Value>(text).ok()?;
+    resource_element_values(text)
+        .into_iter()
+        .find(|value| !value.starts_with(ARN_PREFIX))
+}
+
+/// Every value the statements of `text` name in their RESOURCE elements — `Resource` and its
+/// complement `NotResource` — in the order they are written. Empty for a text that is no
+/// policy, and for a document whose statements name no resource at all.
+///
+/// A service whose API documents that element as the ARN of one of its OWN resources reads
+/// the values against its own rule — whether each names an ARN at all
+/// ([`non_arn_resource`]), or whether each names the very resource the document is being
+/// attached to — so the values are handed over here rather than walked again per service,
+/// and every reader sees the same statements the grammar does.
+pub fn resource_element_values(text: &str) -> Vec<String> {
+    let Ok(document) = ::serde_json::from_str::<::serde_json::Value>(text) else {
+        return Vec::new();
+    };
     statements(&document)
         .into_iter()
         .flat_map(resource_values)
-        .find(|value| !value.starts_with(ARN_PREFIX))
+        .collect()
+}
+
+/// Every value the statements of `text` name in their ACTION elements — `Action` and its
+/// complement `NotAction` — in the order they are written. Empty for a text that is no
+/// policy, and for a document whose statements name no action at all.
+///
+/// The language reads an action's FORM ([`readable_action`]); WHICH actions a document
+/// attached to one of a service's resources may grant is that service's own catalogue, so
+/// the values are handed over here for it to judge — the same seam the `grantable` argument
+/// of [`attached_policy_defect`] is, for a service that words its refusal itself rather than
+/// with that validator's sentence.
+pub fn action_values(text: &str) -> Vec<String> {
+    let Ok(document) = ::serde_json::from_str::<::serde_json::Value>(text) else {
+        return Vec::new();
+    };
+    statements(&document)
+        .into_iter()
+        .flat_map(|statement| {
+            ACTION_ELEMENTS
+                .into_iter()
+                .filter_map(|key| statement.get(key))
+                .flat_map(element_values)
+                .collect::<Vec<String>>()
+        })
+        .collect()
+}
+
+/// Whether any statement of `text` carries the member `element` — one of
+/// [`STATEMENT_ELEMENTS`] — whatever that member says.
+///
+/// A service whose API supports only PART of the statement grammar asks this: a document
+/// carrying an element that service cannot enforce describes a grant it would have to ignore,
+/// so the element's PRESENCE is what it refuses, read off the same statements the grammar
+/// walks.
+pub fn statements_carry_element(text: &str, element: &str) -> bool {
+    let Ok(document) = ::serde_json::from_str::<::serde_json::Value>(text) else {
+        return false;
+    };
+    statements(&document)
+        .into_iter()
+        .any(|statement| statement.get(element).is_some())
 }
 
 /// The statements `document` declares: the entries of its `Statement` list, or the one
@@ -1421,6 +1479,85 @@ mod tests {
             assert_eq!(
                 found, defect,
                 "case {case:?}: expected {defect:?}, got {found:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn the_values_a_statement_names_are_handed_over_in_the_order_they_are_written() {
+        // The rows differ along what the accessors generalise over: the form the element
+        // takes (one value, a list, a nested list), which of the two elements of a pair
+        // carries it, how many statements name values, the form `Statement` takes, and a
+        // text that is no policy at all.
+        let rows: [(&str, String, Vec<&str>, Vec<&str>); 7] = [
+            (
+                "one value in each element",
+                policy(
+                    "{\"Effect\":\"Allow\",\"Action\":\"svc:A\",\
+                     \"Resource\":\"arn:aws:svc:::r\"}",
+                ),
+                vec!["svc:A"],
+                vec!["arn:aws:svc:::r"],
+            ),
+            (
+                "a list in each element",
+                policy(
+                    "{\"Effect\":\"Allow\",\"Action\":[\"svc:A\",\"svc:B\"],\
+                     \"Resource\":[\"arn:aws:svc:::r\",\"arn:aws:svc:::s\"]}",
+                ),
+                vec!["svc:A", "svc:B"],
+                vec!["arn:aws:svc:::r", "arn:aws:svc:::s"],
+            ),
+            (
+                "the complements of both elements",
+                policy(
+                    "{\"Effect\":\"Deny\",\"NotAction\":\"svc:A\",\
+                     \"NotResource\":\"arn:aws:svc:::r\"}",
+                ),
+                vec!["svc:A"],
+                vec!["arn:aws:svc:::r"],
+            ),
+            (
+                "two statements",
+                policy(
+                    "{\"Effect\":\"Allow\",\"Action\":\"svc:A\",\"Resource\":\"*\"},\
+                     {\"Effect\":\"Deny\",\"Action\":\"svc:B\",\"Resource\":\"arn:aws:svc:::r\"}",
+                ),
+                vec!["svc:A", "svc:B"],
+                vec!["*", "arn:aws:svc:::r"],
+            ),
+            (
+                "one statement written as the object itself",
+                "{\"Statement\":{\"Effect\":\"Allow\",\"Action\":\"svc:A\",\
+                 \"Resource\":\"arn:aws:svc:::r\"}}"
+                    .to_string(),
+                vec!["svc:A"],
+                vec!["arn:aws:svc:::r"],
+            ),
+            (
+                "a statement naming neither",
+                policy("{\"Effect\":\"Allow\",\"Principal\":\"*\"}"),
+                Vec::new(),
+                Vec::new(),
+            ),
+            (
+                "a text that is no policy",
+                "not a policy".to_string(),
+                Vec::new(),
+                Vec::new(),
+            ),
+        ];
+
+        for (case, document, actions, resources) in rows {
+            let found = action_values(&document);
+            assert_eq!(
+                found, actions,
+                "case {case:?}: expected the actions {actions:?}, got {found:?}"
+            );
+            let found = resource_element_values(&document);
+            assert_eq!(
+                found, resources,
+                "case {case:?}: expected the resources {resources:?}, got {found:?}"
             );
         }
     }

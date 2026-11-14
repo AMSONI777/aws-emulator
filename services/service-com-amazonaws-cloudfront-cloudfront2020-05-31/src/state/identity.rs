@@ -397,8 +397,10 @@ pub fn associable_web_acl_arn(web_acl_arn: &str) -> bool {
 ///   is reported ABSENT: a policy is attached TO a resource, so the resource has to exist
 ///   first.
 ///
-/// Whether the resource that exists carries a policy is a separate question, the surface's
-/// own existence answer for the POLICY ([`resource_policy_not_found`]).
+/// Whether the resource that exists carries a policy is NOT one of these conditions: a
+/// policy is a property OF the resource, so a resource of the accepted type that carries
+/// none reads as the empty document ([`EMPTY_RESOURCE_POLICY_DOCUMENT`]) and its removal is
+/// a no-op — there is no absent POLICY to report once the resource is there.
 ///
 /// ONE rule for every operation of the surface, which all take the one `ResourceArn`, so no
 /// two of them can disagree about which values they accept. The SENTENCE each puts on the
@@ -460,23 +462,6 @@ pub fn too_many_resource_policies() -> crate::ops::types::InvalidArgument {
             "This emulator holds resource policies for at most {MAX_RESOURCE_POLICIES} \
              resources; delete one before attaching another"
         )),
-    }
-}
-
-/// The sentence a read of a resource policy that was never written answers with: the
-/// CONDITION, carrying nothing from the request, as every other not-found sentence of this
-/// service states its own condition ([`KEY_VALUE_STORE_NOT_FOUND_MESSAGE`],
-/// [`CONNECTION_GROUP_NOT_FOUND_MESSAGE`]).
-pub const RESOURCE_POLICY_NOT_FOUND_MESSAGE: &str = "The specified resource policy does not exist.";
-
-/// The modelled `EntityNotFound` (HTTP 404) for a resource that carries no resource policy
-/// — "The entity was not found."
-///
-/// Takes no ARN: what the refusal states is that no policy is attached to the resource
-/// asked about, which is a property of the store rather than of the value submitted.
-pub fn resource_policy_not_found() -> EntityNotFound {
-    EntityNotFound {
-        message: Some(RESOURCE_POLICY_NOT_FOUND_MESSAGE.to_string()),
     }
 }
 

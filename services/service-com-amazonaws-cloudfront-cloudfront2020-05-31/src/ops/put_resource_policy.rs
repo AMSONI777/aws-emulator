@@ -18,6 +18,14 @@
 //! ([`crate::state::resource_policy_resource_absent`]), since there is no resource to attach
 //! a policy to.
 //!
+//! The `PolicyDocument` is judged next, and also before anything is written
+//! ([`crate::state::resource_policy_document_defect`]): a text that is not a resource-based
+//! policy document is refused on its FORMAT, 400 `InvalidArgument`, and a document whose
+//! statements name another resource or an action this surface does not share is refused as
+//! an unusable POLICY, 400 `InvalidArgument`. What is stored is the document the service
+//! renders from the parsed one ([`crate::state::canonical_resource_policy`]), so a later read
+//! reports the service's canonical form of it.
+//!
 //! ## Shape of an operation
 //!
 //! Each operation is a struct that owns the shared engine and implements
@@ -189,6 +197,19 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
             .into());
         }
 
+        // The DOCUMENT is judged next, from the request alone and still before anything is
+        // written: a text that is no policy document is refused on its format, and a policy
+        // that does not describe a share of THIS resource is refused as an unusable policy.
+        if let Some(defect) = crate::state::resource_policy_document_defect(
+            &input.resource_arn,
+            &input.policy_document,
+        ) {
+            return Err(PutResourcePolicyErrorModeled::InvalidArgument(
+                crate::state::invalid_resource_policy_document(defect),
+            )
+            .into());
+        }
+
         // The store grows only here and a policy cannot be evicted (a later read has to
         // answer with what this write persisted), so the bound is an entry count refused
         // before the insert. A write that replaces the policy of a resource the store
@@ -201,9 +222,13 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
             )
             .into());
         }
-        // The document exactly as submitted: what a later read reports is byte for byte
-        // what this call persisted, never a re-rendering of it.
-        store.put_resource_policy(&input.resource_arn, &input.policy_document);
+        // The service's own form of the document the request carried: the submitted text is
+        // parsed and rendered again, so what a later read reports is this canonical form
+        // rather than the caller's bytes.
+        store.put_resource_policy(
+            &input.resource_arn,
+            &crate::state::canonical_resource_policy(&input.policy_document),
+        );
 
         Ok(PutResourcePolicyOutput {
             resource_arn: Some(input.resource_arn.clone()),

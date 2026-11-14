@@ -23,10 +23,12 @@
 //!   names the resource type it wants ([`INVALID_RESOURCE_POLICY_RESOURCE_TYPE_MESSAGE`]),
 //!   the read demands a usable ARN ([`INVALID_RESOURCE_POLICY_ARN_MESSAGE`]);
 //! * an ARN the surface does accept round-trips: a read answers with the document the last
-//!   write persisted under that ARN, byte for byte, and with that ARN;
-//! * an accepted ARN carrying no policy is `EntityNotFound` (404) under the surface's own
-//!   sentence — the EXISTENCE answer for the POLICY, which is what distinguishes it both
-//!   from the parameter refusal and from the absent RESOURCE above.
+//!   write persisted under that ARN — the service's own canonical rendering of it
+//!   ([`stored`]) — and with that ARN;
+//! * an accepted ARN naming a resource that carries NO policy reads as the empty document
+//!   ([`EMPTY_RESOURCE_POLICY_DOCUMENT`]) under HTTP 200: the policy is a property of the
+//!   resource, so there is no absent entity to report once the resource is there, and a
+//!   client that reads the current policy before writing one back starts from it.
 //!
 //! The rows differ along what the rule generalises over: the resource type the ARN names
 //! (every type this service mints an ARN for, and two the surface would never see), the
@@ -39,9 +41,9 @@
 //! [`crate::distribution_lifecycle`] already builds.
 
 use service_com_amazonaws_cloudfront_cloudfront2020_05_31::state::{
-    INVALID_RESOURCE_POLICY_ARN_MESSAGE, INVALID_RESOURCE_POLICY_RESOURCE_TYPE_MESSAGE,
-    MALFORMED_ARN_MESSAGE, RESOURCE_POLICY_NOT_FOUND_MESSAGE, RESOURCE_POLICY_RESOURCE_TYPE,
-    TAGGABLE_RESOURCE_TYPES,
+    EMPTY_RESOURCE_POLICY_DOCUMENT, INVALID_RESOURCE_POLICY_ARN_MESSAGE,
+    INVALID_RESOURCE_POLICY_RESOURCE_TYPE_MESSAGE, MALFORMED_ARN_MESSAGE,
+    RESOURCE_POLICY_RESOURCE_TYPE, TAGGABLE_RESOURCE_TYPES,
 };
 use smithy_server_runtime::MultiServiceRouter;
 
@@ -149,13 +151,31 @@ pub(crate) fn distribution_config(reference: &str) -> String {
     )
 }
 
-/// A resource policy document, as a caller would write one.
-pub(crate) fn policy(statement: &str) -> String {
+/// A resource policy document, as a caller would write one: one statement sharing the VPC
+/// origin `resource_arn` names with another account for reading, which is what this surface
+/// grants.
+///
+/// It NAMES that resource in its `Resource` element and grants the one action the surface
+/// shares, so the document is one the surface attaches — the baseline every row that expects
+/// a write to be accepted starts from.
+pub(crate) fn policy(resource_arn: &str, statement: &str) -> String {
     format!(
-        "{{\"Version\":\"2008-10-17\",\"Statement\":[{{\"Effect\":\"Allow\",\
+        "{{\"Version\":\"2012-10-17\",\"Statement\":[{{\"Sid\":\"{statement}\",\
+         \"Effect\":\"Allow\",\
          \"Principal\":{{\"AWS\":\"arn:aws:iam::111122223333:root\"}},\
-         \"Action\":\"cloudfront:*\",\"Sid\":\"{statement}\"}}]}}"
+         \"Action\":\"cloudfront:GetVpcOrigin\",\"Resource\":\"{resource_arn}\"}}]}}"
     )
+}
+
+/// The document a read reports for a `submitted` one the surface accepted: the service
+/// parses the document and renders it in the canonical layout every service that attaches a
+/// policy reports one in (`::service_common::iam_policy::canonical_document`), which is what
+/// the handler stores.
+///
+/// `pub(crate)` so every suite of the surface expects the read-back through this one reading
+/// rather than a copy of it.
+pub(crate) fn stored(submitted: &str) -> String {
+    ::service_common::iam_policy::canonical_document(submitted)
 }
 
 /// Create a VPC origin and answer the ARN its create MINTED.
@@ -242,7 +262,7 @@ async fn an_arn_naming_an_existing_resource_of_another_type_is_an_invalid_argume
         let answers = [
             (
                 "PutResourcePolicy",
-                put_resource_policy(&router, arn, &policy("gate")).await,
+                put_resource_policy(&router, arn, &policy(arn, "gate")).await,
                 INVALID_RESOURCE_POLICY_RESOURCE_TYPE_MESSAGE,
             ),
             (
@@ -299,13 +319,19 @@ async fn an_arn_naming_an_existing_resource_of_another_type_is_an_invalid_argume
     }
 
     // The refusals wrote nothing: an accepted ARN still carries no policy, so no refused
-    // write landed under any key.
+    // write landed under any key — which the surface reports as the EMPTY document.
     let accepted = created_vpc_origin_arn(&router, "vo-after-the-refusals").await;
     let read = get_resource_policy(&router, &accepted).await;
     assert_eq!(
-        read.status, 404,
-        "case after the refusals: expected HTTP 404, got {} ({})",
+        read.status, 200,
+        "case after the refusals: expected HTTP 200, got {} ({})",
         read.status, read.raw
+    );
+    assert_eq!(
+        reported_document(&read),
+        EMPTY_RESOURCE_POLICY_DOCUMENT,
+        "case after the refusals: expected the empty document, got {:?}",
+        reported_document(&read)
     );
 }
 
@@ -363,7 +389,7 @@ async fn a_resource_arn_that_is_no_arn_is_refused_on_its_form() {
         let answers = [
             (
                 "PutResourcePolicy",
-                put_resource_policy(&router, value, &policy("form")).await,
+                put_resource_policy(&router, value, &policy(value, "form")).await,
             ),
             (
                 "GetResourcePolicy",
@@ -395,9 +421,15 @@ async fn a_resource_arn_that_is_no_arn_is_refused_on_its_form() {
     // The refusals wrote nothing under any key the surface does address.
     let read = get_resource_policy(&router, &accepted).await;
     assert_eq!(
-        read.status, 404,
-        "case after the form refusals: expected HTTP 404, got {} ({})",
+        read.status, 200,
+        "case after the form refusals: expected HTTP 200, got {} ({})",
         read.status, read.raw
+    );
+    assert_eq!(
+        reported_document(&read),
+        EMPTY_RESOURCE_POLICY_DOCUMENT,
+        "case after the form refusals: expected the empty document, got {:?}",
+        reported_document(&read)
     );
 }
 
@@ -406,7 +438,7 @@ async fn a_resource_arn_that_is_no_arn_is_refused_on_its_form() {
 // ---------------------------------------------------------------------------
 
 #[tokio::test]
-async fn an_accepted_arn_carrying_no_policy_is_entity_not_found() {
+async fn an_accepted_arn_carrying_no_policy_reports_the_empty_document() {
     let router = emulator();
 
     // Rows differing along the resource whose ARN is asked about: each names a VPC origin
@@ -424,24 +456,41 @@ async fn an_accepted_arn_carrying_no_policy_is_entity_not_found() {
     for (case, arn) in &rows {
         let answer = get_resource_policy(&router, arn).await;
         assert_eq!(
-            answer.status, 404,
-            "case {case}: expected HTTP 404, got {} ({})",
+            answer.status, 200,
+            "case {case}: expected HTTP 200, got {} ({})",
             answer.status, answer.raw
         );
         assert_eq!(
             answer.error_code(),
-            "EntityNotFound",
-            "case {case}: expected EntityNotFound, got {:?} ({})",
+            "",
+            "case {case}: expected no error, got {:?} ({})",
             answer.error_code(),
             answer.raw
         );
         assert_eq!(
-            message(&answer),
-            RESOURCE_POLICY_NOT_FOUND_MESSAGE,
-            "case {case}: expected message {RESOURCE_POLICY_NOT_FOUND_MESSAGE:?}, got {:?}",
-            message(&answer)
+            reported_document(&answer),
+            EMPTY_RESOURCE_POLICY_DOCUMENT,
+            "case {case}: expected the empty document, got {:?}",
+            reported_document(&answer)
+        );
+        assert_eq!(
+            reported_arn(&answer),
+            arn.as_str(),
+            "case {case}: expected the read to report {arn:?}, got {:?}",
+            reported_arn(&answer)
         );
     }
+
+    // A read is a REPORT: asking again answers the same empty document, and asking never
+    // attached one.
+    let (case, arn) = &rows[0];
+    let again = get_resource_policy(&router, arn).await;
+    assert_eq!(
+        reported_document(&again),
+        EMPTY_RESOURCE_POLICY_DOCUMENT,
+        "case {case} read twice: expected the empty document, got {:?}",
+        reported_document(&again)
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -454,58 +503,71 @@ async fn a_policy_written_under_an_accepted_arn_reads_back() {
 
     // Rows differing along the content and size of the document — including text that only
     // survives XML escaping and a document far larger than the others — and along the
-    // resource it is attached to, each a VPC origin this service really holds.
-    let escaping = "{\"Version\":\"2008-10-17\",\"Statement\":[{\"Effect\":\"Allow\",\
-                    \"Condition\":{\"StringLike\":{\"aws:SourceArn\":\"<a & b> 'c' \\\"d\\\"\"}}}]}";
-    let bulky = format!(
-        "{{\"Version\":\"2008-10-17\",\"Statement\":[{}]}}",
-        (0..40)
-            .map(|index| format!(
-                "{{\"Effect\":\"Allow\",\"Sid\":\"statement{index}\",\"Action\":\"cloudfront:*\"}}"
-            ))
-            .collect::<Vec<_>>()
-            .join(",")
-    );
-    let documents: Vec<(&str, String, String)> = vec![
+    // resource it is attached to, each a VPC origin this service really holds. A document
+    // NAMES the resource it is attached to, so each row is written from the ARN its create
+    // minted.
+    type Document = Box<dyn Fn(&str) -> String>;
+    let documents: Vec<(&str, String, Document)> = vec![
         (
             "a document a caller would write",
             "vo-minted".to_string(),
-            policy("minted"),
+            Box::new(|arn| policy(arn, "minted")),
         ),
         (
             "a document whose statement id is upper case",
             "vo-upper".to_string(),
-            policy("UPPER"),
+            Box::new(|arn| policy(arn, "UPPER")),
         ),
         (
             "a document under a one-character resource name",
             "a".to_string(),
-            policy("short"),
+            Box::new(|arn| policy(arn, "short")),
         ),
         (
             "a document under a resource name of sixty-four characters",
             "n".repeat(64),
-            policy("long-name"),
+            Box::new(|arn| policy(arn, "long-name")),
         ),
         (
             "a document carrying text that needs escaping",
             "vo-escaping".to_string(),
-            escaping.to_string(),
+            Box::new(|arn| policy(arn, "<a & b> 'c' d")),
         ),
         (
             "a document of forty statements",
             "vo-bulky".to_string(),
-            bulky.clone(),
+            Box::new(|arn| {
+                format!(
+                    "{{\"Version\":\"2012-10-17\",\"Statement\":[{}]}}",
+                    (0..40)
+                        .map(|index| format!(
+                            "{{\"Effect\":\"Allow\",\"Sid\":\"statement{index}\",\
+                             \"Principal\":{{\"AWS\":\"arn:aws:iam::111122223333:root\"}},\
+                             \"Action\":\"cloudfront:GetVpcOrigin\",\
+                             \"Resource\":\"{arn}\"}}"
+                        ))
+                        .collect::<Vec<_>>()
+                        .join(",")
+                )
+            }),
         ),
         (
-            "an empty JSON object",
-            "vo-empty-object".to_string(),
-            "{}".to_string(),
+            "one statement written as the object itself, under the legacy policy version",
+            "vo-legacy".to_string(),
+            Box::new(|arn| {
+                format!(
+                    "{{\"Version\":\"2008-10-17\",\"Statement\":{{\"Effect\":\"Allow\",\
+                     \"Principal\":\"*\",\"Action\":[\"cloudfront:GetVpcOrigin\"],\
+                     \"Resource\":[\"{arn}\"]}}}}"
+                )
+            }),
         ),
     ];
     let mut rows: Vec<(&str, String, String)> = Vec::new();
     for (case, name, document) in documents {
-        rows.push((case, created_vpc_origin_arn(&router, &name).await, document));
+        let arn = created_vpc_origin_arn(&router, &name).await;
+        let written = document(&arn);
+        rows.push((case, arn, written));
     }
 
     for (case, arn, document) in &rows {
@@ -528,10 +590,11 @@ async fn a_policy_written_under_an_accepted_arn_reads_back() {
             "case {case}: expected HTTP 200 from the read, got {} ({})",
             read.status, read.raw
         );
+        let expected = stored(document);
         assert_eq!(
             reported_document(&read),
-            document.as_str(),
-            "case {case}: expected the document {document:?}, got {:?}",
+            expected.as_str(),
+            "case {case}: expected the document {expected:?}, got {:?}",
             reported_document(&read)
         );
         assert_eq!(
@@ -546,10 +609,11 @@ async fn a_policy_written_under_an_accepted_arn_reads_back() {
     // the ARN it was attached to, so no write displaced another resource's policy.
     for (case, arn, document) in &rows {
         let read = get_resource_policy(&router, arn).await;
+        let expected = stored(document);
         assert_eq!(
             reported_document(&read),
-            document.as_str(),
-            "case {case} re-read: expected the document {document:?}, got {:?}",
+            expected.as_str(),
+            "case {case} re-read: expected the document {expected:?}, got {:?}",
             reported_document(&read)
         );
     }
@@ -558,27 +622,28 @@ async fn a_policy_written_under_an_accepted_arn_reads_back() {
     // policy.
     let (_, first_arn, first_document) = &rows[0];
     let again = get_resource_policy(&router, first_arn).await;
+    let expected = stored(first_document);
     assert_eq!(
         reported_document(&again),
-        first_document.as_str(),
-        "case the first row read a third time: expected the document {first_document:?}, got {:?}",
+        expected.as_str(),
+        "case the first row read a third time: expected the document {expected:?}, got {:?}",
         reported_document(&again)
     );
 
-    // An ARN no write named carries no policy, even though other ARNs do.
+    // An ARN no write named carries no policy, even though other ARNs do: the empty
+    // document, under the same 200 every read of an accepted ARN answers.
     let unwritten = created_vpc_origin_arn(&router, "vo-unwritten").await;
     let absent = get_resource_policy(&router, &unwritten).await;
     assert_eq!(
-        absent.status, 404,
-        "case an ARN no write named: expected HTTP 404, got {} ({})",
+        absent.status, 200,
+        "case an ARN no write named: expected HTTP 200, got {} ({})",
         absent.status, absent.raw
     );
     assert_eq!(
-        absent.error_code(),
-        "EntityNotFound",
-        "case an ARN no write named: expected EntityNotFound, got {:?} ({})",
-        absent.error_code(),
-        absent.raw
+        reported_document(&absent),
+        EMPTY_RESOURCE_POLICY_DOCUMENT,
+        "case an ARN no write named: expected the empty document, got {:?}",
+        reported_document(&absent)
     );
 }
 
@@ -590,10 +655,14 @@ async fn a_second_write_supersedes_the_policy_the_resource_carried() {
     // The write is a PUT: each of these documents replaces the one before it, so the read
     // after each write answers with that write's document and nothing accumulates.
     let documents = [
-        policy("first"),
-        policy("second"),
-        "{}".to_string(),
-        policy("last"),
+        policy(&arn, "first"),
+        policy(&arn, "second"),
+        format!(
+            "{{\"Version\":\"2012-10-17\",\"Statement\":[{{\"Effect\":\"Allow\",\
+             \"Principal\":{{\"AWS\":\"arn:aws:iam::111122223333:root\"}},\
+             \"Action\":\"cloudfront:GetVpcOrigin\",\"Resource\":[\"{arn}\"]}}]}}"
+        ),
+        policy(&arn, "last"),
     ];
     for (index, document) in documents.iter().enumerate() {
         let written = put_resource_policy(&router, &arn, document).await;
@@ -603,10 +672,11 @@ async fn a_second_write_supersedes_the_policy_the_resource_carried() {
             written.status, written.raw
         );
         let read = get_resource_policy(&router, &arn).await;
+        let expected = stored(document);
         assert_eq!(
             reported_document(&read),
-            document.as_str(),
-            "case write {index}: expected the document {document:?}, got {:?}",
+            expected.as_str(),
+            "case write {index}: expected the document {expected:?}, got {:?}",
             reported_document(&read)
         );
     }
@@ -614,21 +684,16 @@ async fn a_second_write_supersedes_the_policy_the_resource_carried() {
     // And a refused write leaves the policy the resource already carried untouched: the ARN
     // is judged and resolved before anything is written, so a write the surface refuses —
     // here for a resource of the accepted type this service holds none of — changes nothing.
-    let refused = put_resource_policy(
-        &router,
-        &format!(
-            "arn:aws:cloudfront::{ACCOUNT_ID}:{RESOURCE_POLICY_RESOURCE_TYPE}/vo-refused"
-        ),
-        &policy("refused"),
-    )
-    .await;
+    let absent =
+        format!("arn:aws:cloudfront::{ACCOUNT_ID}:{RESOURCE_POLICY_RESOURCE_TYPE}/vo-refused");
+    let refused = put_resource_policy(&router, &absent, &policy(&absent, "refused")).await;
     assert_eq!(
         refused.status, 404,
         "case the refused write: expected HTTP 404, got {} ({})",
         refused.status, refused.raw
     );
     let read = get_resource_policy(&router, &arn).await;
-    let expected = documents.last().expect("the document table is not empty");
+    let expected = stored(documents.last().expect("the document table is not empty"));
     assert_eq!(
         reported_document(&read),
         expected.as_str(),

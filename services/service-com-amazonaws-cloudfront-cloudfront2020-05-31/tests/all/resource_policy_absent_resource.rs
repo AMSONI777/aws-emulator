@@ -33,9 +33,9 @@
 //! suites', reused rather than copied.
 
 use service_com_amazonaws_cloudfront_cloudfront2020_05_31::state::{
-    INVALID_RESOURCE_POLICY_ARN_MESSAGE, INVALID_RESOURCE_POLICY_RESOURCE_TYPE_MESSAGE,
-    MALFORMED_ARN_MESSAGE, MANAGED_CACHE_POLICIES, NO_SUCH_RESOURCE_MESSAGE,
-    RESOURCE_POLICY_NOT_FOUND_MESSAGE, RESOURCE_POLICY_RESOURCE_TYPE, TAGGABLE_RESOURCE_TYPES,
+    EMPTY_RESOURCE_POLICY_DOCUMENT, INVALID_RESOURCE_POLICY_ARN_MESSAGE,
+    INVALID_RESOURCE_POLICY_RESOURCE_TYPE_MESSAGE, MALFORMED_ARN_MESSAGE, MANAGED_CACHE_POLICIES,
+    NO_SUCH_RESOURCE_MESSAGE, RESOURCE_POLICY_RESOURCE_TYPE, TAGGABLE_RESOURCE_TYPES,
 };
 use smithy_server_runtime::MultiServiceRouter;
 
@@ -45,7 +45,7 @@ use crate::public_key_lifecycle::{create_key, pem, Key};
 use crate::resource_policy_delete::delete_resource_policy;
 use crate::resource_policy_lifecycle::{
     created_vpc_origin_arn, distribution_config, get_resource_policy, message, policy,
-    put_resource_policy, reported_document, OTHER_RESOURCE_TYPES,
+    put_resource_policy, reported_document, stored, OTHER_RESOURCE_TYPES,
 };
 
 /// What the surface answers a row with: a status, an error code and, per operation, the
@@ -88,7 +88,7 @@ async fn ask_each_operation(router: &MultiServiceRouter, arn: &str) -> Vec<(&'st
     vec![
         (
             "PutResourcePolicy",
-            put_resource_policy(router, arn, &policy("absent-resource-suite")).await,
+            put_resource_policy(router, arn, &policy(arn, "absent-resource-suite")).await,
         ),
         ("GetResourcePolicy", get_resource_policy(router, arn).await),
         (
@@ -175,7 +175,7 @@ async fn the_resource_policy_surface_tells_an_absent_resource_from_a_type_it_ref
     // The policy every refusal below has to leave exactly as it is: the surface accepts this
     // ARN, so none of the rows may write under it or remove what it carries.
     let kept_arn = created_vpc_origin_arn(&router, "vo-survives-the-gate").await;
-    let kept = policy("survivor");
+    let kept = policy(&kept_arn, "survivor");
     let written = put_resource_policy(&router, &kept_arn, &kept).await;
     assert_eq!(
         written.status, 200,
@@ -342,29 +342,30 @@ async fn the_resource_policy_surface_tells_an_absent_resource_from_a_type_it_ref
     }
 
     // None of the refusals wrote or removed anything: the one policy the store holds is still
-    // readable, byte for byte.
+    // readable, in the form the write persisted it.
     let read = get_resource_policy(&router, &kept_arn).await;
     assert_eq!(
         read.status, 200,
         "case after the refusals: expected HTTP 200, got {} ({})",
         read.status, read.raw
     );
+    let expected = stored(&kept);
     assert_eq!(
         reported_document(&read),
-        kept.as_str(),
-        "case after the refusals: expected the document {kept:?}, got {:?}",
+        expected.as_str(),
+        "case after the refusals: expected the document {expected:?}, got {:?}",
         reported_document(&read)
     );
 }
 
 #[tokio::test]
-async fn an_accepted_arn_carrying_no_policy_is_the_surfaces_own_existence_answer() {
+async fn an_accepted_arn_carrying_no_policy_is_served_rather_than_refused() {
     let router = emulator();
 
-    // An ARN the surface DOES accept carries its own existence answer — whether a policy is
-    // attached to it — which is a different 404 from "this service holds no such resource":
-    // same code, the surface's own sentence. The rows differ along the endpoint configuration
-    // the resource was created from.
+    // An ARN the surface DOES accept is served whether or not a policy is attached to it:
+    // the read reports the empty document and the removal is a no-op, where an ARN naming no
+    // resource at all is the 404 the table above asserts. The rows differ along the endpoint
+    // configuration the resource was created from.
     let mut rows: Vec<(&str, String)> = Vec::new();
     for (case, name) in [
         ("the first resource created", "vo-no-policy".to_string()),
@@ -390,29 +391,32 @@ async fn an_accepted_arn_carrying_no_policy_is_the_surfaces_own_existence_answer
             ),
         ] {
             assert_eq!(
-                answer.status, 404,
-                "case {case}/{operation}: expected HTTP 404, got {} ({})",
+                answer.status, 200,
+                "case {case}/{operation}: expected HTTP 200, got {} ({})",
                 answer.status, answer.raw
             );
             assert_eq!(
                 answer.error_code(),
-                "EntityNotFound",
-                "case {case}/{operation}: expected EntityNotFound, got {:?} ({})",
+                "",
+                "case {case}/{operation}: expected no error, got {:?} ({})",
                 answer.error_code(),
                 answer.raw
             );
-            assert_eq!(
-                message(&answer),
-                RESOURCE_POLICY_NOT_FOUND_MESSAGE,
-                "case {case}/{operation}: expected message \
-                 {RESOURCE_POLICY_NOT_FOUND_MESSAGE:?}, got {:?}",
-                message(&answer)
-            );
         }
 
-        // And the write under the same ARN is accepted, so what the two reads above answered
+        // The read reports the policy that grants nothing, which is where a get-then-put
+        // flow starts from.
+        let read = get_resource_policy(&router, arn).await;
+        assert_eq!(
+            reported_document(&read),
+            EMPTY_RESOURCE_POLICY_DOCUMENT,
+            "case {case}: expected the empty document, got {:?}",
+            reported_document(&read)
+        );
+
+        // And the write under the same ARN is accepted, so what the two calls above answered
         // was the absence of a POLICY rather than a refusal of the parameter.
-        let document = policy(case);
+        let document = policy(arn, case);
         let written = put_resource_policy(&router, arn, &document).await;
         assert_eq!(
             written.status, 200,
@@ -420,10 +424,11 @@ async fn an_accepted_arn_carrying_no_policy_is_the_surfaces_own_existence_answer
             written.status, written.raw
         );
         let read = get_resource_policy(&router, arn).await;
+        let expected = stored(&document);
         assert_eq!(
             reported_document(&read),
-            document.as_str(),
-            "case {case}: expected the document {document:?}, got {:?}",
+            expected.as_str(),
+            "case {case}: expected the document {expected:?}, got {:?}",
             reported_document(&read)
         );
     }

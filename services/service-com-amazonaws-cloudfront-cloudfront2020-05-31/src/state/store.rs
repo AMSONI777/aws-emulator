@@ -64,15 +64,14 @@ impl ComAmazonawsCloudfrontCloudfront20200531State {
             .insert(arn.to_string(), document.to_string());
     }
 
-    /// Remove the resource policy attached to the resource `arn` names, answering whether
-    /// that resource carried one.
+    /// Remove the resource policy attached to the resource `arn` names.
     ///
-    /// `false` is the whole "there was nothing to remove" answer, which is what lets the
-    /// delete tell an accepted ARN carrying no policy apart from one it removed a policy
-    /// from; nothing else in the store is touched either way, since a policy is keyed by the
-    /// ARN it was attached to alone.
-    pub fn delete_resource_policy(&mut self, arn: &str) -> bool {
-        self.resource_policies.remove(arn).is_some()
+    /// IDEMPOTENT: a resource that carried no policy is left exactly as it was, which is the
+    /// state the caller asked for, so there is nothing for the remover to tell apart. Nothing
+    /// else in the store is touched either way, since a policy is keyed by the ARN it was
+    /// attached to alone.
+    pub fn delete_resource_policy(&mut self, arn: &str) {
+        self.resource_policies.remove(arn);
     }
 
     /// The origin access identity `id` names, or `None` when the store holds none.
