@@ -287,6 +287,8 @@ mod tag_read_propagation;
 mod time_to_live;
 #[path = "all/transactional_consumed_capacity_metrics.rs"]
 mod transactional_consumed_capacity_metrics;
+#[path = "all/transactional_projected_reads.rs"]
+mod transactional_projected_reads;
 #[path = "all/transactional_undefined_expression_tokens.rs"]
 mod transactional_undefined_expression_tokens;
 #[path = "all/transactional_write_capacity_arm.rs"]
