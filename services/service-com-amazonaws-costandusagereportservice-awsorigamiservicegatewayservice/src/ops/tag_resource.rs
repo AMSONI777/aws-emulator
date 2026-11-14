@@ -162,16 +162,9 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         // The per-report tag limit (the modelled `Tag` doc: "You can add up to 50 tags
         // to a report definition") bounds what repeated tagging can accumulate, so a
         // merge crossing it is refused whole rather than partly applied.
-        if let Err(crate::state::TagLimitExceeded { requested, limit }) =
-            report.merge_tags(&input.tags)
-        {
+        if let Err(over_limit) = report.merge_tags(&input.tags) {
             return Err(TagResourceErrorModeled::ValidationException(
-                ValidationException {
-                    message: Some(format!(
-                        "Tags: a report definition can hold at most {limit} tags; the \
-                         request would leave it holding {requested}."
-                    )),
-                },
+                over_limit.refusal_on_merge(),
             )
             .into());
         }

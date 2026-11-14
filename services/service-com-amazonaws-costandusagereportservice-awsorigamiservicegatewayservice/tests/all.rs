@@ -29,3 +29,5 @@ mod reported_definition_round_trip;
 mod service_populated_read_back;
 #[path = "all/state_roundtrip.rs"]
 mod state_roundtrip;
+#[path = "all/tag_limit_refusal.rs"]
+mod tag_limit_refusal;

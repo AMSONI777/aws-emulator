@@ -205,14 +205,9 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         let tags = input.tags.unwrap_or_default();
         let report = match crate::state::StoredReport::new(input.report_definition, &tags) {
             Ok(report) => report,
-            Err(crate::state::TagLimitExceeded { requested, limit }) => {
+            Err(over_limit) => {
                 return Err(PutReportDefinitionErrorModeled::ValidationException(
-                    ValidationException {
-                        message: Some(format!(
-                            "Tags: a report definition can hold at most {limit} tags; the \
-                             request supplies {requested}."
-                        )),
-                    },
+                    over_limit.refusal_on_create(),
                 )
                 .into());
             }

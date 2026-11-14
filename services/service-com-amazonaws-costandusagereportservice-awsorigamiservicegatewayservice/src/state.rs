@@ -209,6 +209,40 @@ pub struct TagLimitExceeded {
     pub limit: usize,
 }
 
+impl TagLimitExceeded {
+    /// The refusal for tags supplied beside a definition being CREATED: the report does
+    /// not exist yet, so the keys that would take it past the limit are the ones the
+    /// request itself carries.
+    ///
+    /// Answered by `PutReportDefinition`.
+    pub fn refusal_on_create(&self) -> ValidationException {
+        self.refusal(format!("the request supplies {}", self.requested))
+    }
+
+    /// The refusal for tags merged onto a report the account ALREADY holds: the keys that
+    /// would take it past the limit are the ones it would be left holding, which is the
+    /// keys it already has plus the fresh ones the request adds.
+    ///
+    /// Answered by `TagResource`.
+    pub fn refusal_on_merge(&self) -> ValidationException {
+        self.refusal(format!("the request would leave it holding {}", self.requested))
+    }
+
+    /// The one sentence both phrasings state: the member the refusal is about, the
+    /// per-report limit that was crossed, and `count_clause` — the clause naming the count
+    /// that crossed it from the point of view of the path that refused. The fixed text and
+    /// the error shape live here alone, so the handlers that answer this refusal cannot
+    /// drift apart.
+    fn refusal(&self, count_clause: String) -> ValidationException {
+        ValidationException {
+            message: Some(format!(
+                "Tags: a report definition can hold at most {} tags; {count_clause}.",
+                self.limit
+            )),
+        }
+    }
+}
+
 /// The last delivery of a report: when the report was delivered and how that delivery
 /// ended.
 ///
