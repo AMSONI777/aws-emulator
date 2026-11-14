@@ -293,6 +293,9 @@ mod unbounded_refusal_message_bounds;
 #[path = "all/workspace_built_in_component_types.rs"]
 mod workspace_built_in_component_types;
 
+#[path = "all/workspace_delete_transfer_jobs.rs"]
+mod workspace_delete_transfer_jobs;
+
 #[path = "all/workspace_entity_lifecycle.rs"]
 mod workspace_entity_lifecycle;
 

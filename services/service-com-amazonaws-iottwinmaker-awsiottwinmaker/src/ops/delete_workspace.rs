@@ -10,6 +10,13 @@
 //! refused with the modelled `ValidationException` rather than silently
 //! cascading. The ARN the workspace was minted with stops resolving with it.
 //!
+//! And nothing the service holds may still have work OUTSTANDING against it: a
+//! metadata transfer job that has not finished names, at each IoT TwinMaker end,
+//! a workspace its transfer is still going to read or write, so such a job
+//! refuses the delete with the same modelled `ValidationException` until it
+//! finishes or is cancelled. A job whose transfer is over keeps reporting the
+//! request it was accepted with and holds nothing up.
+//!
 //! Authorization is not emulated, so the modelled `AccessDeniedException` is
 //! never returned: a 200 from here is not an authorization decision.
 //!
@@ -234,6 +241,31 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
                         input.workspace_id,
                         workspace.sync_jobs.len()
                     )),
+                },
+            )
+            .into());
+        }
+
+        // A workspace is also deleted only once nothing the service still holds
+        // has work OUTSTANDING against it. A metadata transfer job is not a
+        // content of the workspace — it is stored beside the workspaces and may
+        // name a different one at each end — but each IoT TwinMaker end of it
+        // names a workspace the transfer is still going to read or write, and
+        // `CreateMetadataTransferJob` would not have accepted an end naming a
+        // workspace this service does not hold. So a job that has not reached a
+        // terminal state holds the delete up, named in the refusal, and one
+        // whose transfer is OVER does not: its `sources` and `destination` are
+        // the request it was accepted with, which both reads report back
+        // verbatim, and the service models no way to delete a finished job — so
+        // a finished record may not make a workspace undeletable for good.
+        let now = ::std::time::SystemTime::now();
+        let unfinished = state.unfinished_transfer_jobs_for(&input.workspace_id, now);
+        if let Some(message) =
+            crate::state::workspace_in_transfer_message(&input.workspace_id, &unfinished)
+        {
+            return Err(DeleteWorkspaceErrorModeled::ValidationException(
+                ValidationException {
+                    message: Some(message),
                 },
             )
             .into());

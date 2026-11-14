@@ -259,8 +259,12 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
             // and a workspace this service does not hold is one no transfer
             // could read or write — the `ResourceNotFoundException` this
             // operation models (unlike `CreateScene`, which models none and
-            // refuses with a `ValidationException`).
-            for workspace in referenced_workspaces(&input) {
+            // refuses with a `ValidationException`). The ends are read by the
+            // state module's own `referenced_workspaces`, so this check and the
+            // `DeleteWorkspace` that keeps these references resolving while the
+            // transfer is outstanding read one job the same way.
+            for workspace in crate::state::referenced_workspaces(&input.sources, &input.destination)
+            {
                 if state.resolve_workspace_id(workspace).is_none() {
                     return Err(not_found(crate::state::workspace_not_found_message(
                         workspace,
@@ -515,23 +519,3 @@ fn configuration_error(
     })
 }
 
-/// Every workspace ARN this request names, in the order it names them: the
-/// workspace of each IoT TwinMaker source, then of an IoT TwinMaker
-/// destination. The other end types name an Amazon S3 location or an IoT
-/// SiteWise asset model instead, neither of which is a resource this service
-/// holds.
-fn referenced_workspaces(input: &CreateMetadataTransferJobInput) -> Vec<&str> {
-    input
-        .sources
-        .iter()
-        .filter_map(|source| source.iot_twin_maker_configuration.as_ref())
-        .map(|configuration| configuration.workspace.as_str())
-        .chain(
-            input
-                .destination
-                .iot_twin_maker_configuration
-                .as_ref()
-                .map(|configuration| configuration.workspace.as_str()),
-        )
-        .collect()
-}

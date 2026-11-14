@@ -36,7 +36,13 @@
 //! Not everything is inside that tree: a *metadata transfer job* is addressed
 //! with no workspace in its path and may name a different workspace at each
 //! end of the transfer, so the jobs live beside the workspaces
-//! (`metadata_transfer_jobs`). A job is accepted in the non-terminal
+//! (`metadata_transfer_jobs`). The ARN each end names is then the one tie
+//! between a job and a workspace, read in both directions by
+//! [`referenced_workspaces`] and
+//! [`RegionalState::unfinished_transfer_jobs_for`]: a workspace a transfer has
+//! not finished with is not one a delete may remove, so a transfer the service
+//! accepted cannot be left naming a workspace the store no longer holds. A job
+//! is accepted in the non-terminal
 //! `VALIDATING` state and carries the instant its outcome falls due
 //! (`MetadataTransferJob::settles_at`), the same way a component type carries
 //! its own — and so does a *sync job* (`SyncJob::settles_at`), which
@@ -71,11 +77,15 @@ mod workspace_rules;
 /// What a metadata transfer job READS, WRITES and REPORTS: the document its
 /// source describes and the run that lands it in its destination.
 mod metadata_transfer;
+/// Which workspaces a metadata transfer job NAMES, and which jobs still have a
+/// transfer outstanding against one.
+mod transfer_references;
 pub use identity::*;
 pub use metadata_transfer::*;
 pub use page_tokens::*;
 pub use property_projection::*;
 pub use requested_schema::*;
+pub use transfer_references::*;
 
 /// The `ParentEntityId` sentinel the service uses for an entity with no parent.
 /// Taken from the `ParentEntityId` pattern, which admits the literal `$ROOT`
