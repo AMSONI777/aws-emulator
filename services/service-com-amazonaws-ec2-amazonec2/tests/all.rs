@@ -2265,6 +2265,12 @@ mod event_window_target_kind_refusal;
 // endpoint of one and a peer of an endpoint, in both delete states. Declared beside
 #[path = "all/route_server_incorrect_state_wording.rs"]
 mod route_server_incorrect_state_wording;
+// What `DeleteTransitGatewayConnectPeer` records: the Connect peer the request names left in the
+// transient delete state of its own catalog with every other member exactly as it was stored, the
+// clock owing it the terminal one, the allocations it held freed once that has settled — and the
+// ids, the dry run and the second delete it refuses without recording anything.
+#[path = "all/delete_transit_gateway_connect_peer.rs"]
+mod delete_transit_gateway_connect_peer;
 // `UpdateSecurityGroupRuleDescriptionsIngress`: the description it writes onto each inbound
 // rule a request names — by rule id or by the rule's own properties — read back through
 // `DescribeSecurityGroupRules` and `DescribeSecurityGroups`, beside what it refuses and what

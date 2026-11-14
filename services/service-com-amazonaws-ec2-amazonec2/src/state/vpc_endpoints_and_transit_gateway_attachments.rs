@@ -1283,6 +1283,15 @@ pub const CONNECT_PEER_STATE_PENDING: &str = "pending";
 /// A Connect peer in service: that enum's `available` member.
 pub const CONNECT_PEER_STATE_AVAILABLE: &str = "available";
 
+/// A Connect peer a delete has been asked for and that has not settled yet: that enum's
+/// `deleting` member ([`crate::ops::types::TRANSIT_GATEWAY_CONNECT_PEER_STATE_VALUES`]), which
+/// is what `DeleteTransitGatewayConnectPeer` answers with.
+pub const CONNECT_PEER_STATE_DELETING: &str = "deleting";
+
+/// The state that enum reaches once the deletion has settled: `deleted`, which the clock owes a
+/// [`CONNECT_PEER_STATE_DELETING`] peer one [`TRANSITION_DELAY`] after the call that deleted it.
+pub const CONNECT_PEER_STATE_DELETED: &str = "deleted";
+
 /// The tunnel protocol of a Connect attachment and of every peer on it: `ProtocolValue` has
 /// exactly one member, `gre` ("A Connect attachment is a GRE-based tunnel attachment",
 /// `CreateTransitGatewayConnect`).
@@ -1358,6 +1367,19 @@ pub fn transit_gateway_connect_peer_payload_bytes(peer: &TransitGatewayConnectPe
     tags.saturating_add(addresses).saturating_add(inside_blocks)
 }
 
+/// Whether the Connect peer `peer` has already had its deletion asked for — the transient
+/// `deleting` of `TransitGatewayConnectPeerState`, or the terminal `deleted` the clock then
+/// moves it to.
+///
+/// The ONE definition of "this peer is on its way out", so the delete's refusal and every other
+/// reader of that fact cannot drift apart.
+pub fn transit_gateway_connect_peer_is_deleting(peer: &TransitGatewayConnectPeer) -> bool {
+    matches!(
+        peer.state.as_deref(),
+        Some(CONNECT_PEER_STATE_DELETING | CONNECT_PEER_STATE_DELETED)
+    )
+}
+
 impl ComAmazonawsEc2Amazonec2State {
     /// Whether another Connect peer fits inside the store's ceiling
     /// ([`MAX_STORED_RECORDS_PER_STORE`]), on the contract of
@@ -1397,6 +1419,23 @@ impl ComAmazonawsEc2Amazonec2State {
         Some(peer_id)
     }
 
+    /// Put the Connect peer `peer_id` into the transient state a delete leaves it in, with the
+    /// move to the terminal one the clock then owes it, and answer the peer as the store now
+    /// holds it — or `None` when no peer of that id is stored.
+    ///
+    /// The ONE place a Connect peer's deletion is recorded, the way
+    /// [`Self::insert_transit_gateway_connect_peer`] is the one place one is created: the state
+    /// and the owed move are set HERE, so no path can answer a deletion the store does not hold.
+    pub fn begin_transit_gateway_connect_peer_deletion(
+        &mut self,
+        peer_id: &str,
+    ) -> Option<TransitGatewayConnectPeer> {
+        let record = self.transit_gateway_connect_peers.get_mut(peer_id)?;
+        record.view.state = Some(CONNECT_PEER_STATE_DELETING.to_string());
+        record.pending = Some(PendingStateMove::starting_now(CONNECT_PEER_STATE_DELETED));
+        Some(record.view.clone())
+    }
+
     /// The transit gateway the Connect attachment `attachment_id` names belongs to, or `None`
     /// when that id names no Connect attachment of this account.
     pub fn connect_attachment_transit_gateway_id(&self, attachment_id: &str) -> Option<&str> {
@@ -1409,12 +1448,32 @@ impl ComAmazonawsEc2Amazonec2State {
         }
     }
 
-    /// Every transit gateway address a Connect peer of the transit gateway
-    /// `transit_gateway_id` already holds.
+    /// Whether `peer` still HOLDS the allocations it was given out of the transit gateway
+    /// `transit_gateway_id`: it is a peer of that gateway, and its deletion has not settled.
     ///
     /// A peer names its Connect attachment, and the attachment names its transit gateway, so
-    /// the set is reached through the attachment store rather than kept as a second copy on
-    /// the peer.
+    /// the gateway is reached through the attachment store rather than kept as a second copy on
+    /// the peer. A peer whose deletion HAS settled (the terminal `deleted` of
+    /// `TransitGatewayConnectPeerState`) holds nothing any more, so what it was given is free
+    /// for the next peer, while one still being torn down keeps it.
+    fn transit_gateway_connect_peer_holds_allocations(
+        &self,
+        peer: &TransitGatewayConnectPeer,
+        transit_gateway_id: &str,
+    ) -> bool {
+        peer.state.as_deref() != Some(CONNECT_PEER_STATE_DELETED)
+            && peer
+                .transit_gateway_attachment_id
+                .as_deref()
+                .and_then(|attachment_id| {
+                    self.connect_attachment_transit_gateway_id(attachment_id)
+                })
+                == Some(transit_gateway_id)
+    }
+
+    /// Every transit gateway address a Connect peer of the transit gateway
+    /// `transit_gateway_id` already holds
+    /// ([`Self::transit_gateway_connect_peer_holds_allocations`]).
     pub fn transit_gateway_connect_addresses_in_use(
         &self,
         transit_gateway_id: &str,
@@ -1422,14 +1481,10 @@ impl ComAmazonawsEc2Amazonec2State {
         self.transit_gateway_connect_peers
             .values()
             .filter(|record| {
-                record
-                    .view
-                    .transit_gateway_attachment_id
-                    .as_deref()
-                    .and_then(|attachment_id| {
-                        self.connect_attachment_transit_gateway_id(attachment_id)
-                    })
-                    == Some(transit_gateway_id)
+                self.transit_gateway_connect_peer_holds_allocations(
+                    &record.view,
+                    transit_gateway_id,
+                )
             })
             .filter_map(|record| {
                 record
@@ -1442,11 +1497,8 @@ impl ComAmazonawsEc2Amazonec2State {
     }
 
     /// Every interior BGP range a Connect peer of the transit gateway `transit_gateway_id`
-    /// already holds, as those peers report them.
-    ///
-    /// Reached through the attachment store for the same reason as
-    /// [`Self::transit_gateway_connect_addresses_in_use`]: a peer names its attachment and
-    /// the attachment names its gateway, so no second copy is kept on the peer.
+    /// already holds, as those peers report them — held to the same rule as
+    /// [`Self::transit_gateway_connect_addresses_in_use`].
     pub fn transit_gateway_connect_inside_blocks_in_use(
         &self,
         transit_gateway_id: &str,
@@ -1454,14 +1506,10 @@ impl ComAmazonawsEc2Amazonec2State {
         self.transit_gateway_connect_peers
             .values()
             .filter(|record| {
-                record
-                    .view
-                    .transit_gateway_attachment_id
-                    .as_deref()
-                    .and_then(|attachment_id| {
-                        self.connect_attachment_transit_gateway_id(attachment_id)
-                    })
-                    == Some(transit_gateway_id)
+                self.transit_gateway_connect_peer_holds_allocations(
+                    &record.view,
+                    transit_gateway_id,
+                )
             })
             .flat_map(|record| {
                 record

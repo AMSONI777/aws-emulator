@@ -1,15 +1,19 @@
 // SPDX-License-Identifier: CC0-1.0
 
 //! @op DeleteTransitGatewayConnectPeer
-//! SCAFFOLDED, NOT IMPLEMENTED: this operation answers HTTP 501 `NotImplemented` and
-//! asserts NOTHING about `DeleteTransitGatewayConnectPeer`'s real behaviour. Implement it here — this is
-//! the ONLY file to touch for this operation.
 //!
-//! A 501 from this operation means "nobody has written it yet", never "the emulator is
-//! broken". Replace the `Err(..)` in [`DeleteTransitGatewayConnectPeer::handle`] with real behaviour and
-//! delete the SCAFFOLDED marker line above; that line is the machine-readable record of
-//! which operations are still stubs (`grep -rl '^//! SCAFFOLDED, NOT IMPLEMENTED:' */src/ops/`),
-//! so leaving it on an implemented operation under-reports progress.
+//! ## What this operation does
+//!
+//! "Deletes the specified Connect peer": it resolves the Connect peer the request names in the
+//! service's own state and records the deletion on that very record — the peer enters the
+//! transient `deleting` of its own state catalog, with the clock owing it the terminal
+//! `deleted`. `DescribeTransitGatewayConnectPeers` reads the record this writes, so what this
+//! answers is what a read straight after the call corroborates.
+//!
+//! Nothing about the answer is built here: "Information about the deleted Connect peer" is the
+//! stored peer `CreateTransitGatewayConnectPeer` wrote, with the one member this call changes.
+//! Once the deletion has settled, the interior BGP ranges and the transit gateway GRE address
+//! that peer held are free for the next peer of the same transit gateway.
 //!
 //! ## Shape of an operation
 //!
@@ -67,6 +71,8 @@
 
 #[allow(unused_imports)]
 use super::types::*;
+
+use crate::state;
 
 // `#[operation_error]` below expands to an invocation of the LOCAL declarative
 // `smithy!` macro, which this line is what emits into the module. Without it the
@@ -135,18 +141,74 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         input: Self::Input,
         ctx: &smithy_server_runtime::OperationContext<'_>,
     ) -> Result<Self::Output, Self::Error> {
-        // The engine is reachable from `&self` (constructor-injected); `ctx` carries
-        // request metadata. Both are bound here so an implementer has them in scope.
-        let _ = (&input, ctx, &self.engine);
-        // Implement `DeleteTransitGatewayConnectPeer` here, then delete the SCAFFOLDED marker at the top of
-        // this file. Return modeled failures as
-        // `Err(DeleteTransitGatewayConnectPeerErrorModeled::Variant(..).into())` — the `From` impl above lifts it.
-        //
-        // To refuse a bad request this operation models no error for, return
-        // `Err(crate::scaffolded::Scaffolded::validation("..."))` — a 400
-        // `ValidationException`. Do NOT answer 501 for it: 501 means "not written yet",
-        // not "bad request". Modeled constraints are already refused BEFORE this
-        // handler runs, so reaching here means the input satisfies every one of them.
-        Err(crate::scaffolded::Scaffolded::not_implemented("DeleteTransitGatewayConnectPeer"))
+        // `ctx` carries request metadata only; this operation reads none of it — the Connect
+        // peer is named by id. The store is reached through the engine held on `self`.
+        let _ = ctx;
+
+        let peer_id = input.transit_gateway_connect_peer_id.as_str();
+        // The request's own FORM first, before anything is resolved: a value that is not a
+        // Connect peer id at all is refused as malformed, so "not an id of this kind" never
+        // reads as "no such peer" and is never answered by the DryRun arm below either.
+        state::require_well_formed_id(
+            state::TRANSIT_GATEWAY_CONNECT_PEER_ID_PREFIX,
+            peer_id,
+            state::INVALID_TRANSIT_GATEWAY_CONNECT_PEER_ID_MALFORMED,
+        )?;
+
+        // "Checks whether you have the required permissions for the action, WITHOUT ACTUALLY
+        // MAKING THE REQUEST, and provides an error response. If you have the required
+        // permissions, the error response is DryRunOperation. Otherwise, it is
+        // UnauthorizedOperation" (`DryRun`): the flag asks about PERMISSION, not about the peer
+        // the request names, so it is answered once the request's own form has been checked and
+        // before anything is resolved or written; every caller of this emulator is permitted.
+        if input.dry_run.unwrap_or(false) {
+            return Err(state::dry_run_operation());
+        }
+
+        let state_handle = state::require_service_state(&*self.engine)?;
+        let mut store = state_handle.lock();
+        // The clock first: a peer whose `available` or `deleted` move has fallen due is already
+        // in that state, so every question below is asked of the state the store is ACTUALLY
+        // in. That move was owed at this instant whether or not anybody called.
+        store.materialize_due_transitions();
+
+        // An id this account holds no Connect peer for is a refusal, not a no-op: a caller that
+        // deletes twice has to be able to tell the deletion it performed from one it did not.
+        let Some(record) = store.transit_gateway_connect_peers.get(peer_id) else {
+            return Err(state::id_not_found(
+                state::INVALID_TRANSIT_GATEWAY_CONNECT_PEER_ID_NOT_FOUND,
+                "transit gateway Connect peer ID",
+                peer_id,
+            ));
+        };
+        // A peer a delete has already been asked for has nothing left to delete, so a second
+        // delete is refused rather than restarting the clock on it.
+        if state::transit_gateway_connect_peer_is_deleting(&record.view) {
+            let current = record.view.state.clone().unwrap_or_default();
+            return Err(state::incorrect_state_of(
+                "Transit Gateway Connect Peer",
+                peer_id,
+                &current,
+            ));
+        }
+
+        // "Information about the deleted Connect peer" (`$TransitGatewayConnectPeer`) as the
+        // STORE now holds it: the transient `deleting` this resource's catalog gives one a
+        // delete has been asked for, with the clock owing it `deleted`.
+        let deleted = store
+            .begin_transit_gateway_connect_peer_deletion(peer_id)
+            .ok_or_else(|| {
+                // Unreachable: the peer was resolved above and the store is locked throughout.
+                // Kept so a delete that moved nothing can never read as a 200 over a peer the
+                // store still holds as it was.
+                state::internal_error(format!(
+                    "the transit gateway Connect peer '{peer_id}' resolved a moment ago is not \
+                     in the store any more"
+                ))
+            })?;
+
+        Ok(DeleteTransitGatewayConnectPeerOutput {
+            transit_gateway_connect_peer: Some(deleted),
+        })
     }
 }
