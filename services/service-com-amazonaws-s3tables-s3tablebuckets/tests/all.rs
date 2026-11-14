@@ -57,6 +57,8 @@ mod table_bucket_storage_class;
 mod table_bucket_storage_class_reads;
 #[path = "all/table_maintenance_configuration.rs"]
 mod table_maintenance_configuration;
+#[path = "all/table_maintenance_put_round_trip.rs"]
+mod table_maintenance_put_round_trip;
 #[path = "all/table_metadata_location.rs"]
 mod table_metadata_location;
 #[path = "all/table_record_expiration.rs"]

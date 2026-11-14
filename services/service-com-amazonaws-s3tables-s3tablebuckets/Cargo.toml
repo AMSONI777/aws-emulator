@@ -32,6 +32,11 @@ uuid = "1"
 # declares the `date-time` form, which every timestamp member of this model does.
 service-common = { path = "../common" }
 
+[dev-dependencies]
+# The bounded, seeded generator behind the generated maintenance-configuration
+# rows in `tests/all/table_maintenance_put_round_trip.rs`.
+rand = "0.9"
+
 [build-dependencies]
 emulator-core-build-support = { workspace = true }
 

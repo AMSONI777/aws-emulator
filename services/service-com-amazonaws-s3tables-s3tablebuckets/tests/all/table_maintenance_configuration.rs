@@ -40,18 +40,18 @@ const NO_BUCKET: &str = "The specified bucket does not exist.";
 /// towards 512 MB files, and the strategy is derived from the table's own sort
 /// order. Written out here rather than read from the service's own constants,
 /// so the test states the published figures independently.
-const DEFAULT_COMPACTION: (&str, i64, &str) = ("enabled", 512, "auto");
+pub(super) const DEFAULT_COMPACTION: (&str, i64, &str) = ("enabled", 512, "auto");
 
 /// The settings S3 Tables manages a table's snapshots under when nothing
 /// configured it, from the same documentation: snapshot management is on, at
 /// least one snapshot is kept and a snapshot is expired once it is older than
 /// 120 hours.
-const DEFAULT_SNAPSHOT_MANAGEMENT: (&str, i64, i64) = ("enabled", 1, 120);
+pub(super) const DEFAULT_SNAPSHOT_MANAGEMENT: (&str, i64, i64) = ("enabled", 1, 120);
 
 /// One maintenance configuration as a read reports it, reduced to the members
 /// the model declares for the task it belongs to.
 #[derive(Debug, PartialEq, Eq)]
-enum Reported {
+pub(super) enum Reported {
     /// `status`, `settings.icebergCompaction.targetFileSizeMB` and
     /// `settings.icebergCompaction.strategy`.
     Compaction(Option<String>, Option<i64>, Option<String>),
@@ -62,7 +62,7 @@ enum Reported {
 
 impl Reported {
     /// The compaction configuration every table runs under without one.
-    fn default_compaction() -> Self {
+    pub(super) fn default_compaction() -> Self {
         let (status, target, strategy) = DEFAULT_COMPACTION;
         Self::Compaction(
             Some(status.to_string()),
@@ -73,7 +73,7 @@ impl Reported {
 
     /// The snapshot management configuration every table runs under without
     /// one.
-    fn default_snapshot_management() -> Self {
+    pub(super) fn default_snapshot_management() -> Self {
         let (status, minimum, age) = DEFAULT_SNAPSHOT_MANAGEMENT;
         Self::SnapshotManagement(Some(status.to_string()), Some(minimum), Some(age))
     }
@@ -86,7 +86,7 @@ impl Reported {
 /// compaction strategy can be configured on it: a strategy that rewrites
 /// records in the table's sort order is refused on a table whose metadata
 /// carries none, which is the rule `compaction_sort_order.rs` covers.
-async fn create_table(
+pub(super) async fn create_table(
     emulator: &Emulator,
     region: &str,
     bucket: &str,
@@ -212,7 +212,7 @@ fn reported(reply: &Reply, case: &str) -> Vec<(String, Reported)> {
 }
 
 /// The configuration a read reported for ONE task.
-fn reported_task(reply: &Reply, case: &str, kind: TableMaintenanceType) -> Reported {
+pub(super) fn reported_task(reply: &Reply, case: &str, kind: TableMaintenanceType) -> Reported {
     reported(reply, case)
         .into_iter()
         .find(|(reported_kind, _)| reported_kind == kind.as_wire())
@@ -228,7 +228,7 @@ fn reported_task(reply: &Reply, case: &str, kind: TableMaintenanceType) -> Repor
 
 /// How many maintenance configurations the store holds for `table_arn` — a put
 /// persists one per task it was addressed with, and nothing else does.
-fn stored_tasks(emulator: &Emulator, table_arn: &str) -> Vec<String> {
+pub(super) fn stored_tasks(emulator: &Emulator, table_arn: &str) -> Vec<String> {
     let store = emulator.engine.state::<S3TablesState>();
     let store = store.lock();
     store
