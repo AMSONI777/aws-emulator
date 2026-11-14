@@ -3605,3 +3605,13 @@ mod cloudformation_provisions_appsync_resources;
 // (The same fragment again, as an ordinary comment for the same reason: the rule it repeats —
 // checked for this file and for every service crate's `tests/all.rs` — stands at the head of
 // this file.)
+// Declared here, in this same head region, for the reason the entry above records: the four
+// documents that can decide an IAM AccessDenied are only reachable side by side if IAM holds
+// the user, the role and their documents while STS mints the scoped session, so no single
+// service crate's test target can read all four reason clauses back.
+#[path = "all/iam_denial_reason_attribution.rs"]
+mod iam_denial_reason_attribution;
+// suite left at the top level of `tests/` fails the build. (An ordinary comment: an inner doc
+// comment is only legal before the first item of a crate root.)
+// this file and for every service crate's `tests/all.rs`. (An ordinary comment, for the reason
+// the lines above record.)
