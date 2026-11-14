@@ -99,6 +99,8 @@ mod ses_receipt_rule_set_deletion;
 mod ses_receipt_rule_set_listing;
 #[path = "all/ses_receipt_rule_sets.rs"]
 mod ses_receipt_rule_sets;
+#[path = "all/ses_receipt_rule_sns_topic_policy.rs"]
+mod ses_receipt_rule_sns_topic_policy;
 #[path = "all/ses_receipt_rule_stored_defaults.rs"]
 mod ses_receipt_rule_stored_defaults;
 #[path = "all/ses_refusal_names_the_refused_request.rs"]

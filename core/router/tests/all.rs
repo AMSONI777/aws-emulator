@@ -4046,3 +4046,5 @@ mod cloudformation_cloudfront_fronted_rest_api;
 // `E0753` down here.)
 // suite left at the top level of `tests/` fails the build. (Line comments: a `//!` line in
 // this tail is `E0753` and compiles nothing in this target.)
+// (Another line of that same appended header fragment, an ordinary comment for the same
+// (One more line of that same appended header fragment, an ordinary comment for the same

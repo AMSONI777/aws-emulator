@@ -33,7 +33,10 @@
 //!   ([`withholds`]): an explicit deny, or a document that states nothing about the access at
 //!   all. A statement that is about the access and hinges on a condition key this emulator
 //!   carries no value for leaves the grant undecided, and an undecided grant is not evidence
-//!   that the real service would refuse the call.
+//!   that the real service would refuse the call. A destination that needs no grant of its own
+//!   — one the account the rule belongs to owns — is judged on the terminal half of that
+//!   reading alone ([`denies`]): a document that says nothing leaves it reachable, while an
+//!   explicit deny of the access refuses it whoever owns the resource.
 //!
 //! The ONE reading, so `CreateReceiptRule` and `UpdateReceiptRule` hold a stored rule's
 //! destinations to the same requirements instead of each keeping its own copy of them.
@@ -140,6 +143,19 @@ pub fn rule_scoped_context(rule_arn: &str) -> [(String, String); 2] {
         ),
         (SOURCE_ARN_KEY.to_string(), rule_arn.to_string()),
     ]
+}
+
+/// Whether `policy` states an explicit DENY of the access `request` names.
+///
+/// A deny is terminal wherever it is written ("an explicit `Deny` among those statements WINS,
+/// whatever any `Allow` says", [`iam`]), so it withholds the access even where nothing had to
+/// grant it in the first place: a resource of the account the request is made for needs no
+/// statement of its own, and is still off limits when its own document refuses this principal.
+/// A statement whose condition this evaluation cannot decide is read the way the shared
+/// evaluator reads one — a `Deny` that MAY hold is never weakened into permission.
+#[must_use]
+pub fn denies(policy: &str, request: &iam::Request<'_>) -> bool {
+    iam::resource_decision(policy, request) == Decision::Denied
 }
 
 /// Whether `policy` WITHHOLDS the access `request` names — the one reading a refusal of a
@@ -293,12 +309,21 @@ async fn function_refusal(
 /// Why Amazon SES could not publish to the topic `topic_arn` names for the rule `rule_arn`,
 /// and `None` when it could — or when nothing establishes otherwise.
 ///
-/// The topic has to BE there, which is Amazon SNS's own answer ([`topic_answer`]), and a
-/// topic of ANOTHER account has to grant the service principal the publish: "to enable Amazon
-/// SES to … publish to an Amazon SNS topic of another account, Amazon SES must have permission
-/// to access those resources" (`S3Action`), so a topic of the account the rule belongs to
-/// needs no statement of its own. Any OTHER answer states nothing about the topic and refuses
-/// nothing.
+/// The topic has to BE there, which is Amazon SNS's own answer ([`topic_answer`]), and its own
+/// access policy has to leave the service principal the publish — which is the whole scope of
+/// the refusal this earns: "the provided Amazon SNS topic is invalid, or … Amazon SES could not
+/// publish to the topic, possibly due to permissions issues"
+/// (`InvalidSnsTopicException`). How much the policy has to SAY depends on whose topic it is:
+///
+/// * a topic of ANOTHER account has to GRANT the publish — "to enable Amazon SES to … publish
+///   to an Amazon SNS topic of another account, Amazon SES must have permission to access
+///   those resources" (`S3Action`) — so a document that grants nothing withholds it
+///   ([`withholds`]);
+/// * a topic of the account the rule belongs to needs no statement of its own, so only an
+///   explicit deny of the publish withholds it ([`denies`]) — a deny is terminal whoever owns
+///   the resource.
+///
+/// Any OTHER answer states nothing about the topic and refuses nothing.
 ///
 /// `region` is the Region the REQUEST is signed for, as it is for the function above.
 async fn topic_refusal(
@@ -314,9 +339,6 @@ async fn topic_refusal(
         TopicAnswer::Unanswered => return None,
         TopicAnswer::Held(attributes) => attributes,
     };
-    if owned_by_this_account(topic_arn) {
-        return None;
-    }
     let policy = attributes
         .get(TOPIC_POLICY_ATTRIBUTE)
         .cloned()
@@ -326,7 +348,12 @@ async fn topic_refusal(
     let request = iam::Request::new(PUBLISH_ACTION, topic_arn, &principals)
         .with_context(&context)
         .with_published_keys(&[SOURCE_ACCOUNT_KEY, SOURCE_ARN_KEY]);
-    withholds(&policy, &request).then(|| could_not_publish_message(topic_arn))
+    let withheld = if owned_by_this_account(topic_arn) {
+        denies(&policy, &request)
+    } else {
+        withholds(&policy, &request)
+    };
+    withheld.then(|| could_not_publish_message(topic_arn))
 }
 
 /// What a topic a receipt rule's action notifies is called in a log line.
