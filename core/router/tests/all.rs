@@ -3066,3 +3066,6 @@ mod cloudformation_grants_acmpca_permissions;
 // were landing at once; it is an INNER doc comment, which annotates nothing in the middle
 // of a crate root (`E0753`), so it has been returned to the header where it says the same
 // thing.)
+// (`bedrock_agent_ingestion_populates_its_s3_vectors_index` is declared ONCE, a few lines
+// above: two branches landing in the same window each appended their own copy here, and a
+// module declared twice compiles neither, so the second copy is removed.)

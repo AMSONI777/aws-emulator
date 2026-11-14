@@ -21,6 +21,8 @@ mod app_template_document;
 mod app_version_app_components;
 #[path = "all/app_version_resource_listing.rs"]
 mod app_version_resource_listing;
+#[path = "all/app_version_resource_listing_fidelity.rs"]
+mod app_version_resource_listing_fidelity;
 #[path = "all/app_version_resource_resolution.rs"]
 mod app_version_resource_resolution;
 #[path = "all/app_version_resources.rs"]
