@@ -278,10 +278,10 @@ async fn every_invalid_parameter_refusal_carries_field_parameter_and_reason() {
 /// the modelled 20 characters and carries no whitespace, so `ResourceArn`'s own
 /// boundary constraints are not what refuses it.
 ///
-/// A well-formed `rulegroup` ARN naming a rule group that does not exist is NOT in
-/// this table: that is target resolution rather than a bad parameter, and WAF
-/// answers it with its nonexistent-item failure (see
-/// `crate::managed_rule_sets`).
+/// A well-formed `rulegroup` ARN naming a rule group that does not exist carries
+/// the same `Reason`, from the same judgement made against the store (see
+/// `crate::refusal_precedence`); the rows here are the ones that need no store at
+/// all.
 #[tokio::test]
 async fn an_unacceptable_resource_reference_carries_the_arn_reason() {
     let waf = Waf::new();

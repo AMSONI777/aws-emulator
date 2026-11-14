@@ -370,9 +370,9 @@ async fn a_managed_rule_group_that_resolves_to_nothing_is_named_in_the_refusal()
 /// service's ARN, a wafv2 ARN of another resource kind — and each is sent with a lock
 /// token that is not even `LockToken`-shaped and against a set no account holds, so
 /// what the refusal reports is the ARN rather than either of those. Each of those
-/// faults is in the REQUEST, which is why it is reported ahead of both: an ARN that is
-/// well formed and only fails to RESOLVE is a different judgement, made against the
-/// store and so after the target the put acts on
+/// faults is in the REQUEST, which is why it is reported ahead of both. An ARN that
+/// is well formed and only fails to RESOLVE is the same refusal, made against the
+/// store and reported just as early
 /// (`crate::refusal_precedence`).
 #[tokio::test]
 async fn an_arn_the_put_cannot_use_is_refused_before_anything_else() {

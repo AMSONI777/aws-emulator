@@ -9,8 +9,9 @@
 //! `PutManagedRuleSetVersions` and `UpdateManagedRuleSetVersionExpiryDate`. The rule
 //! these suites assert is: each of them addresses a set the ACCOUNT holds, so an
 //! identity no set of the account carries is refused with 400
-//! `WAFNonexistentItemException` and nothing is published under it — target
-//! resolution comes before every other judgement the request invites — while against
+//! `WAFNonexistentItemException` and nothing is published under it — once every
+//! reference the request CARRIES is one WAF can use (see
+//! `crate::refusal_precedence`) — while against
 //! a set that IS held, a put stores the versions it names (each priced by the rule
 //! group that defines it) and an expiry update stores the instant it names on one
 //! published version, both rotating the set's optimistic-lock token, and both
