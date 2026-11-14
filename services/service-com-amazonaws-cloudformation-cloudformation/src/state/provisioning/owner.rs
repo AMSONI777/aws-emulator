@@ -14,6 +14,11 @@ use super::*;
 impl Owner {
     /// Create one resource in the service that owns it — see
     /// [`Provisioner::create`](super::provisioner::Provisioner::create).
+    ///
+    /// The declaration is validated against what its type's schema requires FIRST
+    /// ([`model_validation`]): a provider validates the model it is handed before it calls
+    /// anybody, so a declaration missing a property that schema marks required fails the
+    /// resource with the validator's own sentence and nothing is asked of the owning service.
     pub(super) async fn create(
         self,
         ctx: &smithy_server_runtime::OperationContext<'_>,
@@ -22,6 +27,11 @@ impl Owner {
         propagated: &[(String, String)],
         acknowledged: &[String],
     ) -> Result<Created, Refusal> {
+        if let Some(refusal) =
+            model_validation::refusal(&resource.resource_type, &resource.properties)
+        {
+            return Err(refusal);
+        }
         match self {
             Self::Builtin(provisioner) => {
                 // BOXED, and so is every other call this file makes into the catalogue: that
@@ -530,6 +540,11 @@ impl Owner {
 
     /// Apply a changed declaration to a resource that exists — see
     /// [`Provisioner::update`](super::provisioner::Provisioner::update).
+    ///
+    /// The declaration being applied is validated against what its type's schema requires
+    /// first, as the create's is: the provider validates every model it is handed, so an
+    /// update that DROPS a property that schema marks required fails the resource with the
+    /// validator's own sentence rather than being applied without it.
     pub(super) async fn update(
         self,
         ctx: &smithy_server_runtime::OperationContext<'_>,
@@ -539,6 +554,9 @@ impl Owner {
         propagated: &[(String, String)],
         acknowledged: &[String],
     ) -> Result<Option<Created>, Refusal> {
+        if let Some(refusal) = model_validation::refusal(&resource.resource_type, declared) {
+            return Err(refusal);
+        }
         match self {
             // The bucket's own provider, whose update half lives beside this algorithm
             // ([`s3_bucket`]): a property Amazon S3 publishes a call to write on a live

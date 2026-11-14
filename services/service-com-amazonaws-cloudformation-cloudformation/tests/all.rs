@@ -229,6 +229,8 @@ mod generated_template_updates;
 mod generated_templates;
 #[path = "all/glue_job_resources.rs"]
 mod glue_job_resources;
+#[path = "all/handler_model_validation.rs"]
+mod handler_model_validation;
 #[path = "all/handler_progress_reports.rs"]
 mod handler_progress_reports;
 #[path = "all/harness.rs"]

@@ -45,6 +45,12 @@
 //! schema check when this registry holds real schemas, or when an owning service serves a
 //! would-this-be-accepted read; until then the rows are what it knows.
 //!
+//! A declaration that reaches provisioning missing a property its type requires — one of a
+//! type this stage holds no row for, or any one at all when the request disabled this stage —
+//! is reported by the PROVIDER's own model validation instead, in that validator's own
+//! sentence and on the resource's own failed event, which is a stage of provisioning and lives
+//! with it.
+//!
 //! The document a resource is judged against is the DEPLOYED one — the property document the
 //! owning service would be asked to create the resource with — so a property whose value this
 //! service could not evaluate at all counts as absent, because the create would carry it

@@ -292,6 +292,12 @@ mod outstanding_teardown;
 /// ([`Owner`]'s own methods, moved out so adding a type's arms does not grow this file).
 mod owner;
 
+/// The MODEL VALIDATION a resource provider runs on the declaration it is handed before it
+/// calls the service that owns the type, and the schema validator's own sentence for a
+/// property that type's schema marks required which the declaration does not carry
+/// ([`model_validation`]).
+mod model_validation;
+
 /// The success signals the INSTANCES of a signalled resource send: what releases the
 /// resource-signal wait of a resource whose signals come from the instances it consists of
 /// ([`instance_signals`]).

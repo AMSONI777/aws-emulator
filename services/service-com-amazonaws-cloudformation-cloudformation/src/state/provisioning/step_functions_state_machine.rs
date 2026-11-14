@@ -429,8 +429,13 @@ fn state_machine_name(resource: &StoredResource) -> String {
 }
 
 /// The role the machine runs its executions as, which the type requires ("RoleArn:
-/// Required: Yes"): a declaration naming none describes no state machine that could be
-/// created, so it is refused here rather than with a request Step Functions would reject.
+/// Required: Yes").
+///
+/// A declaration carrying NO `RoleArn` at all never reaches this arm: the provider validates
+/// the model it is handed against the type's schema first, and a required key the document
+/// does not carry fails there ([`super::model_validation`]). What is left for this arm is a
+/// declaration that STATES the property as nothing — the empty string, which names no role —
+/// so no request naming no role is sent for Step Functions to reject.
 fn role_arn(resource: &StoredResource) -> Result<String, Refusal> {
     text_property(&resource.properties, "RoleArn").ok_or_else(|| Refusal {
         code: "InvalidRequest".to_string(),
