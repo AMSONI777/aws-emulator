@@ -211,7 +211,7 @@ fn reservation_cases() -> Vec<ReservationCase> {
 /// the start date is strictly inside the window a future-dated reservation may start in ("5 and
 /// 120 days in advance", `CreateCapacityReservationRequest$StartDate`) however long the call
 /// takes to arrive.
-fn start_date(lead_days: u64) -> SystemTime {
+pub(crate) fn start_date(lead_days: u64) -> SystemTime {
     let now = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
@@ -297,27 +297,30 @@ async fn create_future_dated(
 }
 
 /// One entry of a quote's `cancellationTermSet`, as the response reported it.
+/// Shared with the sibling suite that drives this operation across Regions
+/// (`capacity_reservation_cancellation_quote_region_scope`), which compiles into the same
+/// test binary: one reading of the wire shape rather than two that can drift.
 #[derive(Debug, Clone, PartialEq, Eq)]
-struct ReportedTerms {
-    cancellation_type: String,
-    reservation_state: String,
-    committed_instance_count: String,
-    charge_commitment_duration_hours: String,
-    charge_end_date: String,
+pub(crate) struct ReportedTerms {
+    pub(crate) cancellation_type: String,
+    pub(crate) reservation_state: String,
+    pub(crate) committed_instance_count: String,
+    pub(crate) charge_commitment_duration_hours: String,
+    pub(crate) charge_end_date: String,
 }
 
 /// One cancellation quote, as the response reported it.
 #[derive(Debug, Clone, PartialEq, Eq)]
-struct ReportedQuote {
-    id: String,
-    capacity_reservation_id: String,
-    create_time: String,
-    expiration_time: String,
-    quote_state: String,
-    configuration_instance_count: String,
-    configuration_reservation_state: String,
-    terms: Vec<ReportedTerms>,
-    tags: Vec<(String, String)>,
+pub(crate) struct ReportedQuote {
+    pub(crate) id: String,
+    pub(crate) capacity_reservation_id: String,
+    pub(crate) create_time: String,
+    pub(crate) expiration_time: String,
+    pub(crate) quote_state: String,
+    pub(crate) configuration_instance_count: String,
+    pub(crate) configuration_reservation_state: String,
+    pub(crate) terms: Vec<ReportedTerms>,
+    pub(crate) tags: Vec<(String, String)>,
 }
 
 /// Every quote a response carries, in the order it reported them.
@@ -326,7 +329,7 @@ struct ReportedQuote {
 /// one reading serves the generate's single quote and the describe's set alike. Read with the
 /// XML parser rather than by substring, because a quote's `reservationState` and its terms'
 /// are different members of the same name.
-fn reported_quotes(case: &str, body: &str) -> Vec<ReportedQuote> {
+pub(crate) fn reported_quotes(case: &str, body: &str) -> Vec<ReportedQuote> {
     let parsed = document(case, body);
     parsed
         .descendants()
@@ -380,7 +383,7 @@ fn reported_quotes(case: &str, body: &str) -> Vec<ReportedQuote> {
 }
 
 /// The ONE quote a response carries, or a panic naming the case.
-fn reported_quote(case: &str, body: &str) -> ReportedQuote {
+pub(crate) fn reported_quote(case: &str, body: &str) -> ReportedQuote {
     let mut quotes = reported_quotes(case, body);
     assert_eq!(
         quotes.len(),
@@ -399,7 +402,7 @@ fn at(case: &str, member: &str, value: &str) -> f64 {
 }
 
 /// How many quotes the store holds.
-fn stored_count(engine: &engine::InMemoryEngine) -> usize {
+pub(crate) fn stored_count(engine: &engine::InMemoryEngine) -> usize {
     engine
         .state::<Ec2State>()
         .lock()

@@ -781,6 +781,10 @@ mod capacity_manager_attributes;
 mod accept_capacity_reservation_billing_ownership;
 #[path = "all/capacity_reservation_billing_requests.rs"]
 mod capacity_reservation_billing_requests;
+// Which Region `CreateCapacityReservationCancellationQuote` resolves the reservation it
+// quotes in, and what it answers for one held by another Region.
+#[path = "all/capacity_reservation_cancellation_quote_region_scope.rs"]
+mod capacity_reservation_cancellation_quote_region_scope;
 // What `CreateCapacityReservationCancellationQuote` quotes for cancelling a future-dated
 // Capacity Reservation inside its commitment, and what
 // `DescribeCapacityReservationCancellationQuotes` reports back out of that store.
