@@ -2841,6 +2841,11 @@ mod tests {
     /// each row comes to is then the run's own doing, and a host slow enough to spend a span
     /// of its own time while the interpreter is standing up answers none of them with the
     /// deadline instead.
+    ///
+    /// The span the row about the DEADLINE needs is passed by the run ASKING to wait for it
+    /// rather than by this host running the run long enough to deliver it: so neither which
+    /// bound answers that row nor how much of this host it takes to get there is a reading of
+    /// how fast this host happens to be running.
     #[test]
     fn no_guest_code_can_begin_its_own_invoke_phase() {
         // The names the host module really carries, read from inside a run: a surface this
@@ -2881,6 +2886,21 @@ mod tests {
 
         /// How many megabytes each half of the memory row below allocates.
         const ALLOCATIONS: usize = 40;
+        /// How long each turn of the handler of the row about the DEADLINE asks to wait for,
+        /// in seconds.
+        ///
+        /// A wait a run asks for is spent on the run's OWN clock ([`Clock::wait`]): against a
+        /// clock the host drives the span is ADVANCED on that clock rather than slept on this
+        /// host, and the host clamps it to what the run has left. So the span that row's
+        /// deadline needs passes because the run asked for it, in a handful of turns, instead
+        /// of being earned by delivering the hundred thousand traced events a span of that
+        /// clock's time otherwise takes — work whose cost is this host's own, and which on a
+        /// loaded host outlasts the backstop this module gives a run to end in
+        /// ([`RUN_ANSWER_CEILING`]) rather than being answered by the run's own bound.
+        ///
+        /// A fraction of the span that row gives the handler, so the hunt below really does
+        /// run turn after turn before the deadline falls.
+        const ASKED_PER_TURN_SECONDS: f64 = 0.25;
         // Every name the host module carries, called by the guest in the hope that one of
         // them starts its invoke phase over.
         let hunts = "_host = __import__('_lambda_host')\n\
@@ -2890,12 +2910,18 @@ mod tests {
                          getattr(_host, name)()\n        \
                      except BaseException:\n            \
                          pass\n";
+        // The wait is the one time-moving call the guest does have, and it moves the run
+        // TOWARDS its deadline rather than past it: the host clamps it to what the run has
+        // left ([`bounded_sleep`]), so a handler that never returns and keeps asking is
+        // answered by its deadline whatever it asked for.
         let hunts_the_deadline = format!(
             "{hunts}\
              _hunt()\n\
+             import time\n\
              def handler(event, context):\n    \
                  while True:\n        \
-                     _hunt()\n"
+                     _hunt()\n        \
+                     time.sleep({ASKED_PER_TURN_SECONDS})\n"
         );
         let hunts_the_baseline = format!(
             "{hunts}\
@@ -2936,13 +2962,14 @@ mod tests {
             let mut tight = budget();
             // The bound each row names has to be the only one that can answer it, and WHICH
             // clock the run's deadline is read against is what settles that: the row about
-            // the DEADLINE is judged against a clock its own traced events drive, so the
-            // deadline falls after a number of events rather than after a span of this
-            // host's time, and the row about the BASELINE against a clock that does not
-            // advance, so no deadline falls for it at all however slowly this host faults
-            // its allocations in. Both are given far more steps than either spends, so the
-            // step budget answers neither, and the row about the deadline is given a ceiling
-            // out of reach, so the memory bound answers it no more than the clock does.
+            // the DEADLINE is judged against a clock the run's own readings and the run's own
+            // waits drive, so its deadline falls where what the RUN did took it rather than
+            // after a span of this host's time, and the row about the BASELINE against a
+            // clock that does not advance, so no deadline falls for it at all however slowly
+            // this host faults its allocations in. Both are given far more steps than either
+            // spends, so the step budget answers neither, and the row about the deadline is
+            // given a ceiling out of reach, so the memory bound answers it no more than the
+            // clock does.
             tight.wall_clock = *wall_clock;
             tight.steps = 2_000_000_000;
             tight.memory_bytes = *memory_bytes;

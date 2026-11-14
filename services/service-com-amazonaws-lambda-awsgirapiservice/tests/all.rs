@@ -329,6 +329,8 @@ mod handler_sdk_service_inventory;
 mod handler_secret_relayed_to_queue;
 #[path = "all/handler_secret_sdk.rs"]
 mod handler_secret_sdk;
+#[path = "all/handler_wait_clamped_to_remaining_time.rs"]
+mod handler_wait_clamped_to_remaining_time;
 #[path = "all/handler_workbook_pipeline.rs"]
 mod handler_workbook_pipeline;
 #[path = "all/inline_archive_request_quota.rs"]
