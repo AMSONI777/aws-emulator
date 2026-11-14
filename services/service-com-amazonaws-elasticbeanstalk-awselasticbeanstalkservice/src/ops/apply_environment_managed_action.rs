@@ -5,8 +5,12 @@
 //! names among the ones `DescribeEnvironmentManagedActions` reports for it, and starts
 //! that action immediately — it moves to `Running` and the clock carries its work out,
 //! after which it is in the environment's managed-action history. An action in any
-//! other state is refused with the modelled invalid-state exception. This is the ONLY
-//! file to touch for this operation.
+//! other state is refused with the modelled invalid-state exception, and an `ActionId`
+//! that resolves to no managed action of the environment with the modelled service
+//! exception, which reports the absence of managed-update data to resolve it against.
+//! A terminated environment is no environment this operation acts on, so naming one is
+//! refused as naming no environment is. This is the ONLY file to touch for this
+//! operation.
 //!
 //! ## Shape of an operation
 //!
@@ -178,7 +182,27 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
                 crate::state::missing_environment_message(Some(environment_id.as_str()), None),
             )
         })?;
-        let environment_name = environment.environment_name.clone();
+        // A managed action is maintenance the service performs ON a live
+        // environment, so an environment whose termination has COMPLETED — its
+        // instances and the rest of its resources gone, with no maintenance left
+        // to schedule for it — is no environment this operation can act on: the
+        // request is refused exactly as one naming no environment at all is,
+        // with the shared not-found wording naming the member the caller used.
+        // The store keeps a terminated record so the lifecycle reads can report
+        // it; this operation does not act on one, the way every other call that
+        // acts on a live environment does not. An environment still TERMINATING
+        // is a different class and deliberately not refused here: it exists,
+        // `DescribeEnvironments` reports it without being asked for deleted
+        // records, so a not-found refusal would deny a resource the service is
+        // still reporting.
+        if environment.is_terminated() {
+            return Err(ApplyEnvironmentManagedActionError::invalid_parameter_value(
+                crate::state::missing_environment_message(
+                    input.environment_id.as_deref(),
+                    input.environment_name.as_deref(),
+                ),
+            ));
+        }
         let subject = environment.event_subject();
 
         // "Applies a scheduled managed action immediately. A managed action can
@@ -200,20 +224,11 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
             {
                 return Err(managed_action_invalid_state());
             }
-            // No action of this environment answers to the id at all: there is
-            // nothing to apply, and the generic modelled service exception says
-            // so rather than reporting an action nobody scheduled.
-            return Err(
-                ApplyEnvironmentManagedActionErrorModeled::ElasticBeanstalkServiceException(
-                    ElasticBeanstalkServiceException {
-                        message: Some(format!(
-                            "No managed action with ActionId = '{}' exists for environment {environment_name}.",
-                            input.action_id
-                        )),
-                    },
-                )
-                .into(),
-            );
+            // No action of this environment answers to the id at all: the
+            // service found no managed-update data to resolve the id against,
+            // and the generic modelled service exception reports exactly that —
+            // the absence of the data, not the one id that was asked for.
+            return Err(managed_update_data_not_found());
         };
         if action.status != crate::state::ACTION_STATUS_SCHEDULED {
             return Err(managed_action_invalid_state());
@@ -250,6 +265,23 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
 /// The operation name this call's events are recorded under — the lower
 /// camel case form this service's event log names an operation in.
 const APPLY_ENVIRONMENT_MANAGED_ACTION_ACTIVITY: &str = "applyEnvironmentManagedAction";
+
+/// The refusal of an `ActionId` this service cannot resolve to a managed action
+/// of the named environment: the environment holds no managed-update data that
+/// answers to it, which is what the generic modelled service exception reports —
+/// "Managed update data not found for this environment."
+///
+/// The sentence is the service's own for that class and carries NO variable
+/// part: the refusal is about the absence of managed-update data to resolve an
+/// id against, so neither the requested id nor the environment is named in it.
+fn managed_update_data_not_found() -> ApplyEnvironmentManagedActionError {
+    ApplyEnvironmentManagedActionErrorModeled::ElasticBeanstalkServiceException(
+        ElasticBeanstalkServiceException {
+            message: Some("Managed update data not found for this environment.".to_string()),
+        },
+    )
+    .into()
+}
 
 /// The refusal of an action that is not `Scheduled` any more: the one this
 /// emulator ever has to answer, since an action is applied, running or already

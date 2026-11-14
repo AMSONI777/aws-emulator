@@ -147,22 +147,26 @@ fn now() -> i64 {
 /// One platform branch of the service's own catalog whose current version
 /// superseded a release — the state a managed platform update starts from — and
 /// the two releases that makes available to an environment.
-struct Branch {
-    branch_name: &'static str,
+///
+/// `pub(crate)` so the refusal-wording suite launches its fixtures on the same
+/// catalog rows rather than reading the catalog a second time.
+pub(crate) struct Branch {
+    pub(crate) branch_name: &'static str,
     /// The release the environment is launched on, by version and by ARN.
     from_version: String,
-    from_arn: String,
+    pub(crate) from_arn: String,
     /// The release the branch publishes above it, by version, by solution stack
     /// name and by ARN — what a platform update moves the environment to.
     to_version: String,
     to_name: String,
-    to_arn: String,
+    pub(crate) to_arn: String,
 }
 
 /// The first `count` branches of the catalog that publish a superseded release,
 /// read off the service's own catalog rather than written out here, so the rules
-/// below are asserted over real catalog rows.
-fn branches(count: usize) -> Vec<Branch> {
+/// below are asserted over real catalog rows. `pub(crate)` for the reason
+/// [`Branch`] is.
+pub(crate) fn branches(count: usize) -> Vec<Branch> {
     let branches: Vec<Branch> = eb::state::SOLUTION_STACKS
         .iter()
         .filter_map(|stack| {
@@ -192,8 +196,8 @@ fn branches(count: usize) -> Vec<Branch> {
 
 /// The awsQuery parameters for the configuration `settings`, each a
 /// `(Namespace, OptionName, Value)` triple, as the `OptionSettings` list carries
-/// them.
-fn option_params(settings: &[(&str, &str, &str)]) -> Vec<(String, String)> {
+/// them. `pub(crate)` so no suite keeps a second copy of this encoding.
+pub(crate) fn option_params(settings: &[(&str, &str, &str)]) -> Vec<(String, String)> {
     let mut params = Vec::new();
     for (position, (namespace, option_name, value)) in settings.iter().enumerate() {
         let at = position + 1;

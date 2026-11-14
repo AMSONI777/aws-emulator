@@ -79,6 +79,8 @@ mod lifecycle;
 mod launch_configuration_options;
 #[path = "all/managed_action_history.rs"]
 mod managed_action_history;
+#[path = "all/managed_action_refusal_messages.rs"]
+mod managed_action_refusal_messages;
 #[path = "all/managed_actions.rs"]
 mod managed_actions;
 #[path = "all/managed_platform_catalog_rules.rs"]

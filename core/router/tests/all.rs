@@ -3954,3 +3954,9 @@ mod cloudformation_provisions_redshift_snapshot_copy_grants;
 // comment is only legal before the first item, so it stands as an ordinary comment — a
 // suite left at the top level of `tests/` fails the build.)
 // (One more fragment of that same header, mid-file and therefore an ordinary comment:
+// suite left at the top level of `tests/` fails the build. (One more fragment of this file's
+// own header, appended here with `//!` by a landing: an inner doc comment is legal only
+// before the first item, so mid-file it is `E0753` and compiles nothing — the rule it
+// repeated stands in the module doc at the HEAD of this file.)
+// this file and for every service crate's `tests/all.rs`. (Appended with `//!` by a
+// landing, and an ordinary comment for the reason the lines above record.)
