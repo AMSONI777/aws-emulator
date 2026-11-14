@@ -81,6 +81,8 @@ mod event_bus_key_policy;
 mod event_bus_lifecycle;
 #[path = "all/event_bus_write_semantics.rs"]
 mod event_bus_write_semantics;
+#[path = "all/fan_out_to_lambda_and_state_machine_targets.rs"]
+mod fan_out_to_lambda_and_state_machine_targets;
 #[path = "all/fifo_queue_target_delivery.rs"]
 mod fifo_queue_target_delivery;
 #[path = "all/fifo_queue_target_parameters.rs"]
