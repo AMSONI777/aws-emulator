@@ -65,6 +65,11 @@ pub use endpoint_security::*;
 /// this module's parts.
 pub mod harvest_destination;
 
+/// Carrying a due harvest OUT: the objects it writes to that destination and the terminal
+/// status the outcome of that write decides. Reached as
+/// `crate::state::harvest_export::…`.
+pub mod harvest_export;
+
 /// The signing name (and ARN service namespace) of this service, from the model's
 /// `awsService.sigv4Name`.
 pub const SIGNING_NAME: &str = "mediapackagev2";
@@ -1555,15 +1560,6 @@ fn later_instant(
     }
 }
 
-/// What a harvest job reports once its scheduled window has passed.
-///
-/// This emulator runs no harvester: nothing reads the endpoint's segments and nothing is
-/// written to the S3 destination, so the job cannot complete. It therefore ends in the
-/// model's own failure status with a reason that says exactly that, rather than reporting
-/// a `COMPLETED` export that never happened.
-pub const HARVESTER_UNAVAILABLE_MESSAGE: &str = "This emulator does not run the MediaPackage \
-    harvester, so no content was exported to the harvest destination";
-
 /// A persisted harvest job: an export of an origin endpoint's content to S3.
 #[derive(Debug, Clone)]
 pub struct HarvestJobRecord {
@@ -1636,17 +1632,35 @@ impl HarvestJobRecord {
         )
     }
 
-    /// Materialise the status changes the CLOCK already owed this job by `at`.
+    /// The instant the clock made this job's EXPORT due, or `None` while it is not owed.
     ///
-    /// Called by the reporting operations as well as the mutating ones, because each of
-    /// these transitions was due at the same instant whether or not anybody read the job.
-    /// BOTH are decided by the window the CALLER scheduled: `QUEUED` -> `IN_PROGRESS`
-    /// when that window begins ([`harvest_job_in_progress_at`]) and `IN_PROGRESS` ->
-    /// `FAILED` when it ends ([`HarvestJobRecord::terminal_at`], and see
-    /// [`HARVESTER_UNAVAILABLE_MESSAGE`]), each no sooner than one
-    /// [`HARVEST_JOB_TRANSITION_MILLIS`] span after the job entered the status it leaves.
+    /// A job owes its export once the window it was scheduled for has ended
+    /// ([`HarvestJobRecord::terminal_at`]) and it is still harvesting; the status it ends
+    /// in is then decided by what that export did, which is why no status is moved here
+    /// (see [`harvest_export`]). The instant is the one the export fell DUE at, so the
+    /// commit that records its outcome carries it rather than the moment a client looked.
+    pub fn export_due_at(
+        &self,
+        at: ::aws_smithy_types::DateTime,
+    ) -> Option<::aws_smithy_types::DateTime> {
+        let terminal_at = self.terminal_at();
+        (self.status == HARVEST_JOB_IN_PROGRESS && at.as_secs_f64() >= terminal_at.as_secs_f64())
+            .then_some(terminal_at)
+    }
+
+    /// Materialise the status change the CLOCK already owed this job by `at`.
     ///
-    /// `at` decides only WHETHER each transition has fallen due; the change is committed
+    /// Called by the reporting operations as well as the mutating ones, because this
+    /// transition was due at the same instant whether or not anybody read the job. It is
+    /// decided by the window the CALLER scheduled: `QUEUED` -> `IN_PROGRESS` when that
+    /// window begins ([`harvest_job_in_progress_at`]), no sooner than one
+    /// [`HARVEST_JOB_TRANSITION_MILLIS`] span after the job was created.
+    ///
+    /// The job's exit from `IN_PROGRESS` is NOT here: the status it ends in reports what
+    /// its export did, so it is recorded by the one path that carries that export out
+    /// ([`harvest_export::settle_due_harvests`]), which calls this first.
+    ///
+    /// `at` decides only WHETHER the transition has fallen due; the change is committed
     /// with the instant it fell DUE, so `ModifiedAt` and the version the job reports are a
     /// function of its own schedule rather than of when a client happened to look.
     pub fn materialise_due_transitions(&mut self, at: ::aws_smithy_types::DateTime) {
@@ -1654,12 +1668,6 @@ impl HarvestJobRecord {
         if self.status == HARVEST_JOB_QUEUED && at.as_secs_f64() >= in_progress_at.as_secs_f64() {
             self.status = HARVEST_JOB_IN_PROGRESS.to_string();
             self.commit(in_progress_at);
-        }
-        let terminal_at = self.terminal_at();
-        if self.status == HARVEST_JOB_IN_PROGRESS && at.as_secs_f64() >= terminal_at.as_secs_f64() {
-            self.status = HARVEST_JOB_FAILED.to_string();
-            self.error_message = Some(HARVESTER_UNAVAILABLE_MESSAGE.to_string());
-            self.commit(terminal_at);
         }
     }
 }

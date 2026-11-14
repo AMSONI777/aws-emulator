@@ -184,6 +184,25 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
             )
             .into());
         };
+        let at = crate::state::now();
+        // What the clock owed first: cancelling judges the status the job HAS at this
+        // instant, not the one it was last written with — so the due status change and the
+        // export a job whose window has ended owes its destination are settled before this
+        // service's store is held (carrying an export out reaches the object store's own
+        // front door).
+        crate::state::harvest_export::settle_due_harvests(
+            &*self.engine,
+            ctx,
+            crate::state::harvest_export::HarvestScope::job(
+                &region,
+                &input.channel_group_name,
+                &input.channel_name,
+                &input.origin_endpoint_name,
+                &input.harvest_job_name,
+            ),
+            at,
+        )
+        .await;
         let mut store = state.lock();
 
         let Some(group) = store.channel_group_mut(&region, &input.channel_group_name) else {
@@ -211,11 +230,6 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
             )
             .into());
         };
-
-        let at = crate::state::now();
-        // What the clock owed first: cancelling judges the status the job HAS at this
-        // instant, not the one it was last written with.
-        job.materialise_due_transitions(at);
 
         // The precondition, judged against the status the job HAS at this instant, by the
         // ONE rule every conditional writer of this service shares

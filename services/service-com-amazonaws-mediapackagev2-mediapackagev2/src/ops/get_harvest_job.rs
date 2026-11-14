@@ -2,12 +2,12 @@
 
 //! @op GetHarvestJob
 //! IMPLEMENTED. Reports one harvest job as it is stored. Reporting, with one exception
-//! the clock licenses: before answering it materialises the status changes that were
-//! already DUE at this instant whether or not anybody read the job (`QUEUED` ->
-//! `IN_PROGRESS` once the caller's scheduled window has begun, and `IN_PROGRESS` ->
-//! `FAILED` once it has ended) — see
-//! `state::HarvestJobRecord::materialise_due_transitions`. It never moves a status because
-//! a read happened.
+//! the clock licenses: before answering it settles the work that was already DUE at this
+//! instant whether or not anybody read the job — `QUEUED` -> `IN_PROGRESS` once the
+//! caller's scheduled window has begun, and, once it has ended, the export the job owes to
+//! its destination and the terminal status that export's outcome decides (see
+//! `state::harvest_export::settle_due_harvests`). It never moves a status because a read
+//! happened.
 //!
 //! A 501 from this operation means "nobody has written it yet", never "the emulator is
 //! broken".
@@ -197,37 +197,50 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
             )
             .into());
         };
-        let mut store = state.lock();
+        // Only what the clock already owed: the transition and the export that were due
+        // at this instant even if nobody had called. Settled before this service's store is
+        // held, because carrying the export out reaches the object store's own front door.
+        crate::state::harvest_export::settle_due_harvests(
+            &*self.engine,
+            ctx,
+            crate::state::harvest_export::HarvestScope::job(
+                &region,
+                &input.channel_group_name,
+                &input.channel_name,
+                &input.origin_endpoint_name,
+                &input.harvest_job_name,
+            ),
+            crate::state::now(),
+        )
+        .await;
 
-        let Some(group) = store.channel_group_mut(&region, &input.channel_group_name) else {
+        let store = state.lock();
+
+        let Some(group) = store.channel_group(&region, &input.channel_group_name) else {
             return Err(GetHarvestJobErrorModeled::ResourceNotFoundException(
                 crate::state::ResourceKind::ChannelGroup.not_found(),
             )
             .into());
         };
-        let Some(channel) = group.channels.get_mut(&input.channel_name) else {
+        let Some(channel) = group.channels.get(&input.channel_name) else {
             return Err(GetHarvestJobErrorModeled::ResourceNotFoundException(
                 crate::state::ResourceKind::Channel.not_found(),
             )
             .into());
         };
-        let Some(endpoint) = channel.origin_endpoints.get_mut(&input.origin_endpoint_name)
+        let Some(endpoint) = channel.origin_endpoints.get(&input.origin_endpoint_name)
         else {
             return Err(GetHarvestJobErrorModeled::ResourceNotFoundException(
                 crate::state::ResourceKind::OriginEndpoint.not_found(),
             )
             .into());
         };
-        let Some(job) = endpoint.harvest_jobs.get_mut(&input.harvest_job_name) else {
+        let Some(job) = endpoint.harvest_jobs.get(&input.harvest_job_name) else {
             return Err(GetHarvestJobErrorModeled::ResourceNotFoundException(
                 crate::state::ResourceKind::HarvestJob.not_found(),
             )
             .into());
         };
-        // Only what the clock already owed: a transition that was due at this instant
-        // even if nobody had called.
-        job.materialise_due_transitions(crate::state::now());
-
         Ok(GetHarvestJobOutput {
             channel_group_name: job.group_name.clone(),
             channel_name: job.channel_name.clone(),

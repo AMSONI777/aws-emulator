@@ -168,3 +168,5 @@ mod harvest_destination;
 mod delete_origin_endpoint_cascade;
 #[path = "all/segment_service_applied_blocks.rs"]
 mod segment_service_applied_blocks;
+#[path = "all/harvest_export.rs"]
+mod harvest_export;

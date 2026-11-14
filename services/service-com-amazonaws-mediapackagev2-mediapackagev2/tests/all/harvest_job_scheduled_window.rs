@@ -15,8 +15,11 @@
 //!    the emulator's own non-zero span.
 //! 2. A job leaves `IN_PROGRESS` at the END of that window, never before, and never
 //!    without having been observable `IN_PROGRESS` — so a window that had already closed
-//!    when the job was created still walks `QUEUED` -> `IN_PROGRESS` -> `FAILED` rather
-//!    than skipping a status.
+//!    when the job was created still walks `QUEUED` -> `IN_PROGRESS` -> a terminal status
+//!    rather than skipping a status. The terminal status is the outcome of the export the
+//!    job owes its destination, and this assembly mounts no object store for that export to
+//!    be written to, so every row here ends `FAILED`; `tests/all/harvest_export.rs` is the
+//!    suite for the export and the `COMPLETED` it earns.
 //! 3. The reporting operations (`GetHarvestJob`, `ListHarvestJobs`) only materialise what
 //!    the clock already owed: while the status is unchanged, repeated reads report the same
 //!    `ETag` and `ModifiedAt`, and the two readers never disagree about the status.
@@ -34,7 +37,7 @@ use serde_json::{json, Value};
 // (`rejection_rule_and_negative_paths`).
 use crate::channel_lifecycle::Emulator;
 use crate::rejection_rule_and_negative_paths::{epoch_seconds_from_now, harvest_body};
-use service_com_amazonaws_mediapackagev2_mediapackagev2::state::HARVESTER_UNAVAILABLE_MESSAGE;
+use service_com_amazonaws_mediapackagev2_mediapackagev2::state::harvest_destination::writable_destination_requirement;
 
 /// The hierarchy every row hangs its job off, all matching the model's `ResourceName`
 /// pattern `^[a-zA-Z0-9_-]+$`.
@@ -390,11 +393,14 @@ async fn a_harvest_job_walks_every_status_of_the_window_it_was_scheduled_for() {
             "case {label:?}: the job must be observed in each status in turn, saw {seen:?}"
         );
 
-        // The failure says what did not happen, and is reported by both readers.
+        // The failure says what the destination requirement the harvest could not meet is,
+        // and is reported by both readers: this assembly mounts no object store for the
+        // export to be written to, so the job's output is not where the submission said it
+        // would be (`tests/all/harvest_export.rs` is the suite for the export itself).
         let failed = read_job(&emulator, label).await;
         assert_eq!(
             member(&failed, "ErrorMessage"),
-            HARVESTER_UNAVAILABLE_MESSAGE,
+            writable_destination_requirement(),
             "case {label:?}: a job that ended must report why, got {failed}"
         );
         assert_eq!(

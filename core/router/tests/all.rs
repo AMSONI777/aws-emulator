@@ -3342,6 +3342,9 @@ mod apigateway_wafv2_waf_log_destination_gate;
 // were landing at once: it belongs at the head of this file or nowhere, so it is a line
 // comment — `all/all_rs_declares_each_suite_once.rs` is what checks this file and every
 // service crate's `tests/all.rs`.)
+// (One more line of that same header fragment, appended here as an INNER doc comment: a
+// `//!` line past the first item of this crate root is `E0753`, so it stands as an ordinary
+// comment. The rule it repeats is in the module doc at the HEAD of this file.)
 // this tail: two branches landing in the same window declared it here as well, which compiled
 // (One more line of that same header fragment, which a concurrent landing appended here
 // typed with `//!`: an inner doc comment is legal only before the first item of a crate
@@ -3391,6 +3394,8 @@ mod all_rs_inner_doc_comments_precede_the_first_item;
 // reason the lines above record.)
 // leaving a note here. (Mid-file, so a plain comment: an inner doc comment is only
 // accepted before the first item of a module.)
+// (Another line of that same header fragment, appended as an INNER doc comment and left
+// here as an ordinary comment for the reason the lines above record.)
 // (One more fragment of that same header, appended here with `//!`: an inner doc comment
 // is legal only before the first item of a crate root, so one in this tail is `E0753` and
 // compiles no suite of this target. The rule it repeated — that
@@ -3658,6 +3663,11 @@ mod cloudformation_provisions_appsync_resources;
 // leaving a note here. (Ordinary comments: an inner doc comment `//!` is only legal
 // before the first item of a crate root, so landing these lines here as `//!` is `E0753`
 // and compiles no suite of this target.)
+// suite left at the top level of `tests/` fails the build. (A fragment of this file's own
+// header, landed down here: past the first item a `//!` line is `E0753`, so it stands as an
+// ordinary comment.)
+// this file and for every service crate's `tests/all.rs`. (Same appended header fragment,
+// an ordinary comment for the reason the lines above record.)
 // suite left at the top level of `tests/` fails the build. (An ordinary comment: this is a
 // fragment of this file's own header that a landing appended here, and an inner doc comment
 // is only legal before the first item.)

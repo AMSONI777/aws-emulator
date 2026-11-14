@@ -4,8 +4,9 @@
 //! IMPLEMENTED. Pages over the harvest jobs of one channel group in a stable order,
 //! narrowed by the filters the request carries: `channelName` and `originEndpointName`
 //! restrict the walk to one branch of the hierarchy, and `includeStatus` keeps only the
-//! jobs in that status. Like `GetHarvestJob` it first materialises the status changes
-//! the clock already owed, so a status filter is applied to the statuses the jobs HAVE.
+//! jobs in that status. Like `GetHarvestJob` it first settles what the clock already owed
+//! each job of the group — its due status change and the export a job whose window has
+//! ended owes its destination — so a status filter is applied to the statuses the jobs HAVE.
 //!
 //! A 501 from this operation means "nobody has written it yet", never "the emulator is
 //! broken".
@@ -201,24 +202,30 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
             )
             .into());
         };
-        let mut store = state.lock();
         let at = crate::state::now();
+        // The status a job HAS at this instant is what the filter is applied to, so what
+        // the clock already owed every job of this group is settled first: the due status
+        // change, and the export a job whose window has ended owes its destination. Settled
+        // before this service's store is held, because carrying an export out reaches the
+        // object store's own front door.
+        crate::state::harvest_export::settle_due_harvests(
+            &*self.engine,
+            ctx,
+            crate::state::harvest_export::HarvestScope::group(
+                &region,
+                &input.channel_group_name,
+            ),
+            at,
+        )
+        .await;
+        let store = state.lock();
 
-        let Some(group) = store.channel_group_mut(&region, &input.channel_group_name) else {
+        let Some(group) = store.channel_group(&region, &input.channel_group_name) else {
             return Err(ListHarvestJobsErrorModeled::ResourceNotFoundException(
                 crate::state::ResourceKind::ChannelGroup.not_found(),
             )
             .into());
         };
-        // The status a job HAS at this instant is what the filter is applied to, so the
-        // transitions the clock already owed are materialised before anything is read.
-        for channel in group.channels.values_mut() {
-            for endpoint in channel.origin_endpoints.values_mut() {
-                for job in endpoint.harvest_jobs.values_mut() {
-                    job.materialise_due_transitions(at);
-                }
-            }
-        }
 
         // The page size every paged list in this service resolves through the one shared
         // resolver, so the bounds and the default cannot drift between two lists.

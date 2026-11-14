@@ -29,10 +29,10 @@
 //!
 //! The job is created `QUEUED` and the CLOCK owes it `IN_PROGRESS` once the window the
 //! caller scheduled has begun (see
-//! `state::HarvestJobRecord::materialise_due_transitions`). This emulator runs no
-//! harvester, so once that window ends the job reaches the model's `FAILED` status with a
-//! reason that says exactly that, rather than claiming a `COMPLETED` export nothing
-//! performed.
+//! `state::HarvestJobRecord::materialise_due_transitions`). Once that window ends the job
+//! owes its EXPORT: the manifests it names are written beneath the destination's path and
+//! the job reaches `COMPLETED`, or `FAILED` where the destination could not take them (see
+//! `state::harvest_export`).
 //!
 //! A 501 from this operation means "nobody has written it yet", never "the emulator is
 //! broken".

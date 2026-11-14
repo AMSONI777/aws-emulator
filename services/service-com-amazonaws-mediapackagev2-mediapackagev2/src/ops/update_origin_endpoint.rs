@@ -380,6 +380,26 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
             )
             .into());
         };
+        // The status each of this endpoint's harvest jobs HAS at this instant is what the
+        // manifest-reference rule below is about, so what the clock already owed them is
+        // settled FIRST: the due status change, and the export a job whose window has ended
+        // owes its destination. Each was owed at the same instant whether or not this update
+        // arrived, exactly as the reporting operations settle them, and it is done before
+        // this service's store is held because carrying an export out reaches the object
+        // store's own front door.
+        let now = crate::state::now();
+        crate::state::harvest_export::settle_due_harvests(
+            &*self.engine,
+            ctx,
+            crate::state::harvest_export::HarvestScope::endpoint(
+                &region,
+                &input.channel_group_name,
+                &input.channel_name,
+                &input.origin_endpoint_name,
+            ),
+            now,
+        )
+        .await;
         let mut store = state.lock();
 
         // The manifest-set rules are about the request alone, so they are decided first
@@ -593,14 +613,6 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
             .map(|manifest| crate::state::stored_mss_manifest(manifest, at))
             .collect();
 
-        let now = crate::state::now();
-        // The status each of the endpoint's harvest jobs HAS at this instant is what the
-        // rule below is about, so the transitions the clock already owed them are
-        // materialised first — each was due at the same instant whether or not this
-        // update arrived, exactly as the reporting operations materialise them.
-        for job in endpoint.harvest_jobs.values_mut() {
-            job.materialise_due_transitions(now);
-        }
         // A harvest job of this endpoint that has not finished harvests the manifests it
         // named, and those names resolve against the manifests the endpoint publishes —
         // the reference `CreateHarvestJob` refuses to establish against a manifest that is
