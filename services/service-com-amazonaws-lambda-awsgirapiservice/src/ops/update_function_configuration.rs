@@ -636,6 +636,34 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
             }
         }
 
+        // "The dead-letter queue for failed asynchronous invocations" (`DeadLetterConfig`)
+        // names the queue or topic the event of an invocation Lambda gave up on is written
+        // to, and Lambda writes it acting as the function's OWN execution role, so a target
+        // that role may not write is a dead-letter queue no event could ever reach: it is
+        // refused here, before the configuration is written, rather than left to
+        // asynchronous invocations whose events are silently lost (see
+        // [`crate::state::dead_letter_target`], including the cases that show nothing about
+        // the role and refuse nothing). Both halves of the pair are the ones the function
+        // would RUN with: the role and the target this request installs, or the stored ones
+        // it leaves alone — so the gate is passed by every request that states either half.
+        if input.dead_letter_config.is_some() || input.role.is_some() {
+            let role = input
+                .role
+                .clone()
+                .unwrap_or_else(|| record.config.role.clone());
+            let dead_letter_config = input
+                .dead_letter_config
+                .clone()
+                .or_else(|| record.config.dead_letter_config.clone());
+            if let Some(message) = crate::state::unwritable_dead_letter_target(
+                &*self.engine,
+                &role,
+                dead_letter_config.as_ref(),
+            ) {
+                return Err(invalid_parameter(message));
+            }
+        }
+
         // SnapStart "create[s] a snapshot of the initialized execution environment when
         // you publish a function version", which only a managed runtime carrying the
         // snapshot/restore machinery can do, so a request applying it to any other runtime

@@ -565,6 +565,23 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
             }
         }
 
+        // "The dead-letter queue for failed asynchronous invocations" (`DeadLetterConfig`)
+        // names the queue or topic the event of an invocation Lambda gave up on is written
+        // to — written by Lambda acting as the function's OWN execution role, so a target
+        // that role may not write is a dead-letter queue no event could ever reach. It is
+        // refused here, before anything is stored, rather than left to asynchronous
+        // invocations whose events are silently lost: the same reading of a destination the
+        // execution role has to be able to write that every other call stating one applies
+        // (see [`crate::state::dead_letter_target`], including the cases that show nothing
+        // about the role and refuse nothing).
+        if let Some(message) = crate::state::unwritable_dead_letter_target(
+            &*self.engine,
+            &input.role,
+            input.dead_letter_config.as_ref(),
+        ) {
+            return Err(invalid_parameter(message));
+        }
+
         let mut store = state.lock();
 
         if store.functions.contains_key(&reference.name) {

@@ -95,6 +95,8 @@ mod concurrency_quota_refusal_rules;
 mod container_image_pull_permission;
 #[path = "all/control_plane_request_rules.rs"]
 mod control_plane_request_rules;
+#[path = "all/dead_letter_config_execution_role_permissions.rs"]
+mod dead_letter_config_execution_role_permissions;
 #[path = "all/durable_execution_bound.rs"]
 mod durable_execution_bound;
 #[path = "all/durable_execution_history.rs"]

@@ -3948,3 +3948,5 @@ mod cloudformation_provisions_redshift_snapshot_copy_grants;
 // suite left at the top level of `tests/` fails the build. (An ordinary comment: a `//!`
 // line past the first item is `E0753` and compiles no suite in this target.)
 // this file and for every service crate's `tests/all.rs`. (An ordinary comment: a `//!`
+// comment is only legal before the first item, so a `//!` line in this appended fragment is
+// the lines above record: a `//!` line past the first item is `E0753`.)

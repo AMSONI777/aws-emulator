@@ -337,6 +337,14 @@ pub use event_invoke_config::{
     unwritable_destination, EventInvokeConfigRecord,
 };
 
+/// A function's DEAD-LETTER TARGET is a destination of that same kind — the one a failed
+/// asynchronous invocation's event is written to — so whether the function's execution role
+/// lets Lambda write it is the reading above asked about that target, and lives in
+/// [`dead_letter_target`] beside it. It is re-exported here for the same reason: the two
+/// calls that write a `DeadLetterConfig` name it as `crate::state::…`.
+pub mod dead_letter_target;
+pub use dead_letter_target::{dead_letter_targets, unwritable_dead_letter_target};
+
 /// What the account's CONCURRENCY does with no client action at all — the series Lambda
 /// publishes about how much of the Region's capacity the account has claimed, and how much
 /// of its unreserved pool is in use — lives in [`concurrency_metering`], beside the
