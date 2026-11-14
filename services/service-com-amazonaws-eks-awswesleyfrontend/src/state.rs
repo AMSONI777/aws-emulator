@@ -4704,12 +4704,17 @@ use crate::ops::types::{
 /// service: it routes in process, so no network client is configured here and
 /// this service names no other service's crate. `region` is the request's own
 /// signing region.
+///
+/// The first form takes the handler's `ctx`. The second takes a CALLBACK handle
+/// directly, for the code that has no operation context to read one off — a
+/// cluster's own Kubernetes API address, which the control plane opened and which
+/// exports its audit records long after the create returned.
 macro_rules! callback_client {
-    ($sdk:ident, $ctx:expr, $endpoint:expr, $region:expr) => {{
+    ($sdk:ident, callback = $callback:expr, $endpoint:expr, $region:expr) => {{
         let config = ::$sdk::Config::builder()
             .behavior_version(::$sdk::config::BehaviorVersion::latest())
-            .http_client($ctx.callback().http_client())
-            .credentials_provider($ctx.callback().aws_credentials_provider())
+            .http_client($callback.http_client())
+            .credentials_provider($callback.aws_credentials_provider())
             .region(::$sdk::config::Region::new($region.to_string()))
             .endpoint_url($endpoint)
             // The transport is in-process: there is nothing to retry, time out
@@ -4724,6 +4729,9 @@ macro_rules! callback_client {
             )
             .build();
         ::$sdk::Client::from_conf(config)
+    }};
+    ($sdk:ident, $ctx:expr, $endpoint:expr, $region:expr) => {{
+        callback_client!($sdk, callback = $ctx.callback(), $endpoint, $region)
     }};
 }
 
@@ -4754,16 +4762,19 @@ mod control_plane_logs;
 mod derived_identifiers;
 mod eks_anywhere_subscriptions;
 mod fargate_networking;
-// The three slices of the cluster's DATA plane are modules of their own rather
+// The slices of the cluster's DATA plane are modules of their own rather
 // than glob re-exports: the Kubernetes API surface names its own `serve` and
 // `publish`, which say what they are only under the module that owns them.
 pub mod kubernetes_api;
+pub mod kubernetes_audit;
+pub mod kubernetes_authentication;
 pub mod kubernetes_config_maps;
 pub mod kubernetes_lists;
 pub mod kubernetes_metadata;
 pub mod kubernetes_nodes;
 pub mod kubernetes_objects;
 pub mod kubernetes_pod_spec;
+pub mod kubernetes_rbac;
 mod nodegroup_capacity;
 mod nodegroups;
 mod pass_role;

@@ -149,6 +149,8 @@ mod insights_listing;
 mod insights_refresh;
 #[path = "all/kubernetes_api.rs"]
 mod kubernetes_api;
+#[path = "all/kubernetes_rbac.rs"]
+mod kubernetes_rbac;
 #[path = "all/kubernetes_list_chunking.rs"]
 mod kubernetes_list_chunking;
 #[path = "all/kubernetes_pod_and_config_map_objects.rs"]

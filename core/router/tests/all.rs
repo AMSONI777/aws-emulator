@@ -3402,3 +3402,13 @@ mod cloudformation_s3tables_table_bucket_maintenance;
 // this file and for every service crate's `tests/all.rs`. (Ordinary comment: an inner doc
 // comment appended after an item is `E0753`.)
 // first item, so a `//!` line in this appended tail is `E0753` and compiles no suite.)
+// Declared in this same head region, for the reason the note above records: a cluster's
+// Kubernetes API server, the access entry that maps an IAM principal onto it, the RBAC
+// objects that decide a request and the audit records it leaves are observable only with
+// IAM, STS, EKS and CloudWatch Logs on one engine.
+#[path = "all/eks_kubernetes_api_rbac_audit.rs"]
+mod eks_kubernetes_api_rbac_audit;
+// once appended a second declaration of each here, which compiled neither, so the
+// duplicates are removed and the first declaration of each stands.)
+// branches were landing at once, which is a redefinition that compiled neither, so the
+// duplicate is removed and the first declaration stands.)

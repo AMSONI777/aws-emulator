@@ -211,61 +211,11 @@ pub async fn export_control_plane_logs(
     };
     let logs = callback_client!(aws_sdk_cloudwatchlogs, ctx, endpoint, region);
     let log_group = cluster_log_group_name(&export.cluster_name);
-    let created = logs
-        .create_log_group()
-        .log_group_name(&log_group)
-        .send()
-        .await;
-    match created {
-        Ok(_) => {}
-        // The group is already there — this cluster has exported before, or the account
-        // created it itself — which is exactly the state this step owes the caller.
-        Err(error)
-            if error
-                .as_service_error()
-                .is_some_and(|service| service.is_resource_already_exists_exception()) => {}
-        Err(error) => {
-            ::tracing::warn!(
-                cluster_name = %export.cluster_name,
-                %log_group,
-                error = %::aws_smithy_types::error::display::DisplayErrorContext(&error),
-                "the cluster's control plane log group could not be created, so its \
-                 control plane logs are not exported"
-            );
-            return;
-        }
-    }
-
-    let exported_at = epoch_millis(SystemTime::now());
+    let exported_at = SystemTime::now();
     for log_type in &export.log_types {
         let Some(log_stream) = control_plane_log_stream_name(log_type, &export.resource_id) else {
             continue;
         };
-        let opened = logs
-            .create_log_stream()
-            .log_group_name(&log_group)
-            .log_stream_name(&log_stream)
-            .send()
-            .await;
-        match opened {
-            Ok(_) => {}
-            // The stream this component already exports under: a later export appends to
-            // it rather than opening a second one.
-            Err(error)
-                if error
-                    .as_service_error()
-                    .is_some_and(|service| service.is_resource_already_exists_exception()) => {}
-            Err(error) => {
-                ::tracing::warn!(
-                    cluster_name = %export.cluster_name,
-                    %log_group,
-                    %log_stream,
-                    error = %::aws_smithy_types::error::display::DisplayErrorContext(&error),
-                    "the log stream of this control plane log type could not be opened"
-                );
-                continue;
-            }
-        }
         let Some(component) = control_plane_component(log_type) else {
             continue;
         };
@@ -276,29 +226,126 @@ pub async fn export_control_plane_logs(
             export.version.as_deref(),
             export.platform_version.as_deref(),
         );
-        let Ok(event) = ::aws_sdk_cloudwatchlogs::types::InputLogEvent::builder()
-            .timestamp(exported_at)
-            .message(record)
-            .build()
-        else {
-            continue;
-        };
-        let delivered = logs
-            .put_log_events()
-            .log_group_name(&log_group)
-            .log_stream_name(&log_stream)
-            .log_events(event)
-            .send()
-            .await;
-        if let Err(error) = delivered {
+        deliver_log_record(
+            &logs,
+            &export.cluster_name,
+            &log_group,
+            &log_stream,
+            record,
+            exported_at,
+        )
+        .await;
+    }
+}
+
+/// Deliver ONE record to `log_stream` of `log_group`: create the group if CloudWatch
+/// Logs does not hold it yet, open the stream if it is not open, then put the event.
+///
+/// The ONE delivery sequence this service exports a control plane log record through —
+/// the per-type record of a `logging` change ([`export_control_plane_logs`]) and the
+/// per-request audit record of a cluster's API server
+/// ([`super::kubernetes_audit::AuditDelivery`]) — so the two cannot drift in which
+/// failures they tolerate. A group or a stream that is already there is exactly the
+/// state the step owes; anything else is reported in this service's own tracing and
+/// ends the delivery, because the export is best effort and never fatal.
+pub(super) async fn deliver_log_record(
+    logs: &::aws_sdk_cloudwatchlogs::Client,
+    cluster_name: &str,
+    log_group: &str,
+    log_stream: &str,
+    record: String,
+    at: SystemTime,
+) {
+    let created = logs
+        .create_log_group()
+        .log_group_name(log_group)
+        .send()
+        .await;
+    if let Err(error) = created {
+        if !already_there(&error) {
             ::tracing::warn!(
-                cluster_name = %export.cluster_name,
+                %cluster_name,
+                %log_group,
+                error = %::aws_smithy_types::error::display::DisplayErrorContext(&error),
+                "the cluster's control plane log group could not be created, so this \
+                 record is not exported"
+            );
+            return;
+        }
+    }
+    let opened = logs
+        .create_log_stream()
+        .log_group_name(log_group)
+        .log_stream_name(log_stream)
+        .send()
+        .await;
+    if let Err(error) = opened {
+        if !already_there(&error) {
+            ::tracing::warn!(
+                %cluster_name,
                 %log_group,
                 %log_stream,
                 error = %::aws_smithy_types::error::display::DisplayErrorContext(&error),
-                "this control plane log type's record could not be delivered"
+                "the log stream this record exports under could not be opened"
             );
+            return;
         }
+    }
+    let Ok(event) = ::aws_sdk_cloudwatchlogs::types::InputLogEvent::builder()
+        .timestamp(epoch_millis(at))
+        .message(record)
+        .build()
+    else {
+        return;
+    };
+    let delivered = logs
+        .put_log_events()
+        .log_group_name(log_group)
+        .log_stream_name(log_stream)
+        .log_events(event)
+        .send()
+        .await;
+    if let Err(error) = delivered {
+        ::tracing::warn!(
+            %cluster_name,
+            %log_group,
+            %log_stream,
+            error = %::aws_smithy_types::error::display::DisplayErrorContext(&error),
+            "this control plane log record could not be delivered"
+        );
+    }
+}
+
+/// Whether a create CloudWatch Logs refused is one it refused because the group or the
+/// stream is ALREADY there, which is the state the delivery owes either way.
+fn already_there<Error, Response>(
+    error: &::aws_sdk_cloudwatchlogs::error::SdkError<Error, Response>,
+) -> bool
+where
+    Error: AlreadyExists,
+{
+    error
+        .as_service_error()
+        .is_some_and(AlreadyExists::is_already_there)
+}
+
+/// The one question [`already_there`] asks of the two errors it is given, each of which
+/// models the conflict as its own variant.
+pub(super) trait AlreadyExists {
+    fn is_already_there(&self) -> bool;
+}
+
+impl AlreadyExists for ::aws_sdk_cloudwatchlogs::operation::create_log_group::CreateLogGroupError {
+    fn is_already_there(&self) -> bool {
+        self.is_resource_already_exists_exception()
+    }
+}
+
+impl AlreadyExists
+    for ::aws_sdk_cloudwatchlogs::operation::create_log_stream::CreateLogStreamError
+{
+    fn is_already_there(&self) -> bool {
+        self.is_resource_already_exists_exception()
     }
 }
 
@@ -306,7 +353,7 @@ pub async fn export_control_plane_logs(
 ///
 /// An instant before the epoch, which no log event can carry, clamps to the epoch rather
 /// than wrapping.
-fn epoch_millis(at: SystemTime) -> i64 {
+pub(super) fn epoch_millis(at: SystemTime) -> i64 {
     at.duration_since(::std::time::SystemTime::UNIX_EPOCH)
         .map(|since| i64::try_from(since.as_millis()).unwrap_or(i64::MAX))
         .unwrap_or_default()

@@ -9,10 +9,12 @@
 //! be served. That API is not in the AWS Smithy surface, so the shapes here are
 //! the Kubernetes ones (`Pod`, `ServiceAccount`, `Namespace`, `ConfigMap`,
 //! `TokenRequest`, `Status`) written as the JSON documents a client sends and
-//! reads.
+//! reads; the objects of the `rbac.authorization.k8s.io` group, and the decision they
+//! make about a request, live in [`super::kubernetes_rbac`].
 //!
 //! Everything a request is answered with is computed from these records: a pod is
-//! reported with the `metadata.uid` the create minted for it, a token is issued
+//! reported with the `metadata.uid` the create minted for it, a config map is
+//! reported with the entries its create or its update wrote, a token is issued
 //! only for a service account the cluster holds and only bound to a pod it holds,
 //! and a read of an object that was never created is the Kubernetes not-found
 //! `Status`. Nothing is derived from the request's own text.
@@ -26,6 +28,8 @@ use super::kubernetes_lists::{listed, ListRequest};
 use super::kubernetes_metadata::ObjectMetadata;
 use super::kubernetes_pod_spec::admitted_pod_spec;
 use super::*;
+
+use super::kubernetes_rbac::RbacScope;
 
 /// The namespaces a cluster's API server starts with, as Kubernetes creates them
 /// with the cluster: the one objects are created in by default, and the three the
@@ -96,6 +100,11 @@ pub struct ClusterObjects {
     /// The cluster's namespaces by name. A `BTreeMap` so a listing walks a
     /// stable, sorted order; bounded by [`MAX_NAMESPACES_PER_CLUSTER`].
     pub namespaces: BTreeMap<String, NamespaceObject>,
+    /// The cluster-scoped RBAC objects it holds — its `ClusterRole`s and
+    /// `ClusterRoleBinding`s — keyed by resource and name
+    /// ([`super::kubernetes_rbac`]). Bounded by
+    /// [`super::kubernetes_rbac::MAX_RBAC_OBJECTS_PER_SCOPE`] per resource.
+    pub cluster_rbac: RbacScope,
 }
 
 /// One namespace and the objects inside it.
@@ -111,8 +120,12 @@ pub struct NamespaceObject {
     /// The pods of this namespace, by name. Bounded by
     /// [`MAX_PODS_PER_NAMESPACE`].
     pub pods: BTreeMap<String, PodObject>,
+    /// The namespaced RBAC objects it holds — its `Role`s and `RoleBinding`s —
+    /// keyed by resource and name ([`super::kubernetes_rbac`]). Bounded by
+    /// [`super::kubernetes_rbac::MAX_RBAC_OBJECTS_PER_SCOPE`] per resource.
+    pub rbac: RbacScope,
     /// The ConfigMaps of this namespace, by name. Bounded by
-    /// [`super::MAX_CONFIG_MAPS_PER_NAMESPACE`]; the objects and the answers
+    /// [`MAX_CONFIG_MAPS_PER_NAMESPACE`]; the objects and the answers
     /// about them live in [`super::kubernetes_config_maps`].
     pub config_maps: BTreeMap<String, ConfigMapObject>,
 }
@@ -140,6 +153,7 @@ impl NamespaceObject {
             .collect(),
             pods: BTreeMap::new(),
             config_maps: BTreeMap::new(),
+            rbac: RbacScope::new(),
         }
     }
 }
@@ -437,14 +451,18 @@ impl ClusterObjects {
                 NamespaceObject::new(ObjectMetadata::default(), now),
             );
         }
-        Self { namespaces }
+        Self {
+            namespaces,
+            cluster_rbac: BTreeMap::new(),
+        }
     }
 
     /// The namespace `name`, or the Kubernetes not-found `Status` for one this
     /// cluster does not hold.
     ///
     /// `pub(super)` so the modules holding the objects INSIDE a namespace
-    /// ([`super::kubernetes_config_maps`]) resolve it the same way.
+    /// ([`super::kubernetes_config_maps`], [`super::kubernetes_rbac`]) resolve it the
+    /// same way.
     pub(super) fn namespace(&self, name: &str) -> Result<&NamespaceObject, ApiRefusal> {
         self.namespaces
             .get(name)
@@ -973,6 +991,37 @@ impl ApiRefusal {
         }
     }
 
+    /// The `Status` a request RBAC does not admit is answered with:
+    /// `403 Forbidden`, carrying the sentence the authorizer words it with
+    /// ([`super::kubernetes_rbac::RequestAttributes::forbidden`] builds it) and the
+    /// resource it addressed.
+    #[must_use]
+    pub fn forbidden(message: impl Into<String>, resource: Option<(String, String)>) -> Self {
+        Self {
+            status: 403,
+            reason: "Forbidden",
+            message: message.into(),
+            resource,
+        }
+    }
+
+    /// The `Status` a request whose credential the cluster maps to no Kubernetes
+    /// identity is answered with: `401 Unauthorized`, in the API server's own
+    /// wording.
+    ///
+    /// An IAM principal reaches a cluster's Kubernetes API through the access entry
+    /// that maps it; a principal no entry of this cluster names authenticates as
+    /// nobody, which is what this answers.
+    #[must_use]
+    pub fn unauthorized() -> Self {
+        Self {
+            status: 401,
+            reason: "Unauthorized",
+            message: "Unauthorized".to_string(),
+            resource: None,
+        }
+    }
+
     /// The `Status` a request to a path the API server does not serve is answered
     /// with: `404 NotFound` naming the path, as the API server answers one.
     #[must_use]
@@ -1027,6 +1076,33 @@ impl ApiRefusal {
             "code": self.status,
         })
     }
+}
+
+/// The `Status` a delete this API server served is answered with: the `Success`
+/// `Status` the Kubernetes API answers a delete of these resources, naming what was
+/// given up.
+///
+/// ONE shape for every delete this server serves, whichever group the resource belongs
+/// to, so two deletes of one API cannot answer differently.
+#[must_use]
+pub(super) fn deleted_status_json(
+    resource: &str,
+    name: &str,
+    api_group: Option<&str>,
+) -> ::serde_json::Value {
+    let mut details = ::serde_json::Map::new();
+    details.insert("name".to_string(), ::serde_json::json!(name));
+    details.insert("kind".to_string(), ::serde_json::json!(resource));
+    if let Some(api_group) = api_group {
+        details.insert("group".to_string(), ::serde_json::json!(api_group));
+    }
+    ::serde_json::json!({
+        "kind": "Status",
+        "apiVersion": CORE_API_VERSION,
+        "metadata": {},
+        "status": "Success",
+        "details": ::serde_json::Value::Object(details),
+    })
 }
 
 /// The `metadata.name` a manifest names, or the `Status` the API server answers a

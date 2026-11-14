@@ -43,13 +43,35 @@
 //!
 //! # What answers the request
 //!
-//! The objects ([`super::kubernetes_objects`]) and nothing else: every answer is
-//! computed from the namespaces, service accounts and pods the cluster holds. The
-//! one write a request makes is the object it creates. A projected service account
-//! token is minted by the EKS Auth plane ([`super::pod_identity_plane`]), because
-//! that plane is what answers for the token afterwards — the cluster's record of
-//! what it issued is what `AssumeRoleForPodIdentity` resolves a presented token
-//! against, so there is one registry rather than two.
+//! The cluster's own state and nothing else. A request is served the way an API
+//! server serves one, in that order:
+//!
+//! 1. the credential the request presents names an IAM principal, and the cluster's
+//!    ACCESS ENTRY for that principal is the Kubernetes identity the request is
+//!    served as ([`super::kubernetes_authentication`]); a principal no entry names
+//!    authenticates as nobody;
+//! 2. the cluster's RBAC objects and the access policies its entry associates decide
+//!    whether that identity may do what the request addresses
+//!    ([`super::kubernetes_rbac`]); one that may not is refused before anything is
+//!    read or written;
+//! 3. the objects ([`super::kubernetes_objects`]) answer it: every answer is computed
+//!    from the namespaces, service accounts, pods and RBAC objects the cluster holds,
+//!    and the one write a request makes is the object it creates. A projected service
+//!    account token is minted by the EKS Auth plane
+//!    ([`super::pod_identity_plane`]), because that plane is what answers for the
+//!    token afterwards — the cluster's record of what it issued is what
+//!    `AssumeRoleForPodIdentity` resolves a presented token against, so there is one
+//!    registry rather than two;
+//! 4. the request is RECORDED in the cluster's audit log
+//!    ([`super::kubernetes_audit`]) while the `audit` control plane log type is
+//!    enabled, naming the identity it was served as and the decision taken on it.
+//!
+//! Each of those steps takes this service's store for its own read and GIVES IT UP
+//! again, deliberately: resolving the credential asks the other services' stores and
+//! the audit record is delivered over the in-process callback, and neither may run
+//! with this store held. The authorizer therefore decides on the state it read and the
+//! routing re-reads it, which is what an API server does with two sequential reads
+//! anyway.
 //!
 //! Dropping the handle closes the port and severs what is in flight, which is what
 //! `DeleteCluster` does: a deleted cluster stops answering.
@@ -66,8 +88,11 @@ use ::service_common::in_band_tls::{Prefixed, TLS_RECORD_FIRST_BYTE};
 use ::tokio::io::AsyncReadExt as _;
 use ::tokio::sync::{OwnedSemaphorePermit, Semaphore};
 
+use super::kubernetes_audit::{AuditDelivery, AuditedRequest, ClusterAuditLog};
+use super::kubernetes_authentication::{self as authentication, ApiServerPrincipals};
 use super::kubernetes_lists::ListRequest;
 use super::kubernetes_objects::{ApiRefusal, ClusterObjects};
+use super::kubernetes_rbac::{self as rbac, RbacResource};
 use super::pod_identity_plane::AuthPlane;
 use super::ComAmazonawsEksAwswesleyfrontendState as ServiceStore;
 
@@ -129,6 +154,13 @@ pub struct KubernetesApiPlane {
     authority: Option<String>,
     /// The Kubernetes objects this cluster holds.
     pub objects: ClusterObjects,
+    /// The registries that answer which IAM principal a credential presented at
+    /// this address speaks for.
+    principals: ApiServerPrincipals,
+    /// Where this cluster's audit records go, which is the cluster's own control
+    /// plane log group. Every request is recorded there while the `audit` log type
+    /// is enabled, and none while it is not.
+    audit: Option<ClusterAuditLog>,
     /// The TLS server this address answers a `https://` client with: the
     /// certificate the cluster's own certificate authority issued, and its key.
     /// `None` when the material could not be loaded, in which case a client that
@@ -214,6 +246,7 @@ pub async fn publish<Eng: Send + Sync + 'static>(
     state: &::engine::ServiceState<ServiceStore>,
     key: &(String, String),
     identity: super::ApiServerIdentity,
+    callback: ::smithy_server_runtime::EmbeddedEmulator,
     now: SystemTime,
 ) {
     if state.lock().kubernetes_api.contains_key(key) {
@@ -236,6 +269,14 @@ pub async fn publish<Eng: Send + Sync + 'static>(
     let plane = KubernetesApiPlane {
         authority,
         objects: ClusterObjects::for_new_cluster(now),
+        // The identities of the account, as the other services of this same
+        // emulator hold them: a credential presented here is resolved against the
+        // very records they wrote.
+        principals: ApiServerPrincipals::of(engine),
+        // The audit log of this cluster, reached over the callback into the emulator
+        // the create is running within — the same seam every other cross-service
+        // call of this service goes over.
+        audit: Some(ClusterAuditLog::new(callback, &key.0, &key.1)),
         tls,
         _listener: listener,
     };
@@ -441,20 +482,35 @@ async fn answer(
 ) -> ::http::Response<Full<Bytes>> {
     let method = request.method().clone();
     let path = request.uri().path().to_string();
+    // The credential the request presents, the agent that sent it, and the media type
+    // it wrote its body in: all three are read off the headers before the body,
+    // because the answer is decided by who is asking and how they wrote it as much as
+    // by what was asked.
+    let header_value = |name: ::http::header::HeaderName| {
+        request
+            .headers()
+            .get(&name)
+            .and_then(|value| value.to_str().ok())
+            .map(str::to_string)
+    };
+    let authorization = header_value(::http::header::AUTHORIZATION);
+    let user_agent = header_value(::http::header::USER_AGENT);
     let query = request.uri().query().map(str::to_string);
     // The media type the client wrote its body in, which is what says how the
     // body is read ([`read_manifest`]).
-    let content_type = request
-        .headers()
-        .get(::http::header::CONTENT_TYPE)
-        .and_then(|value| value.to_str().ok())
-        .unwrap_or_default()
-        .to_string();
-    let Ok(permit) = in_flight().try_acquire_owned() else {
+    let content_type = header_value(::http::header::CONTENT_TYPE).unwrap_or_default();
+    // The in-flight permit is WAITED for rather than demanded: an API server queues a
+    // request that arrives while it is already serving its maximum and answers
+    // `429 Too Many Requests` only when it could not take it at all, which is what
+    // this answers when the wait runs out. The cap itself is the core's
+    // ([`in_flight`]), so what the bodies in flight hold at once is unchanged.
+    let acquired =
+        ::tokio::time::timeout(request_deadline(), Arc::clone(&in_flight()).acquire_owned()).await;
+    let Ok(Ok(permit)) = acquired else {
         return rendered(&ApiRefusal {
-            status: 503,
-            reason: "ServiceUnavailable",
-            message: "the server is currently unable to handle the request".to_string(),
+            status: 429,
+            reason: "TooManyRequests",
+            message: "Too many requests, please try again later.".to_string(),
             resource: None,
         });
     };
@@ -473,21 +529,27 @@ async fn answer(
             });
         };
         let body = collected.to_bytes();
-        match serve(
+        let served = serve(
             &state,
             auth.as_ref(),
             &key,
             &ApiRequest {
                 method: method.as_str(),
                 path: &path,
+                authorization: authorization.as_deref(),
+                user_agent: user_agent.as_deref(),
                 query: query.as_deref(),
                 content_type: &content_type,
                 body: &body,
             },
-        ) {
-            Ok((status, document)) => json_response(status, &document),
-            Err(refusal) => rendered(&refusal),
+        );
+        // The audit record goes out once the answer is decided and this service's
+        // store is no longer held, which is why it is delivered here rather than
+        // inside the routing.
+        if let Some(delivery) = served.delivery {
+            delivery.deliver().await;
         }
+        json_response(served.status, &served.document)
     })
     .await;
     served.unwrap_or_else(|_| {
@@ -500,27 +562,167 @@ async fn answer(
     })
 }
 
-/// One request to a cluster's Kubernetes API address, as [`serve`] reads it: the
-/// addressing, the media type the body is written in, and the body.
+/// One request to a cluster's Kubernetes API address, reduced to what deciding it
+/// needs: what it addresses, the credential it presents, the agent that sent it, and
+/// the media type its body is written in.
+///
+/// Carried as one value rather than as a parameter each, because every step of the
+/// decision reads some of it and an API request is one thing, not six.
 #[derive(Debug, Clone, Copy)]
 pub struct ApiRequest<'request> {
     pub method: &'request str,
     pub path: &'request str,
+    /// The `Authorization` header, which is where the credential travels.
+    pub authorization: Option<&'request str>,
+    /// The `User-Agent`, which the audit record names.
+    pub user_agent: Option<&'request str>,
     /// The query string, which is where a list states the chunk it asks for.
     pub query: Option<&'request str>,
-    /// The `Content-Type` the client wrote its body in.
+    /// The media type the client wrote its body in, which is what says how the body is
+    /// read.
     pub content_type: &'request str,
     pub body: &'request [u8],
 }
 
-/// Serve one Kubernetes API request against the cluster keyed `key`, answering the
-/// HTTP status and the object document, or the `Status` the API server refuses it
-/// with.
+/// One answered Kubernetes API request: what the client reads, and the record the
+/// cluster's audit log owes for it.
+#[derive(Debug)]
+pub struct Served {
+    pub status: u16,
+    pub document: ::serde_json::Value,
+    /// The audit record to deliver once this service's store is released, and `None`
+    /// for a cluster that does not have the `audit` log type enabled.
+    pub delivery: Option<AuditDelivery>,
+}
+
+/// Serve one Kubernetes API request against the cluster keyed `key`.
 ///
-/// The ONE place a Kubernetes request is routed, so the published address and any
-/// later in-process caller answer identically. Nothing but the objects decides an
-/// answer; the only write is the object a create makes.
+/// The ONE place a Kubernetes request is served, so the published address and any
+/// later in-process caller answer identically. It is the API server's own sequence:
+/// the credential names an IAM principal, the cluster's ACCESS ENTRY maps that
+/// principal to a Kubernetes identity ([`authentication::authenticate`]), the RBAC
+/// objects and access policies decide whether that identity may do what the request
+/// addresses ([`rbac::admits`]), the request is routed only then, and the whole thing
+/// is recorded in the cluster's audit log.
+///
+/// Nothing but the cluster's own state decides an answer; the only write is the
+/// object a create makes.
 pub fn serve(
+    state: &::engine::ServiceState<ServiceStore>,
+    auth: Option<&AuthPlane>,
+    key: &(String, String),
+    request: &ApiRequest<'_>,
+) -> Served {
+    let received_at = SystemTime::now();
+    let attributes = rbac::request_attributes(request.method, request.path);
+    // The plane's own handles, read and RELEASED: resolving the credential asks the
+    // other services' stores, which is never done with this one's lock held.
+    let plane_handles = {
+        let store = state.lock();
+        store
+            .kubernetes_api
+            .get(key)
+            .map(|plane| (plane.principals.clone(), plane.audit.clone()))
+    };
+    let Some((principals, audit)) = plane_handles else {
+        // The cluster has been deleted while a client was dialling it: there is no
+        // API server behind this address any more, and no audit log to record in.
+        let refusal = ApiRefusal::not_found("clusters", &key.1);
+        return Served {
+            status: refusal.status,
+            document: refusal.to_status_json(),
+            delivery: None,
+        };
+    };
+    let access_key_id = authentication::presented_access_key_id(request.authorization);
+    let principal_arn =
+        access_key_id.and_then(|access_key_id| principals.principal_arn(&access_key_id, received_at));
+
+    let authenticated = match principal_arn {
+        Some(principal_arn) => {
+            let store = state.lock();
+            authentication::authenticate(&store, key, &principal_arn)
+        }
+        // A credential this server cannot read, and one naming a session that has run
+        // out, both speak for nobody.
+        None => Err(ApiRefusal::unauthorized()),
+    };
+    let (identity, admitted, answer) = match authenticated {
+        Err(refusal) => (None, false, Err(refusal)),
+        Ok(identity) => {
+            // The decision, or the `Status` a cluster this store no longer holds is
+            // answered with — the same refusal the handles read above answers, so a
+            // cluster deleted at either instant is answered alike rather than as a
+            // request the authorizer refused.
+            //
+            // What the decision COSTS is bounded by the store it walks rather than by
+            // the request: at most
+            // [`rbac::MAX_RBAC_OBJECTS_PER_SCOPE`] bindings of a scope, each with at
+            // most [`rbac::MAX_SUBJECTS_PER_BINDING`] subjects, resolving to a role of
+            // at most [`rbac::MAX_RULES_PER_ROLE`] rules whose lists hold at most
+            // [`rbac::MAX_ENTRIES_PER_RULE`] entries each — every one of them refused
+            // at the create (`rbac::stored_objects`) rather than trimmed here. A
+            // subject is matched against the identity's groups through the SET those
+            // groups are held in (`rbac::SubjectIdentity::groups`), so however many
+            // groups the access entry was created with they are walked once when the
+            // identity is built and never multiply the product above. The walk matches
+            // strings and indexes nothing, which is also why this short read may hold
+            // the store: it cannot grow with what a caller sends.
+            let decided = {
+                let store = state.lock();
+                plane(&store, key)
+                    .map(|plane| rbac::admits(&plane.objects, &identity, &attributes))
+            };
+            match decided {
+                Ok(true) => (Some(identity), true, route(state, auth, key, request)),
+                Ok(false) => {
+                    let refusal = attributes.forbidden(&identity.username);
+                    (Some(identity), false, Err(refusal))
+                }
+                Err(refusal) => (Some(identity), false, Err(refusal)),
+            }
+        }
+    };
+    let (status, document) = match answer {
+        Ok((status, document)) => (status, document),
+        Err(refusal) => (refusal.status, refusal.to_status_json()),
+    };
+    let answered_at = SystemTime::now();
+    // A create names its object in the manifest rather than in the path, and a
+    // `generateName` is named by the server; the object the answer carries is the one
+    // the request really acted on, so that is the name the record names.
+    let answered_object_name = document
+        .get("metadata")
+        .and_then(|metadata| metadata.get("name"))
+        .and_then(::serde_json::Value::as_str)
+        .map(str::to_string);
+    let delivery = audit.and_then(|log| {
+        let store = state.lock();
+        log.delivery(
+            &store,
+            key,
+            &AuditedRequest {
+                identity,
+                attributes,
+                answered_object_name,
+                status,
+                admitted,
+                user_agent: request.user_agent.map(str::to_string),
+                received_at,
+                answered_at,
+            },
+        )
+    });
+    Served {
+        status,
+        document,
+        delivery,
+    }
+}
+
+/// Route one request the authorizer admitted to the objects that answer it: the HTTP
+/// status and the document, or the `Status` the API server refuses it with.
+fn route(
     state: &::engine::ServiceState<ServiceStore>,
     auth: Option<&AuthPlane>,
     key: &(String, String),
@@ -532,6 +734,7 @@ pub fn serve(
         query,
         content_type,
         body,
+        ..
     } = *request;
     let segments: Vec<&str> = path
         .split('/')
@@ -556,8 +759,27 @@ pub fn serve(
         ["apis"] => {
             return Ok((
                 200,
-                ::serde_json::json!({ "kind": "APIGroupList", "apiVersion": "v1", "groups": [] }),
+                ::serde_json::json!({
+                    "kind": "APIGroupList",
+                    "apiVersion": super::kubernetes_objects::CORE_API_VERSION,
+                    "groups": [rbac::api_group_entry()],
+                }),
             ));
+        }
+        // The discovery documents of the one group beside the core API this server
+        // serves: a client reads them before it addresses the group at all.
+        ["apis", group] if *group == rbac::RBAC_API_GROUP => {
+            return Ok((200, rbac::api_group_document()));
+        }
+        ["apis", group, version]
+            if *group == rbac::RBAC_API_GROUP && *version == rbac::RBAC_GROUP_VERSION =>
+        {
+            return Ok((200, rbac::api_resource_list_document()));
+        }
+        ["apis", group, version, rest @ ..]
+            if *group == rbac::RBAC_API_GROUP && *version == rbac::RBAC_GROUP_VERSION =>
+        {
+            return route_rbac(state, key, request, rest, now);
         }
         _ => {}
     }
@@ -716,6 +938,72 @@ pub fn serve(
         // everything under a namespace is a resource it serves.
         (method, ["namespaces", ..]) => Err(ApiRefusal::method_not_allowed(method, path)),
         _ => Err(ApiRefusal::no_such_path(path)),
+    }
+}
+
+/// Route one request to `rbac.authorization.k8s.io/v1`: the four resources the group
+/// serves, namespaced or cluster-scoped as each of them is.
+///
+/// `rest` is the path under the group version, so `["namespaces", ns, resource, ..]`
+/// addresses a namespaced object and `[resource, ..]` a cluster-scoped one. A
+/// resource addressed in the scope it does not belong to — a `Role` without a
+/// namespace, a `ClusterRole` under one — is a path the group does not serve.
+fn route_rbac(
+    state: &::engine::ServiceState<ServiceStore>,
+    key: &(String, String),
+    request: &ApiRequest<'_>,
+    rest: &[&str],
+    now: SystemTime,
+) -> Result<(u16, ::serde_json::Value), ApiRefusal> {
+    let (method, path, body) = (request.method, request.path, request.body);
+    let (namespace, addressed) = match rest {
+        ["namespaces", namespace, addressed @ ..] if !addressed.is_empty() => {
+            (Some(*namespace), addressed)
+        }
+        _ => (None, rest),
+    };
+    let (Some(resource), name) = (
+        addressed.first().and_then(|segment| RbacResource::from_segment(segment)),
+        addressed.get(1).copied(),
+    ) else {
+        return Err(ApiRefusal::no_such_path(path));
+    };
+    if addressed.len() > 2 || resource.is_namespaced() != namespace.is_some() {
+        return Err(ApiRefusal::no_such_path(path));
+    }
+    let mut store = state.lock();
+    let objects = &mut plane_mut(&mut store, key)?.objects;
+    // What a write RETAINS is bounded by the creating call itself, before anything is
+    // stored: `rbac::MAX_RBAC_OBJECTS_PER_SCOPE` objects of one resource per scope,
+    // `rbac::MAX_RULES_PER_ROLE` rules, `rbac::MAX_SUBJECTS_PER_BINDING` subjects and
+    // `rbac::MAX_ENTRIES_PER_RULE` entries per rule list — each refused with the
+    // validation `Status` past the bound by `rbac::stored_objects`, which these calls
+    // enter.
+    match (method, name) {
+        (method, None) if method == ::http::Method::POST.as_str() => {
+            let manifest = read_manifest(request.content_type, body)?;
+            Ok((
+                201,
+                objects.create_rbac_object(resource, namespace, &manifest, now)?,
+            ))
+        }
+        (method, None) if method == ::http::Method::GET.as_str() => {
+            Ok((200, objects.rbac_list_json(resource, namespace)?))
+        }
+        (method, Some(name)) if method == ::http::Method::GET.as_str() => {
+            Ok((200, objects.rbac_object_json(resource, namespace, name)?))
+        }
+        (method, Some(name)) if method == ::http::Method::PUT.as_str() => {
+            let manifest = read_manifest(request.content_type, body)?;
+            Ok((
+                200,
+                objects.replace_rbac_object(resource, namespace, name, &manifest)?,
+            ))
+        }
+        (method, Some(name)) if method == ::http::Method::DELETE.as_str() => {
+            Ok((200, objects.delete_rbac_object(resource, namespace, name)?))
+        }
+        (method, _) => Err(ApiRefusal::method_not_allowed(method, path)),
     }
 }
 

@@ -963,8 +963,15 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         // (see [`state::kubernetes_api`]). The endpoint is reported from the moment
         // the clock owes the cluster `ACTIVE`, like every other member that only
         // exists once there is a control plane.
-        state::kubernetes_api::publish(&*self.engine, &store, &key, provisioned.api_server, now)
-            .await;
+        state::kubernetes_api::publish(
+            &*self.engine,
+            &store,
+            &key,
+            provisioned.api_server,
+            ctx.callback().clone(),
+            now,
+        )
+        .await;
 
         // The cluster is registered on the EKS Auth plane, which is what answers
         // `AssumeRoleForPodIdentity` for the tokens this cluster's API server
