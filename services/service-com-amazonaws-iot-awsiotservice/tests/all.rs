@@ -83,6 +83,8 @@ mod package_catalog;
 mod package_default_version;
 #[path = "all/package_deletion.rs"]
 mod package_deletion;
+#[path = "all/package_version_sbom.rs"]
+mod package_version_sbom;
 #[path = "all/package_version_update.rs"]
 mod package_version_update;
 #[path = "all/package_versions.rs"]

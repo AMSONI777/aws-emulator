@@ -1,15 +1,11 @@
 // SPDX-License-Identifier: CC0-1.0
 
 //! @op AssociateSbomWithPackageVersion
-//! SCAFFOLDED, NOT IMPLEMENTED: this operation answers HTTP 501 `NotImplemented` and
-//! asserts NOTHING about `AssociateSbomWithPackageVersion`'s real behaviour. Implement it here — this is
-//! the ONLY file to touch for this operation.
 //!
-//! A 501 from this operation means "nobody has written it yet", never "the emulator is
-//! broken". Replace the `Err(..)` in [`AssociateSbomWithPackageVersion::handle`] with real behaviour and
-//! delete the SCAFFOLDED marker line above; that line is the machine-readable record of
-//! which operations are still stubs (`grep -rl '^//! SCAFFOLDED, NOT IMPLEMENTED:' */src/ops/`),
-//! so leaving it on an implemented operation under-reports progress.
+//! Attaches one software bill of materials to the package version named by
+//! `(packageName, versionName)` in this service's state and answers with the record it
+//! persisted — so `GetPackageVersion` reads back the SBOM this call recorded, and the
+//! validation this call starts reports its own status.
 //!
 //! ## Shape of an operation
 //!
@@ -164,18 +160,93 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         input: Self::Input,
         ctx: &smithy_server_runtime::OperationContext<'_>,
     ) -> Result<Self::Output, Self::Error> {
-        // The engine is reachable from `&self` (constructor-injected); `ctx` carries
-        // request metadata. Both are bound here so an implementer has them in scope.
-        let _ = (&input, ctx, &self.engine);
-        // Implement `AssociateSbomWithPackageVersion` here, then delete the SCAFFOLDED marker at the top of
-        // this file. Return modeled failures as
-        // `Err(AssociateSbomWithPackageVersionErrorModeled::Variant(..).into())` — the `From` impl above lifts it.
-        //
-        // To refuse a bad request this operation models no error for, return
-        // `Err(crate::scaffolded::Scaffolded::validation("..."))` — a 400
-        // `ValidationException`. Do NOT answer 501 for it: 501 means "not written yet",
-        // not "bad request". Modeled constraints are already refused BEFORE this
-        // handler runs, so reaching here means the input satisfies every one of them.
-        Err(crate::scaffolded::Scaffolded::not_implemented("AssociateSbomWithPackageVersion"))
+        // No region is read here: the version's ARN was minted by the create, and this
+        // call changes none of its identity.
+        let _ = ctx;
+        let state = crate::state::service_state(&*self.engine).ok_or_else(|| {
+            AssociateSbomWithPackageVersionErrorModeled::InternalServerException(
+                InternalServerException {
+                    message: Some("the IoT emulator has no state store attached".to_string()),
+                },
+            )
+        })?;
+
+        let now = ::std::time::SystemTime::now();
+        let mut store = state.lock();
+
+        // The SBOM is associated with "a SPECIFIC software package version", which is
+        // identified by the pair `(packageName, versionName)`: a pair the catalog does
+        // not hold has nothing to associate one with, so the request is refused with the
+        // modelled `ResourceNotFoundException` (HTTP 404, "The specified resource does
+        // not exist") instead of conjuring the version — in the wording every reader of
+        // a version refuses an unknown pair with.
+        let version = store
+            .packages
+            .get_mut(&input.package_name)
+            .and_then(|package| package.versions.get_mut(&input.version_name))
+            .ok_or_else(|| {
+                AssociateSbomWithPackageVersionErrorModeled::ResourceNotFoundException(
+                    ResourceNotFoundException {
+                        message: Some(crate::state::missing_package_version_message(
+                            &input.package_name,
+                            &input.version_name,
+                        )),
+                    },
+                )
+            })?;
+
+        // A version carries ONE bill of materials: `sbom` is a single structure on every
+        // reader of a version, and this operation PUTs it at the version's `sbom`
+        // sub-resource, so an association names which one the version holds from now on
+        // and the previous one is replaced. What it may NOT do is record the same bill
+        // of materials twice: a second association of the one already held adds
+        // nothing, and conflicts with the state the version is in — what this
+        // operation's `ConflictException` (HTTP 409, "The request conflicts with the
+        // current state of the resource") names — leaving the association already
+        // recorded exactly as it was.
+        if version.carries_sbom(&input.sbom) {
+            // `clientToken` is "a unique case-sensitive identifier that you can provide
+            // to ensure the idempotency of the request", so an association repeating the
+            // token that attached the stored SBOM is the SAME request arriving twice: it
+            // answers from the record and writes nothing.
+            if input.client_token.is_some() && input.client_token == version.sbom_client_token {
+                return Ok(association_output(version));
+            }
+            return Err(
+                AssociateSbomWithPackageVersionErrorModeled::ConflictException(ConflictException {
+                    message: Some(format!(
+                        "An SBOM is already associated with version {} of package {}",
+                        version.version_name, version.package_name
+                    )),
+                    resource_id: Some(version.version_name.clone()),
+                })
+                .into(),
+            );
+        }
+
+        // The association records the SBOM and starts the validation of it "against the
+        // Software Package Data Exchange (SPDX) and CycloneDX industry standard
+        // formats": that validation is answered in the non-terminal `IN_PROGRESS`, its
+        // completion due at a recorded instant (`crate::state::SBOM_VALIDATION_SPAN`)
+        // that a reader of the version materialises — nothing here sleeps for it.
+        version.associate_sbom(input.sbom, input.client_token, now);
+
+        // The response is read off the record that was just persisted, so what this call
+        // reports and what the next `GetPackageVersion` reads are one value, not two
+        // that could drift.
+        Ok(association_output(version))
+    }
+}
+
+/// This operation's response, read off the version the bill of materials is associated
+/// with: the members the model binds on `AssociateSbomWithPackageVersionResponse`.
+fn association_output(
+    version: &crate::state::RegisteredPackageVersion,
+) -> AssociateSbomWithPackageVersionOutput {
+    AssociateSbomWithPackageVersionOutput {
+        package_name: Some(version.package_name.clone()),
+        version_name: Some(version.version_name.clone()),
+        sbom: version.sbom.clone(),
+        sbom_validation_status: version.sbom_validation_status.clone(),
     }
 }

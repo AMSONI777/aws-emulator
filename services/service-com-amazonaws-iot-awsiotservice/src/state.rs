@@ -3957,6 +3957,29 @@ pub fn package_version_status_for_action(action: &str) -> Option<&'static str> {
     }
 }
 
+/// The validation status an SBOM holds while the validation its association started is
+/// still running.
+///
+/// `SbomValidationStatus` is `IN_PROGRESS | FAILED | SUCCEEDED`
+/// ([`crate::ops::types::SBOM_VALIDATION_STATUS_VALUES`]) and
+/// `AssociateSbomWithPackageVersionResponse$sbomValidationStatus` is "the status of the
+/// INITIAL validation", so an association is answered here — the non-terminal status —
+/// and the clock is what moves it on.
+pub const SBOM_VALIDATION_IN_PROGRESS: &str = "IN_PROGRESS";
+
+/// The validation status an SBOM holds once the validation its association started has
+/// completed.
+pub const SBOM_VALIDATION_SUCCEEDED: &str = "SUCCEEDED";
+
+/// How long after `AssociateSbomWithPackageVersion` the validation it started completes.
+///
+/// The association is answered in a NON-TERMINAL status
+/// ([`SBOM_VALIDATION_IN_PROGRESS`]), so the clock owes its move to
+/// [`SBOM_VALIDATION_SUCCEEDED`]; the span is the emulator's own — the same reason
+/// [`INDEX_BUILD_SPAN`] exists — chosen so a caller reading straight back still observes
+/// the transient status, and the due instant is recorded rather than slept for.
+pub const SBOM_VALIDATION_SPAN: Duration = Duration::from_secs(3);
+
 /// One version of a software package, as this service persists it.
 ///
 /// A version is the pair `(packageName, versionName)` — its identity, bound as the two
@@ -4011,8 +4034,22 @@ pub struct RegisteredPackageVersion {
     /// associated.
     pub sbom: Option<Sbom>,
     /// "The status of the validation for a new software bill of materials added to a
-    /// software package version", once one is associated.
+    /// software package version", once one is associated: one of
+    /// [`crate::ops::types::SBOM_VALIDATION_STATUS_VALUES`].
     pub sbom_validation_status: Option<String>,
+    /// When the validation the association was answered in the middle of completes —
+    /// the transition the clock already owes, whether or not anybody calls. `None` once
+    /// it has been materialised, and on a version carrying no SBOM at all.
+    pub sbom_validation_due_at: Option<SystemTime>,
+    /// The `clientToken` the association that attached [`Self::sbom`] carried, when it
+    /// carried one.
+    ///
+    /// `AssociateSbomWithPackageVersion$clientToken` is "A unique case-sensitive
+    /// identifier that you can provide to ensure the idempotency of the request", so an
+    /// association repeating the token that attached this bill of materials is that one
+    /// request arriving twice and answers from the record instead of conflicting with
+    /// it.
+    pub sbom_client_token: Option<String>,
     /// "The date when the package version was created"
     /// (`GetPackageVersion$creationDate`).
     pub creation_date: SystemTime,
@@ -4055,9 +4092,67 @@ impl RegisteredPackageVersion {
             error_reason: None,
             sbom: None,
             sbom_validation_status: None,
+            sbom_validation_due_at: None,
+            sbom_client_token: None,
             creation_date: created_at,
             last_modified_date: created_at,
         }
+    }
+
+    /// Whether this version already carries `sbom`: whether the bill of materials it
+    /// holds names the same object as the one offered.
+    ///
+    /// `Sbom` is one optional `s3Location`, and an `S3Location` is the `bucket`, `key`
+    /// and bucket `version` that name an object
+    /// (`smithy_query(query="shape",shape="Sbom,S3Location")`), so those three members
+    /// are what one bill of materials being the same as another amounts to.
+    pub fn carries_sbom(&self, sbom: &Sbom) -> bool {
+        let Some(held) = self.sbom.as_ref() else {
+            return false;
+        };
+        match (held.s3_location.as_ref(), sbom.s3_location.as_ref()) {
+            (None, None) => true,
+            (Some(held), Some(offered)) => {
+                held.bucket == offered.bucket
+                    && held.key == offered.key
+                    && held.version == offered.version
+            }
+            _ => false,
+        }
+    }
+
+    /// Attach `sbom` to this version at `now`, with the validation the association
+    /// starts due [`SBOM_VALIDATION_SPAN`] later.
+    ///
+    /// The association is the version's own change, so its `lastModifiedDate` moves to
+    /// the instant of the call while its creation date stays where the create put it.
+    /// The validation enters at [`SBOM_VALIDATION_IN_PROGRESS`] — the status the
+    /// association reports — and [`Self::settle_sbom_validation`] is what moves it on.
+    /// A bill of materials the version was already holding is REPLACED, validation and
+    /// all: the version carries one at a time, and this call is what says which.
+    pub fn associate_sbom(&mut self, sbom: Sbom, client_token: Option<String>, now: SystemTime) {
+        self.sbom = Some(sbom);
+        self.sbom_validation_status = Some(SBOM_VALIDATION_IN_PROGRESS.to_string());
+        self.sbom_validation_due_at = Some(now + SBOM_VALIDATION_SPAN);
+        self.sbom_client_token = client_token;
+        self.last_modified_date = now;
+    }
+
+    /// Materialise the SBOM validation completion the clock already owes at `now`, and
+    /// answer whether anything changed.
+    ///
+    /// The association was answered [`SBOM_VALIDATION_IN_PROGRESS`] with the
+    /// validation's completion due at a recorded instant, so by `now` the validation has
+    /// finished whether or not anybody called, and a reader states that. The version's
+    /// own contents did not change with it, so the record's `lastModifiedDate` stays
+    /// where the association put it.
+    pub fn settle_sbom_validation(&mut self, now: SystemTime) -> bool {
+        if self.sbom_validation_due_at.is_none_or(|due| now < due) {
+            return false;
+        }
+        self.sbom_validation_status = Some(SBOM_VALIDATION_SUCCEEDED.to_string());
+        self.sbom_validation_due_at = None;
+        true
     }
 }
 

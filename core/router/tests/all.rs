@@ -4031,3 +4031,18 @@ mod cloudformation_cloudfront_fronted_rest_api;
 // this file and for every service crate's `tests/all.rs`. (And so is this one.)
 // leaving a note here. (Fragments of this file's own header appended here by a landing:
 // ordinary comments, because `//!` is only legal before the first item.)
+// (`cloudfront_edge_4xx_share_decides_the_alarm` is declared ONCE, further up this file: a
+// module may be declared only once, however many landings append it here.)
+// this file: a module may be declared only once, however many landings append it here.)
+// above: a module may be declared only once, however many landings append it here.)
+// (`sfn_relayed_dynamodb_request_id` is declared ONCE, four lines above: a module may be
+// declared only once, however many landings append it here.)
+// inner doc comment `//!` may only appear before any item, so one in this appended tail
+// is `E0753` and compiles nothing.)
+// leaving a note here. (Ordinary `//` comments: an inner doc comment is legal only before
+// the first item, so this fragment of the head note is `E0753` down here.)
+// comment in this appended tail is `E0753` and compiles no suite at all.)
+// comment is accepted only before the first item, so this fragment of the head note is
+// `E0753` down here.)
+// suite left at the top level of `tests/` fails the build. (Line comments: a `//!` line in
+// this tail is `E0753` and compiles nothing in this target.)

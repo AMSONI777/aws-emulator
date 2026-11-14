@@ -2,8 +2,14 @@
 
 //! @op GetPackageVersion
 //!
-//! Reports one version of a software package from this service's state: a pure read of
-//! the record `CreatePackageVersion` persisted, member for member.
+//! Reports one version of a software package from this service's state: the record
+//! `CreatePackageVersion` persisted, member for member.
+//!
+//! The one thing it writes is the transition the clock already owes: an SBOM associated
+//! by `AssociateSbomWithPackageVersion` has its validation complete
+//! (`crate::state::SBOM_VALIDATION_SPAN` after the association, whether or not anybody
+//! calls), so this reader materialises that completion rather than reporting a
+//! validation as still running after its due instant has passed.
 //!
 //! ## Shape of an operation
 //!
@@ -170,14 +176,17 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
             })
         })?;
 
-        // A pure read of the package's version set: the record is cloned out and
-        // reported, and a `(packageName, versionName)` pair the catalog does not hold is
-        // a 404, never a hollow 200.
-        let store = state.lock();
+        // A read of the package's version set: the record is cloned out and reported,
+        // and a `(packageName, versionName)` pair the catalog does not hold is a 404,
+        // never a hollow 200. The ONE thing this read writes is the SBOM validation
+        // completion the clock already owed — due at the instant
+        // `AssociateSbomWithPackageVersion` recorded whether or not anybody called — so
+        // the validation status reported here is the one that holds at the read.
+        let mut store = state.lock();
         let version = store
             .packages
-            .get(&input.package_name)
-            .and_then(|package| package.versions.get(&input.version_name))
+            .get_mut(&input.package_name)
+            .and_then(|package| package.versions.get_mut(&input.version_name))
             .ok_or_else(|| {
                 GetPackageVersionErrorModeled::ResourceNotFoundException(
                     ResourceNotFoundException {
@@ -188,6 +197,7 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
                     },
                 )
             })?;
+        version.settle_sbom_validation(::std::time::SystemTime::now());
 
         Ok(GetPackageVersionOutput {
             package_version_arn: Some(version.package_version_arn.clone()),
