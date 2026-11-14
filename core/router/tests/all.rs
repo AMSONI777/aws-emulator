@@ -3291,3 +3291,13 @@ mod all_rs_inner_doc_comments_precede_the_first_item;
 //! this file and for every service crate's `tests/all.rs`.
 // (One more fragment of that same header landed here; the rule it states stands in the
 // module doc at the HEAD of this file.)
+// (An inner doc comment can only lead a crate root, so these lines — appended here by a
+// landing that duplicated this file's header — are plain comments: as `//!` in the middle of
+// the file they are `E0753` and compile no suite in this target. The guidance they repeat
+// stands at the head of this file.)
+// (Appended here by a landing that duplicated this file's header: a `//!` line past the
+// first item is `E0753` and compiles no suite in this target, so these stand as ordinary
+// comments. The guidance they repeat stands at the head of this file.)
+// (Appended by a landing that duplicated this file's header: a `//!` line past the first
+// item is `E0753` and compiles no suite in this target, so it stands as an ordinary comment.)
+// (Same appended header fragment, as an ordinary comment for the same reason.)

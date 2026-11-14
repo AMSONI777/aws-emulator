@@ -19,6 +19,8 @@ mod agentic_rft_job_lifecycle;
 mod ai_benchmark_job_lifecycle;
 #[path = "all/ai_benchmark_job_release.rs"]
 mod ai_benchmark_job_release;
+#[path = "all/ai_benchmark_job_release_scope.rs"]
+mod ai_benchmark_job_release_scope;
 #[path = "all/ai_recommendation_job_lifecycle.rs"]
 mod ai_recommendation_job_lifecycle;
 #[path = "all/ai_recommendation_job_stop.rs"]

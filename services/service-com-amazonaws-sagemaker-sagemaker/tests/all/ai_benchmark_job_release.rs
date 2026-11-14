@@ -53,13 +53,13 @@ const TERMINAL_STATUSES: &[&str] = &["Completed", "Failed", "Stopped"];
 const ROLE_ARN: &str = "arn:aws:iam::000000000000:role/SageMakerBenchmarkRole";
 
 /// The workload configuration every job here references.
-const WORKLOAD_CONFIG: &str = "release-workload-config";
+pub(crate) const WORKLOAD_CONFIG: &str = "release-workload-config";
 
 /// The endpoint every accepted job here targets.
-const ENDPOINT: &str = "release-endpoint";
+pub(crate) const ENDPOINT: &str = "release-endpoint";
 
 /// Stand up the workload configuration and the endpoint an accepted job needs.
-async fn seeded() -> Emulator {
+pub(crate) async fn seeded() -> Emulator {
     let emulator = Emulator::new();
     emulator
         .ok(
@@ -72,7 +72,7 @@ async fn seeded() -> Emulator {
 }
 
 /// A `CreateAIBenchmarkJob` body naming `identifier` as its benchmark target.
-fn create_body(name: &str, identifier: &str) -> Value {
+pub(crate) fn create_body(name: &str, identifier: &str) -> Value {
     json!({
         "AIBenchmarkJobName": name,
         "AIWorkloadConfigIdentifier": WORKLOAD_CONFIG,
@@ -188,7 +188,7 @@ async fn describe(emulator: &Emulator, name: &str) -> Value {
 
 /// Poll the job until it reaches a status nothing leaves on its own, answering that status.
 /// Waits for the CONDITION, never for a fixed span.
-async fn settled_status(emulator: &Emulator, case: &str, name: &str) -> String {
+pub(crate) async fn settled_status(emulator: &Emulator, case: &str, name: &str) -> String {
     let deadline = Instant::now() + TERMINAL_BUDGET;
     loop {
         let described = describe(emulator, name).await;
