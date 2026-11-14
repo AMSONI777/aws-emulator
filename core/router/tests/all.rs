@@ -1895,9 +1895,6 @@ mod cloudformation_provisions_cloudfront_resources;
 // are declared further up this tail already: a module may be declared only once.)
 // (`apigateway_sns_service_integration` is declared once, further up this tail: a module may
 // be declared only once, and two branches landing at once appended it here as well.)
-// are declared once, further up this tail: a module may be declared only once, and two
-// branches landing at once each re-added the pair here.)
-// are declared in the head region above: a module may be declared only once.)
 // (`apigateway_sns_service_integration` is declared ONCE, a few lines above in this same
 // tail: it was appended here as well while two branches were landing at once, which
 // declared it a second time and compiled neither.)
@@ -2867,3 +2864,12 @@ mod cloudformation_provisions_xray_groups;
 // this tail: two branches landing at once appended a second declaration of it here, and a
 // (`cloudformation_provisions_cloudfront_resources` is declared ONCE, at the end of this
 // tail: its line was restored there while two branches were landing at once, and a module
+// Declared here, in this same head region, for the reason the entry above records: whether an
+// object read is authorized by the identity's own documents OR by the bucket's policy spans
+// IAM, STS and Amazon S3 at once — and is compared with IAM's own simulation of the same union
+// — so no single service crate's test target can see both halves of it.
+#[path = "all/s3_object_read_identity_or_bucket_policy.rs"]
+mod s3_object_read_identity_or_bucket_policy;
+// `zz_probe` further up this tail: two landings each appended their own copy here, and a
+// module declared twice loads the same file twice, which compiles neither — so both copies
+// are removed from this tail rather than left to break the whole target.)
