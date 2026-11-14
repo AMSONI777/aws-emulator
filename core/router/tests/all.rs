@@ -3950,3 +3950,7 @@ mod cloudformation_provisions_redshift_snapshot_copy_grants;
 // this file and for every service crate's `tests/all.rs`. (An ordinary comment: a `//!`
 // comment is only legal before the first item, so a `//!` line in this appended fragment is
 // the lines above record: a `//!` line past the first item is `E0753`.)
+// (Another fragment of this file's header, appended mid-file by a landing: an inner doc
+// comment is only legal before the first item, so it stands as an ordinary comment — a
+// suite left at the top level of `tests/` fails the build.)
+// (One more fragment of that same header, mid-file and therefore an ordinary comment:

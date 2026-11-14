@@ -13,6 +13,8 @@
 // points it into `tests/all/`.
 #[path = "all/arn_field_split_is_shared.rs"]
 mod arn_field_split_is_shared;
+#[path = "all/concurrent_create_quota_refusal.rs"]
+mod concurrent_create_quota_refusal;
 #[path = "all/create_encryption_configuration_forms.rs"]
 mod create_encryption_configuration_forms;
 #[path = "all/cross_account_configuration_names_an_account.rs"]
