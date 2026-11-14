@@ -230,6 +230,10 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
 
         crate::state::check_registry(input.registry_id.as_ref()).map_err(fault_error)?;
 
+        // The Region this scan's completion is published to EventBridge in: the one the
+        // request was signed for, read before the store is locked.
+        let region = crate::state::request_region(ctx.parts());
+
         let now = ::std::time::SystemTime::now();
         let mut store = state.lock();
 
@@ -256,6 +260,9 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         // The digest reported is the stored image's own, and the tag only where it really
         // points at that image.
         let image_id = image.identifier(input.image_id.image_tag.as_deref());
+        // The stored image's own digest, which addresses the record this call writes its
+        // run onto.
+        let image_id_digest = image.digest.clone();
 
         // An image in Amazon ECR archive — including one whose restore has not completed
         // — is not in standard storage, so there is no image content to scan.
@@ -336,6 +343,29 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         let image_scan_status = repo
             .start_basic_scan(&input.image_id, now)
             .map_err(fault_error)?;
+        // A scan is reported when it FINISHES, so the publication of this run's completion
+        // is armed for the instant the clock owes it: this call answers while the run is
+        // still `IN_PROGRESS`, and the event is read back out of the record written above.
+        // The run is named from that record rather than from a second computation of it.
+        let started = repo
+            .images
+            .get(&image_id_digest)
+            .and_then(|image| image.scan.as_ref())
+            .map(|scan| crate::state::scan_events::StartedScan {
+                repository_name: repository_name.clone(),
+                image_digest: image_id_digest.clone(),
+                started_at: scan.started_at,
+                complete_due_at: scan.complete_due_at,
+            });
+        drop(store);
+        if let Some(started) = started {
+            crate::state::scan_events::publish_when_due(
+                ::std::sync::Arc::clone(&self.engine),
+                ctx.callback(),
+                &region,
+                started,
+            );
+        }
 
         Ok(StartImageScanOutput {
             registry_id: Some(registry_id),

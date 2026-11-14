@@ -764,8 +764,11 @@ impl ImageRecord {
             // knows anything about: `PutImage` reads them and sets the jobs (see
             // [`signing::planned_signings`]).
             signings: Vec::new(),
-            // A scan is started by `StartImageScan`, never by a push: a freshly stored
-            // image carries none, which is what `DescribeImageScanFindings` reports
+            // A scan is started by `StartImageScan`, or by the push itself where the
+            // repository is configured to scan images on push (see
+            // [`ComAmazonawsEcrAmazonec2containerregistryV20150921State::start_scan_on_push`],
+            // which the push calls once this record is in the repository): the record
+            // itself carries none, which is what `DescribeImageScanFindings` reports
             // `ScanNotFoundException` for.
             scan: None,
         }
@@ -2160,7 +2163,7 @@ impl Repo {
     /// `PutRegistryScanningConfiguration` now stores belongs to this projection's own
     /// operation, so the list stays empty here.
     pub fn to_scanning_configuration(&self) -> RepositoryScanningConfiguration {
-        let scan_on_push = self.image_scanning_config.scan_on_push;
+        let scan_on_push = self.scans_on_push();
         RepositoryScanningConfiguration {
             repository_arn: Some(self.arn.clone()),
             repository_name: Some(self.name.clone()),
@@ -2795,6 +2798,12 @@ pub struct ComAmazonawsEcrAmazonec2containerregistryV20150921State {
     /// above; bounded by [`MAX_REGISTRY_CREDENTIALS`]. See `state/registry_v2.rs` for why
     /// the password itself is not here.
     pub registry_credentials: BTreeMap<String, RegistryCredential>,
+    /// How many image-scan completions this registry is currently waiting to publish —
+    /// the figure [`scan_events::MAX_ARMED_PUBLICATIONS`] bounds. It lives on the store
+    /// rather than beside it, so the ceiling is this registry's own and one emulator's
+    /// in-flight publications never count against another's. See
+    /// `state/scan_events.rs`.
+    pub armed_scan_publications: usize,
 }
 
 impl ComAmazonawsEcrAmazonec2containerregistryV20150921State {
@@ -4417,6 +4426,12 @@ pub mod scanning;
 /// repository, in `state/image_events.rs`. Declared and re-exported here, so a handler
 /// reaches it as `crate::state::…` like every other part of this store.
 pub mod image_events;
+/// The basic scan a push starts on a repository configured to scan images on push, and the
+/// EventBridge event published when a scan finishes, in `state/scan_events.rs`. Declared
+/// (and not glob re-exported, so a handler names the part of the store it reaches) here, so
+/// a handler reaches it as `crate::state::scan_events::…` like every other part of this
+/// store.
+pub mod scan_events;
 /// Whether a policy in force lets the calling principal reach the images and layers of the
 /// repository a request names, in `state/authorization.rs`. Declared (and not glob
 /// re-exported, so a handler names the gate it consults) here, so a handler reaches it as

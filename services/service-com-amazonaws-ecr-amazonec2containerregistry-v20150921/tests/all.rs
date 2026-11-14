@@ -129,6 +129,8 @@ mod request_preconditions;
 mod resource_tag_mutations;
 #[path = "all/resource_tags.rs"]
 mod resource_tags;
+#[path = "all/scan_on_push.rs"]
+mod scan_on_push;
 #[path = "all/scanning_configuration.rs"]
 mod scanning_configuration;
 #[path = "all/signing_configuration.rs"]

@@ -37,3 +37,31 @@ Traces: cloudwatch__ecr__ecs.ecr-scan-finding-without-rule-target-not-delivered.
 ## Steps to Reproduce
 Cause 1: ecr CreateRepository(<repo>); sqs CreateQueue and allow events.amazonaws.com to SendMessage; events PutRule with pattern {"source":["aws.ecr"],"detail-type":["ECR Image Action"],"detail":{"repository-name":["<repo>"],"action-type":["PUSH"]}} and PutTargets with the queue ARN; push an image to <repo>; ReceiveMessage on the queue — nothing arrives.
 Cause 2: same wiring with detail-type "ECR Image Scan" against a repository created with imageScanningConfiguration={scanOnPush:true}; first with no target (expect nothing), then PutTargets with the queue and push again — nothing arrives on the second leg either.
+
+## Resolution
+
+Cause 1 is served by `state/image_events.rs`, which `PutImage` and `BatchDeleteImage`
+publish through; its replay key passes.
+
+Cause 2 is served by `state/scan_events.rs`: a push into a repository that scanning is
+configured for on push (the repository's own `imageScanningConfiguration.scanOnPush`, or a
+`SCAN_ON_PUSH` rule of the registry scanning configuration whose filters match it) starts the
+same basic scan `StartImageScan` starts, and each run that reaches its terminal status is
+published once onto the default event bus as source `aws.ecr` / detail-type `ECR Image Scan`,
+read back out of the stored run. `core/router/tests/all/ecr_scan_on_push_event_reaches_its_queue_target.rs`
+drives that end to end over the whole emulator — the rule's SQS target receives the
+announcement once it has a target, and a rule with no target and a rule naming another
+repository receive nothing — and
+`services/service-com-amazonaws-ecr-amazonec2containerregistry-v20150921/tests/all/scan_on_push.rs`
+pins the rule over a table of repository configurations, registry rules, image filesystems and
+published details.
+
+REMAINING DIVERGENCE: the recorded unit
+`cloudwatch__ecr__ecs.ecr-scan-finding-without-rule-target-not-delivered` still ends "Check
+timed out after 60.0s" — the replay harness's cap, not a divergence on any call. Which further
+trigger its positive leg uses could not be determined; two behaviours the emulator does not
+have could explain it: EventBridge delivers only to the targets a rule holds at the instant an
+event is published (a target attached afterwards receives nothing), and an image already
+scanned inside the once-per-24-hours window `StartImageScan` documents — "this limit includes
+if an image was scanned on initial push" — is not scanned again, so a re-push of the SAME
+manifest finishes no run and publishes nothing.

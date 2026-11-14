@@ -183,8 +183,9 @@ pub async fn publish(
     }
 }
 
-/// `at` as the epoch milliseconds the event's `time` carries.
-fn epoch_millis(at: SystemTime) -> i64 {
+/// `at` as the epoch milliseconds an event's `time` carries. Shared with
+/// [`super::scan_events`], which publishes its own event at the instant a record states.
+pub(super) fn epoch_millis(at: SystemTime) -> i64 {
     i64::try_from(
         at.duration_since(UNIX_EPOCH)
             .unwrap_or_default()

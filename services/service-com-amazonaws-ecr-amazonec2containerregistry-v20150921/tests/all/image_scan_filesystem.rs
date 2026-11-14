@@ -33,24 +33,27 @@ use ecr::state;
 
 /// The `description` Amazon ECR reports beside the terminal status of a run whose image it
 /// could not scan, spelled out here rather than imported so a change to the constant the
-/// handler reads fails this suite.
-const UNSUPPORTED_IMAGE_DESCRIPTION: &str = "UnsupportedImageError: The image is not supported.";
+/// handler reads fails this suite. Shared with `crate::scan_on_push`, so the two suites
+/// cannot drift apart on it.
+pub(crate) const UNSUPPORTED_IMAGE_DESCRIPTION: &str =
+    "UnsupportedImageError: The image is not supported.";
 
 /// The `description` of a run that examined the image and finished, spelled out here for
 /// the same reason as [`UNSUPPORTED_IMAGE_DESCRIPTION`].
-const COMPLETE_DESCRIPTION: &str = "The scan was completed successfully.";
+pub(crate) const COMPLETE_DESCRIPTION: &str = "The scan was completed successfully.";
 
 /// An `os-release` file identifying Alpine Linux, in the format of the os-release
 /// specification the file's own `ID=` field comes from.
-const ALPINE_OS_RELEASE: &str =
+pub(crate) const ALPINE_OS_RELEASE: &str =
     "NAME=\"Alpine Linux\"\nID=alpine\nVERSION_ID=3.18.4\nPRETTY_NAME=\"Alpine Linux v3.18\"\n";
 
 /// The files one test layer carries: a path inside the image's filesystem, and the
 /// content at it.
-type Files<'a> = &'a [(&'a str, &'a str)];
+pub(crate) type Files<'a> = &'a [(&'a str, &'a str)];
 
-/// One layer of a test image, in the form the registry receives its bytes in.
-enum Layer<'a> {
+/// One layer of a test image, in the form the registry receives its bytes in. Shared with
+/// `crate::scan_on_push`, which pushes the same kinds of layer.
+pub(crate) enum Layer<'a> {
     /// A gzip-compressed tar: what both image formats' `...tar+gzip` / `...tar.gzip`
     /// layer media types carry.
     Gzipped(Files<'a>),
@@ -62,7 +65,7 @@ enum Layer<'a> {
 
 impl Layer<'_> {
     /// The bytes a client uploads for this layer.
-    fn bytes(&self) -> Vec<u8> {
+    pub(crate) fn bytes(&self) -> Vec<u8> {
         match self {
             Self::Gzipped(files) => {
                 let mut encoder = ::flate2::write::GzEncoder::new(
