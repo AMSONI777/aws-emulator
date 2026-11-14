@@ -57,6 +57,8 @@ mod service_attributes;
 mod service_identity_and_error_bodies;
 #[path = "all/service_listing.rs"]
 mod service_listing;
+#[path = "all/service_summary_page_projection.rs"]
+mod service_summary_page_projection;
 #[path = "all/state_roundtrip.rs"]
 mod state_roundtrip;
 #[path = "all/tagging.rs"]

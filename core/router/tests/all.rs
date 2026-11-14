@@ -3739,3 +3739,7 @@ mod cloudformation_provisions_redshift_snapshot_copy_grants;
 // is gone rather than re-typed.)
 // (And one more such fragment landed here typed with `//!`, for the same reason and with the
 // same remedy: the rule it repeated stands in the module doc at the HEAD of this file.)
+// (A last line of that same duplicated header, an ordinary comment here for the same
+// reason: a `//!` line past the first item of this crate root is `E0753`.)
+// (One more line of that same duplicated header, an ordinary comment for the reason the
+// lines above record.)

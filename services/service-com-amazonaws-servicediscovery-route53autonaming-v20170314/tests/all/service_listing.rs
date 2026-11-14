@@ -67,7 +67,10 @@ async fn pages(
 }
 
 /// The ARN `GetNamespace` reports for a stored namespace.
-async fn namespace_arn(router: &MultiServiceRouter, namespace_id: &str) -> String {
+///
+/// `pub(crate)` so the suites that name a namespace by ARN share this one round trip
+/// rather than each carrying a copy of it.
+pub(crate) async fn namespace_arn(router: &MultiServiceRouter, namespace_id: &str) -> String {
     let read = ok(router, "GetNamespace", json!({ "Id": namespace_id })).await;
     read["Namespace"]["Arn"]
         .as_str()
