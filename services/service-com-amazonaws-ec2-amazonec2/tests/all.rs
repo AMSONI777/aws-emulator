@@ -1285,6 +1285,10 @@ mod security_group_filter_limits;
 mod security_groups;
 #[path = "all/snapshot_block_public_access.rs"]
 mod snapshot_block_public_access;
+// `RestoreSnapshotFromRecycleBin`: what the snapshot Recycle Bin gives back, and what it
+// refuses.
+#[path = "all/snapshots_in_recycle_bin.rs"]
+mod snapshots_in_recycle_bin;
 #[path = "all/spot_datafeed_subscription.rs"]
 mod spot_datafeed_subscription;
 // The running instances `DescribeSpotFleetInstances` reports for one Spot Fleet request.

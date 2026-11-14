@@ -81,6 +81,10 @@ service-common = { path = "../common" }
 # minted is read back through `ec2:DescribeSnapshots`, so this service reads THAT service's
 # own state accessor rather than keeping a second copy of its snapshots.
 service-com-amazonaws-ebs-ebs = { workspace = true }
+# A Recycle Bin retention rule is the `rbin` service's resource: whether a deleted EBS
+# resource is retained rather than permanently deleted is decided by THAT service's rules, so
+# this service reads its own state accessor rather than keeping a second copy of them.
+service-com-amazonaws-rbin-amazonrecyclebin = { workspace = true }
 # The IAM store holds the identity-based policies of the principal a request speaks
 # for, and the STS store resolves which principal that is: the authorization gate
 # reads both services' OWN state accessors rather than keeping a second copy of

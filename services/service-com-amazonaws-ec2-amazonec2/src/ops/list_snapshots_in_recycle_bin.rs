@@ -1,15 +1,24 @@
 // SPDX-License-Identifier: CC0-1.0
 
 //! @op ListSnapshotsInRecycleBin
-//! SCAFFOLDED, NOT IMPLEMENTED: this operation answers HTTP 501 `NotImplemented` and
-//! asserts NOTHING about `ListSnapshotsInRecycleBin`'s real behaviour. Implement it here — this is
-//! the ONLY file to touch for this operation.
+//! IMPLEMENTED: reports the snapshots [`crate::state`] holds in the account's Recycle Bin,
+//! narrowed to the ids the request names and cut into `MaxResults`-sized pages. This is the
+//! ONLY file to touch for this operation.
 //!
-//! A 501 from this operation means "nobody has written it yet", never "the emulator is
-//! broken". Replace the `Err(..)` in [`ListSnapshotsInRecycleBin::handle`] with real behaviour and
-//! delete the SCAFFOLDED marker line above; that line is the machine-readable record of
-//! which operations are still stubs (`grep -rl '^//! SCAFFOLDED, NOT IMPLEMENTED:' */src/ops/`),
-//! so leaving it on an implemented operation under-reports progress.
+//! A snapshot reaches the Recycle Bin when it is deleted while a retention rule covers it
+//! ([`crate::state::ComAmazonawsEc2Amazonec2State::move_snapshot_to_recycle_bin`]) and leaves
+//! it when it is restored or when its retention period runs out, so a fresh account's bin is
+//! empty — which is what this reports. The end of a retention period is the CLOCK's, so this
+//! report materialises the permanent deletions already due before it reads the bin: each was
+//! owed at its exit instant whether or not anybody called, and reporting an entry past it
+//! would disagree with `RestoreSnapshotFromRecycleBin`, which refuses that same id. "Omit this
+//! parameter to list all of the snapshots that are in the Recycle Bin" (`SnapshotIds`): an id
+//! the request DOES name has to be a snapshot in the bin, so one that is not is an error
+//! rather than an absent row — a malformed id (`InvalidSnapshotID.Malformed`) before an
+//! unknown one (`InvalidSnapshot.NotFound`), the order EC2 answers the two in.
+//!
+//! Reporting the bin is a READ: nothing here writes but the deletions the clock already made
+//! due, so two calls answer the same.
 //!
 //! ## Shape of an operation
 //!
@@ -141,18 +150,108 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         input: Self::Input,
         ctx: &smithy_server_runtime::OperationContext<'_>,
     ) -> Result<Self::Output, Self::Error> {
-        // The engine is reachable from `&self` (constructor-injected); `ctx` carries
-        // request metadata. Both are bound here so an implementer has them in scope.
-        let _ = (&input, ctx, &self.engine);
-        // Implement `ListSnapshotsInRecycleBin` here, then delete the SCAFFOLDED marker at the top of
-        // this file. Return modeled failures as
-        // `Err(ListSnapshotsInRecycleBinErrorModeled::Variant(..).into())` — the `From` impl above lifts it.
-        //
-        // To refuse a bad request this operation models no error for, return
-        // `Err(crate::scaffolded::Scaffolded::validation("..."))` — a 400
-        // `ValidationException`. Do NOT answer 501 for it: 501 means "not written yet",
-        // not "bad request". Modeled constraints are already refused BEFORE this
-        // handler runs, so reaching here means the input satisfies every one of them.
-        Err(crate::scaffolded::Scaffolded::not_implemented("ListSnapshotsInRecycleBin"))
+        use crate::state::{
+            MAX_RESOURCE_IDS, SNAPSHOT_RECYCLE_BIN_PAGE_SIZE_RANGE, decode_page_token,
+            dry_run_operation, encode_page_token, invalid_pagination_token_for,
+            require_service_state, unresolvable_snapshot_id,
+        };
+
+        // `ctx` carries request metadata only; this operation reads none of it — a snapshot is
+        // named by id. The store is reached through the engine held on `self`.
+        let _ = ctx;
+
+        let requested_ids = input.snapshot_ids.clone().unwrap_or_default();
+        if requested_ids.len() > MAX_RESOURCE_IDS {
+            return Err(crate::scaffolded::Scaffolded::invalid_parameter_value(format!(
+                "SnapshotIds carries {} ids, above the maximum of {MAX_RESOURCE_IDS}",
+                requested_ids.len()
+            )));
+        }
+
+        // "The token returned from a previous paginated request" — anything else is refused
+        // rather than read as an id, and it is refused before any other member is looked at.
+        // The refusal names the token the request sent, which is the wording EC2 answers a
+        // `NextToken` it did not issue with.
+        let start_at = match input.next_token.as_deref() {
+            None => None,
+            Some(token) => Some(
+                decode_page_token(token).ok_or_else(|| invalid_pagination_token_for(token))?,
+            ),
+        };
+
+        // DryRun asks whether the CALLER MAY make this request — "checks whether you have the
+        // required permissions for the action, without actually making the request"
+        // (`ListSnapshotsInRecycleBinRequest$DryRun`) — so it is answered once the request's
+        // own members have been read and before any snapshot is resolved.
+        if input.dry_run == Some(true) {
+            return Err(dry_run_operation());
+        }
+
+        let state = require_service_state(&*self.engine)?;
+        let mut store = state.lock();
+
+        // WHICH snapshots the bin holds is a question about NOW: a snapshot whose
+        // `RecycleBinExitTime` has passed was permanently deleted at that instant whether or
+        // not anybody called, so the deletions the clock already owed are applied before the
+        // bin is read. Reporting one of them would also disagree with
+        // `RestoreSnapshotFromRecycleBin`, which refuses that same id.
+        store.materialize_due_transitions();
+
+        // An id the request named has to be a snapshot the bin holds: a malformed one is
+        // answered as malformed and a well-formed one the bin does not hold as not found,
+        // through the crate's one classification of an unresolvable snapshot id. That is the
+        // two-way answer a LIST of ids gets — the same one `ListVolumesInRecycleBin` gives its
+        // own `VolumeIds` — and it is deliberately not the single code
+        // `RestoreSnapshotFromRecycleBin` collapses to for the ONE resource a restore names,
+        // which the recorded unit behind that operation's issue asserts.
+        for snapshot_id in &requested_ids {
+            if !store.snapshots_in_recycle_bin.contains_key(snapshot_id) {
+                return Err(unresolvable_snapshot_id(snapshot_id));
+            }
+        }
+
+        // The store is an ordered map, so its iteration order is the `SnapshotId` order the
+        // cursor below names a position in. Each record's `entry` is what the report answers
+        // with; the snapshot itself is kept beside it so a restore can give it back.
+        let selected: Vec<&SnapshotRecycleBinInfo> = store
+            .snapshots_in_recycle_bin
+            .iter()
+            .filter(|(snapshot_id, _)| {
+                requested_ids.is_empty() || requested_ids.contains(snapshot_id)
+            })
+            .map(|(_, record)| &record.entry)
+            .collect();
+
+        let from = match start_at.as_deref() {
+            None => 0,
+            Some(cursor) => selected.partition_point(|entry| {
+                entry.snapshot_id.as_deref().unwrap_or_default() < cursor
+            }),
+        };
+        let page = selected.get(from..).unwrap_or_default();
+
+        // A request that names no page size gets the largest page this report serves, so the
+        // `NextToken` path behaves the same whether or not a page size was asked for.
+        let largest_page = usize::try_from(SNAPSHOT_RECYCLE_BIN_PAGE_SIZE_RANGE.1)
+            .unwrap_or(1)
+            .max(1);
+        let limit = input
+            .max_results
+            .and_then(|max_results| usize::try_from(max_results).ok())
+            .unwrap_or(largest_page)
+            .clamp(1, largest_page);
+
+        // A token only when a snapshot follows this page: "the token to include in another
+        // request to get the next page of items. This value is null when there are no more
+        // items to return".
+        let next_token = page
+            .get(limit)
+            .and_then(|entry| entry.snapshot_id.as_deref())
+            .map(encode_page_token);
+
+        Ok(ListSnapshotsInRecycleBinOutput {
+            snapshots: Some(page.iter().take(limit).map(|entry| (*entry).clone()).collect()),
+            next_token,
+        })
     }
 }

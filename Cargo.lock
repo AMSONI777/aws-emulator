@@ -229,9 +229,9 @@ dependencies = [
 
 [[package]]
 name = "ar_archive_writer"
-version = "0.5.3"
+version = "0.5.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "73cd58deff2140a0a8eae87e417bd01db68a33e148aa93d1e8cd837e55e312b6"
+checksum = "523e5e187fff36fcb8d1d19ccf0ca4ca43ec3d158316057f66dc6f72716bc5ec"
 dependencies = [
  "object",
 ]
@@ -1095,9 +1095,9 @@ dependencies = [
 
 [[package]]
 name = "aws-sdk-cloudformation"
-version = "1.138.0"
+version = "1.139.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "5038473e44e63ecf055a0e4dd8c7ad13682fd60d4e6e88309b09e7f4fedff405"
+checksum = "b77def03a5fb2442348afdd6ecd0eafbfa117243865cc78e899beb26edf7fb6d"
 dependencies = [
  "arc-swap",
  "aws-credential-types",
@@ -1340,9 +1340,9 @@ dependencies = [
 
 [[package]]
 name = "aws-sdk-ec2"
-version = "1.277.0"
+version = "1.280.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "d84f1358ac277ff085dccd6892ceefc5cfe07e7145b5d5d3df4a5957f716c4e6"
+checksum = "2f4b884e8e1d323fda60c20c7c4d9929be47ce8da0ed287463477572c0564ffd"
 dependencies = [
  "arc-swap",
  "aws-credential-types",
@@ -1464,9 +1464,9 @@ dependencies = [
 
 [[package]]
 name = "aws-sdk-iam"
-version = "1.135.0"
+version = "1.136.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "1efc8802ed8838a9e47263dffda96ade100f50b640e352fef6e2af8234e358f9"
+checksum = "0f53b6d3c4f3f04b734a5ae6eea34491e5c356be99bc677fa7fd84eba0cc671b"
 dependencies = [
  "arc-swap",
  "aws-credential-types",
@@ -1562,9 +1562,9 @@ dependencies = [
 
 [[package]]
 name = "aws-sdk-lambda"
-version = "1.158.0"
+version = "1.159.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ea90c7f101b913d02169f9f7070d97e20035e7639b10685b5f1c8346bf0fffc9"
+checksum = "2cc0b4925cd55cabd17679859a0b2b71f66512262861cee5c83e3065aa8fd9d2"
 dependencies = [
  "arc-swap",
  "aws-credential-types",
@@ -1588,9 +1588,9 @@ dependencies = [
 
 [[package]]
 name = "aws-sdk-organizations"
-version = "1.139.0"
+version = "1.140.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "4b6521f1867062a1e3eb1aa5a63a24b34ebfa017c17fd6aa09e216102a35e3f1"
+checksum = "12b2cc17ebfecff0f1296596af0ea9d9ffd02948b7987ec200a9defee2b846cc"
 dependencies = [
  "arc-swap",
  "aws-credential-types",
@@ -1774,9 +1774,9 @@ dependencies = [
 
 [[package]]
 name = "aws-sdk-secretsmanager"
-version = "1.127.0"
+version = "1.128.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "8ddbc82990983ffca65c6767fe0aeaf7bc18f10699d8faae783f53553ad206f6"
+checksum = "d77ef7832d9e7c60fa7b8201bb2038ccc9821b6cf88746caab6dc1c8767882b5"
 dependencies = [
  "arc-swap",
  "aws-credential-types",
@@ -1873,9 +1873,9 @@ dependencies = [
 
 [[package]]
 name = "aws-sdk-ssm"
-version = "1.136.0"
+version = "1.137.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "915984b39468a5d9cf36d1813e1847a2fa67ab3ca9fda1a1e17735a30b6b1b24"
+checksum = "db5dffb9ec07fac5dbbf475396fbe1a4a319ee46528b7054662c518f18d00421"
 dependencies = [
  "arc-swap",
  "aws-credential-types",
@@ -2737,9 +2737,9 @@ dependencies = [
 
 [[package]]
 name = "cc"
-version = "1.11.1"
+version = "1.11.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "4ff2a8126fff0f8c839080d619675a585e61720bb12d2baceae45769fd66f155"
+checksum = "33ef9e3e8154a45c7a95cff4c1299702106ad94062d7bb85fdc5d3a5afd91d45"
 dependencies = [
  "find-msvc-tools",
  "jobserver",
@@ -3970,9 +3970,9 @@ checksum = "00d174d5400e5e8fd687ad1049e2f578285fa914201b1af7e8b112a4546bd826"
 
 [[package]]
 name = "errno"
-version = "0.3.14"
+version = "0.3.15"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "39cab71617ae0d63f51a36d69f866391735b51691dbda63cf6f96d042b63efeb"
+checksum = "e35d6e78f4cebb90e51d543db8fe41528851d6deeef6ef21ebd4bfdc1e784776"
 dependencies = [
  "libc",
  "windows-sys 0.61.2",
@@ -5296,9 +5296,9 @@ dependencies = [
 
 [[package]]
 name = "jiff"
-version = "0.2.42"
+version = "0.2.43"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "fefca06093eeaed707a905795e68206da0edca4edef23d2a3997a3ddbee462aa"
+checksum = "26699905cc795a23e3949585cc7ba3ee8ade090872a27e4316304a777297894a"
 dependencies = [
  "jiff-core",
  "jiff-static",
@@ -5312,18 +5312,18 @@ dependencies = [
 
 [[package]]
 name = "jiff-core"
-version = "0.1.4"
+version = "0.1.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "77a24020db0ee88d1c681d677681bd31f9f4ea189a455425223d52ce4f1508aa"
+checksum = "ffe6854081f5ac0a3046a9b223729ccd7a20b1e0e8277e44dc0660eedf67dfe2"
 dependencies = [
  "log",
 ]
 
 [[package]]
 name = "jiff-static"
-version = "0.2.42"
+version = "0.2.43"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "41d3213549742662eea1a18e6c5af9be5dfbabeb7611ab71356a54928ec398f0"
+checksum = "4b4ff49b2887190c760b86207b55cdcaabbdecaf7a0660d68aa2ed6f652abf0a"
 dependencies = [
  "jiff-core",
  "proc-macro2",
@@ -6154,9 +6154,9 @@ dependencies = [
 
 [[package]]
 name = "mio"
-version = "1.2.4"
+version = "1.2.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "1788edb87fdc09c7e26304471e2f5be8cdefb1b6930d6e3985fc02ff53bf86ee"
+checksum = "20521a903f02b0a573cd6840e9d0a5a0cc043d361fe924092cd70f8556cc9c4a"
 dependencies = [
  "libc",
  "wasi",
@@ -7231,7 +7231,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "8a56d757972c98b346a9b766e3f02746cde6dd1cd1d1d563472929fdd74bec4d"
 dependencies = [
  "anyhow",
- "itertools 0.14.0",
+ "itertools 0.10.5",
  "proc-macro2",
  "quote",
  "syn 2.0.119",
@@ -7252,9 +7252,9 @@ dependencies = [
 
 [[package]]
 name = "psl"
-version = "2.1.250"
+version = "2.1.253"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "9c036f34929bf0b11edcba0799b63f360beb20aef1957b3432b1c3954bd3a631"
+checksum = "82576eafaa94759a92a0cf047f34d227665811d5cdf70f4b11e25cd813f3de54"
 dependencies = [
  "psl-types",
 ]
@@ -8000,9 +8000,9 @@ dependencies = [
 
 [[package]]
 name = "rustls-webpki"
-version = "0.103.16"
+version = "0.103.17"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "4443b1b6d39d7c663139942cc4558262562d2c84123bb6282ef177009ca8b281"
+checksum = "e3a0760a887c14823fca5a1c970b01d47c328c696c0c64829d1df50e8f853fd5"
 dependencies = [
  "aws-lc-rs",
  "ring",
@@ -12893,6 +12893,7 @@ dependencies = [
  "service-com-amazonaws-ebs-ebs",
  "service-com-amazonaws-iam-awsidentitymanagementv20100508",
  "service-com-amazonaws-kms-trentservice",
+ "service-com-amazonaws-rbin-amazonrecyclebin",
  "service-com-amazonaws-s3-amazons3",
  "service-com-amazonaws-sts-awssecuritytokenservicev20110615",
  "service-common",
@@ -21727,7 +21728,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "32497e9a4c7b38532efcdebeef879707aa9f794296a4f0244f6f69e9bc8574bd"
 dependencies = [
  "fastrand",
- "getrandom 0.4.3",
+ "getrandom 0.3.4",
  "once_cell",
  "rustix",
  "windows-sys 0.61.2",

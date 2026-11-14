@@ -1907,6 +1907,13 @@ mod elbv2_lambda_target_published_address;
 // branches landing at once each re-added the pair here.)
 // are declared in the head region above: a module may be declared only once.)
 // are declared further up this tail already: a module may be declared only once.)
+// are declared further up this tail already: a module may be declared only once.)
+// (`apigateway_sns_service_integration` is declared once, further up this tail: a module may
+// be declared only once, and two branches landing at once appended it here as well.)
+// are declared once, further up this tail: a module may be declared only once, and two
+// branches landing at once each re-added the pair here.)
+// are declared in the head region above: a module may be declared only once.)
+// are declared further up this tail already: a module may be declared only once.)
 // (`apigateway_sns_service_integration` is declared once, further up this tail: a module may
 // be declared only once, and two branches landing at once each appended it here.)
 // be declared only once, and two branches landing at once appended it here as well.)
@@ -1943,6 +1950,13 @@ mod lambda_signed_write_to_an_aoss_collection_endpoint;
 // as well.)
 // (`apigateway_cognito_authorizer_app_client_audience` is declared in the head region above:
 // a module may be declared only once.)
+// (The Amazon Cognito authorizer suite is declared ONCE, in the head region above: a module
+// may be declared only once, and two branches landing at once appended it here as well.)
+// Declared ONCE, in the head region above beside the other API Gateway suites: it was
+// appended here as well while two branches were landing at once, which declared it a second
+// time and compiled neither.
+// (`apigateway_cognito_authorizer_app_client_audience` is declared once, in the head region
+// above, and `cloudformation_metric_stream_estate_is_drainable` once further down this tail:
 // (`apigateway_cognito_authorizer_app_client_audience` is declared once in the head region
 // above, and `cloudformation_metric_stream_estate_is_drainable` once in the tail below: a
 // module may be declared only once, and a second declaration compiles neither.)
@@ -1997,6 +2011,10 @@ mod cloudformation_metric_stream_estate_is_drainable;
 #[path = "all/redshift_health_alarms_evaluate.rs"]
 mod redshift_health_alarms_evaluate;
 // (`cloudformation_metric_stream_filter_update` is declared once, in the head region above:
+// (`zz_probe` is declared further up this tail already: a module may be declared only once.)
+// (`zz_probe` is declared ONCE, further up this tail: a module may be declared only once.)
+// (`cloudwatch_alarm_ssm_ops_item_action` is declared once, in the head region above: a
+// module may be declared only once.)
 // (`cloudwatch_alarm_ssm_ops_item_action` is declared once, in the head region above: a
 // module may be declared only once.)
 // (`cloudformation_metric_stream_filter_update` is declared ONCE, in the head region above
@@ -2262,6 +2280,8 @@ mod dynamodb_write_capacity_metrics_drive_the_alarm_chain;
 // touch this directory should delete both it and this declaration. Declared ONCE: two
 // landings each appended their own copy, and a module declared twice loads the same file
 // twice, which compiles neither.
+// (`cloudformation_metric_stream_estate_is_drainable` is declared further up this tail
+// already: a module may be declared only once.)
 // (The suite that drives the Amazon Cognito user-pool authorizer is declared ONCE, in the
 // head region above: a module may be declared only once, so the duplicate declaration that
 // was appended here is gone.)
@@ -2374,6 +2394,43 @@ mod cloudformation_rest_api_request_validation;
 // (`zz_probe` is declared once, just above: a module may be declared only once.)
 // (`cloudformation_metric_stream_estate_is_drainable` is declared once, above: a module may
 // `cloudformation_provisions_cloudfront_resources` is declared once, in the head region
+// (`apigateway_sns_service_integration` is declared ONCE, a few lines above in this same
+// tail: it was appended here as well while two branches were landing at once, which
+// declared it a second time and compiled neither.)
+// (`apigateway_sns_service_integration` is declared ONCE, a few lines up in this same
+// appended tail: two branches landing in the same window appended a second declaration of it
+// here, which is a redefinition that compiled neither, so the duplicate is removed and the
+// first declaration stands.)
+// (`apigateway_cognito_authorizer_app_client_audience` is declared in the head region of
+// this file already: two branches landing in the same window each declared it, and a module
+// may be declared only once.)
+// (The API Gateway/Cognito authorizer suite is declared ONCE, in the head region above:
+// a module may be declared only once, and two branches landing at once appended it here
+// as well.)
+// (`cloudformation_metric_stream_filter_update` is declared ONCE, in the head region above
+// beside the other `cloudformation_…` suites: it was appended here as well while two
+// two branches landing in the same window each declared it, and a module may be declared
+// only once.)
+// (`zz_probe` is declared further up this tail already: two branches landing in the same
+// window each appended it, and a module may be declared only once.)
+// (`cloudformation_metric_stream_filter_update` is declared ONCE, in the sorted head above:
+// two branches landing in the same window appended a second declaration of it here, which is a
+// redefinition that compiled neither, so the duplicate is removed and the first stands.)
+// (The metric-stream filter-update suite is declared ONCE, in the head region above: it was
+// appended here as well while two branches were landing at once.)
+// (`zz_probe` is declared ONCE, further up this tail.)
+// (`cloudformation_metric_stream_filter_update` is declared in the head region above: a module
+// (`https_front_door_concurrent_pooled_producer` is declared once, further up this tail:
+// (`cloudformation_metric_stream_estate_is_drainable` is declared further up this file
+// already: two branches landing in the same window each appended it, and a module may be
+// declared only once.)
+// (The HTTPS front-door suite is declared ONCE, in the span above: it was appended here as
+// well while two branches were landing at once.)
+// (The metric-stream estate suite and the other CloudFormation suites of this window
+// (`https_front_door_concurrent_pooled_producer` is declared further up this tail already: a
+// (`ses_event_destination_reaches_an_eventbridge_rule_target` is declared ONCE, further up
+// this tail: two branches landing in the same window declared it here as well, which compiled
+// neither.)
 // (`cloudformation_metric_stream_filter_update` is declared in the head region above too: the
 // suite was appended here as well while two branches were landing at once, which declared it a
 // second time and compiled neither.)
@@ -2621,6 +2678,9 @@ mod s3_object_created_invalidates_the_distribution_edge;
 // tail: a module may be declared only once, and two landings each appended a declaration of
 #[path = "all/sfn_relayed_dynamodb_request_id.rs"]
 mod sfn_relayed_dynamodb_request_id;
+// (`cloudformation_provisions_cloudfront_resources` is declared ONCE, in the sorted span
+// above: two branches landing in the same window declared it here as well, which compiled
+// neither.)
 #[path = "all/cloudformation_provisions_cloudfront_resources.rs"]
 mod cloudformation_provisions_cloudfront_resources;
 // (`cloudformation_provisions_cloudfront_resources` is declared ONCE, further up this file:
@@ -2831,6 +2891,11 @@ mod cloudformation_eventbridge_fan_out_to_lambda_and_sfn;
 // (A suite left at the top level of `tests/` fails the build. Declare each suite exactly
 // leaving a note here. These lines sit after the first item in this file, so they are
 // ordinary comments: an inner doc comment here is `E0753` and compiles no suite at all.)
+// suite left at the top level of `tests/` fails the build. Declare each suite exactly
+// ONCE: this is one crate root, so a second `mod` for the same name is `E0428` and fails
+// every suite in this target. `all/all_rs_declares_each_suite_once.rs` checks that for
+// this file and for every service crate's `tests/all.rs`, so check there rather than
+// leaving a note here.
 // leaving a note here. (Line comments, not `//!`: an inner doc comment is only legal at
 // the head of a crate root, so one in this tail is `E0753` and compiles no suite at all.)
 // (The five lines below arrived as INNER doc comments (`//!`) in this appended tail, where
@@ -3012,7 +3077,17 @@ mod s3_object_events_update_their_search_index;
 // service crate's test target can deploy the stack and then read the pool's roles back.
 #[path = "all/cloudformation_cognito_identity_role_attachment_refusal.rs"]
 mod cloudformation_cognito_identity_role_attachment_refusal;
+// suite left at the top level of `tests/` fails the build. Declare each suite exactly
+// ONCE: this is one crate root, so a second `mod` for the same name is `E0428` and fails
+// every suite in this target. `all/all_rs_declares_each_suite_once.rs` checks that for
+// this file and for every service crate's `tests/all.rs`, so check there rather than
+// leaving a note here.
 // A suite left at the top level of `tests/` fails the build. Declare each suite exactly
+// suite left at the top level of `tests/` fails the build. Declare each suite exactly
+// ONCE: this is one crate root, so a second `mod` for the same name is `E0428` and fails
+// every suite in this target. `all/all_rs_declares_each_suite_once.rs` checks that for
+// this file and for every service crate's `tests/all.rs`, so check there rather than
+// leaving a note here.
 // leaving a note here. (These five lines are another fragment of this file's own header
 // that a merge of two appended tails landed down here; they are ordinary comments
 // because an inner doc comment may only appear before an item.)

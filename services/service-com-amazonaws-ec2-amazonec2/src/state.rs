@@ -1955,6 +1955,19 @@ use crate::scaffolded::Scaffolded;
 mod image_recycle_bin;
 pub use image_recycle_bin::{RecycledImageRecord, recycled_image, require_recycled_image};
 
+// The Recycle Bin an EBS snapshot waits in between its deletion and its permanent deletion,
+// and every rule that moves one in or out of it, in a module of its own.
+mod snapshot_recycle_bin;
+pub use snapshot_recycle_bin::{
+    RecycledSnapshotRecord, SNAPSHOT_RECYCLE_BIN_PAGE_SIZE_RANGE, snapshot_id_not_in_recycle_bin,
+    snapshot_recycle_bin_entry_payload_bytes,
+};
+
+// The RETENTION RULES a delete of an EBS resource is decided by, which are the `rbin`
+// service's resources and are read out of that service's own store.
+mod recycle_bin_rules;
+pub use recycle_bin_rules::{RECYCLE_BIN_RESOURCE_TYPE_SNAPSHOT, recycle_bin_retention_period};
+
 /// The account's KEY PAIRS: the record one is stored as, the bounds a create holds a
 /// request to, the quota and name refusals EC2 answers about one, and the one writer that
 /// stores one. Re-exported, so a handler reaches them as `crate::state::<item>` like every

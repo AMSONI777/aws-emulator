@@ -1,15 +1,24 @@
 // SPDX-License-Identifier: CC0-1.0
 
 //! @op RestoreSnapshotFromRecycleBin
-//! SCAFFOLDED, NOT IMPLEMENTED: this operation answers HTTP 501 `NotImplemented` and
-//! asserts NOTHING about `RestoreSnapshotFromRecycleBin`'s real behaviour. Implement it here — this is
-//! the ONLY file to touch for this operation.
+//! IMPLEMENTED: takes the snapshot the Recycle Bin is keeping back into the account's
+//! snapshots — the SAME record the bin held, so the snapshot comes back with its id, its
+//! owner, its description, the volume and size it was taken of, its tags and the completion
+//! the clock owed it — and answers that snapshot's own members. A snapshot id the bin holds
+//! no entry for is refused with `InvalidSnapshotID.Malformed` (HTTP 400) and the message
+//! `The snapshot ID '<id>' is malformed`
+//! ([`crate::state::snapshot_id_not_in_recycle_bin`]) — the one code the service answers for
+//! every id this operation cannot resolve in the bin — and nothing is written.
 //!
-//! A 501 from this operation means "nobody has written it yet", never "the emulator is
-//! broken". Replace the `Err(..)` in [`RestoreSnapshotFromRecycleBin::handle`] with real behaviour and
-//! delete the SCAFFOLDED marker line above; that line is the machine-readable record of
-//! which operations are still stubs (`grep -rl '^//! SCAFFOLDED, NOT IMPLEMENTED:' */src/ops/`),
-//! so leaving it on an implemented operation under-reports progress.
+//! This is the ONLY file to touch for this operation.
+//!
+//! Which snapshots the bin holds, and the permanent deletion the clock owes each one at the
+//! end of its retention period, are [`crate::state`]'s — see the `snapshot_recycle_bin`
+//! module docs. What puts a snapshot there is `DeleteSnapshot`: a deleted resource is
+//! retained only when a Recycle Bin retention rule covers it, retention rules are the `rbin`
+//! service's resources rather than EC2's, and that delete asks them through
+//! [`crate::state::recycle_bin_retention_period`] — so a delete no rule covers is a permanent
+//! one and leaves this operation nothing to restore.
 //!
 //! ## Shape of an operation
 //!
@@ -147,18 +156,86 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         input: Self::Input,
         ctx: &smithy_server_runtime::OperationContext<'_>,
     ) -> Result<Self::Output, Self::Error> {
-        // The engine is reachable from `&self` (constructor-injected); `ctx` carries
-        // request metadata. Both are bound here so an implementer has them in scope.
-        let _ = (&input, ctx, &self.engine);
-        // Implement `RestoreSnapshotFromRecycleBin` here, then delete the SCAFFOLDED marker at the top of
-        // this file. Return modeled failures as
-        // `Err(RestoreSnapshotFromRecycleBinErrorModeled::Variant(..).into())` — the `From` impl above lifts it.
+        // `ctx` carries request metadata only; this operation reads none of it — a snapshot
+        // is named by id alone, so nothing here depends on the Region the request was signed
+        // for. The store is reached through the engine held on `self`.
+        let _ = ctx;
+        use crate::state;
+
+        let state_handle = state::require_service_state(&*self.engine)?;
+        let mut store = state_handle.lock();
+
+        // Whether the bin still holds the snapshot is a question about NOW, so a permanent
+        // deletion the clock already owed is applied before the bin is read: a snapshot whose
+        // retention period ran out is gone whether or not anybody called, and a restore must
+        // not resurrect it.
+        store.materialize_due_transitions();
+
+        // "Restores a snapshot from the Recycle Bin": the Recycle Bin is the ONLY place this
+        // operation resolves a `SnapshotId` against, and it answers ONE code for every id it
+        // cannot resolve there — `InvalidSnapshotID.Malformed`, HTTP 400, which is what the
+        // recorded service answers for an id the bin holds no entry for. So this operation
+        // does not distinguish "no such entry" from "not a snapshot id" and neither does this
+        // handler: an id the account still has a snapshot for, one the bin never held, one
+        // whose retention period has ended and a value that is not a snapshot id at all are
+        // all refused the same way.
         //
-        // To refuse a bad request this operation models no error for, return
-        // `Err(crate::scaffolded::Scaffolded::validation("..."))` — a 400
-        // `ValidationException`. Do NOT answer 501 for it: 501 means "not written yet",
-        // not "bad request". Modeled constraints are already refused BEFORE this
-        // handler runs, so reaching here means the input satisfies every one of them.
-        Err(crate::scaffolded::Scaffolded::not_implemented("RestoreSnapshotFromRecycleBin"))
+        // That is this operation's own answer, not the crate's general one: `DescribeSnapshots`
+        // keeps `InvalidSnapshot.NotFound` for a well-formed id it cannot resolve, and
+        // `ListSnapshotsInRecycleBin` — which refuses an ENTRY of a list rather than the one
+        // resource this call names — keeps the crate's two-way classification, the way
+        // `ListVolumesInRecycleBin` does beside `RestoreVolumeFromRecycleBin`. The evidence
+        // for the collapse is this issue's recorded unit, which asserts this code.
+        if !store.snapshots_in_recycle_bin.contains_key(&input.snapshot_id) {
+            return Err(state::snapshot_id_not_in_recycle_bin(&input.snapshot_id));
+        }
+
+        // The request is one that would have succeeded, so a dry run stops HERE: "If you have
+        // the required permissions, the error response is DryRunOperation"
+        // (`RestoreSnapshotFromRecycleBinRequest$DryRun`). The snapshot is still in the bin,
+        // and stays there with the retention period it had.
+        if input.dry_run.unwrap_or(false) {
+            return Err(state::dry_run_operation());
+        }
+
+        if !store.restore_recycled_snapshot(&input.snapshot_id) {
+            return Err(state::internal_error(format!(
+                "the Recycle Bin entry for snapshot '{snapshot_id}' checked a moment ago \
+                 could not be restored",
+                snapshot_id = input.snapshot_id,
+            )));
+        }
+
+        // The restored snapshot is read back out of the store it was just put into, so every
+        // member this result reports is the snapshot's own as `DescribeSnapshots` reports it —
+        // including the state and the progress the clock has reached, which
+        // [`crate::state::SnapshotRecord::view_at`] derives rather than storing. A snapshot
+        // restored a moment after it was taken is therefore still `pending` here, exactly as
+        // a read of it would say.
+        let restored = store
+            .snapshots
+            .get(&input.snapshot_id)
+            .map(|record| record.view_at(::std::time::Instant::now()))
+            .ok_or_else(|| {
+                state::internal_error(format!(
+                    "the restored snapshot '{snapshot_id}' is not among the account's \
+                     snapshots",
+                    snapshot_id = input.snapshot_id,
+                ))
+            })?;
+
+        Ok(RestoreSnapshotFromRecycleBinOutput {
+            snapshot_id: restored.snapshot_id,
+            outpost_arn: restored.outpost_arn,
+            description: restored.description,
+            encrypted: restored.encrypted,
+            owner_id: restored.owner_id,
+            progress: restored.progress,
+            start_time: restored.start_time,
+            state: restored.state,
+            volume_id: restored.volume_id,
+            volume_size: restored.volume_size,
+            sse_type: restored.sse_type,
+        })
     }
 }

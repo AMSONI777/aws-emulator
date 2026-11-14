@@ -10,6 +10,14 @@
 //! hold, so the delete applies that rule itself
 //! ([`crate::state::ComAmazonawsEc2Amazonec2State::forget_fast_snapshot_restores`]).
 //!
+//! A snapshot a Recycle Bin RETENTION RULE covers is RETAINED instead of permanently deleted:
+//! it moves into the account's Recycle Bin for that rule's retention period
+//! ([`crate::state::ComAmazonawsEc2Amazonec2State::move_snapshot_to_recycle_bin`]), so it
+//! stops being one of the account's snapshots — which is what this delete reports — and
+//! `RestoreSnapshotFromRecycleBin` can take it back until the period runs out. The rules are
+//! the `rbin` service's resources, read through
+//! [`crate::state::recycle_bin_retention_period`].
+//!
 //! This is the ONLY file to touch for this operation.
 //!
 //! ## Shape of an operation
@@ -67,6 +75,8 @@
 //!   required permissions, the error response is DryRunOperation. Otherwise, it is
 //!   UnauthorizedOperation.
 //! * `SnapshotId` (SnapshotId) **required** — The ID of the EBS snapshot.
+
+use std::time::SystemTime;
 
 #[allow(unused_imports)]
 use super::types::*;
@@ -158,13 +168,17 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         ctx: &smithy_server_runtime::OperationContext<'_>,
     ) -> Result<Self::Output, Self::Error> {
         use crate::state::{
-            delete_direct_api_snapshot, direct_api_snapshot_exists, dry_run_operation,
-            internal_error, require_service_state, snapshot_in_use, unresolvable_snapshot_id,
+            RECYCLE_BIN_RESOURCE_TYPE_SNAPSHOT, delete_direct_api_snapshot,
+            direct_api_snapshot_exists, dry_run_operation, internal_error,
+            recycle_bin_retention_period, request_region, require_service_state,
+            snapshot_in_use, snapshot_limit_exceeded, unresolvable_snapshot_id,
         };
 
-        // A snapshot is named by id alone, so nothing here depends on the Region the request
-        // was signed for; the store is reached through the engine held on `self`.
-        let _ = ctx;
+        // A snapshot is named by id alone, so WHICH snapshot this deletes does not depend on
+        // the Region the request was signed for; the Region is read only to find the Recycle
+        // Bin retention rules in force, which exist in one Region each. The store is reached
+        // through the engine held on `self`.
+        let region = request_region(ctx.parts());
 
         let state_handle = require_service_state(&*self.engine)?;
         let mut store = state_handle.lock();
@@ -205,6 +219,74 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         // Each side removes its OWN record: `remove_snapshot` gives the stored bytes back to
         // this store's budget, and the direct-API delete removes the record that service
         // keeps, along with its blocks and the client token that minted it.
+        //
+        // Unless the snapshot is RETAINED instead: "resources […] that have one or more of the
+        // specified tag key and value pairs are automatically retained in the Recycle Bin upon
+        // deletion", and a Region-level rule "retains all deleted resources of the specified
+        // resource type in the Region in which the rule is created"
+        // (`rbin`'s `CreateRuleRequest$ResourceTags`). So a delete asks the retention rules of
+        // the Region it was signed for — the `rbin` service's own resources, read through
+        // [`recycle_bin_retention_period`] — and a covered snapshot MOVES into the bin for
+        // that rule's retention period rather than being permanently deleted: it stops being
+        // one of the account's snapshots, which is what this delete reports, and
+        // `RestoreSnapshotFromRecycleBin` can take it back until its retention period runs
+        // out.
+        //
+        // A snapshot the EBS direct APIs hold is deleted rather than retained: its record is
+        // THAT service's ([`crate::state::direct_api_snapshots`]) and the bin keeps the record
+        // this store held, so retaining one would mean moving a record between two services'
+        // stores — which is not what a retention rule asks for here, and is left to the issue
+        // that owns the cross-service retention path.
+        // ONE reading of the moment this delete runs at: the rules in force are the rules as
+        // of it, and the two instants the Recycle Bin entry reports are read off the same
+        // moment, so a retained snapshot's retention period cannot start before the rule that
+        // retained it was consulted.
+        let now = SystemTime::now();
+        let retention = if stored_here {
+            let tags = store
+                .snapshots
+                .get(&input.snapshot_id)
+                .and_then(|record| record.view.tags.clone())
+                .unwrap_or_default();
+            recycle_bin_retention_period(
+                &*self.engine,
+                &region,
+                RECYCLE_BIN_RESOURCE_TYPE_SNAPSHOT,
+                &tags,
+                now,
+            )
+        } else {
+            None
+        };
+        if let Some(retention) = retention {
+            // The bin is bounded like every other store here, and the question is asked
+            // BEFORE the snapshot leaves this store, so a delete that cannot be retained
+            // refuses rather than permanently deleting a snapshot a rule says to keep. The
+            // ceiling is this emulator's, not an AWS quota, and a snapshot the Recycle Bin
+            // holds still counts against the account's stored snapshots — so the refusal is
+            // the quota code EC2 answers for the snapshots an account holds, which is the
+            // closest thing the service models to "no room for another stored snapshot".
+            // (`move_snapshot_to_recycle_bin` asks the same question again for itself, so no
+            // path can get past the ceiling by forgetting to.)
+            if !store.has_snapshot_recycle_bin_capacity() {
+                return Err(snapshot_limit_exceeded(
+                    "the Recycle Bin holds as many retained snapshots as this emulator stores",
+                ));
+            }
+            if store
+                .move_snapshot_to_recycle_bin(&input.snapshot_id, now, retention)
+                .is_none()
+            {
+                return Err(internal_error(
+                    "the snapshot checked a moment ago could not be retained in the Recycle Bin",
+                ));
+            }
+            // The fast snapshot restores of the snapshot went with it into the bin: the move
+            // takes the record out of this store through the same removal a permanent delete
+            // uses, and a restore is a property of a snapshot the account can still restore
+            // volumes from.
+            return Ok(DeleteSnapshotOutput);
+        }
         let removed = if stored_here {
             store.remove_snapshot(&input.snapshot_id).is_some()
         } else {

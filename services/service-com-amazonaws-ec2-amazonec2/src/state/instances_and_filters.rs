@@ -400,6 +400,10 @@ impl ComAmazonawsEc2Amazonec2State {
         // at its exit instant whether or not anybody called, so that deletion is applied
         // before anything reads the bin.
         self.delete_due_recycled_volumes(now);
+        // The same deletion the clock owes a snapshot the Recycle Bin is keeping, applied for
+        // the same reason: an entry past its exit instant is permanently deleted whether or
+        // not anybody called, so neither a report of the bin nor a restore can still see it.
+        self.delete_due_recycled_snapshots(now);
         // The other clock-owed removal of a volume: one whose encryption key refused its data
         // key never became available and was withdrawn at that instant, whether or not
         // anybody called.

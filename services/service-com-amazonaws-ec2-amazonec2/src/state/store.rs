@@ -2198,6 +2198,25 @@ pub struct ComAmazonawsEc2Amazonec2State {
     /// Empty for a fresh account: nothing in AWS makes a snapshot until a caller asks for
     /// one. [`Self::insert_snapshot`] is the one writer.
     pub snapshots: BTreeMap<String, SnapshotRecord>,
+    /// Every EBS snapshot of the account that is currently in the Recycle Bin, by
+    /// `SnapshotId`, as a [`RecycledSnapshotRecord`]: the modelled
+    /// [`crate::ops::types::SnapshotRecycleBinInfo`] entry `ListSnapshotsInRecycleBin`
+    /// reports, beside the [`SnapshotRecord`] the snapshot store held, so a restore gives the
+    /// SAME snapshot back rather than a copy rebuilt from a projection. A snapshot is in
+    /// EITHER this store or [`Self::snapshots`], never both: a snapshot the bin holds has
+    /// been deleted, so it is not one of the snapshots the account can read until it is
+    /// restored. Ordered by id, which is the order that report pages over.
+    ///
+    /// A snapshot reaches the bin when it is deleted while a Recycle Bin retention rule
+    /// covers it ([`Self::move_snapshot_to_recycle_bin`]), and leaves it when it is restored
+    /// (`RestoreSnapshotFromRecycleBin`, through [`Self::restore_recycled_snapshot`]) or when
+    /// its retention period runs out — a permanent deletion the CLOCK owes, applied by
+    /// [`Self::materialize_due_transitions`]. `DeleteSnapshot` is what puts one here: a
+    /// deleted resource is retained only when a retention rule covers it, retention rules are
+    /// the `rbin` service's resources, and that delete asks them through
+    /// [`crate::state::recycle_bin_retention_period`] — so a delete no rule covers is still a
+    /// permanent one, which is why this store is empty for an account that holds no rule.
+    pub snapshots_in_recycle_bin: BTreeMap<String, RecycledSnapshotRecord>,
     /// Every VM Import/Export snapshot import task the account holds, by `ImportTaskId`,
     /// as the modelled [`ImportSnapshotTask`] shape itself — so a member a writer sets
     /// round-trips through `DescribeImportSnapshotTasks` without a field-by-field copy
@@ -3583,6 +3602,8 @@ impl Default for ComAmazonawsEc2Amazonec2State {
             volumes: BTreeMap::new(),
             volume_client_tokens: HashMap::new(),
             snapshots: BTreeMap::new(),
+            // A fresh account has deleted no snapshot, so the Recycle Bin is keeping none.
+            snapshots_in_recycle_bin: BTreeMap::new(),
             import_snapshot_tasks: BTreeMap::new(),
             import_snapshot_task_client_tokens: HashMap::new(),
             import_snapshot_conversions: BTreeMap::new(),
