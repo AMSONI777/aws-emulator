@@ -548,6 +548,69 @@ pub async fn list_imports_refusal(
     )
 }
 
+/// How long [`settled_stack_status`] waits for a stack operation to settle before it calls
+/// the stack stuck, and how often it looks. The deadline is far longer than the spans this
+/// emulator gives a stack's transitions, so a loaded host cannot fail a case; what a caller
+/// asserts is the CONDITION (a status that is not an operation in flight), never the time it
+/// took.
+pub const SETTLE_DEADLINE: Duration = Duration::from_secs(60);
+/// See [`SETTLE_DEADLINE`].
+pub const SETTLE_POLL_INTERVAL: Duration = Duration::from_millis(100);
+
+/// Poll `DescribeStacks` the way a client's waiter does and answer the `StackStatus` the stack
+/// SETTLED on — the first status that is not an operation in flight.
+///
+/// The shared waiter for the suites that deploy a stack and then read what it produced: a
+/// stack's terminal status is due at an INSTANT this service records, so what a caller waits
+/// for is that status appearing, under [`SETTLE_DEADLINE`].
+pub async fn settled_stack_status(
+    case: &str,
+    router: &MultiServiceRouter,
+    region: &str,
+    stack: &str,
+) -> String {
+    let deadline = std::time::Instant::now() + SETTLE_DEADLINE;
+    let mut seen: Vec<String> = Vec::new();
+    loop {
+        let (code, body) =
+            call_in(router, region, "DescribeStacks", &[member("StackName", stack)]).await;
+        assert_eq!(
+            code, 200,
+            "case {case:?}: DescribeStacks must answer 200, got {code} {body}"
+        );
+        let reported = xml_text(&body, "StackStatus").unwrap_or_default();
+        if !reported.is_empty() && !reported.ends_with("_IN_PROGRESS") {
+            return reported;
+        }
+        if seen.last().map(String::as_str) != Some(reported.as_str()) {
+            seen.push(reported);
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "case {case:?}: expected {stack} to settle, saw {seen:?}"
+        );
+        tokio::time::sleep(SETTLE_POLL_INTERVAL).await;
+    }
+}
+
+/// The `ResourceStatusReason` of every event a stack recorded — the deployment's own account
+/// of itself, which is what a failed assertion names and what a case expecting a REFUSAL
+/// reads the owning service's report out of.
+pub async fn stack_event_reasons(
+    router: &MultiServiceRouter,
+    region: &str,
+    stack: &str,
+) -> Vec<String> {
+    let (_, events) = call_in(
+        router,
+        region,
+        "DescribeStackEvents",
+        &[member("StackName", stack)],
+    )
+    .await;
+    xml_texts(&events, "ResourceStatusReason")
+}
+
 /// `GetTemplate` at one stage, or at the service's default when `stage` is `None`.
 pub async fn get_template(
     router: &MultiServiceRouter,

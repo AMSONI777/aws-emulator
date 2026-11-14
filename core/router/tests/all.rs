@@ -4057,3 +4057,9 @@ mod cloudformation_cloudfront_fronted_rest_api;
 // of this file's own header, appended into this tail by a landing, where an inner doc comment
 // … this file and for every service crate's `tests/all.rs`. (An ordinary comment, for the
 // reason the notes above record: an inner doc comment past the first item is `E0753`.)
+// (Another fragment of this file's header, appended here by a landing: a `//!` line past the
+// first item is `E0753` and compiles no suite in this target, so it stands as an ordinary
+// comment — the rule it repeats is in the module doc at the HEAD of this file.)
+// (One more fragment of that same header landed here, typed with `//!`: past the first item
+// that is `E0753` and compiles no suite in this target, so it stands as an ordinary comment —
+// the rule it states stands in the module doc at the HEAD of this file.)

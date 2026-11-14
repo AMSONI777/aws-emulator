@@ -687,3 +687,5 @@ mod cognito_principal_tag_identity;
 mod nested_stack_dynamodb_outputs;
 #[path = "all/reference_read_authorization.rs"]
 mod reference_read_authorization;
+#[path = "all/declared_bucket_policy_is_applied.rs"]
+mod declared_bucket_policy_is_applied;
