@@ -97,6 +97,11 @@ mod stage_web_acl_logging;
 mod stage_web_acl_logging_destination_binding;
 #[path = "all/stage_web_acl_association_report.rs"]
 mod stage_web_acl_association_report;
+// WHERE in the serving of a request that same web ACL decides: ahead of the route, the
+// authorization, the API key and the integration the api declares, and for exactly as long as
+// the association lasts.
+#[path = "all/stage_web_acl_precedence.rs"]
+mod stage_web_acl_precedence;
 // What that same web ACL REPORTS to CloudWatch about the requests it decided at the stage:
 // the `AWS/WAFV2` counter of the action each dimension applied, under the web ACL, the rule
 // and the Region together.
