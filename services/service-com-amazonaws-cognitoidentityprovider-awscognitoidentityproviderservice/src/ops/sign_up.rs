@@ -8,6 +8,12 @@
 //! `UNCONFIRMED` with a freshly minted `sub` — which is the `UserSub` the response
 //! carries and what `AdminGetUser` reads back.
 //!
+//! A pool carrying a `LambdaConfig.PreSignUp` trigger has that function EVALUATE the account
+//! this registration proposes before it is stored, so the answer decides what gets stored and
+//! what this call reports: a function that bypassed the registrant's own confirmation leaves
+//! it `CONFIRMED` with no code to answer, and one that failed registers nobody
+//! ([`crate::state::lambda_triggers::pre_sign_up`]).
+//!
 //! The registration attempt this terminates is also an OBSERVATION of the app client it
 //! was made through, published into the pool's `AWS/Cognito` sign-up series
 //! ([`crate::state::auth_metrics`]).
@@ -319,10 +325,25 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> SignUp<Eng> {
         let Some(state) = crate::state::service_state(&*self.engine) else {
             return Err(internal_error());
         };
-        // The registration is performed under this service's lock, and that lock is
-        // RELEASED before the pool's custom email sender is invoked: nothing else of this
+        let caller =
+            crate::state::lambda_triggers::Caller::of(ctx.parts(), Some(&input.client_id));
+        // The registration is decided under this service's lock, and that lock is RELEASED
+        // before any of the pool's trigger functions is invoked: nothing else of this
         // service can be served while a function is being waited for.
-        let registered = self.register(&input)?;
+        let planned = self.plan(&input, caller)?;
+
+        // A pool carrying a pre-sign-up trigger has that function EVALUATE the account this
+        // registration proposes before it is stored: the trigger "evaluates new users and
+        // can bypass confirmation, link a federated user profile, or block sign-up requests"
+        // (`LambdaConfigType$PreSignUp`), so what the function answered is what gets stored
+        // and a function that failed stores nothing at all.
+        let decision = crate::state::lambda_triggers::pre_sign_up::invoke_pre_sign_up(
+            ctx,
+            planned.dispatch.as_ref(),
+        )
+        .await
+        .map_err(trigger_failed)?;
+        let registered = self.store(planned, &decision)?;
 
         // A pool that routes its email to a custom sender delivers this sign-up's code by
         // handing it to that function instead of mailing it, with the app client the
@@ -336,7 +357,7 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> SignUp<Eng> {
                 &registered.user_pool_id,
                 &registered.username,
                 crate::state::lambda_triggers::custom_email::CustomEmailSource::SignUp,
-                crate::state::lambda_triggers::Caller::of(ctx.parts(), Some(&input.client_id)),
+                caller,
                 input.client_metadata.as_ref(),
                 &issued_code,
             )
@@ -362,19 +383,39 @@ struct Registered {
     issued_code: Option<String>,
 }
 
+/// What a registration DECIDED before anything was stored: the account it would store, where
+/// it would store it, and the pre-sign-up invocation the pool owes for it.
+struct Planned {
+    /// The pool the account would be registered in.
+    user_pool_id: String,
+    /// The key that pool would hold it under.
+    key: String,
+    /// The account itself, as the request and the pool's own configuration decided it.
+    user: crate::state::User,
+    /// The instant this registration is made at, which the code it issues is issued at.
+    now: ::std::time::SystemTime,
+    /// The pool's pre-sign-up invocation, or `None` for a pool that configures none.
+    dispatch: Option<crate::state::lambda_triggers::Dispatch>,
+}
+
 impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> SignUp<Eng> {
-    /// Register the user `input` asks for, and report what that left behind.
+    /// Decide the registration `input` asks for: the account it would store and the
+    /// pre-sign-up invocation the pool owes for it, or the refusal the request earns.
     ///
     /// Everything here happens under this service's lock, which this call OWNS: the lock
     /// is taken and released inside it, so its caller holds none of it while it invokes a
     /// trigger function.
-    fn register(&self, input: &SignUpInput) -> Result<Registered, SignUpError> {
+    fn plan(
+        &self,
+        input: &SignUpInput,
+        caller: crate::state::lambda_triggers::Caller<'_>,
+    ) -> Result<Planned, SignUpError> {
         let Some(state) = crate::state::service_state(&*self.engine) else {
             return Err(internal_error());
         };
 
         let now = ::std::time::SystemTime::now();
-        let mut guard = state.lock();
+        let guard = state.lock();
 
         // This operation models no `UserPoolId` at all: the app client the request
         // names is what resolves the pool the user is registered in.
@@ -590,9 +631,62 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> SignUp<Eng> {
             // stored, so the history it starts out with is empty.
             auth_events: Vec::new(),
         };
-        let pool = guard
-            .pool_mut(&user_pool_id)
-            .ok_or_else(internal_error)?;
+
+        // What the pool's pre-sign-up function is handed, built while this lock is still
+        // held: the account this registration would store, which is what the function
+        // evaluates.
+        let dispatch = crate::state::lambda_triggers::pre_sign_up::pre_sign_up(
+            pool,
+            crate::state::lambda_triggers::pre_sign_up::Proposed {
+                username: &user.username,
+                attributes: &user.attributes,
+                validation_data: input.validation_data.as_deref(),
+            },
+            crate::state::lambda_triggers::pre_sign_up::Registration::SignUp,
+            caller,
+            input.client_metadata.as_ref(),
+        );
+        Ok(Planned {
+            user_pool_id,
+            key,
+            user,
+            now,
+            dispatch,
+        })
+    }
+
+    /// Store the account `planned` decided, as the pool's pre-sign-up function left it, and
+    /// report what that registration owes.
+    ///
+    /// Takes this service's lock itself, the pre-sign-up invocation having been made with it
+    /// released.
+    fn store(
+        &self,
+        planned: Planned,
+        decision: &crate::state::lambda_triggers::pre_sign_up::Decision,
+    ) -> Result<Registered, SignUpError> {
+        let Some(state) = crate::state::service_state(&*self.engine) else {
+            return Err(internal_error());
+        };
+        let Planned {
+            user_pool_id,
+            key,
+            mut user,
+            now,
+            ..
+        } = planned;
+        // What the function decided is applied BEFORE the account is stored, so the stored
+        // user is what this response reports and what every later read of this pool reports.
+        decision.apply(&mut user);
+
+        let mut guard = state.lock();
+        let pool = guard.pool_mut(&user_pool_id).ok_or_else(internal_error)?;
+        // Another registration may have taken the name while the function was being waited
+        // for, and a second user under a name the pool already holds is refused here exactly
+        // as it is before the function is asked.
+        if pool.users.contains_key(&key) {
+            return Err(username_exists());
+        }
         pool.users.insert(key.clone(), user);
 
         // Registering the user is what sends its confirmation code: `ConfirmSignUp`
@@ -600,14 +694,18 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> SignUp<Eng> {
         // your user pool", and the pool's own `AutoVerifiedAttributes` decide where it
         // goes (`UserPool::confirmation_destination`). A pool that verifies nothing, or
         // a user holding no value for what it verifies, has no destination — so no code
-        // is minted and no delivery is reported.
+        // is minted and no delivery is reported. Nor is one for an account that owes no
+        // confirmation at all: a code is what the registrant answers to confirm its
+        // sign-up, and a pre-sign-up function that bypassed that confirmation left nothing
+        // to answer.
         let stored = pool.users.get(&key).ok_or_else(internal_error)?;
-        let delivery = pool
-            .confirmation_destination(stored)
+        let delivery = (stored.status == crate::state::UserStatus::Unconfirmed)
+            .then(|| pool.confirmation_destination(stored))
+            .flatten()
             .map(|(attribute, destination)| {
                 crate::state::VerificationCode::issued(&attribute, &destination, now)
             });
-        let user = pool.user_mut(&input.username).ok_or_else(internal_error)?;
+        let user = pool.users.get_mut(&key).ok_or_else(internal_error)?;
         let issued = delivery
             .map(|code| user.issue_code(crate::state::CodePurpose::SignUpConfirmation, code));
         let code_delivery_details = issued

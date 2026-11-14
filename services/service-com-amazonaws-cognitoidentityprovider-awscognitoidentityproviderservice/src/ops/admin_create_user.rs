@@ -4,6 +4,11 @@
 //! Creates a user in a user pool: stores the user with a generated `sub`, in
 //! `FORCE_CHANGE_PASSWORD` state, and answers with the STORED user.
 //!
+//! A pool carrying a `LambdaConfig.PreSignUp` trigger has that function EVALUATE the account
+//! this create proposes before it is stored, so the answer decides what gets stored — which
+//! of the account's values the pool takes as verified — and a function that failed creates
+//! nobody ([`crate::state::lambda_triggers::pre_sign_up`]).
+//!
 //!
 //! ## Shape of an operation
 //!
@@ -266,7 +271,68 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         input: Self::Input,
         ctx: &smithy_server_runtime::OperationContext<'_>,
     ) -> Result<Self::Output, Self::Error> {
-        let _ = ctx;
+        // IAM credentials authorize this operation rather than an app client, so the event
+        // any trigger it fires carries names no app client of its own.
+        let caller = crate::state::lambda_triggers::Caller::of(ctx.parts(), None);
+        // The create is decided under this service's lock, and that lock is RELEASED before
+        // the pool's pre-sign-up function is invoked: nothing else of this service can be
+        // served while a function is being waited for.
+        let creating = match self.plan(&input, caller)? {
+            Planned::Resent(answer) => return Ok(answer),
+            Planned::Create(creating) => creating,
+        };
+
+        // A pool carrying a pre-sign-up trigger has that function EVALUATE the account this
+        // create proposes before it is stored: the trigger "evaluates new users and can
+        // bypass confirmation, link a federated user profile, or block sign-up requests"
+        // (`LambdaConfigType$PreSignUp`), and `ValidationData` is "temporary user attributes
+        // that contribute to the outcomes of your pre sign-up Lambda trigger"
+        // (`AdminCreateUser.ValidationData`), so an administrative create reaches that stage
+        // too — and a function that failed creates nobody.
+        let decision = crate::state::lambda_triggers::pre_sign_up::invoke_pre_sign_up(
+            ctx,
+            creating.dispatch.as_ref(),
+        )
+        .await
+        .map_err(trigger_failed)?;
+        self.store(*creating, &decision)
+    }
+}
+
+/// What the request resolved to under the lock: the invitation a `RESEND` sent again, which is
+/// already answered, or the account a create would store.
+enum Planned {
+    /// A `RESEND`, answered from the user whose invitation it reset.
+    Resent(AdminCreateUserOutput),
+    /// A create, which the pool's pre-sign-up function evaluates before it is stored.
+    Create(Box<Creating>),
+}
+
+/// What a create DECIDED before anything was stored: the account it would store, where it
+/// would store it, and the pre-sign-up invocation the pool owes for it.
+struct Creating {
+    /// The pool the account would be created in.
+    user_pool_id: String,
+    /// The key that pool would hold it under.
+    key: String,
+    /// The account itself, as the request and the pool's own configuration decided it.
+    user: crate::state::User,
+    /// The pool's pre-sign-up invocation, or `None` for a pool that configures none.
+    dispatch: Option<crate::state::lambda_triggers::Dispatch>,
+}
+
+impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> AdminCreateUser<Eng> {
+    /// Decide what `input` asks for: the invitation a `RESEND` sends again, the account a
+    /// create would store, or the refusal the request earns.
+    ///
+    /// Everything here happens under this service's lock, which this call OWNS: the lock is
+    /// taken and released inside it, so its caller holds none of it while it invokes a
+    /// trigger function.
+    fn plan(
+        &self,
+        input: &AdminCreateUserInput,
+        caller: crate::state::lambda_triggers::Caller<'_>,
+    ) -> Result<Planned, AdminCreateUserError> {
         let Some(state) = crate::state::service_state(&*self.engine) else {
             return Err(internal_error());
         };
@@ -432,7 +498,9 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
             }
             existing.user_last_modified_date = now;
             let stored = existing.to_user_type();
-            return Ok(AdminCreateUserOutput { user: Some(stored) });
+            return Ok(Planned::Resent(AdminCreateUserOutput {
+                user: Some(stored),
+            }));
         }
         if resend {
             // There is no invitation to resend to a user that does not exist.
@@ -544,6 +612,59 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
             // protection history is empty.
             auth_events: Vec::new(),
         };
+
+        // What the pool's pre-sign-up function is handed, built while this lock is still
+        // held: the account this create would store, which is what the function evaluates.
+        let dispatch = crate::state::lambda_triggers::pre_sign_up::pre_sign_up(
+            pool,
+            crate::state::lambda_triggers::pre_sign_up::Proposed {
+                username: &user.username,
+                attributes: &user.attributes,
+                validation_data: input.validation_data.as_deref(),
+            },
+            crate::state::lambda_triggers::pre_sign_up::Registration::AdminCreateUser,
+            caller,
+            input.client_metadata.as_ref(),
+        );
+        Ok(Planned::Create(Box::new(Creating {
+            user_pool_id: input.user_pool_id.clone(),
+            key,
+            user,
+            dispatch,
+        })))
+    }
+
+    /// Store the account `creating` decided, as the pool's pre-sign-up function left it, and
+    /// report it the way every read of this service reports a user.
+    ///
+    /// Takes this service's lock itself, the pre-sign-up invocation having been made with it
+    /// released.
+    fn store(
+        &self,
+        creating: Creating,
+        decision: &crate::state::lambda_triggers::pre_sign_up::Decision,
+    ) -> Result<AdminCreateUserOutput, AdminCreateUserError> {
+        let Some(state) = crate::state::service_state(&*self.engine) else {
+            return Err(internal_error());
+        };
+        let Creating {
+            user_pool_id,
+            key,
+            mut user,
+            ..
+        } = creating;
+        // What the function decided is applied BEFORE the account is stored, so the stored
+        // user is what this response reports and what every later read of this pool reports.
+        decision.apply(&mut user);
+
+        let mut guard = state.lock();
+        let pool = guard.pool_mut(&user_pool_id).ok_or_else(internal_error)?;
+        // Another create may have taken the name while the function was being waited for,
+        // and a second user under a name the pool already holds is refused here exactly as
+        // it is before the function is asked.
+        if pool.users.contains_key(&key) {
+            return Err(username_exists());
+        }
         pool.users.insert(key.clone(), user);
 
         // Rendered from the STORED user, so the response is what a later read sees.
@@ -555,6 +676,32 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         Ok(AdminCreateUserOutput {
             user: Some(stored),
         })
+    }
+}
+
+/// What the pool's pre-sign-up trigger's failure is for THIS operation: the modelled error
+/// each outcome amounts to, carrying the message the dispatch built.
+///
+/// The trigger evaluates an account that does not exist yet, so nothing is created for a
+/// failure of it: a function Lambda cannot invoke at all is "an unexpected exception with
+/// Lambda", and one that ran and reported an error is "a user validation exception with the
+/// Lambda service" (this service's model) — which is how a function blocks a create.
+fn trigger_failed(failure: crate::state::lambda_triggers::Failure) -> AdminCreateUserError {
+    match failure {
+        crate::state::lambda_triggers::Failure::Reported(message) => {
+            AdminCreateUserErrorModeled::UserLambdaValidationException(
+                UserLambdaValidationException {
+                    message: Some(message),
+                },
+            )
+            .into()
+        }
+        crate::state::lambda_triggers::Failure::NotInvokable(message) => {
+            AdminCreateUserErrorModeled::UnexpectedLambdaException(UnexpectedLambdaException {
+                message: Some(message),
+            })
+            .into()
+        }
     }
 }
 

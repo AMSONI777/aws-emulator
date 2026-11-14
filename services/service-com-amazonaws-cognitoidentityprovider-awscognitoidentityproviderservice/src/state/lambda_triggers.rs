@@ -13,9 +13,9 @@
 //! Every member is dispatched the same way, through the two steps this module splits the
 //! work into:
 //!
-//! 1. a builder ([`post_confirmation`], [`pre_authentication`], [`pre_token_generation`])
-//!    resolves the member and builds the event, from the pool and the user read under the
-//!    state lock;
+//! 1. a builder ([`post_confirmation`], [`pre_authentication`], [`pre_token_generation`],
+//!    [`pre_sign_up::pre_sign_up`]) resolves the member and builds the event, from the pool
+//!    and the user read under the state lock;
 //! 2. [`invoke`] performs the invocation, after the operation has RELEASED that lock, so
 //!    no other request of this service waits on a function.
 //!
@@ -44,6 +44,10 @@ pub mod custom_email;
 
 /// The encrypted message a custom sender's code travels in.
 pub mod esdk;
+
+/// The pre-sign-up trigger, which every operation that registers an account has the pool's
+/// configured function evaluate that account before it is stored.
+pub mod pre_sign_up;
 
 /// What a pre-token-generation function's answer changes about the tokens that generation
 /// mints: the claims, the scopes and the group configuration it asked them to carry.

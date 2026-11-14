@@ -501,7 +501,7 @@ async fn a_pool_that_configures_no_post_confirmation_function_invokes_nothing() 
             "a pool whose LambdaConfig configures another trigger",
             json!({
                 "LambdaConfig": {
-                    "PreSignUp": function_arn("us-east-1", "pre-sign-up"),
+                    "CustomMessage": function_arn("us-east-1", "custom-message"),
                 }
             }),
         ),

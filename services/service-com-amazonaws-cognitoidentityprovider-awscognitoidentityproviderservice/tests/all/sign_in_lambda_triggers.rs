@@ -712,7 +712,7 @@ async fn a_pool_that_configures_no_sign_in_trigger_invokes_nothing() {
             "a pool whose LambdaConfig configures two other triggers",
             json!({
                 "LambdaConfig": {
-                    "PreSignUp": function_arn("us-east-1", "pre-sign-up"),
+                    "CustomMessage": function_arn("us-east-1", "custom-message"),
                     "PostAuthentication": function_arn("us-east-1", "post-auth"),
                 }
             }),

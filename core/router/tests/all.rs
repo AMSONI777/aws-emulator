@@ -3670,3 +3670,11 @@ mod iam_denial_reason_attribution;
 // which is `E0753` anywhere but the head of a file — so it is an ordinary comment here.)
 // This file and every service crate's `tests/all.rs` are checked by that suite.
 // A suite left at the top level of `tests/` fails the build.
+//! suite left at the top level of `tests/` fails the build.
+// it. The `sfn_relayed_dynamodb_request_id` suite is declared ONCE as well, just above: two
+// landings in the same window each appended it here, and a module declared twice is `E0428`
+// doc comment may only appear before any item, so a `//!` line in this appended tail is
+// `E0753` and compiles nothing.)
+// leaving a note here. (A plain comment: an inner doc comment is only accepted before the
+// first item of a module.)
+// this file and for every service crate's `tests/all.rs`. (A plain comment, for the reason
