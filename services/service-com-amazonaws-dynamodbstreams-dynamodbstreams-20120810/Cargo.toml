@@ -21,6 +21,9 @@ bytes = { workspace = true }
 http = { workspace = true }
 serde_json = { workspace = true }
 tracing = { workspace = true }
+# `arn`: the one parse a caller-supplied resource ARN is read against, so the form a
+# stream ARN has to take is judged the same way every other service judges an ARN.
+service-common = { path = "../common" }
 # Shard ids, event ids and shard-iterator tokens are SHA-256 digests of the
 # resource coordinates they name, so they are opaque yet reproducible.
 sha2 = { workspace = true }

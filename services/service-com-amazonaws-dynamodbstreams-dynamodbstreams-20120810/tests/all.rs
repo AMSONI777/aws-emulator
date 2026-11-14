@@ -11,6 +11,8 @@
 // `tests/all.rs` is a test-target CRATE ROOT, so a bare `mod` resolves to a SIBLING
 // (`tests/state_roundtrip.rs`) — which the layout check refuses. The `#[path]` is what
 // points it into `tests/all/`.
+#[path = "all/identifier_shape_refusals.rs"]
+mod identifier_shape_refusals;
 #[path = "all/list_streams_discovery.rs"]
 mod list_streams_discovery;
 #[path = "all/not_found_messages.rs"]
@@ -23,6 +25,8 @@ mod record_retention_budget;
 mod sequence_number_positions;
 #[path = "all/service_enforced_parameter_bounds.rs"]
 mod service_enforced_parameter_bounds;
+#[path = "all/shard_page_cursor.rs"]
+mod shard_page_cursor;
 #[path = "all/state_roundtrip.rs"]
 mod state_roundtrip;
 #[path = "all/stream_consumer.rs"]

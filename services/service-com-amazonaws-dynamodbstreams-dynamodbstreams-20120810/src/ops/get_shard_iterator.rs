@@ -10,6 +10,10 @@
 //! asynchronous enable is still pending — which exposes no shards — has no shard to
 //! iterate and the request is `ResourceNotFoundException`.
 //!
+//! A `StreamArn` that is not WRITTEN as a stream's ARN is refused before any stream or
+//! shard is resolved (`ValidationException`): it names no stream anywhere, so it is a
+//! permanent input fault rather than a resource a caller should keep polling for.
+//!
 //! This operation's `ResourceNotFoundException` message is a FIXED sentence naming
 //! only the kind of resource that is absent; it never interpolates the ARN or shard
 //! id it was handed. Reporting on one named stream is `DescribeStream`'s job, and its
@@ -218,6 +222,16 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         // "Returns a shard iterator ... Use the shard iterator in a subsequent
         // GetRecords request".
         let _ = ctx;
+        // The SHAPE of the identifier this request names, decided before anything is
+        // looked up: a value that is not written as a stream's ARN names no stream in
+        // any account, so it is a permanent fault in the request rather than a
+        // resource that happens to be absent — and `ResourceNotFoundException` is the
+        // refusal a consumer and its waiters keep polling through.
+        if !crate::state::is_stream_arn(&input.stream_arn) {
+            return Err(crate::scaffolded::Scaffolded::validation(
+                crate::state::INVALID_STREAM_ARN,
+            ));
+        }
         let now = std::time::SystemTime::now();
         let state = crate::state::service_state(&*self.engine).ok_or_else(|| {
             GetShardIteratorErrorModeled::InternalServerError(InternalServerError {

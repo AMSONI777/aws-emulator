@@ -6,6 +6,10 @@
 //! `ExclusiveStartStreamArn`. An account (or table) with no stream gets an empty
 //! `Streams` list, not an error.
 //!
+//! `ExclusiveStartStreamArn` carries the same `StreamArn` shape the stream-addressing
+//! operations take, so a value that is not written as a stream's ARN is refused as
+//! invalid input (`ValidationException`) rather than used as a page boundary.
+//!
 //! ## Shape of an operation
 //!
 //! Each operation is a struct that owns the shared engine and implements
@@ -155,6 +159,19 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         // documented 24 hours of its disable is deleted, so the page lists what
         // exists now rather than what the registry once held.
         let _ = ctx;
+        // The same shape check the two operations that take a `StreamArn` apply, on the
+        // member this one carries of that shape: a page boundary that is not written as
+        // a stream's ARN names no position in the enumeration, so it is refused as
+        // invalid input rather than used as a range bound no stream can sit at.
+        if input
+            .exclusive_start_stream_arn
+            .as_deref()
+            .is_some_and(|start| !crate::state::is_stream_arn(start))
+        {
+            return Err(crate::scaffolded::Scaffolded::validation(
+                crate::state::INVALID_STREAM_ARN,
+            ));
+        }
         let now = std::time::SystemTime::now();
         let state = crate::state::service_state(&*self.engine).ok_or_else(|| {
             ListStreamsErrorModeled::InternalServerError(InternalServerError {

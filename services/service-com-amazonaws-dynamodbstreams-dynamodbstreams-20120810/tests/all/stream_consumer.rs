@@ -832,9 +832,11 @@ async fn describe_stream_agrees_with_list_streams_and_reports_the_shard_topology
         Some(child_id.as_str()),
         "ExclusiveStartShardId must resume after the named shard, got {second_page}"
     );
-    assert!(
-        second_page["StreamDescription"]["LastEvaluatedShardId"].is_null(),
-        "the last shard page must omit LastEvaluatedShardId, got {second_page}"
+    assert_eq!(
+        second_page["StreamDescription"]["LastEvaluatedShardId"].as_str(),
+        Some(child_id.as_str()),
+        "a shard page names the shard it stopped at, even when nothing follows it, got \
+         {second_page}"
     );
 
     // Draining a CLOSED shard retires the iterator: NextShardIterator goes null.

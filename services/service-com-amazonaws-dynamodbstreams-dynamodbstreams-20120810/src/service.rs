@@ -40,6 +40,8 @@
 //! and is reached, not edited, through the one `definition` method below. You
 //! do not write it; editing the entry would let this file drift from the model.
 
+use aws_smithy_schema::Schema;
+use aws_smithy_schema_server::constraints::{path, LengthTrait, Violation, ViolationKind};
 use smithy_server_runtime::{
     http, ErasedOperation, Refusal, Refused, Service,
 };
@@ -111,17 +113,17 @@ impl<Eng: Send + Sync + 'static> Service for EmulatedService<Eng> {
     }
 
     fn override_refusal(&self, refusal: &Refusal) -> Option<Refused> {
-        // The centralized walk calls this on a framework-level refusal (an absent
-        // required member, or a value outside a declared bound) to let this
-        // service reword it. Returning `None` keeps the framework's default
-        // wording. To state a refusal the way the emulated service states it,
-        // replace this body with a `match refusal { .. }` that returns
-        // `Some(Refused { code, message })` for the cases you reword and `None`
-        // for the rest. Replace BOTH the code and the message: a client branches
-        // on the code, so a message without its matching code is worse than
-        // leaving both alone.
-        let _ = refusal;
-        None
+        // One refusal of this service is worded by the service rather than by the
+        // framework: a TABLE NAME the model's own constraints do not admit. For that
+        // member the refusal is a single sentence stating the window a name has to
+        // fit, with no constraint envelope around it and nothing of the request
+        // inside it ([`table_name_refusal`]). Every other refusal — a value outside
+        // another member's bound, an absent required member, authentication — keeps
+        // the framework's wording, which is the envelope AWS answers for them.
+        let Refusal::Invalid(violations) = refusal else {
+            return None;
+        };
+        table_name_refusal(violations)
     }
 
     fn override_routing_error(
@@ -151,4 +153,66 @@ impl<Eng: Send + Sync + 'static> Service for EmulatedService<Eng> {
         let _ = error;
         None
     }
+}
+
+/// The error code a refused request carries, whichever member it was refused over: a
+/// client branches on the code, and this service answers one code for every input
+/// refusal, so rewording a message never moves a caller onto another branch.
+const VALIDATION_EXCEPTION: &str = "ValidationException";
+
+/// How this service refuses a TABLE NAME its model's own constraints do not admit:
+/// one sentence naming the member and the length window a name has to fit, and
+/// nothing else.
+///
+/// The sentence states the REQUIREMENT rather than the measurement, so it is the same
+/// for every value the member rejects — too short, too long, or built of characters
+/// the name's pattern does not admit (an ARN among them, which carries separators no
+/// table name may). Nothing of the request is inside it: a caller already holds the
+/// value it sent, and a refusal that quotes it reflects the request back into the
+/// response.
+///
+/// `None` for a refusal that names no table name, which keeps the framework's
+/// envelope. Only `ListStreams` carries a table name among this service's inputs, so
+/// the member resolves to one schema and one pair of bounds.
+fn table_name_refusal(violations: &[Violation]) -> Option<Refused> {
+    let member = table_name_member()?;
+    let name = member.member_name()?;
+    // The path the framework's walk reports for that member, spelled by the framework
+    // rather than written out here, so the one spelling cannot drift from the model.
+    let refused_at = path::member(name);
+    violations.iter().find(|violation| {
+        violation.path == refused_at
+            && matches!(
+                violation.kind,
+                ViolationKind::MinLength(_) | ViolationKind::MaxLength(_) | ViolationKind::Pattern(_)
+            )
+    })?;
+    let bounds = declared_length(member)?;
+    let (min, max) = (bounds.min?, bounds.max?);
+    Some(Refused {
+        code: VALIDATION_EXCEPTION.to_string(),
+        message: format!(
+            "{name} must be at least {min} characters long and at most {max} characters long"
+        ),
+    })
+}
+
+/// The member of the one input that carries a table name, as the MODEL declares it —
+/// so the sentence above names the member and its bounds as the API states them
+/// rather than restating either here.
+fn table_name_member() -> Option<&'static Schema> {
+    crate::ops::types::LIST_STREAMS_INPUT_SCHEMA
+        .members()
+        .iter()
+        .copied()
+        .find(|member| member.member_name() == Some(TABLE_NAME_MEMBER))
+}
+
+/// The name the model gives the member that carries a table name.
+const TABLE_NAME_MEMBER: &str = "TableName";
+
+/// The `@length` bounds the model attaches to `member`, if it bounds it at all.
+fn declared_length(member: &Schema) -> Option<LengthTrait> {
+    let carried = member.traits()?.get(&LengthTrait::TRAIT_ID)?;
+    carried.as_any().downcast_ref::<LengthTrait>().copied()
 }

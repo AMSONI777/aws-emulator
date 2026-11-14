@@ -1026,8 +1026,67 @@ pub fn floor_to_second(at: SystemTime) -> SystemTime {
 /// of the prefix, so one table's streams can never be read as another's.
 #[must_use]
 pub fn stream_arn_prefix(region: &str, table_name: &str) -> String {
-    ::engine::emulator_arn("dynamodb", region, &format!("table/{table_name}/stream/"))
+    ::engine::emulator_arn(
+        DYNAMODB_ARN_NAMESPACE,
+        region,
+        &format!("{TABLE_RESOURCE_TYPE}/{table_name}{STREAM_RESOURCE_STEP}"),
+    )
 }
+
+/// The ARN namespace a stream is addressed in: a stream belongs to a DynamoDB
+/// table, so it is named inside that service's namespace rather than one of its
+/// own.
+const DYNAMODB_ARN_NAMESPACE: &str = "dynamodb";
+
+/// The resource type a table is named by inside an ARN's resource field.
+const TABLE_RESOURCE_TYPE: &str = "table";
+
+/// The step from a table's resource field to one of that table's streams: a stream's
+/// resource field is `table/<name>/stream/<label>`, which is what
+/// [`stream_arn_prefix`] mints and what a client reads back off every stream ARN this
+/// service reports.
+const STREAM_RESOURCE_STEP: &str = "/stream/";
+
+/// Whether a client-supplied value is WRITTEN as the ARN of a DynamoDB stream.
+///
+/// The form of the identifier, never whether a stream exists under it: a value this
+/// says no to — a table's own ARN, an ARN of another service, a value that is not an
+/// ARN at all — names no stream in any account or Region, so it can never become
+/// found however long a caller waits, while one it says yes to is resolved against
+/// the registry and may legitimately be absent.
+#[must_use]
+pub fn is_stream_arn(value: &str) -> bool {
+    // `parse_of` is the one reader a service judges its OWN resource ARNs with: a
+    // well-formed ARN whose vendor field is this namespace, in one call.
+    let Some(arn) = ::service_common::arn::parse_of(value, DYNAMODB_ARN_NAMESPACE) else {
+        return false;
+    };
+    let Some(resource) = arn
+        .resource
+        .strip_prefix(TABLE_RESOURCE_TYPE)
+        .and_then(|rest| rest.strip_prefix('/'))
+    else {
+        return false;
+    };
+    let Some((table_name, stream_label)) = resource.split_once(STREAM_RESOURCE_STEP) else {
+        return false;
+    };
+    // Both halves name one thing each: a resource field carrying a further `/` in
+    // either of them addresses something other than a stream of a table.
+    !table_name.is_empty()
+        && !table_name.contains('/')
+        && !stream_label.is_empty()
+        && !stream_label.contains('/')
+}
+
+/// What a request is refused with when a member that carries a stream ARN was given
+/// something that is not written as one.
+///
+/// Wholly fixed text naming the SHAPE the member targets (`StreamArn`), which is why
+/// every member of that shape draws the same sentence: it states what kind of
+/// identifier was expected, and echoes neither the value submitted nor the member it
+/// arrived in.
+pub const INVALID_STREAM_ARN: &str = "Invalid StreamArn";
 
 /// The ARN a stream of this table registered at `at` carries.
 fn stream_arn_at(registration: &StreamRegistration, at: SystemTime) -> String {

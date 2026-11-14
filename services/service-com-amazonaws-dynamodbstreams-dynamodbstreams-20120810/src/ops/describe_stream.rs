@@ -6,6 +6,11 @@
 //! narrowed by `ShardFilter`. An ARN no stream is registered under is
 //! `ResourceNotFoundException`, never a success with an empty description.
 //!
+//! A `StreamArn` that is not WRITTEN as a stream's ARN is refused before that lookup
+//! runs (`ValidationException`): it names no stream anywhere, so reporting it as a
+//! resource that happens to be missing would tell a polling consumer to wait for
+//! something that can never arrive.
+//!
 //! The shards reported are the ones the stream SERVES at this instant: a stream whose
 //! asynchronous enable has not fallen due yet reports `ENABLING` and lists no shard,
 //! so a consumer that waits for shards before it reads is never handed a stream that
@@ -14,6 +19,11 @@
 //! `Limit`'s documented ceiling of 100 shard objects is a bound the service ENFORCES:
 //! a wider page request is refused (`ValidationException`), not quietly served a
 //! narrower page.
+//!
+//! `LastEvaluatedShardId` names the shard the page STOPPED at whenever the page
+//! evaluated one, whether or not a further shard follows — the member documents that
+//! a non-empty value "does not necessarily mean that there is more data in the result
+//! set" — and is empty only for a page that evaluated no shard at all.
 //!
 //! ## Shape of an operation
 //!
@@ -181,6 +191,17 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         // documented 24 hours of its disable is gone, so it is not described as if
         // it were still there.
         let _ = ctx;
+        // The SHAPE of the identifier this request names, decided before anything is
+        // looked up: a value that is not written as a stream's ARN names no stream in
+        // any account, so it is a permanent fault in the request rather than a
+        // resource that happens to be absent. The distinction is what a caller acts
+        // on — `ResourceNotFoundException` is the refusal a consumer and its waiters
+        // keep polling through, and a malformed ARN can never become found.
+        if !crate::state::is_stream_arn(&input.stream_arn) {
+            return Err(crate::scaffolded::Scaffolded::validation(
+                crate::state::INVALID_STREAM_ARN,
+            ));
+        }
         let now = std::time::SystemTime::now();
         // The bound the service enforces on this request's parameters, which the model
         // does not express (`Limit` is declared 1.. with no maximum): a page wider than
@@ -272,9 +293,17 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
 
         let remaining = &shards[start_at.min(shards.len())..];
         let page = &remaining[..remaining.len().min(limit)];
-        let last_evaluated_shard_id = (remaining.len() > page.len())
-            .then(|| page.last().map(|shard| shard.shard_id.clone()))
-            .flatten();
+        // The shard this page STOPPED at, which is the last one it evaluated — not
+        // only the last one of a page a `Limit` truncated. The member is the resume
+        // point and its own documentation is explicit that it is not a "there is more"
+        // flag: "If LastEvaluatedShardId is not empty, it does not necessarily mean
+        // that there is more data in the result set. The only way to know when you
+        // have reached the end of the result set is when LastEvaluatedShardId is
+        // empty" (`StreamDescription$LastEvaluatedShardId`). So it is empty for one
+        // reason only: a page that evaluated no shard at all — a stream whose enable
+        // is not due, a filter nothing matched, or a resume point past the last shard
+        // — which is what ends a consumer's walk.
+        let last_evaluated_shard_id = page.last().map(|shard| shard.shard_id.clone());
 
         let shards_out: Vec<Shard> = page
             .iter()
