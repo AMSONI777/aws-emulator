@@ -269,6 +269,9 @@ pub(crate) mod simulated_request;
 mod stage_logs;
 /// The X-Ray trace context this stage propagates onto the call its integration makes.
 mod trace_context;
+/// What a deployed stage answers a call no deployed method serves — which is an
+/// AUTHORIZATION decision before it is a routing one.
+mod unrouted_call;
 
 use std::borrow::Cow;
 use std::collections::BTreeMap;
@@ -1560,18 +1563,35 @@ async fn serving<Eng: Send + Sync + 'static>(
 
             // The DEPLOYMENT decides what is served: a method put on the API after the
             // stage's deployment was created is not in it, and one deleted afterwards still
-            // is.
-            let Some(matched_path) = match_resource_path(deployment, &resource_path) else {
+            // is. A call no deployed method serves is not a routing answer but an
+            // AUTHORIZATION one: the stage decides whether the caller may invoke the ARN it
+            // named before it says whether that method is there ([`unrouted_call`]).
+            let routed = match_resource_path(deployment, &resource_path)
+                .and_then(|path| match_method(deployment, path, req.method()).map(|m| (path, m)));
+            let Some((matched_path, (verb, snapshot))) = routed else {
                 break 'planned Planned::answered(refusal_response(
                     Some(api),
-                    MISSING_AUTHENTICATION_TOKEN,
-                ));
-            };
-            let Some((verb, snapshot)) = match_method(deployment, matched_path, req.method())
-            else {
-                break 'planned Planned::answered(refusal_response(
-                    Some(api),
-                    MISSING_AUTHENTICATION_TOKEN,
+                    unrouted_call::refusal(
+                        engine,
+                        req,
+                        ctx,
+                        &unrouted_call::Unrouted {
+                            region: api.arn_region(),
+                            api_id: &api.id,
+                            policy: api
+                                .policy
+                                .as_deref()
+                                .filter(|policy| !policy.trim().is_empty()),
+                            stage: &stage.stage_name,
+                            resource_path: &resource_path,
+                            addressed: unrouted_call::addressed_resource_path(
+                                deployment,
+                                &resource_path,
+                            ),
+                            source_vpce: resolved.source_vpce,
+                        },
+                        SystemTime::now(),
+                    ),
                 ));
             };
 
@@ -1792,30 +1812,38 @@ async fn serving<Eng: Send + Sync + 'static>(
                 .policy
                 .as_deref()
                 .filter(|policy| !policy.trim().is_empty());
-            if let Some(policy) = attached_policy {
-                if let Some(message) = resource_policy::denial(policy, &call_of) {
-                    tracing::warn!(
-                        api_id = %api.id,
-                        stage = %stage.stage_name,
-                        path = %matched_path,
-                        verb = %verb,
-                        "the api's resource policy does not allow this invoke"
-                    );
-                    break 'planned Planned::answered(refusal_response(
-                        Some(api),
-                        access_denied(message),
-                    ));
+            // For a method API Gateway authenticates a principal for, the document is one HALF
+            // of a single decision taken with the caller's own policies, and the gate that
+            // takes both is the one that refuses ([`execute_api_authorization`]) — because the
+            // clause its sentence closes with names WHICH of them refused the call. For a
+            // method that authenticates nobody the document is the whole decision, and this is
+            // where it is taken.
+            let resource_policy_said = resource_policy::invoke_decision(attached_policy, &call_of);
+            if signing.is_none() {
+                if let Some(policy) = attached_policy {
+                    if let Some(message) = resource_policy::denial(policy, &call_of) {
+                        tracing::warn!(
+                            api_id = %api.id,
+                            stage = %stage.stage_name,
+                            path = %matched_path,
+                            verb = %verb,
+                            "the api's resource policy does not allow this invoke"
+                        );
+                        break 'planned Planned::answered(refusal_response(
+                            Some(api),
+                            access_denied(message),
+                        ));
+                    }
                 }
             }
             // An `AWS_IAM` method is authorized by IAM, and that is a decision about the
             // PRINCIPAL the verified credential speaks for: `execute-api:Invoke` on this
             // method's own ARN, allowed by the caller's identity-based policies or by the
-            // document the api carries. Taken after the resource policy's own deny, so an
-            // explicit deny there keeps answering first.
+            // document the api carries, capped by the scope its credential was minted with,
+            // and refused outright by an explicit deny in any of them.
             if let Some(signing) = signing.as_ref() {
-                let allowed_by_policy = resource_policy::allows_invoke(attached_policy, &call_of);
                 if let Some(message) =
-                    execute_api_authorization::refusal(signing, &call_of, allowed_by_policy)
+                    execute_api_authorization::refusal(signing, &call_of, resource_policy_said)
                 {
                     tracing::warn!(
                         api_id = %api.id,
@@ -4294,19 +4322,42 @@ fn rendered_gateway_template(template: &str, refusal: &GatewayRefusal) -> Option
 /// A literal segment is more specific than a `{parameter}`, which is more specific than a
 /// greedy `{proxy+}` — the order API Gateway resolves a request in. Returns `None` when the
 /// deployment holds no path that matches.
+///
+/// Only the paths a METHOD is deployed under are candidates, which is what makes this the
+/// path that SERVES the call; the path the request ADDRESSED is
+/// [`unrouted_call::addressed_resource_path`], which offers the whole resource tree to the
+/// same selection ([`most_specific_match`]).
 fn match_resource_path<'d>(
     deployment: &'d DeploymentEntry,
     request_path: &str,
 ) -> Option<&'d str> {
-    deployment
-        .api_summary
-        .iter()
-        .filter(|(_, methods)| !methods.is_empty())
-        .filter_map(|(path, _)| match_score(path, request_path).map(|score| (score, path)))
+    most_specific_match(
+        deployment
+            .api_summary
+            .iter()
+            .filter(|(_, methods)| !methods.is_empty())
+            .map(|(path, _)| path.as_str()),
+        request_path,
+    )
+}
+
+/// The one of `candidates` that matches `request_path` most specifically, by the score
+/// [`match_score`] gives each — so every reader of a deployment's paths resolves a request the
+/// one way, and two of them cannot drift on which path wins a tie.
+///
+/// `pub(super)` for [`unrouted_call`], which offers the deployment's whole resource tree to
+/// it. Ties break on the path itself, lowest first, so the answer is the same whatever order
+/// the candidates arrive in.
+pub(super) fn most_specific_match<'d>(
+    candidates: impl Iterator<Item = &'d str>,
+    request_path: &str,
+) -> Option<&'d str> {
+    candidates
+        .filter_map(|path| match_score(path, request_path).map(|score| (score, path)))
         .max_by(|(left, left_path), (right, right_path)| {
             left.cmp(right).then_with(|| right_path.cmp(left_path))
         })
-        .map(|(_, path)| path.as_str())
+        .map(|(_, path)| path)
 }
 
 /// How specifically the resource path `template` matches `request_path`, or `None` when it

@@ -221,6 +221,57 @@ pub(crate) fn given_session(gateway: &Gateway) {
         .expect("the vended session is recorded");
 }
 
+/// Record a SECOND assumed-role session of the same seeded role, minted under
+/// `access_key_id` with `session_name` and scoped by the inline session POLICY `policy` —
+/// exactly as `sts:AssumeRole` records a mint that passed one. Answers the principal ARN
+/// that session speaks for.
+///
+/// `policy` `None` is a mint that passed no session policy, which caps nothing; the role's
+/// own documents are what [`given_policy`] puts on it either way.
+///
+/// `pub(crate)` for the sibling `stage_invoke_session_scope` suite: the SCOPE a credential was
+/// vended with is what that suite varies, and the role, its documents and the api beside it
+/// are this one's to seed.
+pub(crate) fn given_scoped_session(
+    gateway: &Gateway,
+    access_key_id: &str,
+    session_name: &str,
+    policy: Option<&Value>,
+) -> String {
+    let now = SystemTime::now();
+    let role_arn = role_arn();
+    let arn = format!(
+        "arn:aws:sts::{}:assumed-role/{ROLE}/{session_name}",
+        ::engine::emulator_account_id()
+    );
+    let identity = sts::Identity {
+        user_id: format!("{}:{session_name}", sts::role_id(&role_arn)),
+        account: ::engine::emulator_account_id().to_string(),
+        arn: arn.clone(),
+    };
+    let vend = sts::NewSession {
+        role_arn: Some(role_arn),
+        policies: sts::SessionPolicies {
+            inline: policy.map(Value::to_string),
+            managed_arns: Vec::new(),
+            // An `AssumeRole` session keeps the permissions of the role it is of, so passing
+            // no session policy caps nothing.
+            none_means_no_permissions: false,
+        },
+        ..sts::NewSession::new(
+            identity,
+            sts::SessionKind::AssumedRole,
+            i32::try_from(SESSION_SECONDS).unwrap_or(i32::MAX),
+        )
+    };
+    let sessions = sts::service_state(gateway.engine()).expect("the STS store");
+    sessions
+        .lock()
+        .insert(vend.into_session(access_key_id, now))
+        .expect("the vended session is recorded");
+    arn
+}
+
 /// Record the IAM user [`USER_KEY_ID`] belongs to, as `iam:CreateUser` and
 /// `iam:CreateAccessKey` record them.
 fn given_user(gateway: &Gateway) {
@@ -485,26 +536,35 @@ pub(crate) enum Reason {
     IdentityDeny,
     /// The ceiling in force on the principal does not allow what its policies granted.
     NoBoundaryGrant,
+    /// The SCOPE the presented credential was minted with does not allow what the principal's
+    /// own policies granted: the session's permissions are the intersection of the two.
+    NoSessionGrant,
+    /// One of the session policies the presented credential was minted with DENIES the action
+    /// outright, which no grant lifts.
+    SessionDeny,
     /// The api's own RESOURCE policy explicitly DENIED the call — the decision the gate
     /// beside the identity one takes, which no grant lifts either.
     ResourceDeny,
 }
 
 impl Reason {
-    /// The clause this refusal closes with.
-    fn clause(self) -> Option<String> {
+    /// The clause this refusal closes with: which document class withheld the grant, and
+    /// whether its deny was explicit.
+    fn clause(self) -> String {
         match self {
             Self::NoIdentityGrant => {
-                Some(format!("because no identity-based policy allows the {INVOKE_ACTION} action"))
+                format!("because no identity-based policy allows the {INVOKE_ACTION} action")
             }
-            Self::IdentityDeny => {
-                Some("with an explicit deny in an identity-based policy".to_string())
-            }
+            Self::IdentityDeny => "with an explicit deny in an identity-based policy".to_string(),
             Self::NoBoundaryGrant => {
-                Some(format!("because no permissions boundary allows the {INVOKE_ACTION} action"))
+                format!("because no permissions boundary allows the {INVOKE_ACTION} action")
             }
+            Self::NoSessionGrant => {
+                format!("because no session policy allows the {INVOKE_ACTION} action")
+            }
+            Self::SessionDeny => "with an explicit deny in a session policy".to_string(),
             Self::ResourceDeny => {
-                Some("with an explicit deny in a resource-based policy".to_string())
+                "with an explicit deny in a resource-based policy".to_string()
             }
         }
     }
@@ -548,16 +608,13 @@ pub(crate) fn assert_refused(
         answered.header("x-amzn-errortype")
     );
     let message = authorization_message(&answered.body, case);
-    let closing = reason
-        .clause()
-        .map(|clause| format!(" {clause}"))
-        .unwrap_or_default();
     assert_eq!(
         message,
         format!(
             "User: {principal} is not authorized to perform: {INVOKE_ACTION} on resource: \
-             {reported}{closing}",
-            reported = reported_resource(method_arn)
+             {reported} {clause}",
+            reported = reported_resource(method_arn),
+            clause = reason.clause()
         ),
         "case {case}: expected the {INVOKE_ACTION} authorization sentence closed by \
          {reason:?}, got {message:?}"

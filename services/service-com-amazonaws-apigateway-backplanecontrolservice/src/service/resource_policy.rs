@@ -179,6 +179,9 @@ impl Call<'_> {
     /// The path carries no leading `/` of its own — the ARN's separator is already there —
     /// so the root resource is the ARN ending in the verb and a slash, which is the form
     /// AWS reports it in.
+    ///
+    /// This is the resource every DECISION is taken about. What a REFUSAL states is
+    /// [`Self::reported_resource`], which masks the account.
     #[must_use]
     pub fn method_arn(&self) -> String {
         ::emulator_server::emulator_arn(
@@ -247,6 +250,13 @@ impl Call<'_> {
 /// The sentence this call is refused with when `policy` does not let it invoke the method,
 /// or `None` when the policy lets it through.
 ///
+/// Asked for a call the method AUTHENTICATES NOBODY for ([`Caller::Anonymous`]): API Gateway
+/// resolves no principal for such a request, so the api's document is the whole decision and
+/// the sentence ends at the resource — there is no identity-based half for a closing clause to
+/// name. A call the method authenticates a principal for is decided by the gate that takes
+/// BOTH halves at once, which reads this document through [`invoke_decision`]
+/// ([`super::invoke::execute_api_authorization`]).
+///
 /// `policy` is the document the api carries; an api carrying none is not asked at all.
 #[must_use]
 pub fn denial(policy: &str, call: &Call<'_>) -> Option<String> {
@@ -276,7 +286,24 @@ pub fn denial(policy: &str, call: &Call<'_>) -> Option<String> {
 /// `policy` is `None` for an api carrying no document, which allows nothing.
 #[must_use]
 pub fn allows_invoke(policy: Option<&str>, call: &Call<'_>) -> bool {
-    policy.is_some_and(|policy| decision(policy, call, INVOKE_ACTION) == Decision::Allowed)
+    invoke_decision(policy, call) == Decision::Allowed
+}
+
+/// What the document the api carries STATES about this invoke — an allow, an explicit deny,
+/// or nothing at all — rather than what this module makes of that statement.
+///
+/// The whole statement is what the IDENTITY-based gate beside this one needs: it takes ONE
+/// decision out of the api's document and the caller's own, because AWS "evaluates the API
+/// Gateway resource policy and the caller's identity-based policies together", and the clause
+/// its refusal closes with names WHICH document class refused the call — which cannot be read
+/// off a boolean ([`super::invoke::execute_api_authorization`]).
+///
+/// `policy` is `None` for an api carrying no document, which states nothing.
+#[must_use]
+pub fn invoke_decision(policy: Option<&str>, call: &Call<'_>) -> Decision {
+    policy.map_or(Decision::NotStated, |policy| {
+        decision(policy, call, INVOKE_ACTION)
+    })
 }
 
 /// Whether this call may ask for the stage's cached response to be reloaded, which is what
@@ -376,7 +403,12 @@ pub(crate) fn not_authorized(action: &str, principal: &str, method_arn: &str) ->
 /// The clause IAM closes a refusal with when the document the API carries DENIES the action
 /// rather than merely not allowing it: no grant anywhere lifts such a deny, which is what the
 /// clause tells whoever reads the refusal.
-const RESOURCE_EXPLICIT_DENY: &str = "with an explicit deny in a resource-based policy";
+///
+/// `pub(crate)` because the IDENTITY-based gate beside this module closes the SAME refusal —
+/// about the same document, for a caller it authenticated — with it
+/// ([`super::invoke::execute_api_authorization`]): one clause, so the two gates cannot word a
+/// resource-based deny differently.
+pub(crate) const RESOURCE_EXPLICIT_DENY: &str = "with an explicit deny in a resource-based policy";
 
 /// How many trailing digits of the account an `execute-api` refusal reports unmasked.
 const UNMASKED_ACCOUNT_DIGITS: usize = 4;

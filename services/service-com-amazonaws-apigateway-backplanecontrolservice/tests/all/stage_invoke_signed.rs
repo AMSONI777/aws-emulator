@@ -472,7 +472,10 @@ async fn every_signed_invoke_of_a_deployed_stage_is_answered_by_the_stage() {
                 session: false,
             },
             addressing: Addressing::OwnHost,
-            answer: Answer::Gateway(403, MISSING_TOKEN),
+            // The resource IS deployed, so the credential this request carries is
+            // AUTHENTICATED before the stage resolves which method serves the verb — and
+            // every credential this harness fabricates names none the emulator issued.
+            answer: Answer::Gateway(403, INVALID_TOKEN),
         },
         Row {
             case: "a signed request naming a stage this api holds no deployment of",

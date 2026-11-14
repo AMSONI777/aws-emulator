@@ -13,20 +13,24 @@
 //! The three pieces, each held in exactly one place:
 //!
 //! 1. **who** — the principal the request's access key id speaks for: the session STS minted
-//!    that key for ([`sts_store::resolve_caller`], the same record `sts:GetCallerIdentity`
-//!    answers from, so the principal a refusal blames is the one the caller reads back for the
-//!    credentials it signed with), else the IAM user that owns the long-term key, else the
-//!    account's own published credential. A credential an identity pool VENDED is a session of
-//!    that registry like any other, which is what makes a Cognito-federated caller a principal
-//!    this decision can be taken about at all;
+//!    that key for ([`sts_store::resolve_request_caller`], the same record
+//!    `sts:GetCallerIdentity` answers from, so the principal a refusal blames is the one the
+//!    caller reads back for the credentials it signed with), else the IAM user that owns the
+//!    long-term key, else the account's own published credential. A credential an identity pool
+//!    VENDED is a session of that registry like any other, which is what makes a
+//!    Cognito-federated caller a principal this decision can be taken about at all;
 //! 2. **what it may do** — the identity-based policy documents the IAM store holds for that
-//!    principal and the permissions boundary that caps them, read through IAM's own accessors
-//!    (`principal_policies`, `permissions_boundary_document`), so a document
-//!    `iam:PutRolePolicy` wrote takes effect on the next invoke and deleting it lifts it again;
+//!    principal, the permissions boundary that caps them, and the SESSION POLICIES the mint of
+//!    the presented credential passed, read through IAM's own accessors
+//!    (`principal_policies`, `permissions_boundary_document`,
+//!    [`sts_store::session_scoping_documents`]), so a document `iam:PutRolePolicy` wrote takes
+//!    effect on the next invoke, deleting it lifts it again, and a credential vended with a
+//!    reduced scope reaches no further than that scope;
 //! 3. **the decision** — [`::service_common::iam_authorization`], the one shared evaluation of
 //!    those documents, asked about the method's own ARN
 //!    ([`super::super::resource_policy::Call::method_arn`]) — so this gate and the api's
-//!    RESOURCE policy, which the data plane applies beside it, are asked about one resource.
+//!    RESOURCE policy, whose statement about the same method is handed in
+//!    ([`resource_policy::invoke_decision`]), are asked about one resource.
 //!
 //! A refusal states all four: who was refused, the action, the method, and WHY — the clause
 //! IAM closes an authorization failure with, naming the document class that refused the call
@@ -40,9 +44,9 @@
 //! resource policy and the caller's identity-based policies together, and "if the API Gateway
 //! resource policy allows the action, the identity-based policy need not" — so the request is
 //! admitted when the document the developer attached allows it OR the caller's own policies do,
-//! and refused when neither does. An explicit `Deny` in either refuses whatever the other says:
-//! the resource policy's own deny is applied by [`super::super::resource_policy::denial`] ahead
-//! of this, and an identity-based deny is applied here.
+//! and refused when neither does. An explicit `Deny` in either refuses whatever the other says,
+//! and the two are decided HERE, in one place, because the clause a refusal closes with names
+//! which of them refused it.
 //!
 //! ## The callers this gate does not bound
 //!
@@ -92,28 +96,24 @@ const EXPIRED_CREDENTIAL_MESSAGE: &str = "The security token included in the req
 /// The clause IAM closes a refusal with when a readable identity-based document DENIES the
 /// action rather than merely not allowing it: adding a grant will not lift such a deny, which
 /// is exactly what the clause tells whoever reads the refusal.
-const IDENTITY_EXPLICIT_DENY: &str = "with an explicit deny in an identity-based policy";
+const IDENTITY_EXPLICIT_DENY: &str = iam::IDENTITY_POLICY_EXPLICIT_DENY;
 
 /// The clause IAM closes a refusal with when the ceiling in force on the principal carries an
 /// explicit `Deny` of the action — a fact about the BOUNDARY document, so the refusal names
 /// that document class rather than the policies that granted the action.
-const BOUNDARY_EXPLICIT_DENY: &str = "with an explicit deny in a permissions boundary";
+const BOUNDARY_EXPLICIT_DENY: &str = iam::PERMISSIONS_BOUNDARY_EXPLICIT_DENY;
 
-/// How IAM names the document class that holds what a PRINCIPAL may do, in the clause closing
-/// an implicit deny.
-const IDENTITY_POLICY_CLASS: &str = "identity-based policy";
+/// The clause IAM closes a refusal with when one of the SESSION POLICIES the presented
+/// credential was minted with denies the action outright.
+const SESSION_EXPLICIT_DENY: &str = iam::SESSION_POLICY_EXPLICIT_DENY;
 
-/// How IAM names the ceiling in force on a principal, in that same clause.
-const BOUNDARY_POLICY_CLASS: &str = "permissions boundary";
-
-/// The clause IAM closes an IMPLICIT deny with: no readable document of `class` allows
-/// `action`, so the request fell to IAM's default deny and a grant is what would lift it.
+/// The clause IAM closes a refusal with when the api's OWN document — a resource-based policy
+/// — denies the action: a fact about that document, which no identity-based grant lifts.
 ///
-/// The action named here is the action the sentence already named, because it is the same
-/// decision being explained.
-fn no_policy_allows(class: &str, action: &str) -> String {
-    format!("because no {class} allows the {action} action")
-}
+/// The ONE clause [`resource_policy`] words such a refusal with, called rather than copied:
+/// that module refuses a call the method authenticates nobody for in the same words, and the
+/// two gates must not word one deny differently.
+const RESOURCE_POLICY_EXPLICIT_DENY: &str = resource_policy::RESOURCE_EXPLICIT_DENY;
 
 /// The principal an invoke speaks for, and everything the decision is made from.
 #[derive(Debug, Clone)]
@@ -129,6 +129,10 @@ pub struct SigningCaller {
     /// The permissions boundary in force on it, when it carries one whose document this
     /// emulator holds.
     boundary: Option<String>,
+    /// The SESSION POLICIES the mint of the presented credential passed, which cap what any
+    /// grant gives this request ([`sts_store::ScopingPolicies`]). A credential no mint scoped
+    /// — every long-term access key — caps nothing.
+    scope: sts_store::ScopingPolicies,
     /// Set when this request presents the account's own published credential, which holds no
     /// IAM policies (see the module docs).
     account_credential: bool,
@@ -185,39 +189,53 @@ pub fn signing_caller<Eng: Send + Sync + 'static>(
     credentials: &::emulator_server::CredentialStore,
     now: SystemTime,
 ) -> SigningCaller {
-    let identity = match sts_store::service_state(engine) {
-        Some(sts) => sts_store::resolve_caller(&mut sts.lock(), access_key_id, now, credentials),
-        // No STS store on this engine: the only identity a request can present is the account's
-        // own published credential.
-        None => Ok(sts_store::ambient_identity()),
-    };
-    let identity = match identity {
-        Ok(identity) => identity,
+    let resolved = sts_store::service_state(engine).map(|sts| {
+        sts_store::resolve_request_caller(
+            &mut sts.lock(),
+            access_key_id,
+            now,
+            credentials,
+            sts_store::ambient_identity(),
+        )
+    });
+    // No STS store on this engine: the only identity a request can present is the account's
+    // own published credential, which no mint scoped.
+    let (identity_arn, session_policies) = match resolved {
+        Some(Ok(caller)) => (caller.identity.arn.clone(), caller.session_policies.clone()),
         // The session credential has expired, so it speaks for nobody: no documents, no
         // principal spelling, and the invoke it asks for is refused as an expired credential
         // rather than as an authorization failure. The key id it presented is NOT quoted back,
         // and in the assembled emulator the layer that authenticates a request refuses an
         // expired credential before this is reached.
-        Err(expired) => {
+        Some(Err(expired)) => {
             let _ = expired;
             return SigningCaller {
                 arn: String::new(),
                 spellings: Vec::new(),
                 documents: Vec::new(),
                 boundary: None,
+                scope: sts_store::ScopingPolicies::default(),
                 account_credential: false,
                 unreadable_attachment: false,
                 expired: true,
             };
         }
+        None => (
+            sts_store::ambient_identity().arn,
+            sts_store::SessionPolicies::default(),
+        ),
     };
 
     let mut caller = SigningCaller {
-        account_credential: identity.arn == sts_store::ambient_identity().arn,
-        spellings: vec![identity.arn.clone()],
-        arn: identity.arn,
+        account_credential: identity_arn == sts_store::ambient_identity().arn,
+        spellings: vec![identity_arn.clone()],
+        arn: identity_arn,
         documents: Vec::new(),
         boundary: None,
+        // Resolved against the IAM store below where there is one; a managed session policy
+        // an engine carrying no IAM store cannot read scopes nothing, while the inline
+        // document the mint passed scopes the session whether or not a store is there.
+        scope: sts_store::session_scoping_documents(None, &session_policies),
         unreadable_attachment: false,
         expired: false,
     };
@@ -225,6 +243,7 @@ pub fn signing_caller<Eng: Send + Sync + 'static>(
         return caller;
     };
     let store = iam.lock();
+    caller.scope = sts_store::session_scoping_documents(Some(&store), &session_policies);
     // A LONG-TERM access key: STS's store holds SESSIONS, so its answer for a key it never
     // minted is the account's ambient identity — but IAM's store maps an access key id to the
     // user that owns it, so a request signed with one speaks for THAT user and is judged on the
@@ -272,22 +291,24 @@ pub fn expired_refusal(caller: &SigningCaller) -> Option<String> {
         .then(|| EXPIRED_CREDENTIAL_MESSAGE.to_string())
 }
 
-/// The sentence this invoke is refused with when neither the caller's identity-based policies
-/// nor the api's own resource policy allow `execute-api:Invoke` on the method it addressed, or
-/// `None` when the request may proceed.
+/// The sentence this invoke is refused with when the caller's identity-based policies, the
+/// scope its credential was minted with and the api's own resource policy do not between them
+/// allow `execute-api:Invoke` on the method it addressed, or `None` when the request may
+/// proceed.
 ///
-/// The sentence closes with the clause IAM words the REASON of the failure in ([`not_authorized`]):
-/// which document class refused the call, and whether its deny was explicit or the default one
-/// of a call nothing allowed.
+/// The sentence closes with the clause IAM words the REASON of the failure in
+/// ([`not_authorized`]): which document class refused the call, and whether its deny was
+/// explicit or the default one of a call nothing allowed.
 ///
-/// `allowed_by_resource_policy` is whether the document the api carries explicitly ALLOWS this
-/// call ([`resource_policy::allows_invoke`]): either grant suffices, so an allow there admits a
-/// caller whose own policies say nothing.
+/// `resource_policy_said` is what the document the api carries states about this call
+/// ([`resource_policy::invoke_decision`]): either grant suffices, so an allow there admits a
+/// caller whose own policies say nothing, and an explicit deny there refuses whatever the
+/// caller's own policies grant.
 #[must_use]
 pub fn refusal(
     caller: &SigningCaller,
     call: &resource_policy::Call<'_>,
-    allowed_by_resource_policy: bool,
+    resource_policy_said: Decision,
 ) -> Option<String> {
     if let Some(expired) = expired_refusal(caller) {
         return Some(expired);
@@ -297,10 +318,19 @@ pub fn refusal(
     // DECISION is taken about the method's own ARN — which is what a statement names it by.
     let reported = call.reported_resource();
     let request = iam::Request::new(INVOKE_ACTION, &method_arn, &caller.spellings);
+    // The explicit DENIES first, each naming its own document class: an explicit deny refuses
+    // the invoke whatever else allows it — including a grant this emulator cannot read, which
+    // only lifts the DEFAULT deny of a call no readable statement allows. The api's own
+    // document is asked before the caller's, because its deny is a fact about the api and
+    // applies "regardless of the caller and Method configuration".
+    if resource_policy_said == Decision::Denied {
+        return Some(not_authorized(
+            &caller.arn,
+            &reported,
+            RESOURCE_POLICY_EXPLICIT_DENY,
+        ));
+    }
     let identity_said = iam::identity_decision(&caller.documents, &request);
-    // The decision is taken FIRST, so an explicit `Deny` in a document that CAN be read refuses
-    // the invoke whatever else the principal carries — including a grant this emulator cannot
-    // read, which only lifts the DEFAULT deny of a call no readable statement allows.
     if identity_said == Decision::Denied {
         return Some(not_authorized(
             &caller.arn,
@@ -308,20 +338,39 @@ pub fn refusal(
             IDENTITY_EXPLICIT_DENY,
         ));
     }
+    let scope_said = caller.scope.decision(&request);
+    if scope_said == Decision::Denied {
+        return Some(not_authorized(&caller.arn, &reported, SESSION_EXPLICIT_DENY));
+    }
     let granted = iam::is_allowed(identity_said, Decision::NotStated)
         || caller.identity_is_unbounded()
-        || allowed_by_resource_policy;
+        || resource_policy_said == Decision::Allowed;
     if !granted {
+        // IAM's DEFAULT deny: no document the decision could read allows the call, so a grant
+        // is what would lift it — which is what the clause naming the identity-based class
+        // tells whoever reads the refusal.
         return Some(not_authorized(
             &caller.arn,
             &reported,
-            &no_policy_allows(IDENTITY_POLICY_CLASS, INVOKE_ACTION),
+            &iam::no_identity_policy_allows(INVOKE_ACTION),
+        ));
+    }
+    // "The resulting session's permissions are the intersection of the role's identity-based
+    // policy and the session policies" (`AssumeRoleRequest$PolicyArns`): a grant the scope the
+    // credential was minted with does not also allow is not a permission this request has,
+    // whichever document granted it. A credential no mint scoped caps nothing, which the
+    // resolved scope answers as an allow.
+    if scope_said != Decision::Allowed {
+        return Some(not_authorized(
+            &caller.arn,
+            &reported,
+            &iam::no_session_policy_allows(INVOKE_ACTION),
         ));
     }
     // "A permissions boundary sets the maximum permissions that an identity-based policy can
     // grant": a grant the boundary does not also allow is not a permission the principal has. A
     // grant the RESOURCE policy made is not an identity-based one, so no boundary caps it.
-    if allowed_by_resource_policy || caller.identity_is_unbounded() {
+    if resource_policy_said == Decision::Allowed || caller.identity_is_unbounded() {
         return None;
     }
     if let Some(boundary) = &caller.boundary {
@@ -331,7 +380,7 @@ pub fn refusal(
             // a boundary that merely states nothing withheld the grant the identity-based
             // policies gave.
             Decision::Denied => BOUNDARY_EXPLICIT_DENY.to_string(),
-            Decision::NotStated => no_policy_allows(BOUNDARY_POLICY_CLASS, INVOKE_ACTION),
+            Decision::NotStated => iam::no_permissions_boundary_allows(INVOKE_ACTION),
         };
         return Some(not_authorized(&caller.arn, &reported, &reason));
     }
@@ -383,8 +432,8 @@ mod tests {
         }
     }
 
-    /// A federated role session carrying `documents`, with no boundary and no unreadable
-    /// attachment — the position a Cognito-vended credential is in.
+    /// A federated role session carrying `documents`, with no boundary, no unreadable
+    /// attachment and no scope — the position a Cognito-vended credential is in.
     fn session(documents: &[&str]) -> SigningCaller {
         SigningCaller {
             arn: "arn:aws:sts::000000000000:assumed-role/pool-authenticated/CognitoIdentity"
@@ -396,10 +445,23 @@ mod tests {
             ],
             documents: documents.iter().map(|document| (*document).to_string()).collect(),
             boundary: None,
+            scope: sts_store::ScopingPolicies::default(),
             account_credential: false,
             unreadable_attachment: false,
             expired: false,
         }
+    }
+
+    /// The resolved scope of a credential minted with the inline session policy `document`.
+    fn scoped(document: &str) -> sts_store::ScopingPolicies {
+        sts_store::session_scoping_documents(
+            None,
+            &sts_store::SessionPolicies {
+                inline: Some(document.to_string()),
+                managed_arns: Vec::new(),
+                none_means_no_permissions: false,
+            },
+        )
     }
 
     /// RULE: either grant admits the invoke, neither refuses it, and an explicit deny refuses
@@ -422,31 +484,93 @@ mod tests {
         let deny_every_invoke = "{\"Statement\":[{\"Effect\":\"Deny\",\
                                  \"Action\":\"execute-api:Invoke\",\"Resource\":\"*\"}]}";
         // Rows differ along what the identity-based documents state about this method and along
-        // whether the api's own resource policy allows it.
-        let rows: &[(&str, &[&str], bool, bool)] = &[
-            ("the method itself", &[allow_method], false, true),
-            ("every invoke", &[allow_every_invoke], false, true),
-            ("another method of the same stage", &[allow_another_method], false, false),
-            ("another action on every resource", &[allow_another_action], false, false),
-            ("no policy at all", &[], false, false),
-            ("no policy, but the resource policy allows", &[], true, true),
-            ("an explicit deny", &[deny_every_invoke], false, false),
+        // what the api's own resource policy states about it.
+        let rows: &[(&str, &[&str], Decision, bool)] = &[
+            ("the method itself", &[allow_method], Decision::NotStated, true),
+            ("every invoke", &[allow_every_invoke], Decision::NotStated, true),
+            (
+                "another method of the same stage",
+                &[allow_another_method],
+                Decision::NotStated,
+                false,
+            ),
+            (
+                "another action on every resource",
+                &[allow_another_action],
+                Decision::NotStated,
+                false,
+            ),
+            ("no policy at all", &[], Decision::NotStated, false),
+            ("no policy, but the resource policy allows", &[], Decision::Allowed, true),
+            ("an explicit deny", &[deny_every_invoke], Decision::NotStated, false),
             (
                 "an explicit deny with the resource policy allowing",
                 &[deny_every_invoke],
-                true,
+                Decision::Allowed,
                 false,
             ),
             (
                 "an allow beside a deny",
                 &[allow_method, deny_every_invoke],
+                Decision::NotStated,
                 false,
+            ),
+            (
+                "the resource policy denies what the identity grants",
+                &[allow_every_invoke],
+                Decision::Denied,
                 false,
             ),
         ];
         for (case, documents, by_resource_policy, admitted) in rows {
             let caller = session(documents);
-            let refused = refusal(&caller, &call(&caller.spellings.clone()), *by_resource_policy);
+            let refused = refusal(&caller, &call(caller.spellings()), *by_resource_policy);
+            assert_eq!(
+                refused.is_none(),
+                *admitted,
+                "case {case:?}: expected admitted={admitted}, got {refused:?}"
+            );
+        }
+    }
+
+    /// RULE: the SCOPE the presented credential was minted with caps what any grant gives — the
+    /// effective permission is the intersection of the identity's documents and the session
+    /// policies, and an explicit deny in the scope refuses whatever a grant says.
+    #[test]
+    fn a_session_policy_caps_what_the_identity_grants() {
+        let allow_every_invoke = "{\"Statement\":[{\"Effect\":\"Allow\",\
+                                  \"Action\":\"execute-api:Invoke\",\"Resource\":\"*\"}]}";
+        let scope_another_verb = "{\"Statement\":[{\"Effect\":\"Allow\",\
+                                  \"Action\":\"execute-api:Invoke\",\
+                                  \"Resource\":\"arn:aws:execute-api:us-east-1:000000000000:\
+                                  abc1230000/prod/POST/orders\"}]}";
+        let scope_deny = "{\"Statement\":[{\"Effect\":\"Deny\",\
+                          \"Action\":\"execute-api:Invoke\",\"Resource\":\"*\"}]}";
+        // Rows differ along what the scope states about this method and along which grant the
+        // request would otherwise rest on — the identity's own, or the api's document.
+        type Row<'r> = (&'r str, Option<&'r str>, Decision, bool);
+        let rows: &[Row<'_>] = &[
+            ("no scope at all", None, Decision::NotStated, true),
+            ("a scope allowing this method", Some(allow_every_invoke), Decision::NotStated, true),
+            (
+                "a scope allowing only another verb",
+                Some(scope_another_verb),
+                Decision::NotStated,
+                false,
+            ),
+            ("a scope stating nothing", Some("{\"Statement\":[]}"), Decision::NotStated, false),
+            ("a scope denying the action", Some(scope_deny), Decision::NotStated, false),
+            (
+                "a scope allowing only another verb, with the resource policy allowing",
+                Some(scope_another_verb),
+                Decision::Allowed,
+                false,
+            ),
+        ];
+        for (case, scope, by_resource_policy, admitted) in rows {
+            let mut caller = session(&[allow_every_invoke]);
+            caller.scope = scope.map(scoped).unwrap_or_default();
+            let refused = refusal(&caller, &call(caller.spellings()), *by_resource_policy);
             assert_eq!(
                 refused.is_none(),
                 *admitted,
@@ -475,7 +599,7 @@ mod tests {
         for (case, boundary, admitted) in rows {
             let mut caller = session(&[allow_every_invoke]);
             caller.boundary = boundary.map(str::to_string);
-            let refused = refusal(&caller, &call(&caller.spellings.clone()), false);
+            let refused = refusal(&caller, &call(caller.spellings()), Decision::NotStated);
             assert_eq!(
                 refused.is_none(),
                 *admitted,
@@ -502,48 +626,84 @@ mod tests {
                         resource: arn:aws:execute-api:us-east-1:********0000:\
                         abc1230000/prod/GET/orders";
         // Rows differ along WHICH document class refused the invoke and along whether that
-        // class stated an explicit deny or merely failed to allow — the four readings this
-        // gate can reach.
-        let rows: &[(&str, &[&str], Option<&str>, &str)] = &[
+        // class stated an explicit deny or merely failed to allow — every reading this gate
+        // can reach.
+        type Row<'r> = (&'r str, &'r [&'r str], Option<&'r str>, Option<&'r str>, Decision, &'r str);
+        let rows: &[Row<'_>] = &[
             (
                 "no document allows the action",
                 &[],
                 None,
-                "because no identity-based policy allows the execute-api:Invoke action",
+                None,
+                Decision::NotStated,
+                " because no identity-based policy allows the execute-api:Invoke action",
             ),
             (
                 "a readable document denies it",
                 &[deny_every_invoke],
                 None,
-                "with an explicit deny in an identity-based policy",
+                None,
+                Decision::NotStated,
+                " with an explicit deny in an identity-based policy",
+            ),
+            (
+                "the api's own document denies it",
+                &[allow_every_invoke],
+                None,
+                None,
+                Decision::Denied,
+                " with an explicit deny in a resource-based policy",
+            ),
+            (
+                "the scope states nothing about the action",
+                &[allow_every_invoke],
+                None,
+                Some("{\"Statement\":[]}"),
+                Decision::NotStated,
+                " because no session policy allows the execute-api:Invoke action",
+            ),
+            (
+                "the scope denies it",
+                &[allow_every_invoke],
+                None,
+                Some(deny_every_invoke),
+                Decision::NotStated,
+                " with an explicit deny in a session policy",
             ),
             (
                 "the boundary states nothing about the action",
                 &[allow_every_invoke],
                 Some("{\"Statement\":[]}"),
-                "because no permissions boundary allows the execute-api:Invoke action",
+                None,
+                Decision::NotStated,
+                " because no permissions boundary allows the execute-api:Invoke action",
             ),
             (
                 "the boundary allows only another api",
                 &[allow_every_invoke],
                 Some(boundary_other),
-                "because no permissions boundary allows the execute-api:Invoke action",
+                None,
+                Decision::NotStated,
+                " because no permissions boundary allows the execute-api:Invoke action",
             ),
             (
                 "the boundary denies it",
                 &[allow_every_invoke],
                 Some(deny_every_invoke),
-                "with an explicit deny in a permissions boundary",
+                None,
+                Decision::NotStated,
+                " with an explicit deny in a permissions boundary",
             ),
         ];
-        for (case, documents, boundary, reason) in rows {
+        for (case, documents, boundary, scope, by_resource_policy, reason) in rows {
             let mut caller = session(documents);
             caller.boundary = boundary.map(str::to_string);
-            let refused = refusal(&caller, &call(&caller.spellings.clone()), false)
+            caller.scope = scope.map(scoped).unwrap_or_default();
+            let refused = refusal(&caller, &call(caller.spellings()), *by_resource_policy)
                 .unwrap_or_else(|| panic!("case {case:?}: an unauthorized invoke is refused"));
             assert_eq!(
                 refused,
-                format!("{sentence} {reason}"),
+                format!("{sentence}{reason}"),
                 "case {case:?}: got {refused:?}"
             );
         }
@@ -555,7 +715,7 @@ mod tests {
     fn the_accounts_own_published_credential_is_not_bounded() {
         let mut caller = session(&[]);
         caller.account_credential = true;
-        let refused = refusal(&caller, &call(&caller.spellings.clone()), false);
+        let refused = refusal(&caller, &call(caller.spellings()), Decision::NotStated);
         assert!(
             refused.is_none(),
             "case \"the account's own credential\": expected the invoke to be admitted, got \

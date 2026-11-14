@@ -684,3 +684,18 @@ mod regional_endpoint_hosted_zone;
 // from, and what the refusal of a document that explicitly denies the call reports.
 #[path = "all/stage_resource_policy_source_ip.rs"]
 mod stage_resource_policy_source_ip;
+// Appended for the reason the note above gives: what CAPS and what CONDITIONS an
+// `execute-api` authorization decision — the scope the presented credential was minted with,
+// and the address the request was made from.
+#[path = "all/stage_invoke_session_scope.rs"]
+mod stage_invoke_session_scope;
+// Appended for the reason the note above gives: the ORDER a deployed stage decides a call it
+// holds no method for in — the authorization decision about the ARN the request named, and
+// only then the routing answer.
+#[path = "all/stage_invoke_route_order.rs"]
+mod stage_invoke_route_order;
+// Appended for the reason the note above gives: HOW the control plane reports
+// `RestApi$policy` — the stringification of the stored document, which a client unescapes
+// once to recover the document it set.
+#[path = "all/rest_api_policy_reporting.rs"]
+mod rest_api_policy_reporting;

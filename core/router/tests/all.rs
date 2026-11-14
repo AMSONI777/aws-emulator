@@ -3188,3 +3188,24 @@ mod cloudformation_bucket_handles_drive_their_owning_services;
 // doc comment (`//!`) is only legal before any item, so it is left as a plain comment.
 // (A fragment of this file's own header that a landing appended HERE, in the tail, as an
 // inner doc comment; `//!` is only legal before any item, so it is an ordinary comment.
+// (The declaration the two notes above describe was appended here a THIRD time by a later
+// landing; it is removed for the same reason, and the one declaration above stands.)
+// above: this appended copy is a redefinition that compiles neither, so it is removed.)
+// (`lambda_sqs_event_source_visibility_hold` is declared ONCE in the head region above, for
+// the same reason.)
+// (`codebuild_s3_build_output` is declared ONCE in the head region above, for the same
+// reason.)
+// (`cloudformation_scripted_queue_deploy` is declared ONCE in the span above, for the same
+// (`https_front_door_concurrent_pooled_producer` is declared ONCE, further up this tail: this
+// appended copy is a redefinition that compiles neither, so it is removed.)
+// this file: this appended copy is a redefinition that compiles neither, so it is removed.)
+// (`cloudfront_edge_4xx_share_decides_the_alarm` is declared ONCE, in the sorted span at the
+// head of this file: two branches landing at once appended a second declaration of it here,
+// which compiled neither copy.)
+// (`pricing_plan_subscription_resource_eligibility` is declared ONCE, a few lines above in
+// this same tail: two branches landing in the same window each appended their own copy here.)
+// (`cloudformation_kms_encrypted_sns_sqs_pipeline` is declared ONCE, in the sorted
+// CloudFormation span at the head of this file, for the same reason.)
+// (The note the lines above belong to lives at the head of this file: a suite left at the top
+// level of `tests/` fails the build, and each one is declared exactly ONCE here, since this is
+// one crate root and a second `mod` for a name is `E0428`.
