@@ -3288,7 +3288,9 @@ mod apigateway_wafv2_waf_log_destination_gate;
 // were landing at once: it belongs at the head of this file or nowhere, so it is a line
 // comment — `all/all_rs_declares_each_suite_once.rs` is what checks this file and every
 // service crate's `tests/all.rs`.)
-//! suite left at the top level of `tests/` fails the build.
+// suite left at the top level of `tests/` fails the build. (A fragment of this file's own
+// header, landed down here: past the first item a `//!` line is `E0753`, so it stands as an
+// ordinary comment.)
 // Declared here, in this same head region, for the reason the entry above records: what a client
 // of a deployed REST stage is served when the proxied function's own DynamoDB read is refused
 // spans API Gateway, Lambda, IAM, STS, DynamoDB and CloudFormation at once, so no single service
@@ -3323,7 +3325,8 @@ mod all_rs_inner_doc_comments_precede_the_first_item;
 // reason the lines above record.)
 // leaving a note here. (Mid-file, so a plain comment: an inner doc comment is only
 // accepted before the first item of a module.)
-//! this file and for every service crate's `tests/all.rs`.
+// this file and for every service crate's `tests/all.rs`. (Same appended header fragment,
+// an ordinary comment for the reason the lines above record.)
 // (One more fragment of that same header landed here; the rule it states stands in the
 // module doc at the HEAD of this file.)
 // (An inner doc comment can only lead a crate root, so these lines — appended here by a

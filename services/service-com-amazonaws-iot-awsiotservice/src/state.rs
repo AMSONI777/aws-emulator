@@ -109,6 +109,11 @@
 //! `Option` because an account nobody has set them for holds none and the reader refuses
 //! that account rather than reporting options it never configured (see [`v2_logging`]).
 //!
+//! It also holds the account's v1 LOGGING OPTIONS, for the same reasons and as a record of
+//! its own: `SetLoggingOptions` / `GetLoggingOptions` name no resource either, report a
+//! shape of their own, and the read refuses an account that never set THEM with its own
+//! modelled error class (see [`v1_logging`]).
+//!
 //! It also holds the account's DEVICE DEFENDER AUDIT CONFIGURATION — one record, not a
 //! map, because `DescribeAccountAuditConfiguration` and
 //! `UpdateAccountAuditConfiguration` name no resource: there is one audit configuration
@@ -930,6 +935,18 @@ pub struct ComAmazonawsIotAwsiotserviceState {
     /// reader refuses with the modelled `NotConfiguredException` instead of reporting
     /// options the account never configured.
     pub v2_logging_options: Option<V2LoggingOptions>,
+    /// The account's v1 LOGGING OPTIONS — one record, not a map, because neither
+    /// `SetLoggingOptions` nor `GetLoggingOptions` names a resource: there is one set of
+    /// v1 logging options per account.
+    ///
+    /// It is an `Option` for the same reason
+    /// [`ComAmazonawsIotAwsiotserviceState::v2_logging_options`] is: an account nobody has
+    /// set them for HAS none, which is the state the reader refuses with the modelled
+    /// `InvalidRequestException` instead of reporting options the account never
+    /// configured. It is a field of its own and not a view over the v2 record because the
+    /// two reads report different shapes and each refuses an unconfigured account with its
+    /// own error class.
+    pub logging_options: Option<LoggingOptions>,
     /// The account's DEVICE DEFENDER AUDIT CONFIGURATION — one record, not a map,
     /// because `DescribeAccountAuditConfiguration` /
     /// `UpdateAccountAuditConfiguration` name no resource: there is one audit
@@ -2957,6 +2974,13 @@ pub use v2_logging::{
     missing_v2_logging_options_message, LoggedEventConfiguration, V2LoggingOptions,
     MAX_LOG_EVENT_CONFIGURATIONS,
 };
+
+// What the account's v1 LOGGING OPTIONS are — the one record `SetLoggingOptions` writes
+// and `GetLoggingOptions` reports — lives in `state/v1_logging.rs`, beside the v2 record
+// it is superseded by. Its names are re-exported here so a handler reaches them as
+// `crate::state::<name>`.
+pub mod v1_logging;
+pub use v1_logging::{missing_logging_options_message, LoggingOptions};
 
 // What the account's DEVICE DEFENDER AUDIT CONFIGURATION is — the checks it holds a
 // setting for, where its notifications go, and what every reader of it reports — lives

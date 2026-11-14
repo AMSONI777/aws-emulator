@@ -1,15 +1,11 @@
 // SPDX-License-Identifier: CC0-1.0
 
 //! @op SetLoggingOptions
-//! SCAFFOLDED, NOT IMPLEMENTED: this operation answers HTTP 501 `NotImplemented` and
-//! asserts NOTHING about `SetLoggingOptions`'s real behaviour. Implement it here — this is
-//! the ONLY file to touch for this operation.
 //!
-//! A 501 from this operation means "nobody has written it yet", never "the emulator is
-//! broken". Replace the `Err(..)` in [`SetLoggingOptions::handle`] with real behaviour and
-//! delete the SCAFFOLDED marker line above; that line is the machine-readable record of
-//! which operations are still stubs (`grep -rl '^//! SCAFFOLDED, NOT IMPLEMENTED:' */src/ops/`),
-//! so leaving it on an implemented operation under-reports progress.
+//! Writes the account's (v1) logging options into this service's state
+//! ([`crate::state::LoggingOptions`]), where `GetLoggingOptions` reports them. The
+//! operation names no resource, so there is ONE such record per account and a set
+//! replaces it in full: the payload carries every member the reader reports.
 //!
 //! ## Shape of an operation
 //!
@@ -160,18 +156,27 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         input: Self::Input,
         ctx: &smithy_server_runtime::OperationContext<'_>,
     ) -> Result<Self::Output, Self::Error> {
-        // The engine is reachable from `&self` (constructor-injected); `ctx` carries
-        // request metadata. Both are bound here so an implementer has them in scope.
-        let _ = (&input, ctx, &self.engine);
-        // Implement `SetLoggingOptions` here, then delete the SCAFFOLDED marker at the top of
-        // this file. Return modeled failures as
-        // `Err(SetLoggingOptionsErrorModeled::Variant(..).into())` — the `From` impl above lifts it.
-        //
-        // To refuse a bad request this operation models no error for, return
-        // `Err(crate::scaffolded::Scaffolded::validation("..."))` — a 400
-        // `ValidationException`. Do NOT answer 501 for it: 501 means "not written yet",
-        // not "bad request". Modeled constraints are already refused BEFORE this
-        // handler runs, so reaching here means the input satisfies every one of them.
-        Err(crate::scaffolded::Scaffolded::not_implemented("SetLoggingOptions"))
+        // The options are account-wide, so no request metadata selects what is written.
+        let _ = ctx;
+
+        let state = crate::state::service_state(&*self.engine).ok_or_else(|| {
+            SetLoggingOptionsErrorModeled::InternalException(InternalException {
+                message: Some("the IoT emulator has no state store attached".to_string()),
+            })
+        })?;
+
+        // A set replaces the account's options in full: the payload carries every member
+        // the reader reports, so one a caller omits is one the configured options do not
+        // have. `logLevel` is checked against the `LogLevel` catalog by the boundary
+        // validator before this handler runs.
+        let payload = input.logging_options_payload;
+        state.lock().logging_options = Some(crate::state::LoggingOptions::configured(
+            payload.role_arn,
+            payload.log_level,
+        ));
+
+        // `SetLoggingOptions` targets `smithy.api#Unit`, so a successful set is an empty
+        // 200 and what it persisted is read back through `GetLoggingOptions`.
+        Ok(SetLoggingOptionsOutput)
     }
 }
