@@ -155,12 +155,13 @@ impl From<CreateServiceErrorModeled> for CreateServiceError {
 }
 
 /// The response for a stored service — every member read back out of state, with the
-/// status the clock owes it at `now`.
+/// status the clock owes it at `now` and the DNS entry announced at the host this
+/// emulator answers on ([`crate::state::announced_dns_entry`]).
 fn output_of(
     service: &crate::state::LatticeService,
     now: std::time::SystemTime,
+    ctx: &smithy_server_runtime::OperationContext<'_>,
 ) -> CreateServiceOutput {
-    let (domain_name, hosted_zone_id) = service.dns_entry();
     CreateServiceOutput {
         id: Some(service.id.clone()),
         arn: Some(service.arn.clone()),
@@ -170,10 +171,10 @@ fn output_of(
         status: Some(service.status(now).to_string()),
         auth_type: Some(service.auth_type.clone()),
         idle_timeout_seconds: Some(service.idle_timeout_seconds),
-        dns_entry: Some(DnsEntry {
-            domain_name: Some(domain_name),
-            hosted_zone_id: Some(hosted_zone_id),
-        }),
+        dns_entry: Some(crate::state::announced_dns_entry(
+            ctx,
+            &service.dns_hosted_zone_id,
+        )),
     }
 }
 
@@ -278,7 +279,7 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
                 )
                 .into());
             }
-            return Ok(output_of(existing, now));
+            return Ok(output_of(existing, now, ctx));
         }
 
         let name_key = crate::state::name_key(crate::state::KIND_SERVICE, &input.name);
@@ -315,7 +316,6 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         let sequence = store.next_sequence();
         let record = crate::state::LatticeService {
             arn: crate::state::arn_for(&region, crate::state::KIND_SERVICE, &id),
-            dns_domain_name: crate::state::service_domain_name(&input.name, &id, &region),
             dns_hosted_zone_id: crate::state::mint_hosted_zone_id(),
             id: id.clone(),
             name: input.name.clone(),
@@ -345,6 +345,6 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
             .services
             .get(&id)
             .expect("the service was just inserted under this id");
-        Ok(output_of(stored, now))
+        Ok(output_of(stored, now, ctx))
     }
 }

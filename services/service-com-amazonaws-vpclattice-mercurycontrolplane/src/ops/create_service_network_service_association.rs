@@ -156,10 +156,12 @@ fn not_found(
 }
 
 /// The response for a stored association — every member read back out of state, with
-/// the status the clock owes it at `now`.
+/// the status the clock owes it at `now` and the DNS entry announced at the host this
+/// emulator answers on ([`crate::state::announced_dns_entry`]).
 fn output_of(
     association: &crate::state::ServiceNetworkServiceAssociation,
     now: std::time::SystemTime,
+    ctx: &smithy_server_runtime::OperationContext<'_>,
 ) -> CreateServiceNetworkServiceAssociationOutput {
     CreateServiceNetworkServiceAssociationOutput {
         id: Some(association.id.clone()),
@@ -167,10 +169,10 @@ fn output_of(
         arn: Some(association.arn.clone()),
         created_by: Some(association.created_by.clone()),
         custom_domain_name: association.custom_domain_name.clone(),
-        dns_entry: Some(DnsEntry {
-            domain_name: Some(association.dns_domain_name.clone()),
-            hosted_zone_id: Some(association.dns_hosted_zone_id.clone()),
-        }),
+        dns_entry: Some(crate::state::announced_dns_entry(
+            ctx,
+            &association.dns_hosted_zone_id,
+        )),
     }
 }
 
@@ -278,7 +280,7 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
                     .into(),
                 );
             }
-            return Ok(output_of(existing, now));
+            return Ok(output_of(existing, now, ctx));
         }
 
         // Each identifier must name something actually persisted.
@@ -351,7 +353,6 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
 
         let id = crate::state::mint_id(crate::state::PREFIX_SERVICE_ASSOCIATION);
         let sequence = store.next_sequence();
-        let (domain_name, hosted_zone_id) = service.dns_entry();
         let record = crate::state::ServiceNetworkServiceAssociation {
             arn: crate::state::arn_for(&region, crate::state::KIND_SERVICE_ASSOCIATION, &id),
             id: id.clone(),
@@ -366,8 +367,7 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
             service_network_id: network.id.clone(),
             service_network_arn: network.arn.clone(),
             service_network_name: network.name.clone(),
-            dns_domain_name: domain_name,
-            dns_hosted_zone_id: hosted_zone_id,
+            dns_hosted_zone_id: service.dns_hosted_zone_id.clone(),
             custom_domain_name: service.custom_domain_name.clone(),
             tags: input.tags.clone().unwrap_or_default(),
             sequence,
@@ -381,6 +381,6 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
             .service_associations
             .get(&id)
             .expect("the association was just inserted under this id");
-        Ok(output_of(stored, now))
+        Ok(output_of(stored, now, ctx))
     }
 }

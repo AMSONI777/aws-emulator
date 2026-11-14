@@ -175,7 +175,6 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         input: Self::Input,
         ctx: &smithy_server_runtime::OperationContext<'_>,
     ) -> Result<Self::Output, Self::Error> {
-        let _ = ctx;
         let Some(state) = crate::state::service_state(&*self.engine) else {
             return Err(GetServiceErrorModeled::InternalServerException(
                 InternalServerException {
@@ -197,17 +196,16 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         let Some(service) = store.services.get(&id) else {
             return Err(not_found(&input.service_identifier));
         };
-        let (domain_name, hosted_zone_id) = service.dns_entry();
         Ok(GetServiceOutput {
             id: Some(service.id.clone()),
             name: Some(service.name.clone()),
             arn: Some(service.arn.clone()),
             created_at: Some(crate::state::timestamp(service.created_at)),
             last_updated_at: Some(crate::state::timestamp(service.last_updated_at)),
-            dns_entry: Some(DnsEntry {
-                domain_name: Some(domain_name),
-                hosted_zone_id: Some(hosted_zone_id),
-            }),
+            dns_entry: Some(crate::state::announced_dns_entry(
+                ctx,
+                &service.dns_hosted_zone_id,
+            )),
             custom_domain_name: service.custom_domain_name.clone(),
             certificate_arn: service.certificate_arn.clone(),
             status: Some(service.status(now).to_string()),

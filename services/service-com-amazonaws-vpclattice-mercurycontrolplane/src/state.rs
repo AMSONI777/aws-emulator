@@ -9,6 +9,14 @@
 //! `CREATE_IN_PROGRESS -> ACTIVE` and `DELETE_IN_PROGRESS -> gone` spans. Handlers reach
 //! the store through
 //! [`service_state`]; nothing in `src/ops/` keeps a second copy of a resource.
+//!
+//! The host a response ANNOUNCES in a `DnsEntry` is read in the `announced_dns` child
+//! module, which every operation that serializes one builds its entry through
+//! ([`announced_dns_entry`]).
+
+mod announced_dns;
+
+pub use announced_dns::{announced_dns_entry, announced_dns_host};
 
 use std::collections::HashMap;
 use std::time::{Duration, SystemTime};
@@ -478,7 +486,10 @@ pub struct LatticeService {
     /// What the caller sent, or [`DEFAULT_IDLE_TIMEOUT_SECONDS`] — the value the
     /// member's own documentation gives a create that omits it.
     pub idle_timeout_seconds: i32,
-    pub dns_domain_name: String,
+    /// The hosted zone of this service's DNS entry, minted once with the service and
+    /// kept, so every read reports the same zone. The entry's DOMAIN NAME is not stored:
+    /// it is the host this emulator answers on, read per request by
+    /// [`announced_dns_entry`].
     pub dns_hosted_zone_id: String,
     pub tags: HashMap<String, String>,
     pub created_at: SystemTime,
@@ -500,11 +511,6 @@ impl LatticeService {
             "CREATE_IN_PROGRESS"
         }
     }
-
-    /// This service's DNS entry, as persisted.
-    pub fn dns_entry(&self) -> (String, String) {
-        (self.dns_domain_name.clone(), self.dns_hosted_zone_id.clone())
-    }
 }
 
 /// An association between one service network and one service.
@@ -522,7 +528,9 @@ pub struct ServiceNetworkServiceAssociation {
     pub service_network_id: String,
     pub service_network_arn: String,
     pub service_network_name: String,
-    pub dns_domain_name: String,
+    /// The hosted zone of the associated service's DNS entry, copied from that service
+    /// when the association is made — the association reports the service's own entry.
+    /// Its DOMAIN NAME is not stored; see [`announced_dns_entry`].
     pub dns_hosted_zone_id: String,
     pub custom_domain_name: Option<String>,
     pub tags: HashMap<String, String>,
@@ -2039,9 +2047,8 @@ pub fn rule_arn(region: &str, service_id: &str, listener_id: &str, rule_id: &str
 /// renders a 64-bit value as 16 hex digits behind that one fixed character, the same
 /// shape the EC2-family ids wear, and that form satisfies each modelled pattern and
 /// length. The suffix also travels into every value that embeds an id: the resource ARNs
-/// ([`arn_for`], [`listener_arn`], [`rule_arn`]), an error's `resourceId`, and the
-/// generated DNS name ([`service_domain_name`]), so minting it here is the one place that
-/// form is decided.
+/// ([`arn_for`], [`listener_arn`], [`rule_arn`]) and an error's `resourceId`, so minting it
+/// here is the one place that form is decided.
 pub fn mint_id(prefix: &str) -> String {
     format!(
         "{prefix}{ID_LEADING_CHARACTER}{}",
@@ -2053,31 +2060,6 @@ pub fn mint_id(prefix: &str) -> String {
 /// characters, the shape Route 53 gives a hosted zone.
 pub fn mint_hosted_zone_id() -> String {
     format!("Z{}", encode_in(fresh_entropy(), 19, BASE36_UPPER))
-}
-
-/// The generated domain name of a service's DNS entry:
-/// `<name>-<id suffix>.<account segment>.vpc-lattice-svcs.<region>.on.aws`, the form
-/// VPC Lattice hands out. The account segment is derived from the account id, so every
-/// service of one account shares it and it is stable across reads.
-pub fn service_domain_name(name: &str, service_id: &str, region: &str) -> String {
-    let suffix = service_id
-        .strip_prefix(PREFIX_SERVICE)
-        .unwrap_or(service_id);
-    format!(
-        "{name}-{suffix}.{}.vpc-lattice-svcs.{region}.on.aws",
-        account_segment()
-    )
-}
-
-/// The 7-hex account segment of a lattice domain name, derived from the account id.
-fn account_segment() -> String {
-    use sha2::{Digest, Sha256};
-    let digest = Sha256::digest(account_id().as_bytes());
-    digest[..4]
-        .iter()
-        .map(|byte| format!("{byte:02x}"))
-        .collect::<String>()[..7]
-        .to_string()
 }
 
 /// Entropy for one minted id.

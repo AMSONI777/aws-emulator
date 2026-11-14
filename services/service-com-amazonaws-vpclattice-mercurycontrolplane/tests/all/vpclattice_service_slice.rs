@@ -85,13 +85,27 @@ impl Lattice {
         path: &str,
         body: Option<serde_json::Value>,
     ) -> Answer {
+        self.call_from_host(&format!("vpc-lattice.{REGION}.amazonaws.com"), method, path, body)
+            .await
+    }
+
+    /// The same call, from a client that addressed `host` — the service's own published
+    /// host, or an address this emulator is reached on. Shared with the suites that
+    /// assert what the service ANNOUNCES to each kind of caller.
+    pub(crate) async fn call_from_host(
+        &self,
+        host: &str,
+        method: &str,
+        path: &str,
+        body: Option<serde_json::Value>,
+    ) -> Answer {
         let payload = body
             .map(|value| serde_json::to_vec(&value).expect("the test body serializes"))
             .unwrap_or_default();
         let request = http::Request::builder()
             .method(method)
-            .uri(format!("https://vpc-lattice.{REGION}.amazonaws.com{path}"))
-            .header("host", format!("vpc-lattice.{REGION}.amazonaws.com"))
+            .uri(format!("https://{host}{path}"))
+            .header("host", host)
             // The SigV4 credential scope is what routes the request to this service
             // and what names the region its ARNs carry.
             .header(
@@ -459,9 +473,14 @@ async fn creating_services_persists_them_with_a_dns_entry_and_reads_back_identic
             .as_str()
             .unwrap_or_default()
             .to_string();
-        assert!(
-            domain.contains("vpc-lattice-svcs") && domain.contains(REGION),
-            "case {case:?}: expected a generated lattice domain name, got {domain:?}"
+        // The announced host is the one this emulator answers on; this harness addresses
+        // the service's published host on an emulator served at no address of its own, so
+        // that is the unserved base's authority. The whole table of addressings is in
+        // `announced_dns_entry`.
+        assert_eq!(
+            domain,
+            crate::announced_dns_entry::unserved_authority(),
+            "case {case:?}: expected the host this emulator answers on, got {domain:?}"
         );
         assert!(
             created.body["dnsEntry"]["hostedZoneId"]

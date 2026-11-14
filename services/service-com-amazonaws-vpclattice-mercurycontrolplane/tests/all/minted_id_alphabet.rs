@@ -14,8 +14,8 @@
 //! id for and several mints of each: a minted id is its kind's prefix plus a 17-character
 //! suffix of the form `0` followed by 16 characters of the LOWERCASE HEX alphabet, and
 //! that suffix travels unchanged into every value that embeds it — the resource ARNs
-//! (including the ones that nest under a parent), the `resourceId` of a conflict, the ids
-//! a read or a listing echoes, and the label of the generated DNS name.
+//! (including the ones that nest under a parent), the `resourceId` of a conflict, and the
+//! ids a read or a listing echoes.
 //!
 //! The modelled patterns are wider than that (`^svc-[0-9a-z]{17}$`,
 //! `^listener-[0-9a-z]{17}$`, `^sn-[0-9a-z]{17}$`, `^snsa-[0-9a-z]{17}$`,
@@ -27,7 +27,7 @@
 use crate::listeners::{create_listener, listener_kind};
 use crate::rules::{create_rule, fixed_response_rule, rule_kind};
 use crate::target_groups::create_target_group;
-use crate::vpclattice_service_slice::{expected_arn, Answer, Lattice, REGION};
+use crate::vpclattice_service_slice::{expected_arn, Answer, Lattice};
 use service_com_amazonaws_vpclattice_mercurycontrolplane::state;
 
 /// How many characters a minted id carries after its prefix, as every modelled id pattern
@@ -129,39 +129,6 @@ fn domain_name_of(case: &str, answer: &Answer) -> String {
             )
         })
         .to_string()
-}
-
-/// Take `domain_name` apart against the template VPC Lattice hands out —
-/// `<service name>-<the service id's suffix>.<account segment>.vpc-lattice-svcs.<region>.on.aws`
-/// — and answer the account segment, which is 7 lowercase-hex characters.
-fn account_segment_of(case: &str, name: &str, service_id: &str, domain_name: &str) -> String {
-    let suffix = service_id
-        .strip_prefix(state::PREFIX_SERVICE)
-        .unwrap_or_else(|| panic!("case {case}: expected a svc- id, got {service_id:?}"));
-    let head = format!("{name}-{suffix}.");
-    let rest = domain_name.strip_prefix(&head).unwrap_or_else(|| {
-        panic!("case {case}: expected a domain name beginning {head:?}, got {domain_name:?}")
-    });
-    let (segment, tail) = rest.split_once('.').unwrap_or_else(|| {
-        panic!("case {case}: expected an account segment in {domain_name:?}")
-    });
-    assert_eq!(
-        tail,
-        format!("vpc-lattice-svcs.{REGION}.on.aws"),
-        "case {case}: expected the lattice service domain of the request's region, \
-         got {domain_name:?}"
-    );
-    // 7 hex characters: the segment AWS derives from the account, which every service of
-    // one account shares.
-    assert!(
-        segment.len() == 7
-            && segment
-                .bytes()
-                .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase()),
-        "case {case}: expected a 7-character hexadecimal account segment, got {segment:?} \
-         in {domain_name:?}"
-    );
-    segment.to_string()
 }
 
 /// Every kind this service mints an id for, several mints each: the id wears AWS's suffix
@@ -297,8 +264,7 @@ async fn every_minted_id_and_arn_carries_a_lowercase_hex_suffix() {
 }
 
 /// The minted suffix travels: a read, a listing, a delete acknowledgement and a conflict
-/// all carry the same minted ids, and the generated DNS name splices the service id's
-/// suffix into its first label.
+/// all carry the same minted ids.
 #[tokio::test]
 async fn the_minted_suffix_travels_into_reads_listings_deletes_and_conflicts() {
     let lattice = Lattice::new();
@@ -310,16 +276,14 @@ async fn the_minted_suffix_travels_into_reads_listings_deletes_and_conflicts() {
         created.str_field("id")
     };
 
-    // Rows differing in the service name the domain name is built from: the shortest the
-    // `ServiceName` pattern admits, one with digits, one with inner hyphens, and one at
-    // the length a probe uses.
+    // Rows differing in the service name: the shortest the `ServiceName` pattern admits,
+    // one with digits, one with inner hyphens, and one at the length a probe uses.
     let names = [
         "abc",
         "travel7",
         "travel-host-two",
         "travel-probe-host-00000000",
     ];
-    let mut segments: Vec<String> = Vec::new();
     let mut created_services: Vec<(String, String, String)> = Vec::new();
     for name in names {
         let case = format!("service {name:?}");
@@ -330,7 +294,6 @@ async fn the_minted_suffix_travels_into_reads_listings_deletes_and_conflicts() {
         let id = created.str_field("id");
         assert_hex_id(&case, &id, state::PREFIX_SERVICE);
         let domain_name = domain_name_of(&case, &created);
-        segments.push(account_segment_of(&case, name, &id, &domain_name));
 
         // The read path echoes exactly what the create minted.
         let read = lattice.get_service(&id).await;
@@ -344,19 +307,10 @@ async fn the_minted_suffix_travels_into_reads_listings_deletes_and_conflicts() {
         assert_eq!(
             domain_name_of(&format!("{case} read back"), &read),
             domain_name,
-            "case {case}: GetService must echo the stored domain name, got {}",
+            "case {case}: GetService must announce the same host the create did, got {}",
             read.body
         );
         created_services.push((name.to_string(), id, domain_name));
-    }
-    // The account segment is one account's, so every service of this emulator shares it.
-    for (index, segment) in segments.iter().enumerate() {
-        assert_eq!(
-            segment, &segments[0],
-            "case service {:?}: expected the account segment {:?} every other service \
-             carries, got {segment:?}",
-            names[index], segments[0]
-        );
     }
 
     // A listener on the first service, read back, then a duplicate name so the conflict

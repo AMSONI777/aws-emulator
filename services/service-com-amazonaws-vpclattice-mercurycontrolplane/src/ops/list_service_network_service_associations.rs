@@ -141,10 +141,13 @@ fn invalid(
     .into()
 }
 
-/// The summary of one stored association, with the status the clock owes it at `now`.
+/// The summary of one stored association, with the status the clock owes it at `now` and
+/// the DNS entry announced at the host this emulator answers on
+/// ([`crate::state::announced_dns_entry`]).
 fn summary_of(
     association: &crate::state::ServiceNetworkServiceAssociation,
     now: std::time::SystemTime,
+    ctx: &smithy_server_runtime::OperationContext<'_>,
 ) -> ServiceNetworkServiceAssociationSummary {
     ServiceNetworkServiceAssociationSummary {
         id: Some(association.id.clone()),
@@ -158,10 +161,10 @@ fn summary_of(
         service_network_id: Some(association.service_network_id.clone()),
         service_network_name: Some(association.service_network_name.clone()),
         service_network_arn: Some(association.service_network_arn.clone()),
-        dns_entry: Some(DnsEntry {
-            domain_name: Some(association.dns_domain_name.clone()),
-            hosted_zone_id: Some(association.dns_hosted_zone_id.clone()),
-        }),
+        dns_entry: Some(crate::state::announced_dns_entry(
+            ctx,
+            &association.dns_hosted_zone_id,
+        )),
         custom_domain_name: association.custom_domain_name.clone(),
     }
 }
@@ -202,7 +205,6 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         input: Self::Input,
         ctx: &smithy_server_runtime::OperationContext<'_>,
     ) -> Result<Self::Output, Self::Error> {
-        let _ = ctx;
         let Some(state) = crate::state::service_state(&*self.engine) else {
             return Err(
                 ListServiceNetworkServiceAssociationsErrorModeled::InternalServerException(
@@ -302,7 +304,7 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
                 break;
             }
             page_ends_at = association.sequence;
-            items.push(summary_of(association, now));
+            items.push(summary_of(association, now, ctx));
         }
 
         Ok(ListServiceNetworkServiceAssociationsOutput {
