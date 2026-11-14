@@ -2246,3 +2246,10 @@ mod event_window_target_kind_refusal;
 // endpoint of one and a peer of an endpoint, in both delete states. Declared beside
 #[path = "all/route_server_incorrect_state_wording.rs"]
 mod route_server_incorrect_state_wording;
+// `UpdateSecurityGroupRuleDescriptionsIngress`: the description it writes onto each inbound
+// rule a request names — by rule id or by the rule's own properties — read back through
+// `DescribeSecurityGroupRules` and `DescribeSecurityGroups`, beside what it refuses and what
+// it leaves alone. Declared at the tail of this file, which is where every new ec2 suite
+// lands.
+#[path = "all/update_security_group_rule_descriptions_ingress.rs"]
+mod update_security_group_rule_descriptions_ingress;
