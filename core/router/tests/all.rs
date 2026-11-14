@@ -2824,7 +2824,6 @@ mod iam_session_tag_authorization;
 // (A suite left at the top level of `tests/` fails the build. Declare each suite exactly
 // leaving a note here. These lines sit after the first item in this file, so they are
 // ordinary comments: an inner doc comment here is `E0753` and compiles no suite at all.)
-// suite left at the top level of `tests/` fails the build. Declare each suite exactly
 // leaving a note here. (Line comments, not `//!`: an inner doc comment is only legal at
 // the head of a crate root, so one in this tail is `E0753` and compiles no suite at all.)
 // (The five lines below arrived as INNER doc comments (`//!`) in this appended tail, where
@@ -3004,8 +3003,6 @@ mod s3_object_events_update_their_search_index;
 #[path = "all/cloudformation_cognito_identity_role_attachment_refusal.rs"]
 mod cloudformation_cognito_identity_role_attachment_refusal;
 // A suite left at the top level of `tests/` fails the build. Declare each suite exactly
-// leaving a note here. (This note sits mid-file, so it is a plain comment: an inner doc
-// comment is only accepted before the first item of a module.)
 //! suite left at the top level of `tests/` fails the build. Declare each suite exactly
 //! ONCE: this is one crate root, so a second `mod` for the same name is `E0428` and fails
 //! every suite in this target. `all/all_rs_declares_each_suite_once.rs` checks that for

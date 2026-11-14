@@ -25,6 +25,8 @@ mod emulator;
 mod native_queue_lifecycle;
 #[path = "all/native_resource_resolution.rs"]
 mod native_resource_resolution;
+#[path = "all/patch_removal_defaults.rs"]
+mod patch_removal_defaults;
 #[path = "all/primary_identifier.rs"]
 mod primary_identifier;
 #[path = "all/refusal_wording.rs"]

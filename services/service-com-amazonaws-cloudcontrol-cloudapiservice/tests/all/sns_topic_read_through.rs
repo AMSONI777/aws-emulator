@@ -29,7 +29,7 @@ use super::emulator::{
 };
 
 /// The type whose resources live in the Amazon SNS service's own store.
-const TOPIC: &str = "AWS::SNS::Topic";
+pub(crate) const TOPIC: &str = "AWS::SNS::Topic";
 
 /// The ARN of the topic called `name`, built by the core's own ARN builder so a case pins
 /// the topic Cloud Control API resolved to the one Amazon SNS holds rather than to a string
@@ -41,7 +41,7 @@ fn topic_arn(name: &str) -> String {
 /// The value Amazon SNS reports for the topic attribute `name` in a `GetTopicAttributes`
 /// envelope, or `""` when it reports none: the attribute map is one entry per attribute,
 /// read by the harness's one reader of an `awsQuery` answer.
-fn attribute(body: &str, name: &str) -> String {
+pub(crate) fn attribute(body: &str, name: &str) -> String {
     map_entry(body, name)
 }
 
@@ -55,7 +55,7 @@ async fn inventory(emulator: &Emulator) -> Vec<String> {
 }
 
 /// One `GetTopicAttributes` call, required to be answered.
-async fn attributes(emulator: &Emulator, case: &str, arn: &str) -> String {
+pub(crate) async fn attributes(emulator: &Emulator, case: &str, arn: &str) -> String {
     let (status, body) = emulator
         .sns("GetTopicAttributes", &[("TopicArn", arn)])
         .await;

@@ -78,13 +78,13 @@ fn expected_model(name: &str, overrides: &[(&str, Value)]) -> Value {
 }
 
 /// One `Tags` entry, as the type's schema carries a tag: a `{ Key, Value }` pair.
-fn tag(key: &str, value: &str) -> Value {
+pub(crate) fn tag(key: &str, value: &str) -> Value {
     json!({ "Key": key, "Value": value })
 }
 
 /// Create a queue through the OWNING service's own API — `sqs:CreateQueue` — and answer
 /// the url it reports. Nothing of such a queue is ever named to Cloud Control API.
-async fn create_native(emulator: &Emulator, name: &str, attributes: &Value) -> String {
+pub(crate) async fn create_native(emulator: &Emulator, name: &str, attributes: &Value) -> String {
     let mut request = Map::new();
     request.insert("QueueName".to_string(), json!(name));
     if attributes.as_object().is_some_and(|map| !map.is_empty()) {
@@ -98,7 +98,11 @@ async fn create_native(emulator: &Emulator, name: &str, attributes: &Value) -> S
 
 /// What the OWNING service reports for one attribute of the queue at `url`, or `None`
 /// where it reports no value for it.
-async fn native_attribute(emulator: &Emulator, url: &str, attribute: &str) -> Option<String> {
+pub(crate) async fn native_attribute(
+    emulator: &Emulator,
+    url: &str,
+    attribute: &str,
+) -> Option<String> {
     let reported = emulator
         .sqs_ok(
             "GetQueueAttributes",
@@ -112,7 +116,7 @@ async fn native_attribute(emulator: &Emulator, url: &str, attribute: &str) -> Op
 
 /// The tags the OWNING service reports for the queue at `url`, as the type's schema
 /// carries them.
-async fn native_tags(emulator: &Emulator, url: &str) -> Vec<Value> {
+pub(crate) async fn native_tags(emulator: &Emulator, url: &str) -> Vec<Value> {
     let reported = emulator
         .sqs_ok("ListQueueTags", json!({ "QueueUrl": url }))
         .await;
