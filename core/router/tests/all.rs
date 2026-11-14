@@ -3227,3 +3227,16 @@ mod cloudformation_bucket_handles_drive_their_owning_services;
 // this file and for every service crate's `tests/all.rs`. (An ordinary comment: an inner doc
 // comment is only legal before the first item of this crate root.)
 // this file and for every service crate's `tests/all.rs`.
+// Declared at the END of this list, clear of the comment spans above, for the reason the
+// entries there record: the sorted `a…` span is a region concurrently landing suites add
+// their line to. The suite spans API Gateway, WAFv2 and CloudWatch Logs at once, so no
+// single service crate's test target can deploy the stage, gate the logging destination the
+// web ACL is pointed at, and then read what reached it.
+#[path = "all/apigateway_wafv2_waf_log_destination_gate.rs"]
+mod apigateway_wafv2_waf_log_destination_gate;
+// (These five lines are a fragment of this file's own module header, which a merge of two
+// appended tails landed down here. They stand as ORDINARY comments because an inner doc
+// comment `//!` may only appear before the first item, so one in this tail is `E0753` and
+// compiles no suite of this target. The rule they state is in the header at the top of this
+// file, where it belongs.)
+// (Another fragment of that same header, an ordinary comment here for the same reason.)
