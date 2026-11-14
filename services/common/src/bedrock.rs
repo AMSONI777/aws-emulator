@@ -70,13 +70,16 @@ enum Shared {
     /// with `500 AmbiguousService`.
     OwnedBy(&'static str),
     /// The sharers bind the SAME routes under this segment and the route's one
-    /// `@httpLabel` is the ARN OF THE RESOURCE being tagged, whose `resource-type`
-    /// field each sharer's model enumerates in its own taggable-resource shape — and
-    /// those enumerations are DISJOINT, each naming only resources that sharer's plane
-    /// mints. So the ARN names the sharer: the service whose taggable-resource types
-    /// admit the ARN's own type claims the request
-    /// ([`tagged_resource_owner`]), and an ARN naming a resource type no sharer admits
-    /// goes to the segment's declared owner.
+    /// `@httpLabel` is the ARN OF THE RESOURCE being tagged, whose syntax each sharer's
+    /// model spells out in its own taggable-resource shape — the resource TYPES it
+    /// enumerates and the IDENTIFIER form it states for them — and those syntaxes are
+    /// DISJOINT, each admitting only resources that sharer's plane mints.
+    ///
+    /// So the request is placed in two tiers ([`tagging_sharer`]): the endpoint HOST names
+    /// the sharer when it names one at all, which is AWS's own discriminator; otherwise the
+    /// ARN does — the sharer whose taggable-resource syntax ADMITS it claims the request
+    /// ([`tagged_resource_owner`]), and an ARN no sharer's syntax admits, which neither can
+    /// resolve, goes to the segment's declared owner.
     ByTaggedResourceType,
 }
 
@@ -90,17 +93,19 @@ enum Shared {
 ///   against `POST /knowledgebases/{knowledgeBaseId}/retrieve`), so the route decides.
 /// * `tags` — the same two both bind `GET`, `POST` and `DELETE /tags/{resourceArn}`, the
 ///   identical three routes, so neither the method nor the URI template decides. What DOES
-///   decide is the ARN the one `@httpLabel` carries: its `resource-type` field, because each
-///   of the two models enumerates the resource types its own tagging admits and the two
-///   enumerations are disjoint — the build-time plane's taggable resources are the ones it
+///   decide is first the endpoint HOST, and then the ARN the one `@httpLabel` carries,
+///   judged against the whole taggable-resource syntax each of the two models spells out —
+///   the resource types its own tagging admits AND the identifier form it states for them.
+///   Those syntaxes are disjoint: the build-time plane's taggable resources are the ones it
 ///   mints (an agent, an agent alias, a knowledge base, a flow, a prompt, a retrieval
-///   instruction) and the data plane's are the ones it mints (a session, an
-///   advanced-optimize-prompt job). Each endpoint refuses an ARN its own model does not
-///   admit (the recorded `bedrock-agent-runtime` refusal of a build-time plane's ARN quotes
-///   the RUNTIME's pattern), and answers one it does admit, so the plane that MINTS the
-///   named resource is the one that serves the request ([`Shared::ByTaggedResourceType`]).
-///   An ARN naming a resource type neither model admits falls to the declared owner, as the
-///   three identically-bound tagging segments below do: the data plane.
+///   instruction, each identified by ten alphanumeric characters) and the data plane's are
+///   the ones it mints (a session, an advanced-optimize-prompt job). Each endpoint ANSWERS
+///   an ARN its own model admits and refuses one it does not — the recorded
+///   `bedrock-agent-runtime` refusal of an ARN outside the runtime's syntax quotes the
+///   RUNTIME's pattern, whatever resource type that ARN names — so the plane whose syntax
+///   admits the ARN is the one that serves the request ([`Shared::ByTaggedResourceType`]).
+///   An ARN neither model's syntax admits falls to the declared owner, as the three
+///   identically-bound tagging segments below do: the data plane.
 /// * `listTagsForResource`, `tagResource`, `untagResource` — the `bedrock` control plane
 ///   and `bedrock-data-automation` both bind `POST` on each of these three, again
 ///   identically, and the control plane is the member every Bedrock tagging flow uses.
@@ -149,24 +154,39 @@ pub fn claims_request(
                     .is_none_or(|owner| identity.shape_id() == owner)
         }
         Some(Shared::OwnedBy(owner)) => identity.shape_id() == owner,
-        Some(Shared::ByTaggedResourceType) => {
-            identity.shape_id() == tagged_resource_owner(parts.uri.path())
-        }
+        Some(Shared::ByTaggedResourceType) => identity.shape_id() == tagging_sharer(parts),
     }
 }
 
-/// Which sharer of the identically-bound `/tags/{resourceArn}` routes mints each taggable
-/// resource type, read off each model's own `TaggableResourcesArn`
-/// (`smithy_query(query="shape",shape="TaggableResourcesArn")` on each of the two): the
-/// build-time plane's resources are the ones it mints, and the data plane's are the ones it
+/// One sharer of the identically-bound `/tags/{resourceArn}` routes, as the two tiers that
+/// place such a request read it.
+#[derive(Debug, Clone, Copy)]
+struct TaggingSharer {
+    /// The sharer's Smithy shape id, as `definition().identity().shape_id()` reports it.
+    shape_id: &'static str,
+    /// Its `aws.api#service$endpointPrefix` — the host AWS itself tells the two apart by.
+    endpoint_prefix: &'static str,
+    /// The `resource-type` fields its own taggable-resource expression enumerates.
+    resource_types: &'static [&'static str],
+    /// Whether the identifier that follows such a type is of the form that same expression
+    /// states for it.
+    admits_identifier: fn(&str) -> bool,
+}
+
+/// The two sharers of the identically-bound `/tags/{resourceArn}` routes, each with the
+/// taggable-resource syntax its OWN model spells out
+/// (`smithy_query(query="shape",shape="TaggableResourcesArn")` on each of the two) and the
+/// endpoint it is served on (`smithy_query(query="service_info")` on each): the build-time
+/// plane's taggable resources are the ones it mints, and the data plane's are the ones it
 /// mints — the published expression of the second widening the modelled `session` with the
 /// optimization job that plane also mints (see that service's own `PUBLISHED_PATTERNS`).
 ///
-/// The two enumerations are disjoint, so a resource type names at most one sharer.
-const TAGGED_RESOURCE_OWNERS: &[(&str, &[&str])] = &[
-    (
-        AGENT,
-        &[
+/// The two syntaxes are disjoint, so an ARN is admitted by at most one sharer.
+const TAGGING_SHARERS: &[TaggingSharer] = &[
+    TaggingSharer {
+        shape_id: AGENT,
+        endpoint_prefix: "bedrock-agent",
+        resource_types: &[
             "agent",
             "agent-alias",
             "knowledge-base",
@@ -174,20 +194,81 @@ const TAGGED_RESOURCE_OWNERS: &[(&str, &[&str])] = &[
             "prompt",
             "retrieval-instruction",
         ],
-    ),
-    (AGENT_RUNTIME, &["session", "advanced-optimize-prompt-job"]),
+        admits_identifier: is_build_time_identifier,
+    },
+    TaggingSharer {
+        shape_id: AGENT_RUNTIME,
+        endpoint_prefix: "bedrock-agent-runtime",
+        resource_types: &["session", "advanced-optimize-prompt-job"],
+        admits_identifier: is_runtime_identifier,
+    },
 ];
 
-/// The sharer a tagging request whose ARN names no taggable resource of EITHER plane
-/// belongs to: the segment's declared owner, as the three identically-bound tagging
+/// Characters in an identifier of a resource the BUILD-TIME plane mints: its
+/// taggable-resource expression spells every one of them as ten characters
+/// (`[A-Z0-9]{10}`, and `[a-z0-9]{10}` for a retrieval instruction), which is the `Id`
+/// shape that model's own resources carry (`^[0-9a-zA-Z]{10}$`).
+const BUILD_TIME_IDENTIFIER_LENGTH: usize = 10;
+
+/// Whether `identifier` is of the form the build-time plane's taggable-resource expression
+/// states: [`BUILD_TIME_IDENTIFIER_LENGTH`] alphanumeric characters, in either case,
+/// because that expression spells the same identifier upper-case in three of its
+/// alternatives and lower-case in the fourth while the `Id` shape behind it admits both.
+///
+/// A prompt ARN may carry the prompt's VERSION after a `:` (`prompt/<id>:<version>`),
+/// which that expression states separately and which is not part of the identifier.
+fn is_build_time_identifier(identifier: &str) -> bool {
+    let id = identifier
+        .split_once(':')
+        .map_or(identifier, |(id, _version)| id);
+    id.len() == BUILD_TIME_IDENTIFIER_LENGTH
+        && id.chars().all(|character| character.is_ascii_alphanumeric())
+}
+
+/// Whether `identifier` is of the form the DATA plane's published taggable-resource
+/// expression states for both resource kinds it admits (`[a-zA-Z0-9-]+`): a session's uuid
+/// and an optimization job's identifier are both of it.
+fn is_runtime_identifier(identifier: &str) -> bool {
+    !identifier.is_empty()
+        && identifier
+            .chars()
+            .all(|character| character.is_ascii_alphanumeric() || character == '-')
+}
+
+/// The sharer a tagging request whose ARN is admitted by NEITHER plane's taggable-resource
+/// syntax belongs to: the segment's declared owner, as the three identically-bound tagging
 /// segments of the other pair are owned. Neither plane can resolve such an ARN, so the
-/// request still reaches exactly one claimant rather than none or both.
+/// request still reaches exactly one claimant rather than none or both — and the one it
+/// reaches refuses it against its own published expression.
 const TAGGED_RESOURCE_DECLARED_OWNER: &str = AGENT_RUNTIME;
 
-/// Which sharer of the identically-bound `/tags/{resourceArn}` routes a request on `path`
-/// belongs to: the plane that MINTS the resource the ARN names, read off that ARN's
-/// `resource-type` field ([`TAGGED_RESOURCE_OWNERS`]), and otherwise
-/// [`TAGGED_RESOURCE_DECLARED_OWNER`].
+/// Which sharer of the identically-bound `/tags/{resourceArn}` routes `parts` belongs to,
+/// in the two tiers [`Shared::ByTaggedResourceType`] states: the endpoint HOST where it
+/// names one of them, and otherwise the ARN in the one `@httpLabel`.
+fn tagging_sharer(parts: &http::request::Parts) -> &'static str {
+    tagging_endpoint_addressed(parts).unwrap_or_else(|| tagged_resource_owner(parts.uri.path()))
+}
+
+/// The sharer whose ENDPOINT the request addresses, or `None` when its host names neither
+/// — a loopback or IP endpoint, which is what a client pointed at the emulator sends, and
+/// every recorded request.
+///
+/// This is AWS's own discriminator between two endpoints that serve the identical route,
+/// read exactly as [`crate::endpoint_family`] reads it (`emulator_server`'s host readers,
+/// and the `:authority` an HTTP/2 request carries on the URI instead of a `Host`), so a
+/// client pointed at one of the two real endpoint hosts reaches that endpoint's service
+/// whatever ARN it sends — including an ARN that endpoint itself refuses.
+fn tagging_endpoint_addressed(parts: &http::request::Parts) -> Option<&'static str> {
+    let host = ::emulator_server::service_from_host(&parts.headers)
+        .or_else(|| ::emulator_server::service_from_authority(&parts.uri))?;
+    TAGGING_SHARERS
+        .iter()
+        .find(|sharer| host.eq_ignore_ascii_case(sharer.endpoint_prefix))
+        .map(|sharer| sharer.shape_id)
+}
+
+/// Which sharer the ARN on `path` names: the plane whose own taggable-resource syntax
+/// ADMITS it ([`TAGGING_SHARERS`]), and otherwise [`TAGGED_RESOURCE_DECLARED_OWNER`].
 ///
 /// The label is read as the codec that deserializes the request reads it, percent escapes
 /// resolved ([`crate::percent_decode_path_label`]), because a non-greedy `@httpLabel`
@@ -196,25 +277,32 @@ fn tagged_resource_owner(path: &str) -> &'static str {
     let Some(label) = super::nth_path_segment(path, 1).map(crate::percent_decode_path_label) else {
         return TAGGED_RESOURCE_DECLARED_OWNER;
     };
-    let Some(resource_type) = tagged_resource_type(&label) else {
+    let Some((resource_type, identifier)) = tagged_resource(&label) else {
         return TAGGED_RESOURCE_DECLARED_OWNER;
     };
-    TAGGED_RESOURCE_OWNERS
+    TAGGING_SHARERS
         .iter()
-        .find(|(_, types)| types.contains(&resource_type))
-        .map_or(TAGGED_RESOURCE_DECLARED_OWNER, |(owner, _)| *owner)
+        .find(|sharer| {
+            sharer.resource_types.contains(&resource_type) && (sharer.admits_identifier)(identifier)
+        })
+        .map_or(TAGGED_RESOURCE_DECLARED_OWNER, |sharer| sharer.shape_id)
 }
 
-/// The `resource-type` field of `arn` where it is an ARN of this family's namespace, or
-/// `None` for anything else.
+/// The `resource-type` field of `arn` and the identifier that follows it, where `arn` is an
+/// ARN of this family's namespace; `None` for anything else.
 ///
 /// Read through [`crate::arn`], the one ARN parse of this crate: the resource field of
-/// every taggable resource of this family is `<resource-type>/<resource-id>` (a flow alias
-/// and a prompt version append a further `/<id>` or `:<version>`, which leaves the type
-/// where it is, and [`crate::arn::Arn::resource_type`] ends it on either separator). The
-/// comparison is case-sensitive, as an ARN's resource type is.
-fn tagged_resource_type(arn: &str) -> Option<&str> {
-    crate::arn::parse_of(arn, ARN_NAMESPACE).map(|arn| arn.resource_type())
+/// every taggable resource of this family is `<resource-type>/<resource-id>` (an agent
+/// alias and a flow alias append a further segment, which leaves both the type and the
+/// first identifier where they are, and a prompt version appends `:<version>` to the
+/// identifier). The comparison is case-sensitive, as an ARN's resource type is.
+fn tagged_resource(arn: &str) -> Option<(&str, &str)> {
+    let parsed = crate::arn::parse_of(arn, ARN_NAMESPACE)?;
+    let (resource_type, rest) = parsed.resource.split_once('/')?;
+    Some((
+        resource_type,
+        rest.split_once('/').map_or(rest, |(first, _rest)| first),
+    ))
 }
 
 /// The ONE route shape both `agents` sharers bind, which [`Shared::ByRoute`] cannot split:
@@ -365,17 +453,17 @@ mod tests {
             }
         }
 
-        // The tagged-resource split names members of this family too, and its two
-        // enumerations are DISJOINT — which is what makes a resource type name at most one
-        // sharer.
+        // The tagging split names members of this family too, and its two syntaxes are
+        // DISJOINT in their resource types — which is what makes an ARN admitted by at
+        // most one sharer.
         let mut claimed: Vec<&str> = Vec::new();
-        for (owner, types) in TAGGED_RESOURCE_OWNERS {
+        for sharer in TAGGING_SHARERS {
             assert!(
-                members.contains(owner),
-                "the tagged-resource split names {owner:?}, which is not a member of the \
-                 bedrock family"
+                members.contains(&sharer.shape_id),
+                "the tagging split names {:?}, which is not a member of the bedrock family",
+                sharer.shape_id
             );
-            for resource_type in *types {
+            for resource_type in sharer.resource_types {
                 assert!(
                     !claimed.contains(resource_type),
                     "resource type {resource_type:?} is claimed by more than one sharer"
@@ -390,17 +478,17 @@ mod tests {
     }
 
     /// RULE: on the tagging path space the sharers bind IDENTICALLY, the ARN in the
-    /// `@httpLabel` names the plane that MINTS the resource — each sharer's model
-    /// enumerates its own taggable resource types and the two enumerations are disjoint —
-    /// so the request belongs to that plane, and a label naming no taggable resource of
-    /// either goes to the segment's declared owner.
+    /// `@httpLabel` names the plane whose own taggable-resource syntax ADMITS it — the
+    /// resource types that plane's model enumerates and the identifier form it states for
+    /// them, the two syntaxes being disjoint — and an ARN neither syntax admits goes to
+    /// the segment's declared owner.
     ///
     /// The rows differ along the resource type the ARN names (each enumeration, both
     /// sharers), the partition, the spelling of the label's separators, the identifier
-    /// form, the casing of the fields, another vendor's ARN, and the labels that name no
-    /// resource at all.
+    /// form (admitted, too long, too short, empty, punctuated), the casing of the fields,
+    /// another vendor's ARN, and the labels that name no resource at all.
     #[test]
-    fn the_tagging_path_belongs_to_the_plane_that_mints_the_named_resource() {
+    fn the_tagging_path_belongs_to_the_plane_whose_syntax_admits_the_arn() {
         /// The label as a client that percent-encodes a non-greedy `@httpLabel` sends it.
         fn encoded(arn: &str) -> String {
             arn.replace(':', "%3A").replace('/', "%2F")
@@ -463,13 +551,40 @@ mod tests {
                 AGENT,
             ),
             (
-                "an agent ARN whose identifier no model's pattern admits: the type still \
-                 names the plane",
+                // The recorded `bedrock-agent-runtime` refusal of exactly this ARN quotes
+                // the RUNTIME's own expression: an identifier outside the build-time
+                // plane's form names no resource that plane mints, so the ARN is admitted
+                // by neither syntax and the declared owner answers it.
+                "an agent ARN whose identifier is one character past the build-time form",
                 format!(
                     "/tags/{}",
                     encoded("arn:aws:bedrock:us-east-1:000000000000:agent/NOTASESSION")
                 ),
-                AGENT,
+                AGENT_RUNTIME,
+            ),
+            (
+                "a knowledge-base ARN whose identifier is one character short of it",
+                format!(
+                    "/tags/{}",
+                    encoded("arn:aws:bedrock:us-east-1:000000000000:knowledge-base/KB1234567")
+                ),
+                AGENT_RUNTIME,
+            ),
+            (
+                "a flow ARN carrying no identifier at all",
+                format!(
+                    "/tags/{}",
+                    encoded("arn:aws:bedrock:us-east-1:000000000000:flow/")
+                ),
+                AGENT_RUNTIME,
+            ),
+            (
+                "an agent ARN whose identifier carries punctuation that form excludes",
+                format!(
+                    "/tags/{}",
+                    encoded("arn:aws:bedrock:us-east-1:000000000000:agent/AGENT-1234")
+                ),
+                AGENT_RUNTIME,
             ),
             (
                 "an agent alias ARN, whose resource field carries two identifiers",
@@ -516,6 +631,17 @@ mod tests {
                 AGENT,
             ),
             (
+                // The build-time plane's identifiers are ten alphanumerics in EITHER case:
+                // the taggable expression spells three of its alternatives upper-case and
+                // one lower-case, while the `Id` shape behind them admits both.
+                "a lower-case agent identifier",
+                format!(
+                    "/tags/{}",
+                    encoded("arn:aws:bedrock:us-east-1:000000000000:agent/aZ09aZ09aZ")
+                ),
+                AGENT,
+            ),
+            (
                 "another service's ARN",
                 format!(
                     "/tags/{}",
@@ -545,12 +671,97 @@ mod tests {
                 split,
                 Some(Shared::ByTaggedResourceType),
                 "case {case:?} ({path}): expected the segment to be split by the tagged \
-                 resource's type, got {split:?}"
+                 resource's syntax, got {split:?}"
             );
             let actual = tagged_resource_owner(&path);
             assert_eq!(
                 actual, expected,
                 "case {case:?} ({path}): expected {expected:?}, got {actual:?}"
+            );
+        }
+    }
+
+    /// RULE: the first tier of that split is the endpoint the request addresses — a host
+    /// naming one sharer's `endpointPrefix` hands it that sharer, whatever ARN the label
+    /// carries, and a host naming neither leaves the ARN to decide.
+    ///
+    /// The rows span both sharers' endpoint hosts, a regional and a global spelling of
+    /// one, a host carrying a port, another family member's endpoint, the loopback host a
+    /// client pointed at the emulator sends, and no host at all — each with an ARN the
+    /// OTHER tier would place elsewhere, so every row shows which tier decided.
+    #[test]
+    fn the_endpoint_the_tagging_request_addresses_names_the_sharer() {
+        /// One `GET /tags/<arn>` request, as `can_handle` is handed it.
+        fn parts(host: Option<&str>, arn: &str) -> ::http::request::Parts {
+            let mut builder = ::http::Request::builder()
+                .method("GET")
+                .uri(format!("/tags/{}", arn.replace(':', "%3A").replace('/', "%2F")));
+            if let Some(host) = host {
+                builder = builder.header("host", host);
+            }
+            builder
+                .body(())
+                .expect("the request builds")
+                .into_parts()
+                .0
+        }
+
+        const SESSION: &str =
+            "arn:aws:bedrock:us-west-2:000000000000:session/0cabde93-58b4-4d68-b230-90df328e1acb";
+        const AGENT_ARN: &str = "arn:aws:bedrock:us-east-1:000000000000:agent/AGENT12345";
+
+        // (case, the request's Host, the ARN in the label, the sharer it belongs to)
+        let rows: [(&str, Option<&str>, &str, &str); 8] = [
+            (
+                "the build-time plane's endpoint, addressed with a session ARN",
+                Some("bedrock-agent.us-east-1.amazonaws.com"),
+                SESSION,
+                AGENT,
+            ),
+            (
+                "its global spelling, addressed with an ARN it refuses",
+                Some("bedrock-agent.amazonaws.com"),
+                "arn:aws:bedrock:us-east-1:000000000000:knowledge-base/",
+                AGENT,
+            ),
+            (
+                "the data plane's endpoint, addressed with an agent ARN",
+                Some("bedrock-agent-runtime.us-east-1.amazonaws.com"),
+                AGENT_ARN,
+                AGENT_RUNTIME,
+            ),
+            (
+                "the same endpoint carrying a port",
+                Some("bedrock-agent-runtime.us-east-1.amazonaws.com:443"),
+                AGENT_ARN,
+                AGENT_RUNTIME,
+            ),
+            (
+                "another family member's endpoint: the ARN decides",
+                Some("bedrock.us-east-1.amazonaws.com"),
+                AGENT_ARN,
+                AGENT,
+            ),
+            (
+                "the loopback host a client pointed at the emulator sends",
+                Some("localhost:4566"),
+                AGENT_ARN,
+                AGENT,
+            ),
+            (
+                "the same, with an ARN neither syntax admits",
+                Some("127.0.0.1:4566"),
+                "arn:aws:bedrock:us-east-1:000000000000:agent/NOTASESSION",
+                AGENT_RUNTIME,
+            ),
+            ("no host at all", None, SESSION, AGENT_RUNTIME),
+        ];
+
+        for (case, host, arn, expected) in rows {
+            let actual = tagging_sharer(&parts(host, arn));
+            assert_eq!(
+                actual, expected,
+                "case {case:?} (host {host:?}, {arn}): expected {expected:?}, got {actual:?}"
             );
         }
     }

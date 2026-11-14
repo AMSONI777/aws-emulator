@@ -41,6 +41,8 @@ mod reranking;
 mod retrieve_and_generate;
 #[path = "all/session_error_messages.rs"]
 mod session_error_messages;
+#[path = "all/shared_tagging_arn_claim.rs"]
+mod shared_tagging_arn_claim;
 #[path = "all/sessions.rs"]
 mod sessions;
 #[path = "all/state_roundtrip.rs"]

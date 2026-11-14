@@ -35,12 +35,13 @@
 //! `service_common::bedrock` splits those spaces once for both sides: by the whole
 //! modelled route where the two bind different routes, by the request's own trailing slash
 //! for the ONE route shape whose two templates differ in nothing else
-//! (`POST /agents/{agentId}/` against `POST /agents/{sessionId}`), by the TAGGED RESOURCE's
-//! own type on the `/tags/{resourceArn}` space — each model enumerates the resource types
-//! its own tagging admits, and the two enumerations are disjoint, so the plane that mints
-//! the named resource is the claimant — and by a declared owner where nothing in the
-//! request tells them apart (a tagging label naming no taggable resource of either plane
-//! among them).
+//! (`POST /agents/{agentId}/` against `POST /agents/{sessionId}`), by the ENDPOINT the
+//! request addresses and then the TAGGED RESOURCE's own ARN on the `/tags/{resourceArn}`
+//! space — each model spells out the taggable-resource syntax its own tagging admits, the
+//! resource types and the identifier form together, and the two syntaxes are disjoint, so
+//! the plane whose syntax admits the ARN is the claimant — and by a declared owner where
+//! nothing in the request tells them apart (a tagging label neither syntax admits among
+//! them).
 //!
 //! This suite pins that: the claim table (who claims what), the property that the six
 //! models' path spaces overlap ONLY where that rule declares a split, and that a request
@@ -398,21 +399,41 @@ fn each_service_sharing_the_bedrock_signing_name_claims_only_its_own_surface() {
         Row {
             // The agent pair bind `/tags/{resourceArn}` IDENTICALLY on all three methods,
             // so neither the method nor the URI template tells them apart — the ARN does:
-            // each model enumerates the resource types its own tagging admits and the two
-            // enumerations are disjoint, so the plane that MINTS the named resource is the
-            // claimant. An `agent` is the build-time plane's.
+            // each model spells out the taggable-resource syntax its own tagging admits
+            // (the resource types AND the identifier form) and the two are disjoint, so
+            // the plane whose syntax admits the ARN is the claimant. An `agent` of ten
+            // alphanumerics is the build-time plane's.
             case: "the tagging path both agent models bind, with an agent ARN",
             method: "GET",
-            path: "/tags/arn%3Aaws%3Abedrock%3Aus-east-1%3A%3Aagent%2Fa1",
+            path: "/tags/arn%3Aaws%3Abedrock%3Aus-east-1%3A000000000000%3Aagent%2FAGENT12345",
             target: None,
             claimants: vec![AGENT],
         },
         Row {
             case: "the same tagging path as a POST",
             method: "POST",
-            path: "/tags/arn%3Aaws%3Abedrock%3Aus-east-1%3A%3Aagent%2Fa1",
+            path: "/tags/arn%3Aaws%3Abedrock%3Aus-east-1%3A000000000000%3Aagent%2FAGENT12345",
             target: None,
             claimants: vec![AGENT],
+        },
+        Row {
+            // An identifier outside the build-time plane's form names no resource that
+            // plane mints, and `agent` is no resource type the data plane's tagging
+            // admits: neither syntax admits the ARN, so the segment's declared owner
+            // answers it — and refuses it against its own published expression, which is
+            // what the recorded refusal of exactly this ARN quotes.
+            case: "the tagging path with an agent ARN neither syntax admits",
+            method: "POST",
+            path: "/tags/arn%3Aaws%3Abedrock%3Aus-east-1%3A000000000000%3Aagent%2FNOTASESSION",
+            target: None,
+            claimants: vec![AGENT_RUNTIME],
+        },
+        Row {
+            case: "the tagging path with a build-time resource type and no identifier",
+            method: "GET",
+            path: "/tags/arn%3Aaws%3Abedrock%3Aus-east-1%3A000000000000%3Aknowledge-base%2F",
+            target: None,
+            claimants: vec![AGENT_RUNTIME],
         },
         Row {
             // A knowledge base is the build-time plane's too, and its tags are what a
@@ -452,8 +473,8 @@ fn each_service_sharing_the_bedrock_signing_name_claims_only_its_own_surface() {
             claimants: vec![AGENT_RUNTIME],
         },
         Row {
-            // A label that names no resource of this family is the declared owner's too,
-            // so such a request still reaches exactly one claimant.
+            // A label neither syntax admits is the declared owner's too, so such a request
+            // still reaches exactly one claimant.
             case: "the tagging path with a label that is no bedrock ARN",
             method: "GET",
             path: "/tags/not-an-arn",
@@ -1173,6 +1194,346 @@ async fn every_operation_of_the_awsjson_member_answers_its_own_contract() {
              got {} with {}",
             answer.status,
             answer.raw_body
+        );
+    }
+}
+
+/// The host a client pointed at the emulator's own endpoint sends — no AWS endpoint
+/// prefix, which is what every recorded request carries.
+const EMULATOR_HOST: &str = "emulator.local";
+
+/// The two agent-family endpoint hosts, as AWS publishes them
+/// (`smithy_query(query="service_info")` on each of the two models gives the
+/// `endpointPrefix`es `bedrock-agent` and `bedrock-agent-runtime`).
+const BUILD_TIME_HOST: &str = "bedrock-agent.us-east-1.amazonaws.com";
+const DATA_PLANE_HOST: &str = "bedrock-agent-runtime.us-east-1.amazonaws.com";
+
+/// The expression the DATA plane's `resourceArn` refusal quotes: the `TaggableResourcesArn`
+/// that service PUBLISHES, which admits the two runtime resource kinds it mints (see that
+/// crate's own `PUBLISHED_PATTERNS`).
+const DATA_PLANE_TAGGABLE_PATTERN: &str = "arn:aws(-[^:]+)?:bedrock:[a-zA-Z0-9-]+:[0-9]{12}\
+                                           :(session|advanced-optimize-prompt-job)\
+                                           /[a-zA-Z0-9-]+";
+
+/// The one-violation envelope the framework states over that clause, for the value a
+/// request submitted.
+fn one_pattern_error(value: &str) -> String {
+    format!(
+        "1 validation error detected: Value '{value}' at 'resourceArn' failed to satisfy \
+         constraint: Member must satisfy regular expression pattern: \
+         {DATA_PLANE_TAGGABLE_PATTERN}"
+    )
+}
+
+/// One ARN percent-encoded for a non-greedy `@httpLabel`, as an SDK sends it.
+fn label(arn: &str) -> String {
+    arn.replace('%', "%25").replace(':', "%3A").replace('/', "%2F")
+}
+
+/// Dispatch one tagging request for `arn` through the whole router, as a client pointed at
+/// `host` sends it: the three operations the agent pair bind IDENTICALLY
+/// (`GET`/`POST`/`DELETE /tags/{resourceArn}`), each with the members its own model
+/// requires, so the only thing a refusal can be about is the ARN.
+async fn tagging_call(
+    router: &MultiServiceRouter,
+    host: &str,
+    method: &str,
+    arn: &str,
+) -> Answer {
+    let (path, body) = match method {
+        "POST" => (
+            format!("/tags/{}", label(arn)),
+            r#"{"tags":{"estate":"routing"}}"#.to_string(),
+        ),
+        "DELETE" => (
+            format!("/tags/{}?tagKeys=estate", label(arn)),
+            String::new(),
+        ),
+        _ => (format!("/tags/{}", label(arn)), String::new()),
+    };
+    let request = http::Request::builder()
+        .method(method)
+        .uri(format!("https://{host}{path}"))
+        .header("host", host)
+        .header("content-type", "application/json")
+        .header("authorization", authorization("bedrock"))
+        .body(Bytes::from(body))
+        .expect("build the request");
+    let response = router.dispatch(request).await;
+    let status = response.status().as_u16();
+    let content_type = response
+        .headers()
+        .get("content-type")
+        .and_then(|value| value.to_str().ok())
+        .unwrap_or_default()
+        .to_string();
+    let raw_body = String::from_utf8_lossy(response.body()).to_string();
+    let body = serde_json::from_str::<Value>(&raw_body).unwrap_or(Value::Null);
+    let error_code = response
+        .headers()
+        .get("x-amzn-errortype")
+        .and_then(|value| value.to_str().ok())
+        .map(str::to_string)
+        .or_else(|| {
+            body.get("__type")
+                .and_then(Value::as_str)
+                .map(str::to_string)
+        })
+        .unwrap_or_default()
+        .split(':')
+        .next()
+        .unwrap_or_default()
+        .rsplit('#')
+        .next()
+        .unwrap_or_default()
+        .to_string();
+    Answer {
+        status,
+        error_code,
+        content_type,
+        body,
+        raw_body,
+    }
+}
+
+/// The `message` member of an error body, or `""` when there is none.
+fn stated_message(answer: &Answer) -> &str {
+    answer
+        .body
+        .get("message")
+        .and_then(Value::as_str)
+        .unwrap_or("")
+}
+
+/// RULE: on the `/tags/{resourceArn}` space the two agent-family models bind IDENTICALLY,
+/// the request is served by the plane whose own taggable-resource syntax ADMITS the ARN —
+/// the resource types that model enumerates together with the identifier form it states
+/// for them — and an ARN NEITHER syntax admits is served by the segment's declared owner,
+/// the data plane, which refuses it against its own published expression. So an ARN the
+/// build-time plane's syntax admits is answered out of build-time state, whatever
+/// identifier it carries elsewhere, and one it does not is a `ValidationException` quoting
+/// the data plane's expression — never the router's own refusals.
+///
+/// The rows span what the rule generalises over: which plane's syntax admits the ARN, the
+/// resource type it names (both enumerations and one neither names), the identifier form
+/// (admitted, too long, too short, absent, punctuated), and all three identically-bound
+/// routes.
+#[tokio::test]
+async fn the_shared_tagging_space_is_served_by_the_plane_whose_syntax_admits_the_arn() {
+    let engine: Arc<engine::InMemoryEngine> = Arc::new(engine::InMemoryEngine::new());
+    let router = build_router(&engine);
+
+    /// What a row expects: the plane that answered, read off the answer only that plane
+    /// can produce.
+    enum Answered {
+        /// The data plane refused the ARN against its own published expression.
+        DataPlaneRefusedTheArn,
+        /// The data plane resolved the ARN and found no session of its own.
+        DataPlaneFoundNoSession,
+        /// The build-time plane resolved the ARN and found no resource of this type,
+        /// which it names in its own refusal.
+        BuildTimeFoundNo(&'static str),
+    }
+
+    let rows: Vec<(&str, String, Answered)> = vec![
+        (
+            // The ARN the recorded data-plane fixture sends: `agent` is no resource type
+            // the data plane's tagging admits, and `NOTASESSION` is no identifier the
+            // build-time plane's resources carry, so neither syntax admits it.
+            "an agent ARN whose identifier is past the build-time form",
+            "arn:aws:bedrock:us-east-1:000000000000:agent/NOTASESSION".to_string(),
+            Answered::DataPlaneRefusedTheArn,
+        ),
+        (
+            "a flow ARN whose identifier is one character short of it",
+            "arn:aws:bedrock:us-east-1:000000000000:flow/FLOW12345".to_string(),
+            Answered::DataPlaneRefusedTheArn,
+        ),
+        (
+            "a knowledge-base ARN carrying no identifier at all",
+            "arn:aws:bedrock:us-east-1:000000000000:knowledge-base/".to_string(),
+            Answered::DataPlaneRefusedTheArn,
+        ),
+        (
+            "an agent ARN whose identifier carries punctuation that form excludes",
+            "arn:aws:bedrock:us-east-1:000000000000:agent/AGENT-1234".to_string(),
+            Answered::DataPlaneRefusedTheArn,
+        ),
+        (
+            "a bedrock ARN of a resource type neither plane's tagging admits",
+            "arn:aws:bedrock:us-east-1:000000000000:guardrail/gr1234567890".to_string(),
+            Answered::DataPlaneRefusedTheArn,
+        ),
+        (
+            "a session ARN whose body is no uuid, which the published data-plane \
+             expression admits",
+            "arn:aws:bedrock:us-west-2:000000000000:session/NOTAUUID".to_string(),
+            Answered::DataPlaneRefusedTheArn,
+        ),
+        (
+            "a session ARN the data plane's syntax admits, naming nothing stored",
+            "arn:aws:bedrock:us-west-2:000000000000:session/0cabde93-58b4-4d68-b230-90df328e1acb"
+                .to_string(),
+            Answered::DataPlaneFoundNoSession,
+        ),
+        (
+            "an agent ARN the build-time syntax admits, naming nothing stored",
+            "arn:aws:bedrock:us-east-1:000000000000:agent/AGENT12345".to_string(),
+            Answered::BuildTimeFoundNo("Agent"),
+        ),
+        (
+            "a knowledge-base ARN the build-time syntax admits, naming nothing stored",
+            "arn:aws:bedrock:us-east-1:000000000000:knowledge-base/KB12345678".to_string(),
+            Answered::BuildTimeFoundNo("KnowledgeBase"),
+        ),
+        (
+            "a lower-case flow identifier, which that form admits too",
+            "arn:aws:bedrock:us-east-1:000000000000:flow/aZ09aZ09aZ".to_string(),
+            Answered::BuildTimeFoundNo("Flow"),
+        ),
+    ];
+
+    for (case, arn, expected) in &rows {
+        for method in ["GET", "POST", "DELETE"] {
+            let answer = tagging_call(&router, EMULATOR_HOST, method, arn).await;
+            let case = format!("{case} ({method})");
+            assert!(
+                !ROUTER_REFUSALS.contains(&answer.error_code.as_str()),
+                "case {case:?} ({arn}): the request must reach exactly one plane, got {} \
+                 {} with {}",
+                answer.status,
+                answer.error_code,
+                answer.raw_body
+            );
+            let stated = stated_message(&answer);
+            match expected {
+                Answered::DataPlaneRefusedTheArn => {
+                    assert_eq!(
+                        (answer.status, answer.error_code.as_str()),
+                        (400, "ValidationException"),
+                        "case {case:?} ({arn}): expected the data plane's 400 \
+                         ValidationException, got {} {} with {}",
+                        answer.status,
+                        answer.error_code,
+                        answer.raw_body
+                    );
+                    let wanted = one_pattern_error(arn);
+                    assert_eq!(
+                        stated, wanted,
+                        "case {case:?} ({arn}): expected message {wanted:?}, got {stated:?}"
+                    );
+                }
+                Answered::DataPlaneFoundNoSession => {
+                    assert_eq!(
+                        (answer.status, answer.error_code.as_str()),
+                        (404, "ResourceNotFoundException"),
+                        "case {case:?} ({arn}): expected the data plane's 404, got {} {} \
+                         with {}",
+                        answer.status,
+                        answer.error_code,
+                        answer.raw_body
+                    );
+                    assert_eq!(
+                        stated, "Session resource not found.",
+                        "case {case:?} ({arn}): expected the data plane's own sentence, got \
+                         {stated:?}"
+                    );
+                }
+                Answered::BuildTimeFoundNo(resource_type) => {
+                    assert_eq!(
+                        (answer.status, answer.error_code.as_str()),
+                        (404, "ResourceNotFoundException"),
+                        "case {case:?} ({arn}): expected the build-time plane's 404, got {} \
+                         {} with {}",
+                        answer.status,
+                        answer.error_code,
+                        answer.raw_body
+                    );
+                    assert!(
+                        stated.contains(&format!("resource type {resource_type}")),
+                        "case {case:?} ({arn}): expected the build-time plane's own refusal \
+                         naming {resource_type}, got {stated:?}"
+                    );
+                }
+            }
+        }
+    }
+}
+
+/// RULE: the first tier of that split is AWS's own discriminator — the ENDPOINT the
+/// request addresses. A client pointed at one of the two published endpoint hosts is
+/// served by THAT endpoint's plane whatever ARN it sends, so each plane's own refusal for
+/// an ARN its syntax does not admit stays reachable; a client pointed at the emulator's
+/// own endpoint names no plane, and the ARN decides.
+#[tokio::test]
+async fn an_endpoint_addressed_tagging_request_is_served_by_that_endpoints_plane() {
+    let engine: Arc<engine::InMemoryEngine> = Arc::new(engine::InMemoryEngine::new());
+    let router = build_router(&engine);
+
+    // An ARN each plane's own syntax does NOT admit, so the answer shows which plane the
+    // request reached rather than which syntax matched.
+    let build_time_arn = "arn:aws:bedrock:us-east-1:000000000000:agent/AGENT12345";
+    let data_plane_arn =
+        "arn:aws:bedrock:us-west-2:000000000000:session/0cabde93-58b4-4d68-b230-90df328e1acb";
+
+    // (case, host, ARN, status, error code, a fragment only the answering plane states)
+    let rows: [(&str, &str, &str, u16, &str, String); 4] = [
+        (
+            "the build-time endpoint, addressed with a data-plane ARN",
+            BUILD_TIME_HOST,
+            data_plane_arn,
+            400,
+            "ValidationException",
+            "at 'resourceArn' failed to satisfy constraint".to_string(),
+        ),
+        (
+            "the data-plane endpoint, addressed with a build-time ARN",
+            DATA_PLANE_HOST,
+            build_time_arn,
+            400,
+            "ValidationException",
+            one_pattern_error(build_time_arn),
+        ),
+        (
+            "the emulator's own endpoint with the build-time ARN: the ARN decides",
+            EMULATOR_HOST,
+            build_time_arn,
+            404,
+            "ResourceNotFoundException",
+            "resource type Agent".to_string(),
+        ),
+        (
+            "the emulator's own endpoint with the data-plane ARN",
+            EMULATOR_HOST,
+            data_plane_arn,
+            404,
+            "ResourceNotFoundException",
+            "Session resource not found.".to_string(),
+        ),
+    ];
+
+    for (case, host, arn, status, code, fragment) in &rows {
+        let answer = tagging_call(&router, host, "GET", arn).await;
+        assert!(
+            !ROUTER_REFUSALS.contains(&answer.error_code.as_str()),
+            "case {case:?}: the request must reach exactly one plane, got {} {} with {}",
+            answer.status,
+            answer.error_code,
+            answer.raw_body
+        );
+        assert_eq!(
+            (answer.status, answer.error_code.as_str()),
+            (*status, *code),
+            "case {case:?}: expected HTTP {status} {code}, got {} {} with {}",
+            answer.status,
+            answer.error_code,
+            answer.raw_body
+        );
+        let stated = stated_message(&answer);
+        assert!(
+            stated.contains(fragment.as_str()),
+            "case {case:?}: expected the answering plane's own wording {fragment:?}, got \
+             {stated:?}"
         );
     }
 }
