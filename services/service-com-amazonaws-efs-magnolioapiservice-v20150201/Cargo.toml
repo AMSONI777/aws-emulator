@@ -24,6 +24,9 @@ serde_json = { workspace = true }
 # resource policy against a request, for `PutFileSystemPolicy`'s document grammar and its
 # policy-lockout safety check.
 service-common = { path = "../common" }
+# The one regex engine in this tree that compiles the look-around two of this service's
+# modelled `@pattern` expressions (`Path`, `TagKey`) are written with.
+fancy-regex = "0.16"
 tracing = { workspace = true }
 
 [build-dependencies]

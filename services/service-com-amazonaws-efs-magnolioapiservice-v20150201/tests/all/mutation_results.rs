@@ -49,7 +49,11 @@ async fn update_file_system(efs: &Emulator, file_system_id: &str, body: Value) -
 /// `POST /2015-02-01/create-tags/{FileSystemId}` — the deprecated `CreateTags` binding,
 /// whose modelled success status is 204
 /// (`smithy_query(query="operation",operation="CreateTags")`).
-async fn create_tags(efs: &Emulator, file_system_id: &str, tags: &[(String, String)]) -> Reply {
+pub(crate) async fn create_tags(
+    efs: &Emulator,
+    file_system_id: &str,
+    tags: &[(String, String)],
+) -> Reply {
     efs.send(
         "POST",
         &format!("/2015-02-01/create-tags/{file_system_id}"),
@@ -60,7 +64,7 @@ async fn create_tags(efs: &Emulator, file_system_id: &str, tags: &[(String, Stri
 
 /// `POST /2015-02-01/delete-tags/{FileSystemId}` — the deprecated `DeleteTags` binding,
 /// also a modelled 204 (`smithy_query(query="operation",operation="DeleteTags")`).
-async fn delete_tags(efs: &Emulator, file_system_id: &str, keys: &[&str]) -> Reply {
+pub(crate) async fn delete_tags(efs: &Emulator, file_system_id: &str, keys: &[&str]) -> Reply {
     efs.send(
         "POST",
         &format!("/2015-02-01/delete-tags/{file_system_id}"),
@@ -76,7 +80,7 @@ async fn describe_tags(efs: &Emulator, file_system_id: &str) -> Reply {
 }
 
 /// `GET /2015-02-01/resource-tags/{ResourceId}` — the current `ListTagsForResource` read.
-async fn list_tags(efs: &Emulator, resource_id: &str) -> Reply {
+pub(crate) async fn list_tags(efs: &Emulator, resource_id: &str) -> Reply {
     efs.send(
         "GET",
         &format!("/2015-02-01/resource-tags/{resource_id}"),
@@ -86,7 +90,11 @@ async fn list_tags(efs: &Emulator, resource_id: &str) -> Reply {
 }
 
 /// `POST /2015-02-01/resource-tags/{ResourceId}` — the current `TagResource` write.
-async fn tag_resource(efs: &Emulator, resource_id: &str, tags: &[(String, String)]) -> Reply {
+pub(crate) async fn tag_resource(
+    efs: &Emulator,
+    resource_id: &str,
+    tags: &[(String, String)],
+) -> Reply {
     efs.send(
         "POST",
         &format!("/2015-02-01/resource-tags/{resource_id}"),

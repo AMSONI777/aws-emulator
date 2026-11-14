@@ -18,6 +18,14 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::time::{Duration, SystemTime};
 
+/// The modelled `@pattern` constraints the request walk cannot compile, applied here
+/// instead. Re-exported by name, so a handler reaches them beside the rest of this module
+/// and the surface this module owns stays visible.
+mod model_patterns;
+pub use model_patterns::{
+    constraint_refusal, root_directory_violations, tag_key_list_violations, tag_violations,
+};
+
 use crate::ops::types::{
     BackupPolicy, CreateAccessPointOutput, CreateFileSystemOutput, CreateMountTargetOutput,
     CreateReplicationConfigurationOutput, Destination, FileSystemSize, LifecyclePolicy,

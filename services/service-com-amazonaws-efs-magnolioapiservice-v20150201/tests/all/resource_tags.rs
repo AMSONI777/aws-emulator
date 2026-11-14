@@ -52,7 +52,7 @@ fn as_label(arn: &str) -> String {
 
 /// A value percent-encoded for a query string, as an SDK encodes an `httpQuery` member:
 /// every byte outside the unreserved set (RFC 3986) escaped.
-fn query_escape(value: &str) -> String {
+pub(crate) fn query_escape(value: &str) -> String {
     let mut escaped = String::new();
     for byte in value.bytes() {
         match byte {
@@ -68,7 +68,7 @@ fn query_escape(value: &str) -> String {
 /// `DELETE /2015-02-01/resource-tags/{ResourceId}?tagKeys=…` — the `UntagResource` HTTP
 /// binding, whose `TagKeys` is an `httpQuery` list
 /// (`smithy_query(query="operation",operation="UntagResource")`).
-async fn untag_resource(efs: &Emulator, resource_id: &str, keys: &[&str]) -> Reply {
+pub(crate) async fn untag_resource(efs: &Emulator, resource_id: &str, keys: &[&str]) -> Reply {
     let query = keys
         .iter()
         .map(|key| format!("tagKeys={}", query_escape(key)))

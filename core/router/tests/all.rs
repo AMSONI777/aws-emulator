@@ -3411,6 +3411,11 @@ mod apigateway_wafv2_waf_log_destination_gate;
 // were landing at once: it belongs at the head of this file or nowhere, so it is a line
 // comment — `all/all_rs_declares_each_suite_once.rs` is what checks this file and every
 // service crate's `tests/all.rs`.)
+// (One more line of that same header fragment, which a concurrent landing appended here
+// typed with `//!`: an inner doc comment is legal only before the first item of a crate
+// root, so one in this tail is `E0753` and compiles no suite of this target. The rule it
+// states — a suite left at the top level of `tests/` fails the build — is in the header at
+// the top of this file, where it belongs.)
 // (One more fragment of that same header landed here as a `//!` line, which is `E0753`
 // mid-file: a suite left at the top level of `tests/` fails the build.)
 // suite left at the top level of `tests/` fails the build.
@@ -3454,6 +3459,11 @@ mod all_rs_inner_doc_comments_precede_the_first_item;
 // reason the lines above record.)
 // leaving a note here. (Mid-file, so a plain comment: an inner doc comment is only
 // accepted before the first item of a module.)
+// (One more fragment of that same header, appended here with `//!`: an inner doc comment
+// is legal only before the first item of a crate root, so one in this tail is `E0753` and
+// compiles no suite of this target. The rule it repeated — that
+// `all/all_rs_declares_each_suite_once.rs` checks this file and every service crate's
+// `tests/all.rs` — stands in the header at the head of this file.)
 // (And one more: the rule it states — that `all/all_rs_declares_each_suite_once.rs` checks
 // this file and every service crate's `tests/all.rs` — stands in the module doc at the HEAD
 // of this file.)

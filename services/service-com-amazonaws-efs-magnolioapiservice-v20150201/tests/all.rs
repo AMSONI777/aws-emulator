@@ -31,6 +31,8 @@ mod file_system_lifecycle;
 mod file_system_policy;
 #[path = "all/harness.rs"]
 mod harness;
+#[path = "all/input_constraint_refusals.rs"]
+mod input_constraint_refusals;
 #[path = "all/lifecycle_configuration.rs"]
 mod lifecycle_configuration;
 #[path = "all/minted_id_width.rs"]

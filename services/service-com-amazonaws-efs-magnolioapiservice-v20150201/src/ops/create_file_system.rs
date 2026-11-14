@@ -303,6 +303,15 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         let region = efs::request_region(ctx.parts());
         let now = ::std::time::SystemTime::now();
 
+        // The modelled constraint the walk in front of this handler could not enforce,
+        // measured before anything else: `TagKey`'s expression carries a look-ahead the
+        // walk's regex engine cannot compile, and it treats an expression it cannot
+        // compile as matching every value (see `crate::state::model_patterns`).
+        let tags = input.tags.clone().unwrap_or_default();
+        if let Some(message) = efs::constraint_refusal(&efs::tag_violations(&tags)) {
+            return Err(crate::scaffolded::Scaffolded::validation(message));
+        }
+
         // Defaults. The modelled enum closure of `PerformanceMode` / `ThroughputMode`
         // is already refused at the boundary, so a value reaching here is one of them.
         let performance_mode = input
@@ -388,7 +397,6 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
 
         // "Each key must be unique", and at most the published number of tags: the one
         // construction every operation of this service that accepts a tag list shares.
-        let tags = input.tags.clone().unwrap_or_default();
         if let Some(problem) = efs::tag_list_problem(&tags) {
             return Err(bad_request(problem));
         }

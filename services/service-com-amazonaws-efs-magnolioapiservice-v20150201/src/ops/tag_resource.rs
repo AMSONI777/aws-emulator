@@ -172,6 +172,15 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
             return Err(internal_server_error());
         };
 
+        // The modelled constraint the walk in front of this handler could not enforce,
+        // measured before the resource is even looked up: `TagKey`'s expression carries a
+        // look-ahead the walk's regex engine cannot compile, and it treats an expression
+        // it cannot compile as matching every value (see
+        // `crate::state::model_patterns`).
+        if let Some(message) = efs::constraint_refusal(&efs::tag_violations(&input.tags)) {
+            return Err(crate::scaffolded::Scaffolded::validation(message));
+        }
+
         let mut state = state.lock();
 
         // "The ID specifying the EFS resource that you want to create a tag for": the

@@ -214,6 +214,20 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         let region = efs::request_region(ctx.parts());
         let now = ::std::time::SystemTime::now();
 
+        // The modelled constraints the walk in front of this handler could not enforce,
+        // measured before anything is read or written: `RootDirectory$Path`'s and
+        // `TagKey`'s expressions both carry a look-ahead the walk's regex engine cannot
+        // compile, and it treats an expression it cannot compile as matching every value
+        // (see `crate::state::model_patterns`). The violations are collected in the order
+        // the walk itself visits the input's members, and reported in ONE envelope, so a
+        // caller cannot tell which side of the boundary measured the value.
+        let tags = input.tags.clone().unwrap_or_default();
+        let mut violations = efs::tag_violations(&tags);
+        violations.extend(efs::root_directory_violations(input.root_directory.as_ref()));
+        if let Some(message) = efs::constraint_refusal(&violations) {
+            return Err(crate::scaffolded::Scaffolded::validation(message));
+        }
+
         // "When specifying a RootDirectory, you must provide the Path" — the member is
         // modelled optional, so the documented requirement is enforced here. A request
         // that names no RootDirectory at all exposes the file system root instead.
@@ -234,7 +248,6 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
 
         // "Each tag is a key-value pair, each key must be unique", and at most the
         // published number of tags: the same construction CreateFileSystem refuses with.
-        let tags = input.tags.clone().unwrap_or_default();
         if let Some(problem) = efs::tag_list_problem(&tags) {
             return Err(bad_request(problem));
         }
