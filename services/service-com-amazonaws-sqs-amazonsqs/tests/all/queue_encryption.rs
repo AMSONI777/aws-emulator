@@ -39,7 +39,7 @@ use bytes::Bytes;
 use serde_json::{json, Value};
 use smithy_server_runtime::MultiServiceRouter;
 
-use super::support::{as_map, error_code, form_encode, xml_element, REGION};
+use super::support::{as_map, error_code, form_encode, kms_ok, xml_element, REGION};
 
 // The sentence KMS itself words for a request addressing a resource through an ARN that
 // names no account, asked of the KMS crate so a test cannot re-word it.
@@ -129,8 +129,9 @@ impl Emulator {
         parsed
     }
 
-    /// One KMS call, as the account's own credential. KMS is an awsJson1_1 service reached
-    /// by `X-Amz-Target: TrentService.<Operation>`.
+    /// One KMS call, as the account's own credential, through the shared KMS caller
+    /// ([`super::support::kms_ok`]) — so this suite and every other that drives a queue's
+    /// key send the same request shape.
     ///
     /// A key policy these suites attach is the document UNDER TEST — it says what the
     /// QUEUE's key permits a caller, so it need not leave this caller a path to a later
@@ -142,31 +143,7 @@ impl Emulator {
         if matches!(operation, "CreateKey" | "PutKeyPolicy") {
             body["BypassPolicyLockoutSafetyCheck"] = json!(true);
         }
-        let request = http::Request::builder()
-            .method("POST")
-            .uri("/")
-            .header("host", format!("kms.{REGION}.amazonaws.com"))
-            .header("content-type", "application/x-amz-json-1.1")
-            .header("x-amz-target", format!("TrentService.{operation}"))
-            .header(
-                "authorization",
-                format!(
-                    "AWS4-HMAC-SHA256 Credential={ACCOUNT_KEY}/20260101/{REGION}/kms/\
-                     aws4_request, SignedHeaders=host;x-amz-target, Signature=0"
-                ),
-            )
-            .body(Bytes::from(
-                serde_json::to_vec(&body).expect("the request body serializes"),
-            ))
-            .expect("a well-formed request");
-        let response = self.router.dispatch(request).await;
-        let status = response.status().as_u16();
-        let parsed: Value = serde_json::from_slice(response.body()).unwrap_or(Value::Null);
-        assert_eq!(
-            status, 200,
-            "case KMS {operation} {body}: expected HTTP 200, got {status} with {parsed}"
-        );
-        parsed
+        kms_ok(&self.router, operation, body).await
     }
 
     /// One awsQuery call to IAM or STS.

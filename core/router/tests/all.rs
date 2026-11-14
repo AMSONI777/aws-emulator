@@ -3439,3 +3439,18 @@ mod chime_deleted_meeting_tagging;
 // the first item of a crate root, so these lines are `E0753` in this appended tail.)
 // this file and for every service crate's `tests/all.rs`. (An ordinary comment: `//!` here,
 // past the first item of this crate root, is `E0753`.)
+// (The five suites of the span at the head of this region —
+// `sdb_legacy_query_api_on_the_assembled_router`,
+// `cloudformation_scripted_queue_deploy` — were declared here a second time by two branches
+// landing in the same window, which compiled neither; the duplicates are removed and the
+// declarations above stand.)
+// (That suite is declared ONCE, further up this tail: two branches landing in the same window
+// each declared it here as well, which compiled neither.)
+// (`pricing_plan_subscription_resource_eligibility` is declared ONCE, in the sorted block at
+// the head of this file, and `cloudformation_provisions_cloudfront_resources` ONCE further up
+// this file: two branches landing in the same window each declared them here as well, which
+// (`bedrock_agent_ingestion_populates_its_s3_vectors_index` is declared ONCE, further up
+// this file: two branches landing in the same window each declared it here as well, which
+// (The note about declaring each suite exactly once is part of this file's HEADER, at the
+// top: an inner doc comment is only accepted before the first item, so a copy of it down
+// here compiles nothing. It was appended here while two branches were landing at once.)

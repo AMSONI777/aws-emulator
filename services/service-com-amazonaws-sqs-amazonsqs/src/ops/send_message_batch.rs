@@ -20,7 +20,9 @@
 //! used for this caller: the key belongs to the queue, so it refuses the whole request
 //! with the `Kms*` error of its class rather than failing an entry at a time
 //! ([`crate::state::encryption::authorize_queue_key`]), and it is asked about only once
-//! the request's own shape is one AWS would act on.
+//! the request's own shape is one AWS would act on. The data key every entry of the batch
+//! is sealed under is that queue's one data key ([`crate::state::data_keys`]), so a batch
+//! of sends inside one reuse window makes no more KMS calls than a single send does.
 //!
 //! Past those, each entry is judged on its own against the queue, by exactly the rules
 //! `SendMessage` applies to one message — the body's character set and size, the FIFO
@@ -307,7 +309,7 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         // under, as this caller, and a caller the key does not permit has the whole batch
         // refused with nothing enqueued. Asked AFTER the refusals about the request's own
         // shape, which AWS answers without reaching the key at all.
-        sqs::encryption::authorize_queue_key(
+        let queue_key = sqs::encryption::authorize_queue_key(
             &*self.engine,
             ctx,
             &input.queue_url,
@@ -315,8 +317,25 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         )
         .map_err(kms_refusal)?;
 
-        let mut state = store.lock();
         let now = SystemTime::now();
+        // One data key for the whole batch, for the same reason the key is asked about
+        // once: every entry goes to ONE queue, and the data key is the queue's — its live
+        // one while the `KmsDataKeyReusePeriodSeconds` window has not run out, else a new
+        // one from a `kms:GenerateDataKey` call made on the caller's behalf. A batch of six
+        // sends inside one window therefore makes no more KMS calls than one send does.
+        let data_key = match &queue_key {
+            None => None,
+            Some(queue_key) => sqs::data_keys::data_key_for_send(
+                &*self.engine,
+                ctx,
+                &input.queue_url,
+                queue_key,
+                now,
+            )
+            .map_err(kms_refusal)?,
+        };
+
+        let mut state = store.lock();
         // A queue url resolves in the region the request addressed: this region's queue of
         // that name, and nothing another region holds.
         let region = sqs::request_region(ctx.parts());
@@ -541,6 +560,9 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
                 // A send puts the message in this queue directly: no redrive moved it
                 // here, so it names no dead-letter source.
                 dead_letter_source_arn: None,
+                // Every entry of this batch is sealed under the one data key the queue is
+                // sealing its messages under.
+                data_key: data_key.clone(),
             });
             if let (Some(key), Some(sequence_number)) =
                 (deduplication_key, sequence_number.clone())

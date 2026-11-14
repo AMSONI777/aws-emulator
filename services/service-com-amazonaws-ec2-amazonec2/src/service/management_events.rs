@@ -445,6 +445,9 @@ fn served_api_call<Eng: Send + Sync + 'static>(
         // A call signed with an AWS credential was authenticated by this account, not by an
         // external provider.
         identity_provider: None,
+        // The caller made this call itself: a call one SERVICE made for a caller is
+        // recorded by `service_common::on_behalf_of_calls`.
+        invoked_by: None,
         session,
         account_id: ::emulator_server::emulator_account_id().to_string(),
         user_agent: recorded_user_agent(ctx.parts()),

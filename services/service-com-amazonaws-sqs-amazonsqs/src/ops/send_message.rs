@@ -15,7 +15,10 @@
 //! generate a data key under before it can seal the message, as the CALLER — so the
 //! send is gated on that key being usable and on this caller holding the grant, which is
 //! [`crate::state::encryption::authorize_queue_key`]; its refusal is answered as the
-//! `Kms*` error the model declares for each class.
+//! `Kms*` error the model declares for each class. The data key itself comes from
+//! [`crate::state::data_keys`]: the queue's live one while its
+//! `KmsDataKeyReusePeriodSeconds` window has not run out, else a new one from a
+//! `kms:GenerateDataKey` call this send makes on the caller's behalf.
 //!
 //! ## Shape of an operation
 //!
@@ -282,7 +285,7 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         // KMS generate a data key under, as this caller, before it can seal the message:
         // a caller the key does not permit — or a key KMS cannot use — is refused here,
         // so nothing is enqueued for a message that could not have been encrypted.
-        sqs::encryption::authorize_queue_key(
+        let queue_key = sqs::encryption::authorize_queue_key(
             &*self.engine,
             ctx,
             &input.queue_url,
@@ -298,9 +301,27 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         let fanned_out_by_the_notification_service =
             sqs::service_delivery::is_a_notification_fan_out(&*self.engine, ctx);
 
+        let now = SystemTime::now();
+        // The data key this message is sealed under: the queue's live one while its
+        // `KmsDataKeyReusePeriodSeconds` window has not run out, and otherwise a new one
+        // KMS generates for the queue — which is the `kms:GenerateDataKey` call this send
+        // makes on the caller's behalf (`sqs::data_keys`). Taken BEFORE the store is
+        // locked, like the decision above it, so nothing of this service's state is held
+        // while KMS is being asked.
+        let data_key = match &queue_key {
+            None => None,
+            Some(queue_key) => sqs::data_keys::data_key_for_send(
+                &*self.engine,
+                ctx,
+                &input.queue_url,
+                queue_key,
+                now,
+            )
+            .map_err(kms_refusal)?,
+        };
+
         let mut state = store.lock();
 
-        let now = SystemTime::now();
         // A queue url resolves in the region the request addressed: this region's queue of
         // that name, and nothing another region holds.
         let region = sqs::request_region(ctx.parts());
@@ -554,6 +575,9 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
             // A send puts the message in this queue directly: no redrive moved it here,
             // so it names no dead-letter source.
             dead_letter_source_arn: None,
+            // The data key the queue is sealing its messages under, for a queue on a
+            // customer managed key; a queue on the Amazon SQS owned key needs none.
+            data_key,
         });
         if let (Some(key), Some(sequence_number)) = (deduplication_key, sequence_number.clone()) {
             queue.record_deduplication(

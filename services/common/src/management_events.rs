@@ -967,6 +967,13 @@ pub struct ServedApiCall {
     /// ("the principal name of the external identity provider"). `None` for a caller this
     /// account authenticated itself, which is every call signed with an AWS credential.
     pub identity_provider: Option<String>,
+    /// The SERVICE that made this call on the caller's behalf, for a call an AWS service
+    /// made while serving a call of its own: CloudTrail reports it as
+    /// `userIdentity.invokedBy`, which is how an auditor tells a call a service made FOR a
+    /// principal from one that principal made itself. `None` for a call the client made
+    /// directly, which leaves the field out of the record altogether. The one place that
+    /// builds such a record is [`crate::on_behalf_of_calls`].
+    pub invoked_by: Option<String>,
     /// The SESSION the call's temporary credential belongs to, for a call made with one:
     /// what the record carries as `userIdentity.sessionContext` (and as the session's own
     /// `userIdentity.arn`). `None` for a call made with a long-term credential or with none
@@ -1105,6 +1112,15 @@ impl ManagementEvent {
             identity.insert(
                 "identityProvider".to_string(),
                 serde_json::Value::String(identity_provider.clone()),
+            );
+        }
+        // The service that made this call for the principal above. A call the client made
+        // itself carries no such field, so it is written only when a service made the call:
+        // what distinguishes the two in event history is the presence of the member.
+        if let Some(invoked_by) = &call.invoked_by {
+            identity.insert(
+                "invokedBy".to_string(),
+                serde_json::Value::String(invoked_by.clone()),
             );
         }
         if let Some(session) = &call.session {
@@ -1690,6 +1706,7 @@ mod tests {
             principal_type: PRINCIPAL_TYPE_IAM_USER.to_string(),
             principal_id: None,
             identity_provider: None,
+            invoked_by: None,
             session: None,
             account_id: "000000000000".to_string(),
             user_agent: None,

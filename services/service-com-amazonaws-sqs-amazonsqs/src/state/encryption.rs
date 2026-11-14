@@ -109,10 +109,9 @@ const VIA_SERVICE_CONDITION_KEY: &str = "kms:ViaService";
 /// The condition key naming the account whose principal is making the KMS request.
 const CALLER_ACCOUNT_CONDITION_KEY: &str = "kms:CallerAccount";
 
-/// The encryption context entry Amazon SQS seals a queue's messages under: the queue's
-/// own ARN, under the `aws:sqs:arn` key. A key policy may be conditioned on it, so the
-/// decision carries it.
-const QUEUE_ENCRYPTION_CONTEXT_KEY: &str = "kms:EncryptionContext:aws:sqs:arn";
+/// The prefix a key policy conditions on ONE entry of a KMS request's encryption context
+/// with: the condition key is that prefix followed by the entry's own name.
+const KMS_ENCRYPTION_CONTEXT_CONDITION_PREFIX: &str = "kms:EncryptionContext:";
 
 /// The customer master key a queue's attribute set puts it on, or `None` for a queue
 /// encrypted with an Amazon SQS owned key.
@@ -270,7 +269,7 @@ const KMS_REFUSAL_STATUS: u16 = 400;
 /// `code` is KMS's own error code for the class, which is not the `KMS.*` code this
 /// service answers with: the first names the shape KMS returned, the second the shape SQS
 /// relays it as.
-fn relayed(message: &str, code: &str) -> String {
+pub(crate) fn relayed(message: &str, code: &str) -> String {
     format!(
         "{message} (Service: {KMS_SERVICE_NAME}; Status Code: {KMS_REFUSAL_STATUS}; \
          Error Code: {code}; Request ID: {}; Proxy: null)",
@@ -278,21 +277,40 @@ fn relayed(message: &str, code: &str) -> String {
     )
 }
 
+/// The KMS key a queue's messages are sealed under, as a call that may use it sees it.
+///
+/// What the authorization answers with rather than a bare `Ok(())`: the call that is
+/// allowed to use the key is the call that goes on to USE it, and it needs the queue the
+/// data key is generated for and the key it is generated under — both resolved once, here,
+/// so the data-key component ([`super::data_keys`]) resolves no identifier a second time
+/// and the two cannot disagree about which key a queue is on.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct QueueKey {
+    /// The queue whose messages the key seals: the value of the `aws:sqs:arn` entry of the
+    /// encryption context every call on this queue's key carries.
+    pub queue_arn: String,
+    /// The ARN of the KMS key itself, as KMS resolved the queue's `KmsMasterKeyId` to —
+    /// which is the identifier a later call resolves the same key by whatever form the
+    /// attribute carries (a key id, an ARN, an alias).
+    pub key_arn: String,
+}
+
 /// Whether the queue at `queue_url` may have its key used for `action` on behalf of this
 /// request's caller — the step a send and a receive each run BEFORE they touch the
 /// message plane, so a call the key does not permit changes nothing.
 ///
-/// `Ok(())` for a url that addresses no queue and for a queue on the Amazon SQS owned
+/// `Ok(None)` for a url that addresses no queue and for a queue on the Amazon SQS owned
 /// key: neither needs anything of KMS, and a url naming no queue is what the operation's
-/// own `QueueDoesNotExist` reports, out of the store it goes on to read.
+/// own `QueueDoesNotExist` reports, out of the store it goes on to read. `Ok(Some(key))`
+/// names the queue and the key the call may now use.
 pub fn authorize_queue_key<Eng: Send + Sync + 'static>(
     engine: &Eng,
     ctx: &::smithy_server_runtime::OperationContext<'_>,
     queue_url: &str,
     action: &str,
-) -> Result<(), KeyRefusal> {
+) -> Result<Option<QueueKey>, KeyRefusal> {
     let Some(store) = crate::state::service_state(engine) else {
-        return Ok(());
+        return Ok(None);
     };
     let region = crate::state::request_region(ctx.parts());
     // The lock is released before KMS is consulted: nothing of this service's state is
@@ -306,9 +324,14 @@ pub fn authorize_queue_key<Eng: Send + Sync + 'static>(
         })
     };
     let Some((queue_arn, master_key_id)) = configured else {
-        return Ok(());
+        return Ok(None);
     };
-    authorize_master_key(engine, ctx, &region, &queue_arn, &master_key_id, action)
+    let key_arn =
+        authorize_master_key(engine, ctx, &region, &queue_arn, &master_key_id, action)?;
+    Ok(Some(QueueKey {
+        queue_arn,
+        key_arn,
+    }))
 }
 
 /// Whether the queue's customer master key may be used for `action` on behalf of this
@@ -320,9 +343,9 @@ pub fn authorize_queue_key<Eng: Send + Sync + 'static>(
 /// `queue_arn` the queue whose messages the key seals, which is the encryption context a
 /// conditioned key policy is decided against.
 ///
-/// `Ok(())` for a queue whose key KMS can use for this caller, and for a lookup that says
-/// nothing about the key (no KMS mounted beside this service). See the module docs for
-/// the rule.
+/// The key's own ARN for a queue whose key KMS can use for this caller, and the
+/// identifier the queue carries for a lookup that says nothing about the key (no KMS
+/// mounted beside this service). See the module docs for the rule.
 pub fn authorize_master_key<Eng: Send + Sync + 'static>(
     engine: &Eng,
     ctx: &::smithy_server_runtime::OperationContext<'_>,
@@ -330,7 +353,7 @@ pub fn authorize_master_key<Eng: Send + Sync + 'static>(
     queue_arn: &str,
     master_key_id: &str,
     action: &str,
-) -> Result<(), KeyRefusal> {
+) -> Result<String, KeyRefusal> {
     let Some(kms) = kms_store::service_state(engine) else {
         // Visible to an operator: a lookup nothing answered is accepted, so without
         // this line it would be indistinguishable from a key KMS permitted.
@@ -339,7 +362,7 @@ pub fn authorize_master_key<Eng: Send + Sync + 'static>(
             action,
             "no KMS service is mounted beside Amazon SQS; the queue's key is accepted"
         );
-        return Ok(());
+        return Ok(master_key_id.to_string());
     };
     let key = {
         let mut store = kms.lock();
@@ -416,7 +439,7 @@ pub fn authorize_master_key<Eng: Send + Sync + 'static>(
     // An Amazon Web Services managed key's policy is managed by AWS for the service that
     // owns the alias, so the caller needs no grant of its own on it.
     if key.aws_managed {
-        return Ok(());
+        return Ok(key.arn);
     }
 
     let caller = caller(engine, ctx);
@@ -430,12 +453,15 @@ pub fn authorize_master_key<Eng: Send + Sync + 'static>(
             caller.account.clone(),
         ),
         (
-            QUEUE_ENCRYPTION_CONTEXT_KEY.to_string(),
+            format!(
+                "{KMS_ENCRYPTION_CONTEXT_CONDITION_PREFIX}{}",
+                super::data_keys::QUEUE_ENCRYPTION_CONTEXT_NAME
+            ),
             queue_arn.to_string(),
         ),
     ];
     match withheld_by(&key, &caller, action, &context) {
-        None => Ok(()),
+        None => Ok(key.arn.clone()),
         // The sentence IAM gives for a principal that may not perform an action on a
         // resource: who asked, what for, on what, and which document withheld it.
         Some(reason) => Err(KeyRefusal::AccessDenied(relayed(

@@ -442,6 +442,11 @@ impl<O: Operation, S: AuditedService> AuditedOperation<O, S> {
             // A call signed with an AWS credential was authenticated by this account, not
             // by an external provider.
             identity_provider: None,
+            // The caller served through this wrapper made the call itself: a call one
+            // SERVICE made for a caller is recorded by
+            // [`crate::on_behalf_of_calls`], which is the one place that names the
+            // service that made it.
+            invoked_by: None,
             session,
             account_id: self.service.account_id(),
             user_agent: crate::management_events::recorded_user_agent(ctx.parts()),

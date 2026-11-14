@@ -533,6 +533,11 @@ pub mod api_call_events;
 /// bucket of every trail whose event selectors admit it, with the match against those
 /// selectors, so both are stated once rather than per service.
 pub mod data_events;
+/// The ONE recording of a call one emulated service makes to ANOTHER service's API on the
+/// CALLER's behalf — the record CloudTrail attributes to that caller with `invokedBy`
+/// naming the service that made it — so every service that reaches another one on a
+/// caller's behalf records it the same way.
+pub mod on_behalf_of_calls;
 /// The ONE construction of the in-process Amazon S3 client a service writing an object
 /// drives, so no two services configure that hop differently.
 pub mod s3_client;

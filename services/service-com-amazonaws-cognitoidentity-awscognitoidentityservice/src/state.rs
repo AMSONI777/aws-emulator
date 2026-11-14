@@ -3571,6 +3571,10 @@ pub fn record_vended_assume<Eng: Send + Sync + 'static>(
             // Amazon Cognito Identity issued, and `userIdentity.identityProvider` is the
             // external provider's principal name.
             identity_provider: Some(COGNITO_IDENTITY_PRINCIPAL.to_string()),
+            // What this record names is the federated user the assume was made for, above;
+            // the member that names a CALLING SERVICE is
+            // `service_common::on_behalf_of_calls`'s to write.
+            invoked_by: None,
             // The assume itself is made ON BEHALF of a federated user, not BY a session:
             // the session it mints is what LATER calls carry, and each of those records
             // names it through the account's session directory.
@@ -3730,6 +3734,8 @@ pub fn record_served_call<Eng: Send + Sync + 'static, T, E>(
             // with none at all, so no caller of one is a federated user an external
             // provider authenticated.
             identity_provider: None,
+            // The caller made this call itself.
+            invoked_by: None,
             // The session the call was made BY, when it was made with one — the shared
             // directory the minting service wrote it to, so a call this service serves
             // under a role session is recorded as that session.

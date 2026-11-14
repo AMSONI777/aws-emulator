@@ -155,13 +155,14 @@ impl<Eng: Send + Sync + 'static> AuditedService for SqsAudit<Eng> {
 /// A SHARED type ([`service_common::management_events::ManagementEventLog`]) and not a
 /// field of this service's own state: CloudTrail reports the management calls of every
 /// service, and the service that served a call is the only one that knows it happened, so
-/// recorder and reporter reach one log rather than two copies of it.
+/// recorder and reporter reach one log rather than two copies of it. Resolved by the shared
+/// accessor ([`service_common::on_behalf_of_calls::management_event_log`]), so this service
+/// and the recorder of the calls it makes to another service on a caller's behalf cannot
+/// reach two different logs.
 pub fn management_event_log<Eng: Send + Sync + 'static>(
     engine: &Eng,
 ) -> Option<::engine::ServiceState<ManagementEventLog>> {
-    (engine as &dyn ::std::any::Any)
-        .downcast_ref::<::engine::InMemoryEngine>()
-        .map(::engine::InMemoryEngine::state::<ManagementEventLog>)
+    ::service_common::on_behalf_of_calls::management_event_log(engine)
 }
 
 /// The account's SESSION directory in that same shared engine: the sessions the token
@@ -173,9 +174,7 @@ pub fn management_event_log<Eng: Send + Sync + 'static>(
 pub fn session_audit_directory<Eng: Send + Sync + 'static>(
     engine: &Eng,
 ) -> Option<::engine::ServiceState<SessionAuditDirectory>> {
-    (engine as &dyn ::std::any::Any)
-        .downcast_ref::<::engine::InMemoryEngine>()
-        .map(::engine::InMemoryEngine::state::<SessionAuditDirectory>)
+    ::service_common::on_behalf_of_calls::session_audit_directory(engine)
 }
 
 /// The envelope a pre-dispatch failure of one of this service's operations renders in:

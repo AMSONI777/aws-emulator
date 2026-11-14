@@ -160,6 +160,11 @@ use md5::{Digest, Md5};
 use sha2::Sha256;
 
 pub mod encryption;
+/// The data key a queue on a customer managed KMS key seals its messages under: where it
+/// comes from, how long it is reused before this service calls KMS again, and what the
+/// account's audit record says about each of those calls.
+pub mod data_keys;
+pub use data_keys::{MessageDataKey, QueueDataKey};
 
 use crate::ops::types::{
     InvalidAddress, InvalidAttributeName, InvalidAttributeValue, ListMessageMoveTasksResultEntry,
@@ -1035,6 +1040,14 @@ pub struct StoredMessage {
     /// triaged by where each message came from; a later redrive re-stamps it with the
     /// queue that one moved the message out of.
     pub dead_letter_source_arn: Option<String>,
+    /// The data key this message was sealed under, for a message sent to a queue on a
+    /// customer managed KMS key — the sealed copy KMS answered with, naming the key and the
+    /// queue the data key was obtained for ([`MessageDataKey`]). `None` for a message of a
+    /// queue on the Amazon SQS owned key, which needs no data key of the account's.
+    ///
+    /// It travels with the message, so a message a redrive or a movement task moves into
+    /// another queue is still opened under the data key it was sealed under.
+    pub data_key: Option<MessageDataKey>,
 }
 
 impl StoredMessage {
@@ -1143,6 +1156,12 @@ pub struct ComAmazonawsSqsAmazonsqsState {
     /// The task of that clock, so it can be stopped: a clock that outlives its claim is
     /// aborted when the next one takes it over.
     pub depth_clock: Option<::tokio::task::JoinHandle<()>>,
+    /// The data key each queue on a customer managed KMS key is sealing its messages under,
+    /// keyed by the same `(region, QueueName)` pair the queue itself is held under — at most
+    /// one entry per queue, so the map never holds more than [`queues`](Self::queues) does.
+    /// Read through [`Self::live_data_key`], which answers only a key that may still be
+    /// reused; see [`data_keys`] for the window.
+    pub data_keys: BTreeMap<(String, String), data_keys::QueueDataKey>,
 }
 
 /// A stored queue: the state the reported `Attributes` map is rebuilt from, plus the
@@ -2433,6 +2452,9 @@ impl ComAmazonawsSqsAmazonsqsState {
     ) -> Option<Queue> {
         let key = queue_key(region, queue_name_from_url(queue_url)?);
         let removed = self.queues.remove(&key)?;
+        // The data key the queue was sealing its messages under goes with the queue: a
+        // name created again is another incarnation, which seals under its own.
+        self.data_keys.remove(&key);
         self.forget_lapsed_deletions(at);
         self.recently_deleted.insert(key, at);
         // The ledger is bounded; the oldest record goes first, so the names deleted most

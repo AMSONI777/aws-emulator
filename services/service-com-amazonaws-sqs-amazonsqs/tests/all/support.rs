@@ -47,6 +47,59 @@ pub fn emulator() -> MultiServiceRouter {
     emulator_over_engine().0
 }
 
+/// One emulator holding this service and KMS over one shared engine, with that engine
+/// handed back — what every suite driving a queue on a CUSTOMER MANAGED key uses: the key
+/// such a queue is on is resolved in the KMS service's OWN store, so a suite that needs one
+/// makes it with KMS's own operations rather than planting anything.
+pub fn emulator_with_kms() -> (MultiServiceRouter, Arc<engine::InMemoryEngine>) {
+    let engine: Arc<engine::InMemoryEngine> = Arc::new(engine::InMemoryEngine::new());
+    let mut router = MultiServiceRouter::new();
+    router.set_request_authentication(false);
+    router.register_service(EmulatedService::new(Arc::clone(&engine)));
+    router.register_service(
+        service_com_amazonaws_kms_trentservice::EmulatedService::new(Arc::clone(&engine)),
+    );
+    (router, engine)
+}
+
+/// One KMS call that must succeed, as the same credential every helper here signs with.
+///
+/// KMS is an `awsJson1_1` service reached by `X-Amz-Target: TrentService.<Operation>`, which
+/// is the one thing that differs from this service's own wire shape.
+pub async fn kms_ok(router: &MultiServiceRouter, operation: &str, body: Value) -> Value {
+    let (status, parsed) = kms(router, operation, body.clone()).await;
+    assert_eq!(
+        status, 200,
+        "case KMS {operation} {body}: expected HTTP 200, got {status} with {parsed}"
+    );
+    parsed
+}
+
+/// The same call, with its status handed back — for a row that drives a refusal.
+pub async fn kms(router: &MultiServiceRouter, operation: &str, body: Value) -> (u16, Value) {
+    let request = http::Request::builder()
+        .method("POST")
+        .uri("/")
+        .header("host", format!("kms.{REGION}.amazonaws.com"))
+        .header("content-type", "application/x-amz-json-1.1")
+        .header("x-amz-target", format!("TrentService.{operation}"))
+        .header(
+            "authorization",
+            format!(
+                "AWS4-HMAC-SHA256 Credential=AKIDTEST/20260101/{REGION}/kms/aws4_request, \
+                 SignedHeaders=host;x-amz-target, Signature=0000"
+            ),
+        )
+        .body(Bytes::from(
+            serde_json::to_vec(&body).expect("the request body serializes"),
+        ))
+        .expect("a well-formed request");
+    let response = router.dispatch(request).await;
+    let status = response.status().as_u16();
+    let parsed = serde_json::from_slice(response.body()).unwrap_or(Value::Null);
+    (status, parsed)
+}
+
 /// The same emulator, with the engine it was built over handed back.
 ///
 /// A suite that has to observe — or ADVANCE — a span the clock owes uses this: a

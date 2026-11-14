@@ -368,6 +368,7 @@ fn served_elsewhere(source: &str, region: &str, access_key_id: &str) -> ServedAp
         principal_type: PRINCIPAL_TYPE_IAM_USER.to_string(),
         principal_id: None,
         identity_provider: None,
+        invoked_by: None,
         session: None,
         account_id: engine::emulator_account_id().to_string(),
         user_agent: None,

@@ -1534,6 +1534,9 @@ mod tests {
             first_received_at: Some(at_millis(FIRST_RECEIVED_AT_MILLIS)),
             last_received_at: Some(at_millis(FIRST_RECEIVED_AT_MILLIS)),
             dead_letter_source_arn: None,
+            // A message of a queue on the Amazon SQS owned key is sealed under no data key
+            // of the account's.
+            data_key: None,
         }
     }
 

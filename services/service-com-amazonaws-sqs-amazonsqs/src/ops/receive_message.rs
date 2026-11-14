@@ -22,7 +22,9 @@
 //! handed no body. That decrypt happens WHEN a message is handed over, so the key is
 //! consulted only by a receive that has one to hand over: a receive that finds the queue
 //! empty decrypts nothing, asks nothing of KMS, and is the empty success an empty queue is
-//! whatever the key permits.
+//! whatever the key permits. The data keys themselves are opened by
+//! [`crate::state::data_keys`], which reuses one still inside the queue's
+//! `KmsDataKeyReusePeriodSeconds` window and asks KMS to open one past it.
 //!
 //! ## Shape of an operation
 //!
@@ -440,20 +442,59 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
                 // permit drives those messages to the queue's dead-letter target rather
                 // than being refused the same messages for ever. Nothing is handed over
                 // and nothing is hidden.
-                if let Err(refusal) = sqs::encryption::authorize_queue_key(
+                let authorized = match sqs::encryption::authorize_queue_key(
                     &*self.engine,
                     ctx,
                     &input.queue_url,
                     sqs::encryption::DECRYPT_ACTION,
                 ) {
-                    let mut state = store.lock();
-                    if let Some(queue) = state.queue_by_url_mut(&region, &input.queue_url) {
-                        queue.count_refused_delivery(
-                            now,
-                            usize::try_from(max_messages).unwrap_or(1),
-                        );
+                    Ok(authorized) => authorized,
+                    Err(refusal) => {
+                        let mut state = store.lock();
+                        if let Some(queue) = state.queue_by_url_mut(&region, &input.queue_url) {
+                            queue.count_refused_delivery(
+                                now,
+                                usize::try_from(max_messages).unwrap_or(1),
+                            );
+                        }
+                        return Err(kms_refusal(refusal));
                     }
-                    return Err(kms_refusal(refusal));
+                };
+                // The data keys the messages this receive is about to hand over were sealed
+                // under have to be opened before their bodies go over: a data key still
+                // inside the queue's `KmsDataKeyReusePeriodSeconds` window is reused as it
+                // is, and one past that window is opened by a `kms:Decrypt` call made on
+                // the caller's behalf (`sqs::data_keys`). Which messages those are is read
+                // under the lock and the lock is then released, so KMS is never asked
+                // anything while this service's own guard is held. A queue on the Amazon
+                // SQS owned key is sealed under no data key of the account's, so it is not
+                // even asked which messages are next.
+                if authorized.is_some() {
+                    let sealed: Vec<sqs::MessageDataKey> = {
+                        let state = store.lock();
+                        state
+                            .queue_by_url(&region, &input.queue_url)
+                            .map(|queue| {
+                                queue
+                                    .delivery_order(
+                                        now,
+                                        usize::try_from(max_messages).unwrap_or(1),
+                                    )
+                                    .into_iter()
+                                    .filter_map(|index| {
+                                        queue.messages.get(index)?.data_key.clone()
+                                    })
+                                    .collect()
+                            })
+                            .unwrap_or_default()
+                    };
+                    sqs::data_keys::open_message_data_keys(
+                        &*self.engine,
+                        ctx,
+                        &region,
+                        &sealed,
+                        now,
+                    );
                 }
             }
             let (messages, wait) = {

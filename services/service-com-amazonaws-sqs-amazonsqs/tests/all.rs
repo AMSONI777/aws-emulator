@@ -131,6 +131,8 @@ mod send_message_size_refusals;
 mod sender_attribution;
 #[path = "all/service_delivery_message_size.rs"]
 mod service_delivery_message_size;
+#[path = "all/sse_kms_data_keys.rs"]
+mod sse_kms_data_keys;
 #[path = "all/state_roundtrip.rs"]
 mod state_roundtrip;
 #[path = "all/support.rs"]

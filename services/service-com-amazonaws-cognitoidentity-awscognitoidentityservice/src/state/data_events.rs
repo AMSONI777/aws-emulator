@@ -132,6 +132,8 @@ pub fn hold_data_event<T, E>(
             // all: the end user a `Logins` token speaks for is not the PRINCIPAL of the
             // call, which is what `identityProvider` would name.
             identity_provider: None,
+            // The caller made this call itself.
+            invoked_by: None,
             session,
             account_id: ::engine::emulator_account_id().to_string(),
             user_agent: ::service_common::management_events::recorded_user_agent(parts),
