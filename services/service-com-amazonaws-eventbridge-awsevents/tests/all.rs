@@ -137,6 +137,8 @@ mod partner_event_source;
 mod pass_role_authorization;
 #[path = "all/pattern_and_connection_filters.rs"]
 mod pattern_and_connection_filters;
+#[path = "all/pattern_field_paths.rs"]
+mod pattern_field_paths;
 #[path = "all/pattern_preflight.rs"]
 mod pattern_preflight;
 #[path = "all/pattern_refusal_location.rs"]

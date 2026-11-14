@@ -4738,6 +4738,13 @@ pub mod input_transform;
 /// The operators are the ones the EventBridge event-pattern reference defines:
 /// exact values, `prefix`, `suffix`, `equals-ignore-case`, `wildcard`,
 /// `anything-but`, `numeric`, `cidr`, `exists`, `$or`, and nested objects.
+///
+/// A pattern selects a value by the whole FIELD PATH it sits at: the event is
+/// read as the set of paths its values sit at, where a member of an array sits
+/// at the path its container sits at and a member name carrying a dot spells the
+/// same path that nesting spells. So a nested pattern object names a longer path
+/// rather than a sub-document to search, and a leaf of the same name at another
+/// depth is a different field.
 pub mod event_pattern;
 
 /// What an invocation of an API destination CARRIES: the credentials the

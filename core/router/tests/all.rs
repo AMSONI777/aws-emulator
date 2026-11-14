@@ -3004,3 +3004,8 @@ mod cloudformation_task_definition_runs_an_ecs_service;
 // inner doc comment is only legal before the first item, so landing it in this tail failed
 // every suite in this target.)
 //! this file and for every service crate's `tests/all.rs`.
+// (A module doc comment belongs at the head of this file, before any item: these lines were
+// appended here as `//!` while two branches were landing at once, which is `E0753` and
+// compiles no suite of this target, so they stand as ordinary comments. Declare each suite
+// exactly ONCE: this is one crate root, so a second `mod` for the same name is `E0428`.
+// crate's `tests/all.rs`, so check there rather than leaving a note here.)

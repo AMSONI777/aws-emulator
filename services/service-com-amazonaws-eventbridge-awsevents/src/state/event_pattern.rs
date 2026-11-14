@@ -490,7 +490,7 @@ pub fn matches_parsed(
     event: &Value,
     budget: &mut Budget,
 ) -> bool {
-    match_object(pattern, event, budget)
+    match_object(pattern, event, &[], budget)
 }
 
 /// A work allowance for pattern matching, counted in bytes of text the
@@ -1002,39 +1002,64 @@ fn degenerate_range(terms: &[Value]) -> Option<&'static str> {
 
 /// Every field of a pattern object must match, which is what makes a
 /// pattern a conjunction over fields.
-fn match_object(pattern: &Map<String, Value>, event: &Value, budget: &mut Budget) -> bool {
+///
+/// `prefix` is the field PATH this pattern object's own fields sit under, in
+/// segments. A pattern selects on the path a value sits at, so a nested
+/// pattern object does not descend into a sub-document of the event: it
+/// lengthens that path, and the leaf terms underneath it are resolved
+/// against the event from its root ([`select`]). That is what makes a
+/// pattern match a value only at the WHOLE path it names, and never a
+/// member of the same name at some other depth.
+fn match_object(
+    pattern: &Map<String, Value>,
+    event: &Value,
+    prefix: &[&str],
+    budget: &mut Budget,
+) -> bool {
     for (key, spec) in pattern {
         if !budget.charge(1) {
             return false;
         }
         let held = if key == "$or" && relates_objects(spec) {
-            match_any_branch(spec, event, budget)
+            match_any_branch(spec, event, prefix, budget)
         } else {
-            let field = event.get(key);
+            // A member name IS the path it spells, so one written with
+            // separators contributes a segment per separator
+            // ([`PATH_SEPARATOR`]).
+            let mut steps: Vec<&str> = prefix.to_vec();
+            steps.extend(key.split(PATH_SEPARATOR));
             match spec {
                 // One of the listed terms must match, which is what makes a
-                // term list a disjunction.
+                // term list a disjunction — against any value that path
+                // selects, since one path can be spelled several ways and
+                // can run through an array.
                 Value::Array(terms) => {
+                    let mut found: Vec<&Value> = ::std::vec::Vec::new();
+                    if !select(event, &steps, budget, &mut found) {
+                        return false;
+                    }
                     let mut held = false;
                     for term in terms {
-                        if match_term(term, field, budget) {
+                        // "exists only works on leaf nodes": a path the
+                        // event carries NO value at — because the leaf is
+                        // missing, or because an intermediate parent is —
+                        // is evaluated against absence rather than failed
+                        // outright, so an `exists: false` term holds for it.
+                        let matched = if found.is_empty() {
+                            match_term(term, None, budget)
+                        } else {
+                            found
+                                .iter()
+                                .any(|value| match_term(term, Some(value), budget))
+                        };
+                        if matched {
                             held = true;
                             break;
                         }
                     }
                     held
                 }
-                Value::Object(child) => {
-                    // "exists only works on leaf nodes": a sub-pattern whose
-                    // PARENT the event does not carry is evaluated against
-                    // absence rather than failed outright, so an
-                    // `exists: false` term holds when an intermediate parent
-                    // is missing — the leaf is absent either way.
-                    match field {
-                        Some(value) => match_object(child, value, budget),
-                        None => match_object(child, &Value::Null, budget),
-                    }
-                }
+                Value::Object(child) => match_object(child, event, &steps, budget),
                 _ => false,
             }
         };
@@ -1043,6 +1068,86 @@ fn match_object(pattern: &Map<String, Value>, event: &Value, budget: &mut Budget
         }
     }
     true
+}
+
+/// What separates one segment of a field path from the next.
+///
+/// An event is matched by the PATHS its values sit at, and a path is written
+/// with its segments separated by this character — which is why a member name
+/// carrying one is indistinguishable from the path it spells: `{"a.b": "v"}`
+/// and `{"a": {"b": "v"}}` carry `"v"` at the same path, so a pattern over
+/// either matches both.
+const PATH_SEPARATOR: char = '.';
+
+/// Every value of `event` that sits at the field path `steps`, appended to
+/// `found`.
+///
+/// One path can select several values, because an event can spell it several
+/// ways at once and because a path may run THROUGH an array: a member of an
+/// array sits at the path its container sits at, so an object nested in an
+/// array is entered without consuming a segment and `{"a": [{"b": "v"}]}`
+/// carries `"v"` at the same path `{"a": {"b": "v"}}` does. A segment is
+/// consumed by any member name that spells a whole run of the remaining
+/// segments ([`segments_spanned`]).
+///
+/// The walk descends an EVENT's value, which nests as deep as
+/// [`super::MAX_DETAIL_DEPTH`] admits, so it descends on an explicit stack for
+/// the reason [`argument_cost`] gives. It is charged against `budget` by what
+/// it walks, and answers `false` once that allowance is gone — the selection
+/// is then incomplete, so the caller stops rather than drawing a verdict from
+/// it ([`Budget::spent`]).
+fn select<'a>(
+    event: &'a Value,
+    steps: &[&str],
+    budget: &mut Budget,
+    found: &mut Vec<&'a Value>,
+) -> bool {
+    let mut pending: Vec<(&'a Value, usize)> = ::std::vec![(event, 0)];
+    while let Some((value, reached)) = pending.pop() {
+        if !budget.charge(leaf_cost(value)) {
+            return false;
+        }
+        if reached == steps.len() {
+            found.push(value);
+            continue;
+        }
+        match value {
+            Value::Array(members) => {
+                pending.extend(members.iter().map(|member| (member, reached)));
+            }
+            Value::Object(map) => {
+                for (name, child) in map {
+                    if let Some(spanned) = segments_spanned(name, &steps[reached..]) {
+                        pending.push((child, reached + spanned));
+                    }
+                }
+            }
+            // A scalar sits at the end of its own path: there is nothing
+            // further down it to select.
+            _ => {}
+        }
+    }
+    true
+}
+
+/// How many leading segments of `steps` the member name `name` spells, or
+/// `None` when it spells no whole run of them.
+///
+/// `"a"` spells one segment of `["a", "b"]` and `"a.b"` spells both, so a
+/// name carrying separators selects the same value the nesting it spells
+/// would ([`PATH_SEPARATOR`]). A name that is only part of a segment
+/// (`"a"` against `["ab"]`), or that spells MORE segments than remain,
+/// spells none of them.
+fn segments_spanned(name: &str, steps: &[&str]) -> Option<usize> {
+    let mut rest = name;
+    for (spanned, step) in steps.iter().enumerate() {
+        rest = rest.strip_prefix(*step)?;
+        if rest.is_empty() {
+            return Some(spanned + 1);
+        }
+        rest = rest.strip_prefix(PATH_SEPARATOR)?;
+    }
+    None
 }
 
 /// Whether `spec` is the or-RELATIONSHIP `$or` names: a list of at least
@@ -1059,7 +1164,15 @@ fn relates_objects(spec: &Value) -> bool {
 }
 
 /// `$or`: at least one branch, itself a pattern object, must match.
-fn match_any_branch(spec: &Value, event: &Value, budget: &mut Budget) -> bool {
+///
+/// Each branch's fields sit at the same path the `$or` itself does, so the
+/// branches are matched under the relationship's own `prefix`.
+fn match_any_branch(
+    spec: &Value,
+    event: &Value,
+    prefix: &[&str],
+    budget: &mut Budget,
+) -> bool {
     let Some(branches) = spec.as_array() else {
         return false;
     };
@@ -1067,7 +1180,7 @@ fn match_any_branch(spec: &Value, event: &Value, budget: &mut Budget) -> bool {
         let Some(object) = branch.as_object() else {
             continue;
         };
-        if match_object(object, event, budget) {
+        if match_object(object, event, prefix, budget) {
             return true;
         }
     }
