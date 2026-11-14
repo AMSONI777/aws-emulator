@@ -7,9 +7,10 @@
 //! namespace of the service that served it as `ServiceName` and the Region it was served
 //! in as `Region` — beside the name of the IAM user that owns the key; a key the account
 //! holds that no recorded call was made with reports no `LastUsedDate` and `N/A` for both
-//! of the other two; and an access key id the account holds no key under is not found.
-//! Nothing about the report depends on which call is asked about it: it is a read, so two
-//! reads of one key answer the same.
+//! of the other two; and an access key id the account holds no key under, which resolves
+//! to no IAM user for a statement to be about, is refused `AccessDenied` rather than
+//! answered with whether such a key exists. Nothing about the report depends on which
+//! call is asked about it: it is a read, so two reads of one key answer the same.
 //!
 //! Each test is a TABLE whose rows differ along what the rule generalises over: the owning
 //! user's name alphabet and case, how many keys that user holds, which operation the key
@@ -34,6 +35,10 @@ use crate::identity_policy_enforcement::grant_action;
 use crate::user_lifecycle::{
     call, call_signed_in_region, element, elements, error_code, router_with_engine,
 };
+
+/// The IAM action this read is authorized under, as the Service Authorization Reference
+/// spells it — the name a refusal of the call names.
+const IAM_ACTION: &str = "iam:GetAccessKeyLastUsed";
 
 /// What `AccessKeyLastUsed$ServiceName` and `AccessKeyLastUsed$Region` carry for a key
 /// that has not been used, from those members' own documentation ("the value of this
@@ -493,11 +498,13 @@ async fn the_most_recent_recorded_use_is_the_one_reported() {
     }
 }
 
-/// RULE: an access key is reachable only through the user that holds it, so an access key
-/// id the account holds no key under names nothing to report on: HTTP 404 `NoSuchEntity`,
-/// naming the id the request carried.
+/// RULE: an access key is reachable only through the IAM user that holds it, so an access
+/// key id the account holds no key under resolves to no entity a policy statement about
+/// this read could be about: the call is one its caller is not authorized to perform —
+/// HTTP 403 `AccessDenied`, naming the caller, the action and the key id the request
+/// carried — and nothing in the answer says whether a key with that id exists.
 #[tokio::test]
-async fn an_id_the_account_holds_no_key_under_is_not_found() {
+async fn an_id_the_account_holds_no_key_under_is_refused() {
     let (router, _engine) = router_with_engine();
     let owner = Owner {
         stored_name: "holder",
@@ -530,23 +537,133 @@ async fn an_id_the_account_holds_no_key_under_is_not_found() {
         "Z".repeat(128),
     ];
 
+    // The caller the refusal names is the principal the request speaks for: an unsigned
+    // call speaks for the IAM user this emulator's published long-term key belongs to,
+    // which is the identity STS reports for it.
+    let unsigned_caller = service_common::caller_principal::ambient_user_arn();
+
     for access_key_id in &absent {
         let (status, refused) = last_used(&router, access_key_id).await;
         assert_eq!(
-            status, 404,
-            "case {access_key_id:?}: expected 404, got {status}: {refused}"
+            status, 403,
+            "case {access_key_id:?}: expected 403, got {status}: {refused}"
         );
         assert_eq!(
             error_code(&refused),
-            "NoSuchEntity",
-            "case {access_key_id:?}: expected NoSuchEntity, got {:?}",
+            "AccessDenied",
+            "case {access_key_id:?}: expected AccessDenied, got {:?}",
             error_code(&refused)
         );
         assert_eq!(
             element(&refused, "Message"),
-            format!("The Access Key with id {access_key_id} cannot be found."),
-            "case {access_key_id:?}: expected the family's wording for an absent key, got {:?}",
+            format!(
+                "User: {unsigned_caller} is not authorized to perform {IAM_ACTION} on \
+                 resource: access key {access_key_id}"
+            ),
+            "case {access_key_id:?}: expected the refusal to name the caller, the action and \
+             the key id, got {:?}",
             element(&refused, "Message")
+        );
+        assert!(
+            elements(&refused, "UserName").is_empty()
+                && elements(&refused, "ServiceName").is_empty()
+                && elements(&refused, "Region").is_empty(),
+            "case {access_key_id:?}: expected the refusal to report nothing about the key, \
+             got {refused}"
+        );
+    }
+}
+
+/// RULE: the principal a refusal names is the one the REQUEST speaks for, so the same
+/// unresolvable key id asked about by a caller signing with an IAM user's own key is
+/// refused naming that user — whatever that user's own policies say, since they were never
+/// what withheld the call.
+#[tokio::test]
+async fn the_refusal_names_the_principal_the_request_speaks_for() {
+    let (router, _engine) = router_with_engine();
+
+    // Rows differing in the signing user's name alphabet and case, and in the form of the
+    // id asked about: a never-issued id of AWS's published example form, one at
+    // `accessKeyIdType`'s 16-character minimum and one at its 128-character maximum.
+    let rows: [(&str, String); 3] = [
+        ("signer", "AKIAIOSFODNN7EXAMPLE".to_string()),
+        ("Signer_2", "B".repeat(16)),
+        ("signer.3", "Y".repeat(128)),
+    ];
+
+    for (user_name, access_key_id) in &rows {
+        let case = format!("{user_name} asking about {access_key_id}");
+        let (status, created) = call(&router, "CreateUser", &[("UserName", user_name)]).await;
+        assert_eq!(
+            status, 200,
+            "case {case:?}: the fixture CreateUser must succeed, got {status}: {created}"
+        );
+        let caller_arn = element(&created, "Arn");
+        let (status, key) = call(&router, "CreateAccessKey", &[("UserName", user_name)]).await;
+        assert_eq!(
+            status, 200,
+            "case {case:?}: the fixture CreateAccessKey must succeed, got {status}: {key}"
+        );
+        let signing_key = element(&key, "AccessKeyId");
+
+        // The same unresolvable id asked about by the same caller twice: once while its
+        // policies allow nothing, then once holding the grant the action needs. The
+        // refusal is the same both times, because the policies in force were never what
+        // withheld it.
+        for (policies, grant_first) in [("holding no policy", false), ("holding the grant", true)] {
+            if grant_first {
+                grant_action(&router, &case, user_name, IAM_ACTION).await;
+            }
+            let case = format!("{case}, {policies}");
+            let (status, refused) = call_signed_in_region(
+                &router,
+                Some(&signing_key),
+                IAM_REGION,
+                "GetAccessKeyLastUsed",
+                &[("AccessKeyId", access_key_id)],
+            )
+            .await;
+            assert_eq!(
+                status, 403,
+                "case {case:?}: expected 403, got {status}: {refused}"
+            );
+            assert_eq!(
+                error_code(&refused),
+                "AccessDenied",
+                "case {case:?}: expected AccessDenied, got {:?}",
+                error_code(&refused)
+            );
+            assert_eq!(
+                element(&refused, "Message"),
+                format!(
+                    "User: {caller_arn} is not authorized to perform {IAM_ACTION} on \
+                     resource: access key {access_key_id}"
+                ),
+                "case {case:?}: expected the refusal to name the signing user, got {:?}",
+                element(&refused, "Message")
+            );
+        }
+
+        // The caller's OWN key, which the account does hold, is still reported for it:
+        // the refusal above is about the id that resolves to nothing, not about the
+        // caller.
+        let (status, served) = call_signed_in_region(
+            &router,
+            Some(&signing_key),
+            IAM_REGION,
+            "GetAccessKeyLastUsed",
+            &[("AccessKeyId", &signing_key)],
+        )
+        .await;
+        assert_eq!(
+            status, 200,
+            "case {case:?}: expected the held key to be reported, got {status}: {served}"
+        );
+        assert_eq!(
+            element(&served, "UserName"),
+            *user_name,
+            "case {case:?}: expected the owner's stored name, got {:?}",
+            element(&served, "UserName")
         );
     }
 }
@@ -593,7 +710,7 @@ async fn the_read_is_decided_against_the_callers_policies() {
         &router,
         "a caller holding the grant",
         owner.stored_name,
-        "iam:GetAccessKeyLastUsed",
+        IAM_ACTION,
     )
     .await;
     let (status, served) = call_signed_in_region(

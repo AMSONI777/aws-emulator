@@ -737,6 +737,27 @@ pub fn not_authorized_to_perform(principal: &str, action: &str, resource: &str) 
     format!("User: {principal} is not authorized to perform: {action} on resource: {resource}")
 }
 
+/// The same sentence again with NO colon after `perform`, and no reason clause either.
+///
+/// Stated beside [`not_authorized_to_perform`] rather than in the one gate that needs it, so
+/// the family of this refusal's wordings stays in one place. A service reaches for this form
+/// only where a recording of its own refusal shows the colon absent — the observed case is a
+/// request addressing a resource the account cannot resolve to an entity, which no document
+/// withheld and no statement denied, so there is nothing after the resource either. Every
+/// other refusal takes [`not_authorized_to_perform`] or
+/// [`not_authorized_by_identity_policy`].
+///
+/// `action` is the fully qualified IAM action and `resource` what the request addressed, as in
+/// [`not_authorized_to_perform`].
+#[must_use]
+pub fn not_authorized_to_perform_unpunctuated(
+    principal: &str,
+    action: &str,
+    resource: &str,
+) -> String {
+    format!("User: {principal} is not authorized to perform {action} on resource: {resource}")
+}
+
 /// The reason clause for a request an explicit `Deny` in one of the principal's own
 /// identity-based documents refuses: a fact about that document, so the sentence names it
 /// rather than the action.

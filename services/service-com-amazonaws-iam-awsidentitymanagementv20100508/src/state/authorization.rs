@@ -912,6 +912,52 @@ pub fn not_authorized(principal: &str, action: &str, named_as: &str, reason: &st
     ))
 }
 
+/// The `AccessDenied` text AWS words a call it will not perform for its caller with when
+/// NO evaluation of the policies in force explains it: what the refusal is about — the
+/// principal, the action and the resource — and nothing after it.
+///
+/// A refusal the documents in force explain says which of them withheld the call or which
+/// statement denied it ([`not_authorized`]), because that clause is what the caller has to
+/// fix. This refusal has no such clause to carry: the request addresses a resource this
+/// account cannot resolve to an entity, so no statement could have been about it and no
+/// document withheld anything. Recorded behaviour words it without the reason AND without
+/// the colon after `perform` that the explained sentence carries, which is the tree's
+/// [`::service_common::iam_authorization::not_authorized_to_perform_unpunctuated`] — the
+/// family of these wordings lives there, so this is only the lift into the error channel.
+pub fn not_authorized_without_reason(principal: &str, action: &str, named_as: &str) -> AccessDenied {
+    AccessDenied::new(
+        ::service_common::iam_authorization::not_authorized_to_perform_unpunctuated(
+            principal, action, named_as,
+        ),
+    )
+}
+
+/// The ARN of the principal this request speaks for, as `sts:GetCallerIdentity` reports it
+/// for the credential the request was signed with — what a refusal this service words
+/// itself names as the caller.
+///
+/// The same resolution the gate above makes its decision about ([`signing_principal`]): the
+/// IAM user that holds the long-term key, or the role session the temporary credential was
+/// vended for. EVERY other credential — the long-term pair this emulator publishes at
+/// start, a key id nothing issued, and a session whose role or user the account no longer
+/// holds — resolves to no identity of this account, and STS reports one principal for all
+/// of them: the IAM user that published pair belongs to
+/// ([`::service_common::caller_principal::ambient_user_arn`]). So that is what a refusal
+/// names for them, the identity such a caller reads back for itself rather than an invented
+/// one.
+///
+/// A READ: the store is only consulted.
+pub fn caller_principal_arn(
+    store: &IamState,
+    ctx: &::smithy_server_runtime::OperationContext<'_>,
+) -> String {
+    let access_key_id = ::engine::extract_akid(&ctx.parts().headers);
+    match signing_principal(store, &access_key_id) {
+        Some(signer) => signer.arn,
+        None => ::service_common::caller_principal::ambient_user_arn(),
+    }
+}
+
 /// Whether the caller has sufficient permissions to cover the asks of the delegation
 /// request `delegated` — the permission check `GetDelegationRequest` performs when its
 /// request asks for one — as one of the three values `permissionCheckResultType`

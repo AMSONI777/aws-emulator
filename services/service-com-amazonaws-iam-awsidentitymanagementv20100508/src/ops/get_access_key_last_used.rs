@@ -21,6 +21,15 @@
 //! decided first against the caller's own identity-based policies and the permissions
 //! boundary that caps them ([`crate::state::authorization`]).
 //!
+//! The request addresses the key by its ID ALONE, so the entity a policy statement about
+//! this call would name — the IAM user that owns the key — is reachable only by resolving
+//! that id. An id the account holds no key under resolves to no such entity, so no
+//! statement can be about it and the call is one IAM will not perform for its caller: it
+//! is refused `AccessDenied`, naming the key the request carried, rather than answered
+//! with whether a key with that id exists. The sibling access-key operations, which take
+//! the OWNING USER beside the key id and model `NoSuchEntity`, are the ones that report an
+//! absent key as absent.
+//!
 //! LIMITATION, stated so the answer is not mistaken for more than it is: the usage this
 //! reports is the usage the account RECORDED, so a call served by a service that does not
 //! record management events is not reported here, and a use older than the log's retention
@@ -109,19 +118,18 @@ smithy_macros::smithy_model!("smithy-model/com-amazonaws-iam-awsidentitymanageme
 // generates an UNINHABITED enum here, which is correct and expected: there is nothing
 // to construct until the model says otherwise.
 //
-// This operation lists no error of its own, so the enum would be UNINHABITED. Two shapes
-// the SERVICE models — and which its other access-key operations declare — are widened in
-// through `extra_errors`: `NoSuchEntityException`, because an access key id the account
-// holds no key under names no key to report on, which is the answer `DeleteAccessKey` and
-// `UpdateAccessKey` give the same id; and `ServiceFailureException`, so an engine that
-// cannot hand back this service's store has a modelled server failure to answer with.
+// This operation lists no error of its own, so the enum would be UNINHABITED. ONE shape the
+// SERVICE models is widened in through `extra_errors`: `ServiceFailureException`, so an
+// engine that cannot hand back this service's store has a modelled server failure to answer
+// with. `NoSuchEntityException` is deliberately NOT widened in — this operation declares no
+// error of its own, and an id the account holds no key under is refused rather than reported
+// absent (see the module docs), so there is no call for it here.
 #[smithy_macros::operation_error(
     "com.amazonaws.iam#GetAccessKeyLastUsed",
-    extra_errors = ["NoSuchEntityException", "ServiceFailureException"]
+    extra_errors = ["ServiceFailureException"]
 )]
 #[derive(Debug)]
 pub enum GetAccessKeyLastUsedErrorModeled {
-    NoSuchEntityException(NoSuchEntityException),
     ServiceFailureException(ServiceFailureException),
 }
 
@@ -197,43 +205,37 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
             .get(&input.access_key_id)
             .and_then(|record| store.users.get(&record.user_key));
 
+        // An id no key of this account carries resolves to no IAM user, so there is no
+        // entity a statement about this read could name and nothing the policies in force
+        // could allow it on: the call is one IAM will not perform for its caller, refused
+        // naming the caller, the action and the key id the request carried, and nothing is
+        // said about whether such a key exists. The refusal is the SAME whatever those
+        // policies say — they were never what withheld it — so it is answered before they
+        // are read, and it carries no document that withheld the call to name
+        // ([`crate::state::authorization::not_authorized_without_reason`]).
+        let Some(user) = owner else {
+            return Err(crate::state::authorization::not_authorized_without_reason(
+                &crate::state::authorization::caller_principal_arn(&store, ctx),
+                crate::state::authorization::GET_ACCESS_KEY_LAST_USED,
+                &format!("access key {}", input.access_key_id),
+            )
+            .into());
+        };
+
         // IAM authorizes its own API: the signing principal's identity-based policies,
         // within the boundary that caps them, are evaluated before anything is reported.
         // The decision is made on the ARN of the user whose key is asked about, and the
-        // refusal names that user. A request naming an access key id the account holds no
-        // key under addresses no entity to decide on, so it is decided against every
-        // resource ([`crate::state::authorization::ACCOUNT_WIDE_RESOURCE`]) while the
-        // refusal names the key as the request carried it — and the lookup above is
-        // answered only afterwards, because a caller that may not read this account's key
-        // usage learns that it may not, never what the usage was.
-        let (resource, named_as) = match owner {
-            Some(user) => (user.arn.clone(), format!("user {}", user.user_name)),
-            None => (
-                crate::state::authorization::ACCOUNT_WIDE_RESOURCE.to_string(),
-                format!("access key {}", input.access_key_id),
-            ),
-        };
+        // refusal names that user — and the usage is read only afterwards, because a
+        // caller that may not read this account's key usage learns that it may not, never
+        // what the usage was.
         crate::state::authorization::authorize_named(
             &store,
             ctx,
             crate::state::authorization::GET_ACCESS_KEY_LAST_USED,
-            &resource,
-            &named_as,
+            &user.arn,
+            &format!("user {}", user.user_name),
         )?;
 
-        // An id no key of this account carries names nothing to report on, which is the
-        // answer the access-key family gives such an id, worded as they word it.
-        let Some(user) = owner else {
-            return Err(GetAccessKeyLastUsedErrorModeled::NoSuchEntityException(
-                NoSuchEntityException {
-                    message: Some(format!(
-                        "The Access Key with id {} cannot be found.",
-                        input.access_key_id
-                    )),
-                },
-            )
-            .into());
-        };
         // Reported in the case the user was created with, not the case the request
         // happened to spell, since IAM names "are not distinguished by case".
         let user_name = user.user_name.clone();
