@@ -4758,8 +4758,12 @@ mod fargate_networking;
 // than glob re-exports: the Kubernetes API surface names its own `serve` and
 // `publish`, which say what they are only under the module that owns them.
 pub mod kubernetes_api;
+pub mod kubernetes_config_maps;
+pub mod kubernetes_lists;
+pub mod kubernetes_metadata;
 pub mod kubernetes_nodes;
 pub mod kubernetes_objects;
+pub mod kubernetes_pod_spec;
 mod nodegroup_capacity;
 mod nodegroups;
 mod pass_role;
@@ -4780,6 +4784,11 @@ pub use derived_identifiers::*;
 pub use eks_anywhere_subscriptions::*;
 pub use fargate_networking::*;
 pub use kubernetes_api::KubernetesApiPlane;
+// The data plane's helper modules are re-exported by NAME for the same reason: a
+// `stored_pod_spec` or a `MAX_CONFIG_MAP_BYTES` says what it is only under the
+// module that owns it.
+pub use kubernetes_config_maps::{ConfigMapObject, MAX_CONFIG_MAPS_PER_NAMESPACE};
+pub use kubernetes_metadata::ObjectMetadata;
 pub use kubernetes_nodes::NodeInstance;
 pub use nodegroup_capacity::*;
 pub use nodegroups::*;

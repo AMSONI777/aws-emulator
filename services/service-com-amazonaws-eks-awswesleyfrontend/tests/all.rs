@@ -147,6 +147,10 @@ mod insights_listing;
 mod insights_refresh;
 #[path = "all/kubernetes_api.rs"]
 mod kubernetes_api;
+#[path = "all/kubernetes_list_chunking.rs"]
+mod kubernetes_list_chunking;
+#[path = "all/kubernetes_pod_and_config_map_objects.rs"]
+mod kubernetes_pod_and_config_map_objects;
 #[path = "all/kubernetes_cluster_resources.rs"]
 mod kubernetes_cluster_resources;
 #[path = "all/list_pod_identity_associations.rs"]

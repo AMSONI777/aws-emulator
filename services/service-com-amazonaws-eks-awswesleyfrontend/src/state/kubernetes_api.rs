@@ -66,6 +66,7 @@ use ::service_common::in_band_tls::{Prefixed, TLS_RECORD_FIRST_BYTE};
 use ::tokio::io::AsyncReadExt as _;
 use ::tokio::sync::{OwnedSemaphorePermit, Semaphore};
 
+use super::kubernetes_lists::ListRequest;
 use super::kubernetes_objects::{ApiRefusal, ClusterObjects};
 use super::pod_identity_plane::AuthPlane;
 use super::ComAmazonawsEksAwswesleyfrontendState as ServiceStore;
@@ -102,10 +103,21 @@ fn request_deadline() -> StdDuration {
 /// issued for it.
 const HANDSHAKE_DEADLINE: StdDuration = StdDuration::from_secs(10);
 
-/// How many bytes of one request this address reads: the core's per-connection
-/// ceiling.
+/// The most bytes of ONE request a Kubernetes API server reads: the limit the
+/// API server itself puts on a request body ("Request entity too large: limit is
+/// 3145728"), under which every object it stores therefore fits.
+///
+/// It is what bounds the size of an object a create writes into this service's
+/// store, beside the per-namespace counts the objects are bounded by
+/// ([`super::kubernetes_objects::MAX_PODS_PER_NAMESPACE`] and its neighbours).
+pub(super) const MAX_REQUEST_BYTES: usize = 3 * 1024 * 1024;
+
+/// How many bytes of one request this address reads: the API server's own
+/// request ceiling, never more than the core's per-connection ceiling.
 fn body_ceiling() -> usize {
-    usize::try_from(listener_caps::MAX_BYTES_PER_CONN).unwrap_or(usize::MAX)
+    usize::try_from(listener_caps::MAX_BYTES_PER_CONN)
+        .unwrap_or(usize::MAX)
+        .min(MAX_REQUEST_BYTES)
 }
 
 /// One cluster's Kubernetes API plane: the objects it holds, the address it is
@@ -429,6 +441,7 @@ async fn answer(
 ) -> ::http::Response<Full<Bytes>> {
     let method = request.method().clone();
     let path = request.uri().path().to_string();
+    let query = request.uri().query().map(str::to_string);
     // The media type the client wrote its body in, which is what says how the
     // body is read ([`read_manifest`]).
     let content_type = request
@@ -450,10 +463,12 @@ async fn answer(
         // Held for the whole read and dispatch, and released with it.
         let _permit: OwnedSemaphorePermit = permit;
         let Ok(collected) = limited.collect().await else {
+            // The ceiling is the API server's own, so the refusal is the one the API
+            // server answers a body past it with, naming that limit.
             return rendered(&ApiRefusal {
                 status: 413,
                 reason: "RequestEntityTooLarge",
-                message: "the request body is larger than this server reads".to_string(),
+                message: format!("Request entity too large: limit is {}", body_ceiling()),
                 resource: None,
             });
         };
@@ -462,10 +477,13 @@ async fn answer(
             &state,
             auth.as_ref(),
             &key,
-            method.as_str(),
-            &path,
-            &content_type,
-            &body,
+            &ApiRequest {
+                method: method.as_str(),
+                path: &path,
+                query: query.as_deref(),
+                content_type: &content_type,
+                body: &body,
+            },
         ) {
             Ok((status, document)) => json_response(status, &document),
             Err(refusal) => rendered(&refusal),
@@ -482,6 +500,19 @@ async fn answer(
     })
 }
 
+/// One request to a cluster's Kubernetes API address, as [`serve`] reads it: the
+/// addressing, the media type the body is written in, and the body.
+#[derive(Debug, Clone, Copy)]
+pub struct ApiRequest<'request> {
+    pub method: &'request str,
+    pub path: &'request str,
+    /// The query string, which is where a list states the chunk it asks for.
+    pub query: Option<&'request str>,
+    /// The `Content-Type` the client wrote its body in.
+    pub content_type: &'request str,
+    pub body: &'request [u8],
+}
+
 /// Serve one Kubernetes API request against the cluster keyed `key`, answering the
 /// HTTP status and the object document, or the `Status` the API server refuses it
 /// with.
@@ -493,11 +524,15 @@ pub fn serve(
     state: &::engine::ServiceState<ServiceStore>,
     auth: Option<&AuthPlane>,
     key: &(String, String),
-    method: &str,
-    path: &str,
-    content_type: &str,
-    body: &[u8],
+    request: &ApiRequest<'_>,
 ) -> Result<(u16, ::serde_json::Value), ApiRefusal> {
+    let ApiRequest {
+        method,
+        path,
+        query,
+        content_type,
+        body,
+    } = *request;
     let segments: Vec<&str> = path
         .split('/')
         .filter(|segment| !segment.is_empty())
@@ -605,6 +640,9 @@ pub fn serve(
     let nodes = store.scheduler_nodes(&key.0, &key.1);
 
     let objects = &mut plane_mut(&mut store, key)?.objects;
+    // The chunk a list asks for, read once: every collection below answers one
+    // chunk of itself ([`super::kubernetes_lists`]).
+    let list_request = ListRequest::from_query(query);
     // The clock-owed moves of this cluster's objects, materialised before any of
     // them is reported: each was due at a stored instant whether or not anybody
     // called.
@@ -615,20 +653,7 @@ pub fn serve(
             Ok((201, objects.create_namespace(&document, now)?))
         }
         (method, ["namespaces"]) if method == ::http::Method::GET.as_str() => {
-            let items: Vec<::serde_json::Value> = objects
-                .namespaces
-                .keys()
-                .filter_map(|name| objects.namespace_json(name).ok())
-                .collect();
-            Ok((
-                200,
-                ::serde_json::json!({
-                    "kind": "NamespaceList",
-                    "apiVersion": super::kubernetes_objects::CORE_API_VERSION,
-                    "metadata": {},
-                    "items": items,
-                }),
-            ))
+            Ok((200, objects.namespace_list_json(&list_request?)))
         }
         (method, ["namespaces", namespace]) if method == ::http::Method::GET.as_str() => {
             Ok((200, objects.namespace_json(namespace)?))
@@ -638,12 +663,31 @@ pub fn serve(
             Ok((201, objects.create_pod(namespace, &document, now, &nodes)?))
         }
         (method, ["namespaces", namespace, "pods"]) if method == ::http::Method::GET.as_str() => {
-            Ok((200, objects.pod_list_json(namespace)?))
+            Ok((200, objects.pod_list_json(namespace, &list_request?)?))
         }
         (method, ["namespaces", namespace, "pods", name])
             if method == ::http::Method::GET.as_str() =>
         {
             Ok((200, objects.pod_json(namespace, name)?))
+        }
+        (method, ["namespaces", namespace, "configmaps"])
+            if method == ::http::Method::POST.as_str() =>
+        {
+            let document = read_manifest(content_type, body)?;
+            Ok((201, objects.create_config_map(namespace, &document, now)?))
+        }
+        (method, ["namespaces", namespace, "configmaps"])
+            if method == ::http::Method::GET.as_str() =>
+        {
+            Ok((
+                200,
+                objects.config_map_list_json(namespace, &list_request?)?,
+            ))
+        }
+        (method, ["namespaces", namespace, "configmaps", name])
+            if method == ::http::Method::GET.as_str() =>
+        {
+            Ok((200, objects.config_map_json(namespace, name)?))
         }
         (method, ["namespaces", namespace, "serviceaccounts"])
             if method == ::http::Method::POST.as_str() =>
@@ -657,7 +701,10 @@ pub fn serve(
         (method, ["namespaces", namespace, "serviceaccounts"])
             if method == ::http::Method::GET.as_str() =>
         {
-            Ok((200, objects.service_account_list_json(namespace)?))
+            Ok((
+                200,
+                objects.service_account_list_json(namespace, &list_request?)?,
+            ))
         }
         (method, ["namespaces", namespace, "serviceaccounts", name])
             if method == ::http::Method::GET.as_str() =>
@@ -713,6 +760,7 @@ fn core_api_resource_list() -> ::serde_json::Value {
             resource("namespaces", "Namespace", false, &["ns"], &read_create),
             resource("nodes", "Node", false, &["no"], &read),
             resource("pods", "Pod", true, &["po"], &read_create),
+            resource("configmaps", "ConfigMap", true, &["cm"], &read_create),
             resource(
                 "serviceaccounts",
                 "ServiceAccount",

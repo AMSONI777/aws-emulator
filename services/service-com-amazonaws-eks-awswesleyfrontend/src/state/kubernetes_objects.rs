@@ -7,8 +7,9 @@
 //! client reaches there is a Kubernetes API: it addresses `/api/v1/...`, sends and
 //! reads object manifests, and is answered a `Status` object when a request cannot
 //! be served. That API is not in the AWS Smithy surface, so the shapes here are
-//! the Kubernetes ones (`Pod`, `ServiceAccount`, `Namespace`, `TokenRequest`,
-//! `Status`) written as the JSON documents a client sends and reads.
+//! the Kubernetes ones (`Pod`, `ServiceAccount`, `Namespace`, `ConfigMap`,
+//! `TokenRequest`, `Status`) written as the JSON documents a client sends and
+//! reads.
 //!
 //! Everything a request is answered with is computed from these records: a pod is
 //! reported with the `metadata.uid` the create minted for it, a token is issued
@@ -20,6 +21,10 @@
 //! the objects and the rules over them, so both the published address and any
 //! later in-process caller answer from one place.
 
+use super::kubernetes_config_maps::ConfigMapObject;
+use super::kubernetes_lists::{listed, ListRequest};
+use super::kubernetes_metadata::ObjectMetadata;
+use super::kubernetes_pod_spec::admitted_pod_spec;
 use super::*;
 
 /// The namespaces a cluster's API server starts with, as Kubernetes creates them
@@ -98,12 +103,45 @@ pub struct ClusterObjects {
 pub struct NamespaceObject {
     pub uid: String,
     pub created_at: SystemTime,
+    /// The labels and annotations the manifest carried.
+    pub metadata: ObjectMetadata,
     /// The service accounts of this namespace, by name. Bounded by
     /// [`MAX_SERVICE_ACCOUNTS_PER_NAMESPACE`].
     pub service_accounts: BTreeMap<String, ServiceAccountObject>,
     /// The pods of this namespace, by name. Bounded by
     /// [`MAX_PODS_PER_NAMESPACE`].
     pub pods: BTreeMap<String, PodObject>,
+    /// The ConfigMaps of this namespace, by name. Bounded by
+    /// [`super::MAX_CONFIG_MAPS_PER_NAMESPACE`]; the objects and the answers
+    /// about them live in [`super::kubernetes_config_maps`].
+    pub config_maps: BTreeMap<String, ConfigMapObject>,
+}
+
+impl NamespaceObject {
+    /// A namespace as Kubernetes creates one: empty but for the `default`
+    /// service account Kubernetes creates in every namespace.
+    ///
+    /// The ONE constructor, so the namespaces a cluster is created with and the
+    /// ones a client creates afterwards hold the same objects.
+    fn new(metadata: ObjectMetadata, now: SystemTime) -> Self {
+        Self {
+            uid: new_object_uid(),
+            created_at: now,
+            metadata,
+            service_accounts: [(
+                DEFAULT_SERVICE_ACCOUNT.to_string(),
+                ServiceAccountObject {
+                    uid: new_object_uid(),
+                    created_at: now,
+                    metadata: ObjectMetadata::default(),
+                },
+            )]
+            .into_iter()
+            .collect(),
+            pods: BTreeMap::new(),
+            config_maps: BTreeMap::new(),
+        }
+    }
 }
 
 /// One service account: the identity a pod runs as, and what a `TokenRequest`
@@ -112,6 +150,9 @@ pub struct NamespaceObject {
 pub struct ServiceAccountObject {
     pub uid: String,
     pub created_at: SystemTime,
+    /// The labels and annotations the manifest carried — among them the ones a
+    /// client puts on an account to bind it to an IAM role.
+    pub metadata: ObjectMetadata,
 }
 
 /// How long a pod that has been bound to a node reports `Pending` before the
@@ -136,13 +177,16 @@ pub const POD_PHASE_RUNNING: &str = "Running";
 pub struct PodObject {
     pub uid: String,
     pub created_at: SystemTime,
+    /// The labels and annotations the manifest carried.
+    pub metadata: ObjectMetadata,
     /// The service account the pod runs as: `spec.serviceAccountName`, or the
     /// namespace's `default` account for a pod that names none, which is what
     /// Kubernetes fills in.
     pub service_account_name: String,
-    /// The pod's `spec` AS ADMITTED: the one the create carried, with the
-    /// defaults the API server fills in — the service account it resolved to, and
-    /// the node the cluster bound the pod to.
+    /// The pod's `spec` AS ADMITTED: the one the create carried, validated
+    /// ([`super::kubernetes_pod_spec::admitted_pod_spec`]) with the defaults the
+    /// API server fills in — the service account it resolved to, and the node the
+    /// cluster bound the pod to.
     ///
     /// Held whole rather than field by field, because a client reads a pod back
     /// to see what the cluster admitted — its containers, their environment and
@@ -245,6 +289,15 @@ impl PodObject {
                 ::serde_json::json!({
                     "name": name,
                     "image": image,
+                    // `ContainerStatus.imageID` is "ImageID of the container's
+                    // image", which is the id the runtime resolved the reference
+                    // to when it PULLED it. Nothing here pulls an image, so there
+                    // is no resolved id to report and the member is reported as
+                    // it is for a container whose image has not been pulled —
+                    // empty, rather than an id nothing produced. It is reported
+                    // rather than left out because the member is a required one
+                    // of the status a client deserialises.
+                    "imageID": "",
                     "ready": running,
                     "started": running,
                     "restartCount": 0,
@@ -379,22 +432,9 @@ impl ClusterObjects {
     pub fn for_new_cluster(now: SystemTime) -> Self {
         let mut namespaces = BTreeMap::new();
         for name in INITIAL_NAMESPACES {
-            let mut service_accounts = BTreeMap::new();
-            service_accounts.insert(
-                DEFAULT_SERVICE_ACCOUNT.to_string(),
-                ServiceAccountObject {
-                    uid: new_object_uid(),
-                    created_at: now,
-                },
-            );
             namespaces.insert(
                 name.to_string(),
-                NamespaceObject {
-                    uid: new_object_uid(),
-                    created_at: now,
-                    service_accounts,
-                    pods: BTreeMap::new(),
-                },
+                NamespaceObject::new(ObjectMetadata::default(), now),
             );
         }
         Self { namespaces }
@@ -402,7 +442,10 @@ impl ClusterObjects {
 
     /// The namespace `name`, or the Kubernetes not-found `Status` for one this
     /// cluster does not hold.
-    fn namespace(&self, name: &str) -> Result<&NamespaceObject, ApiRefusal> {
+    ///
+    /// `pub(super)` so the modules holding the objects INSIDE a namespace
+    /// ([`super::kubernetes_config_maps`]) resolve it the same way.
+    pub(super) fn namespace(&self, name: &str) -> Result<&NamespaceObject, ApiRefusal> {
         self.namespaces
             .get(name)
             .ok_or_else(|| ApiRefusal::not_found("namespaces", name))
@@ -426,20 +469,10 @@ impl ClusterObjects {
         }
         self.namespaces.insert(
             name.clone(),
-            NamespaceObject {
-                uid: new_object_uid(),
-                created_at: now,
-                service_accounts: [(
-                    DEFAULT_SERVICE_ACCOUNT.to_string(),
-                    ServiceAccountObject {
-                        uid: new_object_uid(),
-                        created_at: now,
-                    },
-                )]
-                .into_iter()
-                .collect(),
-                pods: BTreeMap::new(),
-            },
+            NamespaceObject::new(
+                ObjectMetadata::from_manifest("Namespace", &name, manifest)?,
+                now,
+            ),
         );
         self.namespace_json(&name)
     }
@@ -450,14 +483,24 @@ impl ClusterObjects {
         Ok(::serde_json::json!({
             "kind": "Namespace",
             "apiVersion": CORE_API_VERSION,
-            "metadata": {
-                "name": name,
-                "uid": namespace.uid,
-                "creationTimestamp": rfc3339_seconds(namespace.created_at),
-            },
+            "metadata": namespace.metadata.render(
+                name,
+                None,
+                &namespace.uid,
+                namespace.created_at,
+            ),
             "spec": {},
             "status": { "phase": "Active" },
         }))
+    }
+
+    /// The namespaces this cluster holds, as the `NamespaceList` a client reads
+    /// — one chunk of it ([`super::kubernetes_lists`]).
+    pub fn namespace_list_json(&self, request: &ListRequest) -> ::serde_json::Value {
+        let names: Vec<String> = self.namespaces.keys().cloned().collect();
+        listed("NamespaceList", &names, request, |name| {
+            self.namespace_json(name).ok()
+        })
     }
 
     /// `POST /api/v1/namespaces/{namespace}/serviceaccounts`.
@@ -471,6 +514,7 @@ impl ClusterObjects {
         // The namespace is resolved first: an object cannot be created in a
         // namespace that does not exist.
         self.namespace(namespace)?;
+        let metadata = ObjectMetadata::from_manifest("ServiceAccount", &name, manifest)?;
         let held = self
             .namespaces
             .get_mut(namespace)
@@ -489,6 +533,7 @@ impl ClusterObjects {
             ServiceAccountObject {
                 uid: new_object_uid(),
                 created_at: now,
+                metadata,
             },
         );
         self.service_account_json(namespace, &name)
@@ -508,20 +553,22 @@ impl ClusterObjects {
         Ok(::serde_json::json!({
             "kind": "ServiceAccount",
             "apiVersion": CORE_API_VERSION,
-            "metadata": {
-                "name": name,
-                "namespace": namespace,
-                "uid": account.uid,
-                "creationTimestamp": rfc3339_seconds(account.created_at),
-            },
+            "metadata": account.metadata.render(
+                name,
+                Some(namespace),
+                &account.uid,
+                account.created_at,
+            ),
         }))
     }
 
     /// `GET /api/v1/namespaces/{namespace}/serviceaccounts`: the namespace's service
-    /// accounts, as the `ServiceAccountList` a client reads.
+    /// accounts, as the `ServiceAccountList` a client reads — one chunk of it
+    /// ([`super::kubernetes_lists`]).
     pub fn service_account_list_json(
         &self,
         namespace: &str,
+        request: &ListRequest,
     ) -> Result<::serde_json::Value, ApiRefusal> {
         let names: Vec<String> = self
             .namespace(namespace)?
@@ -529,15 +576,8 @@ impl ClusterObjects {
             .keys()
             .cloned()
             .collect();
-        let items: Vec<::serde_json::Value> = names
-            .iter()
-            .filter_map(|name| self.service_account_json(namespace, name).ok())
-            .collect();
-        Ok(::serde_json::json!({
-            "kind": "ServiceAccountList",
-            "apiVersion": CORE_API_VERSION,
-            "metadata": {},
-            "items": items,
+        Ok(listed("ServiceAccountList", &names, request, |name| {
+            self.service_account_json(namespace, name).ok()
         }))
     }
 
@@ -571,21 +611,13 @@ impl ClusterObjects {
                 &service_account_name,
             ));
         }
-        // The spec as the API server ADMITS it: the one the manifest carried, with
-        // the service account it resolved to filled in under both members
-        // Kubernetes reports it under.
-        let mut spec = match manifest.get("spec") {
-            None | Some(::serde_json::Value::Null) => ::serde_json::json!({}),
-            Some(spec @ ::serde_json::Value::Object(_)) => spec.clone(),
-            Some(_) => {
-                return Err(ApiRefusal::invalid(format!(
-                    "Pod \"{name}\" is invalid: spec: Invalid value: the pod's spec must be \
-                     an object"
-                )))
-            }
-        };
-        spec["serviceAccountName"] = ::serde_json::json!(service_account_name);
-        spec["serviceAccount"] = ::serde_json::json!(service_account_name);
+        // The spec as the API server ADMITS it: the one the manifest carried,
+        // VALIDATED — a Pod with no container list is a pod with no workload,
+        // which the API server refuses — with the service account it resolved to
+        // filled in under both members Kubernetes reports it under. Nothing is
+        // stored until it has been admitted, so a refused create writes nothing.
+        let spec = admitted_pod_spec(&name, manifest, &service_account_name)?;
+        let metadata = ObjectMetadata::from_manifest("Pod", &name, manifest)?;
         let held = self
             .namespaces
             .get_mut(namespace)
@@ -601,6 +633,7 @@ impl ClusterObjects {
             PodObject {
                 uid: new_object_uid(),
                 created_at: now,
+                metadata,
                 service_account_name,
                 spec,
                 node_name: None,
@@ -646,12 +679,7 @@ impl ClusterObjects {
         Ok(::serde_json::json!({
             "kind": "Pod",
             "apiVersion": CORE_API_VERSION,
-            "metadata": {
-                "name": name,
-                "namespace": namespace,
-                "uid": pod.uid,
-                "creationTimestamp": rfc3339_seconds(pod.created_at),
-            },
+            "metadata": pod.metadata.render(name, Some(namespace), &pod.uid, pod.created_at),
             // The spec this create was admitted with, read back unchanged.
             "spec": pod.spec,
             // What the pod has reached on the node it was bound to.
@@ -660,23 +688,20 @@ impl ClusterObjects {
     }
 
     /// `GET /api/v1/namespaces/{namespace}/pods`: the namespace's pods, as the
-    /// `PodList` a client reads.
-    pub fn pod_list_json(&self, namespace: &str) -> Result<::serde_json::Value, ApiRefusal> {
+    /// `PodList` a client reads — one chunk of it ([`super::kubernetes_lists`]).
+    pub fn pod_list_json(
+        &self,
+        namespace: &str,
+        request: &ListRequest,
+    ) -> Result<::serde_json::Value, ApiRefusal> {
         let names: Vec<String> = self
             .namespace(namespace)?
             .pods
             .keys()
             .cloned()
             .collect();
-        let items: Vec<::serde_json::Value> = names
-            .iter()
-            .filter_map(|name| self.pod_json(namespace, name).ok())
-            .collect();
-        Ok(::serde_json::json!({
-            "kind": "PodList",
-            "apiVersion": CORE_API_VERSION,
-            "metadata": {},
-            "items": items,
+        Ok(listed("PodList", &names, request, |name| {
+            self.pod_json(namespace, name).ok()
         }))
     }
 
@@ -1015,7 +1040,10 @@ impl ApiRefusal {
 ///
 /// `generateName` is served too — a client that sends one asks the API server to
 /// mint the name — by appending the five random characters Kubernetes appends.
-fn manifest_name(manifest: &::serde_json::Value, kind: &str) -> Result<String, ApiRefusal> {
+pub(super) fn manifest_name(
+    manifest: &::serde_json::Value,
+    kind: &str,
+) -> Result<String, ApiRefusal> {
     let metadata = manifest.get("metadata");
     if let Some(name) = metadata
         .and_then(|metadata| metadata.get("name"))
