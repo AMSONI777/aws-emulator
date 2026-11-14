@@ -372,6 +372,9 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
             active_at: now + crate::state::CREATE_TRANSITION,
             // Nothing is deleting this target group yet.
             deleting_at: None,
+            // A target group is created empty: targets are registered with it afterwards
+            // (`RegisterTargets`).
+            targets: Vec::new(),
             sequence,
         };
 

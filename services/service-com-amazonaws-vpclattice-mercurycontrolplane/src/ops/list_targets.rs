@@ -1,15 +1,10 @@
 // SPDX-License-Identifier: CC0-1.0
 
 //! @op ListTargets
-//! SCAFFOLDED, NOT IMPLEMENTED: this operation answers HTTP 501 `NotImplemented` and
-//! asserts NOTHING about `ListTargets`'s real behaviour. Implement it here — this is
-//! the ONLY file to touch for this operation.
-//!
-//! A 501 from this operation means "nobody has written it yet", never "the emulator is
-//! broken". Replace the `Err(..)` in [`ListTargets::handle`] with real behaviour and
-//! delete the SCAFFOLDED marker line above; that line is the machine-readable record of
-//! which operations are still stubs (`grep -rl '^//! SCAFFOLDED, NOT IMPLEMENTED:' */src/ops/`),
-//! so leaving it on an implemented operation under-reports progress.
+//! Reports the targets `RegisterTargets` stored on a target group, each with the status
+//! the stored records and the clock give it. A reporting operation: it writes nothing
+//! beyond materialising a target group whose asynchronous removal the clock has already
+//! made due.
 //!
 //! ## Shape of an operation
 //!
@@ -120,6 +115,17 @@ impl From<ListTargetsErrorModeled> for ListTargetsError {
     }
 }
 
+/// HTTP 404 for an identifier that names no persisted target group, built by the
+/// service's shared error construction ([`crate::state::resource_not_found`]): AWS's
+/// not-found message over the submitted identifier, and the kind's resource-type token.
+fn not_found(identifier: &str) -> ListTargetsError {
+    ListTargetsErrorModeled::ResourceNotFoundException(crate::state::resource_not_found(
+        crate::state::ResourceKind::TargetGroup,
+        identifier,
+    ))
+    .into()
+}
+
 /// The `ListTargets` operation.
 ///
 /// Owns the shared engine (the constructor seam) and implements
@@ -156,18 +162,139 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         input: Self::Input,
         ctx: &smithy_server_runtime::OperationContext<'_>,
     ) -> Result<Self::Output, Self::Error> {
-        // The engine is reachable from `&self` (constructor-injected); `ctx` carries
-        // request metadata. Both are bound here so an implementer has them in scope.
-        let _ = (&input, ctx, &self.engine);
-        // Implement `ListTargets` here, then delete the SCAFFOLDED marker at the top of
-        // this file. Return modeled failures as
-        // `Err(ListTargetsErrorModeled::Variant(..).into())` — the `From` impl above lifts it.
-        //
-        // To refuse a bad request this operation models no error for, return
-        // `Err(crate::scaffolded::Scaffolded::validation("..."))` — a 400
-        // `ValidationException`. Do NOT answer 501 for it: 501 means "not written yet",
-        // not "bad request". Modeled constraints are already refused BEFORE this
-        // handler runs, so reaching here means the input satisfies every one of them.
-        Err(crate::scaffolded::Scaffolded::not_implemented("ListTargets"))
+        let _ = ctx;
+        // A `targets` filter names at most the number of targets that member's own
+        // modelled `@length(0, 20)` admits. Checked FIRST — before the state lock is taken
+        // and before any per-target work — so the length a caller chose cannot decide how
+        // much work this listing does. The boundary refuses a longer filter before this
+        // handler runs, so this reports the same violation it would.
+        if let Err(violation) = crate::state::check_target_count(
+            crate::state::TARGETS_MEMBER,
+            input.targets.as_ref().map_or(0, Vec::len),
+            crate::state::MAX_TARGET_FILTER,
+        ) {
+            return Err(ListTargetsErrorModeled::ValidationException(
+                crate::state::validation_exception(&[violation]),
+            )
+            .into());
+        }
+        let Some(state) = crate::state::service_state(&*self.engine) else {
+            return Err(ListTargetsErrorModeled::InternalServerException(
+                InternalServerException {
+                    message: "the vpc-lattice state store is unavailable".to_string(),
+                    retry_after_seconds: None,
+                },
+            )
+            .into());
+        };
+        // `targetGroupIdentifier` is modelled as either the bare id or the target
+        // group's ARN.
+        let Some(id) = crate::state::id_from_identifier(
+            &input.target_group_identifier,
+            crate::state::PREFIX_TARGET_GROUP,
+        ) else {
+            return Err(not_found(&input.target_group_identifier));
+        };
+        let now = std::time::SystemTime::now();
+        let mut store = state.lock();
+        // A delete is asynchronous: a target group whose removal the clock has already
+        // made due is gone, so this read materialises that removal first and then reports
+        // the modelled not-found for it, exactly as every other read of one does.
+        store.expire_deleted_target_groups(now);
+        let Some(group) = store.target_groups.get(&id) else {
+            return Err(not_found(&input.target_group_identifier));
+        };
+
+        let Ok(after) = crate::state::decode_cursor(input.next_token.as_deref()) else {
+            // A token no listing of this service ever minted; the model declares
+            // ValidationException for input the service refuses. `nextToken` is an
+            // OPAQUE cursor — the model constrains only its length, which the boundary
+            // enforces — so there is no constraint to report a value against and this
+            // message is the refusal itself, not a constraint clause.
+            return Err(ListTargetsErrorModeled::ValidationException(
+                ValidationException {
+                    message: "nextToken is not a token this service issued".to_string(),
+                    reason: crate::state::VALIDATION_REASON_FIELD.to_string(),
+                    field_list: Some(vec![ValidationExceptionField {
+                        name: "nextToken".to_string(),
+                        message: "the token does not name a page of this result set".to_string(),
+                    }]),
+                },
+            )
+            .into());
+        };
+
+        // "By default, all targets are included. You can also filter the results by
+        // target" (this operation's own documentation): a `targets` filter keeps the
+        // registered targets it names, matching a target by its id and, when the filter
+        // entry sends one, by the port it is reached on too. The filter is indexed ONCE,
+        // so the listing costs one pass over it plus one over the targets held.
+        let filter: Option<std::collections::HashSet<(&str, Option<i32>)>> = input
+            .targets
+            .as_ref()
+            .filter(|asked| !asked.is_empty())
+            .map(|asked| {
+                asked
+                    .iter()
+                    .map(|target| (target.id.as_str(), target.port))
+                    .collect()
+            });
+        let wanted = |target: &crate::state::RegisteredTarget| {
+            filter.as_ref().is_none_or(|asked| {
+                // An entry that sends no port names the target whatever port it is
+                // reached on; one that sends a port names only that pair.
+                asked.contains(&(target.id.as_str(), None))
+                    || asked.contains(&(target.id.as_str(), target.port))
+            })
+        };
+
+        // One stable order for every page: registration order, from the monotonic
+        // sequence number each target was stored with. A page's cursor names the ORDER it
+        // ended at, so deregistering a target between pages cannot invalidate a cursor.
+        let mut ordered: Vec<&crate::state::RegisteredTarget> = group
+            .targets
+            .iter()
+            .filter(|target| wanted(target))
+            .collect();
+        ordered.sort_by_key(|target| target.sequence);
+
+        // `maxResults` caps one page. Absent, the page carries at most the maximum the
+        // model allows that member (1..100), so one call can never be made to serialise
+        // every target of a group; `nextToken` pages the rest. Clamped into that modelled
+        // range, so no page size can be zero and leave a caller paging forever.
+        let page_size = input
+            .max_results
+            .and_then(|max| usize::try_from(max).ok())
+            .unwrap_or(crate::state::MAX_PAGE_SIZE)
+            .clamp(1, crate::state::MAX_PAGE_SIZE);
+
+        let mut items: Vec<TargetSummary> = Vec::new();
+        let mut page_ends_at = after;
+        let mut more_follow = false;
+        for target in ordered.iter().filter(|target| target.sequence > after) {
+            if items.len() == page_size {
+                // One target beyond the page proves a next page exists; the cursor names
+                // where this page ended, so resuming never repeats or skips one.
+                more_follow = true;
+                break;
+            }
+            page_ends_at = target.sequence;
+            items.push(TargetSummary {
+                id: Some(target.id.clone()),
+                port: target.port,
+                // Derived from the stored records and the clock, so a status is never a
+                // health this service did not measure.
+                status: Some(store.target_status(group, target, now).to_string()),
+                // `reasonCode` is "the code for why the target status is what it is"; the
+                // model states no code, and this service has no reason to report beyond
+                // the status itself.
+                reason_code: None,
+            });
+        }
+
+        Ok(ListTargetsOutput {
+            items,
+            next_token: more_follow.then(|| crate::state::encode_cursor(page_ends_at)),
+        })
     }
 }

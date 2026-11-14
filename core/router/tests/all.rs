@@ -2789,9 +2789,6 @@ mod bedrock_agent_ingestion_populates_its_s3_vectors_index;
 // this file and for every service crate's `tests/all.rs`, so check there rather than
 // leaving a note here.
 // A suite left at the top level of `tests/` fails the build. Declare each suite exactly
-// ONCE: this is one crate root, so a second `mod` for the same name is `E0428` and fails
-// every suite in this target. `all/all_rs_declares_each_suite_once.rs` checks that for
-// this file and for every service crate's `tests/all.rs`, so check there rather than
 // leaving a note here. (This note sits mid-file, so it is a plain comment: an inner doc
 // comment is only accepted before the first item of a module.)
 // Declared here, in the appended tail: WAFv2 protection a stack provisions.
@@ -2946,3 +2943,21 @@ mod s3_object_events_update_their_search_index;
 // service crate's test target can deploy the stack and then read the pool's roles back.
 #[path = "all/cloudformation_cognito_identity_role_attachment_refusal.rs"]
 mod cloudformation_cognito_identity_role_attachment_refusal;
+//! suite left at the top level of `tests/` fails the build. Declare each suite exactly
+//! ONCE: this is one crate root, so a second `mod` for the same name is `E0428` and fails
+//! every suite in this target. `all/all_rs_declares_each_suite_once.rs` checks that for
+//! this file and for every service crate's `tests/all.rs`, so check there rather than
+//! leaving a note here.
+// it was appended here as well while two branches were landing at the same time.)
+// (`redshift_health_alarms_evaluate` is declared ONCE, further up this tail: a module may
+// be declared only once, and two branches landing at once appended it twice.)
+// (The Cognito-authorizer suite is declared ONCE, in the head region above: a module may be
+// declared only once, and two branches landing at once each kept a different copy of it.)
+// The suites below are declared exactly ONCE, here. Each of them had accumulated a second
+// declaration (or lost its only one) in this index: the tail is where every landing appends
+// its line while the name is already declared further up, a module declared twice loads the
+// same file twice and compiles neither, and two branches removing the same duplicate each
+// leave none. One block, one declaration per suite.
+// (`pricing_plan_subscription_resource_eligibility` is declared ONCE, in the head region
+// above: a module may be declared only once, and two branches landing at once each kept a
+// different copy of it.)

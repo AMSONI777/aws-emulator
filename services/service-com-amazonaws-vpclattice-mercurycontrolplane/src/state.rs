@@ -295,6 +295,52 @@ pub const MAX_RULES_PER_LISTENER: usize = 100;
 /// `ServiceQuotaExceededException`.
 pub const MAX_TARGET_GROUPS: usize = 1_000;
 
+/// How many targets this emulator will hold for one target group whose type documents no
+/// maximum of its own.
+/// Same reasoning as the ceilings above, and `RegisterTargets` models the same
+/// `ServiceQuotaExceededException`. Not a fidelity claim about the published
+/// targets-per-target-group quota: it is this emulator's own ceiling, so a caller looping
+/// on registration cannot grow this process's memory without bound.
+pub const MAX_TARGETS_PER_TARGET_GROUP: usize = 1_000;
+
+/// The most targets one registration may carry.
+///
+/// SOURCE: `RegisterTargets`' `targets` member is modelled `@length(1, 100)`
+/// (`smithy_query(query="operation",operation="RegisterTargets")`). The request boundary
+/// refuses a longer list before a handler runs; the handler checks it again before it does
+/// anything proportional to the number of targets the caller chose
+/// ([`check_target_count`]), so no request can make this service do unbounded work.
+pub const MAX_TARGETS_PER_REGISTRATION: usize = 100;
+
+/// The most targets a `ListTargets` filter may name: that operation's own `targets` member
+/// is modelled `@length(0, 20)`. Same reasoning as [`MAX_TARGETS_PER_REGISTRATION`].
+pub const MAX_TARGET_FILTER: usize = 20;
+
+/// The maximum number of targets a target group of each type holds, for every type whose
+/// OWN documentation states one.
+///
+/// SOURCE: `RegisterTargets`'s own documentation, "If it's a Lambda target, you can only
+/// have one target in a target group" — the only per-type maximum this service's model
+/// documents. A type absent from this table has no documented maximum and is bounded by
+/// this emulator's own ceiling instead ([`MAX_TARGETS_PER_TARGET_GROUP`]).
+pub const DOCUMENTED_TARGET_MAXIMUM: &[(&str, usize)] = &[(TYPE_LAMBDA, 1)];
+
+/// The maximum number of targets `group_type`'s own documentation allows one of its target
+/// groups, or `None` for a type that documents none; see [`DOCUMENTED_TARGET_MAXIMUM`].
+pub fn documented_target_maximum(group_type: &str) -> Option<usize> {
+    DOCUMENTED_TARGET_MAXIMUM
+        .iter()
+        .find(|(name, _)| *name == group_type)
+        .map(|(_, maximum)| *maximum)
+}
+
+/// How many targets a target group of `group_type` can hold: the maximum its type
+/// documents, and this emulator's ceiling ([`MAX_TARGETS_PER_TARGET_GROUP`]) for a type
+/// that documents none.
+pub fn max_targets_for(group_type: &str) -> usize {
+    documented_target_maximum(group_type).unwrap_or(MAX_TARGETS_PER_TARGET_GROUP)
+}
+
 /// The listener port a create gets when it omits `port`, by protocol.
 ///
 /// From the `port` member's own documentation: "The listener port. You can specify a
@@ -586,6 +632,13 @@ pub struct TargetGroup {
     /// reports `DELETE_IN_PROGRESS` until it passes and is then gone
     /// ([`ComAmazonawsVpclatticeMercurycontrolplaneState::expire_deleted_target_groups`]).
     pub deleting_at: Option<SystemTime>,
+    /// The targets registered with this target group, in registration order.
+    ///
+    /// They live ON the target group record, so the ONE store a target group is read
+    /// from is the one its targets are read from, and a removed target group takes its
+    /// targets with it. Bounded by [`max_targets_for`]: a registration past that ceiling
+    /// is refused.
+    pub targets: Vec<RegisteredTarget>,
     /// Creation order, so a listing pages deterministically. See [`encode_cursor`].
     pub sequence: u64,
 }
@@ -616,6 +669,105 @@ impl TargetGroup {
     pub fn deletion_due(&self, now: SystemTime) -> bool {
         self.deleting_at.is_some_and(|due| now >= due)
     }
+
+    /// Whether this target group health-checks its targets at all.
+    ///
+    /// A health check belongs to a type that supports the `healthCheck` config member at
+    /// all ([`CONFIG_MEMBER_SUPPORT`]: not `LAMBDA`, not `ALB`) and that has not turned
+    /// it off (`enabled`, "Indicates whether health checking is enabled"). Where it does
+    /// not apply, a target's status is `UNAVAILABLE` — "Health checks are unavailable for
+    /// the target group" (`TargetStatus`) — rather than a health the service never
+    /// measured.
+    pub fn health_checks_apply(&self) -> bool {
+        config_member_supported(&self.group_type, "healthCheck")
+            && self
+                .config
+                .health_check
+                .as_ref()
+                .is_none_or(|check| check.enabled != Some(false))
+    }
+
+    /// How long a target of this group reports `INITIAL` before its first health checks
+    /// have had time to pass; see [`initial_health_check_span`].
+    pub fn initial_health_check(&self) -> Duration {
+        initial_health_check_span(self.config.health_check.as_ref())
+    }
+
+    /// How many targets this target group is allowed to hold; see [`max_targets_for`].
+    pub fn target_ceiling(&self) -> usize {
+        max_targets_for(&self.group_type)
+    }
+}
+
+/// One target registered with a target group.
+///
+/// A target is identified by its `id` TOGETHER with the port it is reached on, so the
+/// same backend registered on two ports is two targets and a second registration of the
+/// same pair changes nothing.
+#[derive(Debug, Clone)]
+pub struct RegisteredTarget {
+    /// `Target.id` exactly as the registration sent it: an instance id, an IP address or
+    /// another service's ARN, by the target group's type (see [`check_target_id`]).
+    pub id: String,
+    /// The port the target is reached on: what the registration sent, or the target
+    /// group's own configured port — the default `Target.port` documents for the
+    /// protocol the targets are reached over. `None` for a target of a type where a port
+    /// does not apply ([`effective_target_port`]).
+    pub port: Option<i32>,
+    /// The instant the clock owes this target the end of its initial health checking, so
+    /// a read reports `INITIAL` before it and `HEALTHY` from then on
+    /// ([`ComAmazonawsVpclatticeMercurycontrolplaneState::target_status`]). Stored, never
+    /// slept for.
+    pub healthy_at: SystemTime,
+    /// Registration order, so a listing pages deterministically. See [`encode_cursor`].
+    pub sequence: u64,
+}
+
+/// The `TargetStatus` of a target nothing routes traffic to: "Target group is not used
+/// in a service" (`smithy_query(query="shape",shape="TargetStatus")`).
+pub const TARGET_STATUS_UNUSED: &str = "UNUSED";
+/// The `TargetStatus` of a target in a group that runs no health checks: "Health checks
+/// are unavailable for the target group". Same source as [`TARGET_STATUS_UNUSED`].
+pub const TARGET_STATUS_UNAVAILABLE: &str = "UNAVAILABLE";
+/// The `TargetStatus` while a target's first health checks are still running: "Initial
+/// health checks on the target are being performed". Same source as
+/// [`TARGET_STATUS_UNUSED`].
+pub const TARGET_STATUS_INITIAL: &str = "INITIAL";
+/// The `TargetStatus` of a target whose health checks have passed: "The target is
+/// healthy." Same source as [`TARGET_STATUS_UNUSED`].
+pub const TARGET_STATUS_HEALTHY: &str = "HEALTHY";
+
+/// How long a freshly registered target reports `INITIAL` before it reports `HEALTHY`.
+///
+/// `INITIAL` is non-terminal ("Initial health checks on the target are being performed",
+/// `TargetStatus`), so the clock owes the target a terminal status, and the span is the
+/// one the health check's OWN configuration states: `healthyThresholdCount` is "the
+/// number of consecutive successful health checks required before considering an
+/// unhealthy target healthy" and `healthCheckIntervalSeconds` "the approximate amount of
+/// time, in seconds, between health checks of an individual target"
+/// (`smithy_query(query="shape",shape="HealthCheckConfig")`), so that many checks take
+/// that many intervals. A member the config leaves null contributes the default its own
+/// documentation states ([`HEALTH_CHECK_RANGES`]). Nothing sleeps for it: the due instant
+/// is stored on the target and compared on read.
+pub fn initial_health_check_span(
+    health_check: Option<&crate::ops::types::HealthCheckConfig>,
+) -> Duration {
+    let documented = |member: &str| {
+        HEALTH_CHECK_RANGES
+            .iter()
+            .find(|(name, _, _, _)| *name == member)
+            .map_or(0, |(_, _, _, default)| *default)
+    };
+    let interval = health_check
+        .and_then(|check| check.health_check_interval_seconds)
+        .unwrap_or_else(|| documented("healthCheckIntervalSeconds"));
+    let threshold = health_check
+        .and_then(|check| check.healthy_threshold_count)
+        .unwrap_or_else(|| documented("healthyThresholdCount"));
+    let seconds = u64::try_from(interval.max(0))
+        .unwrap_or_default()
+        .saturating_mul(u64::try_from(threshold.max(0)).unwrap_or_default());
+    Duration::from_secs(seconds)
 }
 
 /// The `TargetGroupType` values the model enumerates
@@ -891,6 +1043,139 @@ pub fn required_config_members_message(group_type: &str) -> String {
 /// wording of it, since the model states no text for the refusal.
 pub fn unsupported_config_member_message(member: &str, group_type: &str) -> String {
     format!("{member} is not supported for target group type {group_type}.")
+}
+
+/// The input member a registration sends its targets at, as the model names it.
+pub const TARGETS_MEMBER: &str = "targets";
+
+/// The member of a target that carries what the target is, as the model names it.
+pub const TARGET_ID_MEMBER: &str = "id";
+
+/// What a target's `id` is, by the type of the target group it is registered with.
+///
+/// SOURCE: `Target`'s `id` documentation — "If the target group type is `INSTANCE`, this
+/// is an instance ID. If the target group type is `IP`, this is an IP address. If the
+/// target group type is `LAMBDA`, this is the ARN of a Lambda function. If the target
+/// group type is `ALB`, this is the ARN of an Application Load Balancer." The model types
+/// the member as a plain `String`, so the form each type demands is checked here
+/// ([`check_target_id`]); an ARN form names the AWS service whose ARN it has to be.
+const TARGET_ID_FORM: &[(&str, TargetIdForm)] = &[
+    (TYPE_INSTANCE, TargetIdForm::InstanceId),
+    (TYPE_IP, TargetIdForm::IpAddress),
+    (TYPE_LAMBDA, TargetIdForm::Arn("lambda")),
+    (TYPE_ALB, TargetIdForm::Arn("elasticloadbalancing")),
+];
+
+/// The form a target's `id` has to have; see [`TARGET_ID_FORM`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum TargetIdForm {
+    /// An EC2 instance id: `i-` and 8 or 17 hexadecimal characters.
+    InstanceId,
+    /// An IP address, of either family.
+    IpAddress,
+    /// An ARN of the named AWS service.
+    Arn(&'static str),
+}
+
+impl TargetIdForm {
+    /// Whether `id` has this form.
+    fn admits(self, id: &str) -> bool {
+        match self {
+            Self::InstanceId => id.strip_prefix("i-").is_some_and(|suffix| {
+                matches!(suffix.len(), 8 | 17)
+                    && suffix.bytes().all(|byte| byte.is_ascii_hexdigit())
+            }),
+            Self::IpAddress => id.parse::<std::net::IpAddr>().is_ok(),
+            // `arn:<partition>:<service>:<region>:<account>:<resource…>`, so the service
+            // is the third colon-separated field of the ARN.
+            Self::Arn(service) => {
+                let mut fields = id.split(':');
+                fields.next() == Some("arn")
+                    && fields.next().is_some_and(|partition| !partition.is_empty())
+                    && fields.next() == Some(service)
+                    && fields.count() >= 3
+            }
+        }
+    }
+
+    /// What this form is, for the refusal that reports it.
+    fn described(self) -> String {
+        match self {
+            Self::InstanceId => "an instance ID".to_string(),
+            Self::IpAddress => "an IP address".to_string(),
+            Self::Arn(service) => format!("an {service} ARN"),
+        }
+    }
+}
+
+/// Refuse a target whose `id` is not of the form its target group's TYPE demands, as the
+/// service-rule violation it is; `Ok(())` for an id of that form, and for a type the
+/// model admits no form for.
+///
+/// The rule is `Target`'s `id` documentation ([`TARGET_ID_FORM`]), which the model
+/// carries no constraint trait for, so it is reported over the bare member it constrains
+/// ([`service_rule_exception`]).
+pub fn check_target_id(group_type: &str, id: &str) -> Result<(), ServiceRuleViolation> {
+    let Some((_, form)) = TARGET_ID_FORM
+        .iter()
+        .find(|(name, _)| *name == group_type)
+    else {
+        return Ok(());
+    };
+    if form.admits(id) {
+        return Ok(());
+    }
+    Err(ServiceRuleViolation {
+        member: TARGET_ID_MEMBER.to_string(),
+        message: unsupported_target_message(id, group_type, *form),
+    })
+}
+
+/// How the service refuses a target whose `id` is not of the form its target group's
+/// type demands.
+///
+/// The construction — the submitted id, the target group's type and the form that type
+/// demands, all taken from the request and the type's own documentation — is the
+/// requirement; the sentence is this service's wording of it, as the model states no
+/// text for the refusal.
+fn unsupported_target_message(id: &str, group_type: &str, form: TargetIdForm) -> String {
+    format!(
+        "Target {id} is not valid for target group type {group_type}: a target of this \
+         type is {}.",
+        form.described()
+    )
+}
+
+/// How the service refuses a registration that would leave a target group holding more
+/// targets than its TYPE allows one.
+///
+/// SOURCE: recorded AWS behaviour (400 `ValidationException`). The sentence is fixed text
+/// for this refusal class; its variable parts are the target group the registration named,
+/// its type, and the maximum that type allows ([`documented_target_maximum`]) — all taken
+/// from the request and the stored record.
+pub fn target_ceiling_message(target_group_id: &str, group_type: &str, maximum: usize) -> String {
+    format!(
+        "Target group {target_group_id} with type {group_type} can only contain a maximum \
+         of {maximum} targets"
+    )
+}
+
+/// The port a target is reached on once registered: what the registration sent, or the
+/// port the target group itself is configured with — the value the member's own
+/// documentation gives a target that sends none ("The port on which the target is
+/// listening. For HTTP, the default is 80. For HTTPS, the default is 443", which is the
+/// same default the group's own `port` carries, filled in by
+/// [`normalized_target_group_config`]).
+///
+/// `None` where a port does not apply to the target at all: a `LAMBDA` target group
+/// supports no `port` in its configuration ([`CONFIG_MEMBER_SUPPORT`]) and a target of it
+/// is a function, which "doesn't apply if the target is a Lambda function"
+/// (`TargetFailure`'s `port`) — so a port sent for one is not persisted and not reported.
+pub fn effective_target_port(group: &TargetGroup, sent: Option<i32>) -> Option<i32> {
+    if !config_member_supported(&group.group_type, "port") {
+        return None;
+    }
+    sent.or(group.config.port)
 }
 
 /// The health check as it is PERSISTED: the caller's health check with every value its
@@ -1457,6 +1742,109 @@ impl ComAmazonawsVpclatticeMercurycontrolplaneState {
         Some(removed)
     }
 
+    /// Register targets with the target group stored under `target_group_id`, answering
+    /// the records as PERSISTED, one per entry of `requested` (`None` when no target group
+    /// is stored under that id).
+    ///
+    /// A target is identified by its id TOGETHER with the port it is reached on, so an
+    /// entry naming a pair the group already holds answers that target and changes nothing
+    /// — which is what makes a retried registration idempotent, health check included.
+    /// Each port is the one the registration settled on ([`effective_target_port`]); the
+    /// caller enforces the group's own target ceiling ([`TargetGroup::target_ceiling`])
+    /// before asking for new ones.
+    ///
+    /// The targets this group already holds are indexed ONCE, so the whole registration
+    /// costs one pass over them plus one over `requested` however many targets either
+    /// side carries.
+    pub fn register_targets(
+        &mut self,
+        target_group_id: &str,
+        requested: &[(String, Option<i32>)],
+        now: SystemTime,
+    ) -> Option<Vec<RegisteredTarget>> {
+        let group = self.target_groups.get(target_group_id)?;
+        // The first health checks start when the target is registered, so the instant the
+        // clock owes it a terminal status is fixed here and only read afterwards.
+        let healthy_at = now + group.initial_health_check();
+        let mut held: HashMap<(String, Option<i32>), RegisteredTarget> = group
+            .targets
+            .iter()
+            .map(|target| ((target.id.clone(), target.port), target.clone()))
+            .collect();
+        let mut registered: Vec<RegisteredTarget> = Vec::with_capacity(requested.len());
+        let mut added: Vec<RegisteredTarget> = Vec::new();
+        for pair in requested {
+            if let Some(existing) = held.get(pair) {
+                registered.push(existing.clone());
+                continue;
+            }
+            let record = RegisteredTarget {
+                id: pair.0.clone(),
+                port: pair.1,
+                healthy_at,
+                sequence: self.next_sequence(),
+            };
+            held.insert(pair.clone(), record.clone());
+            added.push(record.clone());
+            registered.push(record);
+        }
+        let group = self.target_groups.get_mut(target_group_id)?;
+        group.targets.extend(added);
+        Some(registered)
+    }
+
+    /// How many of `targets` the target group under `target_group_id` does not hold yet —
+    /// the number a registration of them would ADD, so a ceiling is checked against what
+    /// the call would really store. The held targets are indexed once, so this costs one
+    /// pass over each side.
+    pub fn new_target_count(
+        &self,
+        target_group_id: &str,
+        targets: &[(String, Option<i32>)],
+    ) -> usize {
+        let Some(group) = self.target_groups.get(target_group_id) else {
+            return targets.len();
+        };
+        let held: std::collections::HashSet<(&str, Option<i32>)> = group
+            .targets
+            .iter()
+            .map(|target| (target.id.as_str(), target.port))
+            .collect();
+        targets
+            .iter()
+            .filter(|(id, port)| !held.contains(&(id.as_str(), *port)))
+            .count()
+    }
+
+    /// The `TargetStatus` of one registered target of `group` at `now`.
+    ///
+    /// Each branch is the status whose OWN documentation describes the state the stored
+    /// records are in (`smithy_query(query="shape",shape="TargetStatus")`): `UNUSED`
+    /// while no listener or rule routes to the target group ("Target group is not used in
+    /// a service", derived from the stored listener and rule records exactly as
+    /// [`Self::service_arns_using`] derives the service list), `UNAVAILABLE` where the
+    /// group runs no health checks at all ("Health checks are unavailable for the target
+    /// group"), and otherwise `INITIAL` until the stored due instant of the target's
+    /// first health checks passes ("Initial health checks on the target are being
+    /// performed") and `HEALTHY` from then on. A pure function of stored state and the
+    /// clock, so reading it changes nothing a later caller sees.
+    pub fn target_status(
+        &self,
+        group: &TargetGroup,
+        target: &RegisteredTarget,
+        now: SystemTime,
+    ) -> &'static str {
+        if self.service_arns_using(&group.id).is_empty() {
+            TARGET_STATUS_UNUSED
+        } else if !group.health_checks_apply() {
+            TARGET_STATUS_UNAVAILABLE
+        } else if now < target.healthy_at {
+            TARGET_STATUS_INITIAL
+        } else {
+            TARGET_STATUS_HEALTHY
+        }
+    }
+
     /// Drop every listener of `service_id`, releasing its name and token records.
     ///
     /// `DeleteService`'s own documentation: "If you delete a service, all resources
@@ -1981,6 +2369,31 @@ pub fn check_tag_count(tags: Option<&HashMap<String, String>>) -> Result<(), Fie
         return Err(Violation {
             path: "tags".to_string(),
             kind: ViolationKind::MaxLength(MAX_TAGS as i64),
+            value: Some(format!("{count} entries")),
+            sensitive: false,
+        });
+    }
+    Ok(())
+}
+
+/// Refuse a list of targets longer than the modelled `@length` ceiling of the member it
+/// was sent at, as the violation the boundary would report for the same trait; `Ok(())`
+/// when it fits.
+///
+/// The boundary already refuses an over-long list, so this is that same bound restated
+/// where the WORK happens: a handler checks it before it takes the state lock and before
+/// it does anything per target, so the number of targets one request supplies cannot
+/// decide how much work this service does. Rendered exactly as [`check_tag_count`]
+/// renders a collection `@length`.
+pub fn check_target_count(
+    member: &str,
+    count: usize,
+    maximum: usize,
+) -> Result<(), FieldViolation> {
+    if count > maximum {
+        return Err(Violation {
+            path: member.to_string(),
+            kind: ViolationKind::MaxLength(maximum as i64),
             value: Some(format!("{count} entries")),
             sensitive: false,
         });

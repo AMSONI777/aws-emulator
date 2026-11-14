@@ -1,15 +1,9 @@
 // SPDX-License-Identifier: CC0-1.0
 
 //! @op RegisterTargets
-//! SCAFFOLDED, NOT IMPLEMENTED: this operation answers HTTP 501 `NotImplemented` and
-//! asserts NOTHING about `RegisterTargets`'s real behaviour. Implement it here — this is
-//! the ONLY file to touch for this operation.
-//!
-//! A 501 from this operation means "nobody has written it yet", never "the emulator is
-//! broken". Replace the `Err(..)` in [`RegisterTargets::handle`] with real behaviour and
-//! delete the SCAFFOLDED marker line above; that line is the machine-readable record of
-//! which operations are still stubs (`grep -rl '^//! SCAFFOLDED, NOT IMPLEMENTED:' */src/ops/`),
-//! so leaving it on an implemented operation under-reports progress.
+//! Registers targets with a persisted target group: each target the group's type admits
+//! is stored on the target-group record and reported under `successful`, so
+//! `ListTargets` reports exactly what this operation stored.
 //!
 //! ## Shape of an operation
 //!
@@ -122,6 +116,57 @@ impl From<RegisterTargetsErrorModeled> for RegisterTargetsError {
     }
 }
 
+/// HTTP 404 for an identifier that names no persisted target group, built by the
+/// service's shared error construction ([`crate::state::resource_not_found`]): AWS's
+/// not-found message over the submitted identifier, and the kind's resource-type token.
+fn not_found(identifier: &str) -> RegisterTargetsError {
+    RegisterTargetsErrorModeled::ResourceNotFoundException(crate::state::resource_not_found(
+        crate::state::ResourceKind::TargetGroup,
+        identifier,
+    ))
+    .into()
+}
+
+/// HTTP 400 for a value a documented SERVICE RULE of this operation refuses — a rule the
+/// model carries no constraint trait for — reported over the bare member the rule
+/// constrains by the service's shared construction
+/// ([`crate::state::service_rule_exception`]).
+fn refused(violation: &crate::state::ServiceRuleViolation) -> RegisterTargetsError {
+    RegisterTargetsErrorModeled::ValidationException(crate::state::service_rule_exception(
+        violation,
+    ))
+    .into()
+}
+
+/// HTTP 409 for a registration against a target group whose asynchronous deletion is
+/// already under way: the record is still readable but no longer takes writes.
+fn conflict(target_group_id: &str, message: String) -> RegisterTargetsError {
+    RegisterTargetsErrorModeled::ConflictException(crate::state::conflict(
+        crate::state::ResourceKind::TargetGroup,
+        target_group_id,
+        message,
+    ))
+    .into()
+}
+
+/// HTTP 402 for a registration that would push a target group past the number of targets
+/// this emulator holds for one ([`crate::state::MAX_TARGETS_PER_TARGET_GROUP`]).
+fn quota_exceeded(target_group_id: &str) -> RegisterTargetsError {
+    RegisterTargetsErrorModeled::ServiceQuotaExceededException(ServiceQuotaExceededException {
+        message: format!(
+            "this target group already holds the maximum of {} targets",
+            crate::state::MAX_TARGETS_PER_TARGET_GROUP
+        ),
+        resource_id: Some(target_group_id.to_string()),
+        resource_type: crate::state::ResourceKind::TargetGroup
+            .wire_type()
+            .to_string(),
+        service_code: crate::state::ARN_SERVICE.to_string(),
+        quota_code: "targets-per-target-group".to_string(),
+    })
+    .into()
+}
+
 /// The `RegisterTargets` operation.
 ///
 /// Owns the shared engine (the constructor seam) and implements
@@ -158,18 +203,124 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         input: Self::Input,
         ctx: &smithy_server_runtime::OperationContext<'_>,
     ) -> Result<Self::Output, Self::Error> {
-        // The engine is reachable from `&self` (constructor-injected); `ctx` carries
-        // request metadata. Both are bound here so an implementer has them in scope.
-        let _ = (&input, ctx, &self.engine);
-        // Implement `RegisterTargets` here, then delete the SCAFFOLDED marker at the top of
-        // this file. Return modeled failures as
-        // `Err(RegisterTargetsErrorModeled::Variant(..).into())` — the `From` impl above lifts it.
-        //
-        // To refuse a bad request this operation models no error for, return
-        // `Err(crate::scaffolded::Scaffolded::validation("..."))` — a 400
-        // `ValidationException`. Do NOT answer 501 for it: 501 means "not written yet",
-        // not "bad request". Modeled constraints are already refused BEFORE this
-        // handler runs, so reaching here means the input satisfies every one of them.
-        Err(crate::scaffolded::Scaffolded::not_implemented("RegisterTargets"))
+        let _ = ctx;
+        // A registration carries at most the number of targets `targets`' own modelled
+        // `@length(1, 100)` admits. Checked FIRST — before the state lock is taken and
+        // before any per-target work — so the count a caller chose can never decide how
+        // much work this operation does, or how long it holds the store. The boundary
+        // refuses an over-long list before this handler runs, so this reports the same
+        // violation it would.
+        if let Err(violation) = crate::state::check_target_count(
+            crate::state::TARGETS_MEMBER,
+            input.targets.len(),
+            crate::state::MAX_TARGETS_PER_REGISTRATION,
+        ) {
+            return Err(RegisterTargetsErrorModeled::ValidationException(
+                crate::state::validation_exception(&[violation]),
+            )
+            .into());
+        }
+        let Some(state) = crate::state::service_state(&*self.engine) else {
+            return Err(RegisterTargetsErrorModeled::InternalServerException(
+                InternalServerException {
+                    message: "the vpc-lattice state store is unavailable".to_string(),
+                    retry_after_seconds: None,
+                },
+            )
+            .into());
+        };
+        // `targetGroupIdentifier` is modelled as either the bare id or the target
+        // group's ARN.
+        let Some(id) = crate::state::id_from_identifier(
+            &input.target_group_identifier,
+            crate::state::PREFIX_TARGET_GROUP,
+        ) else {
+            return Err(not_found(&input.target_group_identifier));
+        };
+        let now = std::time::SystemTime::now();
+        let mut store = state.lock();
+        // A delete is asynchronous: a target group whose removal the clock has already
+        // made due is gone, so this registration materialises that removal first and then
+        // reports the modelled not-found for it.
+        store.expire_deleted_target_groups(now);
+        let Some(group) = store.target_groups.get(&id) else {
+            return Err(not_found(&input.target_group_identifier));
+        };
+        if group.deleting_at.is_some() {
+            // The record is readable until the clock removes it, but a write against a
+            // resource whose deletion is under way conflicts with its current state.
+            return Err(conflict(
+                &id,
+                format!("TargetGroup {id} deletion is in progress."),
+            ));
+        }
+
+        // What each target is has to match the target group's TYPE — "If the target group
+        // type is INSTANCE, this is an instance ID. If the target group type is IP, this
+        // is an IP address. If the target group type is LAMBDA, this is the ARN of a
+        // Lambda function. If the target group type is ALB, this is the ARN of an
+        // Application Load Balancer" (`Target`'s `id`) — and the port it is reached on is
+        // the one the registration sent or the group's own configured port, except where a
+        // port does not apply to the target at all. Both are settled before anything is
+        // stored, so a refused registration leaves every target already registered
+        // exactly as it was.
+        let mut requested: Vec<(String, Option<i32>)> = Vec::with_capacity(input.targets.len());
+        let mut seen: std::collections::HashSet<(String, Option<i32>)> =
+            std::collections::HashSet::with_capacity(input.targets.len());
+        for target in &input.targets {
+            crate::state::check_target_id(&group.group_type, &target.id)
+                .map_err(|violation| refused(&violation))?;
+            let port = crate::state::effective_target_port(group, target.port);
+            // One call naming the same target twice registers it once: a target is its id
+            // together with the port it is reached on. Membership is a set lookup, so the
+            // pass over the submitted list is linear in its length.
+            if seen.insert((target.id.clone(), port)) {
+                requested.push((target.id.clone(), port));
+            }
+        }
+
+        // The maximum number of targets this target group holds. For a type whose own
+        // documentation states one — "If it's a Lambda target, you can only have one
+        // target in a target group" (this operation's own documentation) — a registration
+        // past it is input the service does not accept, refused over the `targets` member;
+        // for a type that documents none it is this emulator's own ceiling, which is what
+        // the modelled `ServiceQuotaExceededException` reports.
+        let documented = crate::state::documented_target_maximum(&group.group_type);
+        let group_type = group.group_type.clone();
+        let ceiling = group.target_ceiling();
+        let held = group.targets.len();
+        if held + store.new_target_count(&id, &requested) > ceiling {
+            let Some(maximum) = documented else {
+                return Err(quota_exceeded(&id));
+            };
+            return Err(refused(&crate::state::ServiceRuleViolation {
+                member: crate::state::TARGETS_MEMBER.to_string(),
+                message: crate::state::target_ceiling_message(&id, &group_type, maximum),
+            }));
+        }
+
+        let mut successful: Vec<Target> = Vec::with_capacity(requested.len());
+        let Some(registered) = store.register_targets(&id, &requested, now) else {
+            return Err(not_found(&input.target_group_identifier));
+        };
+        for record in registered {
+            // Each answer is read off the record that was stored, so this response and
+            // what a later `ListTargets` reports are the same thing.
+            successful.push(Target {
+                id: record.id,
+                port: record.port,
+            });
+        }
+
+        Ok(RegisterTargetsOutput {
+            successful: Some(successful),
+            // Every target this service refuses, it refuses for the whole call: a target
+            // reaching here is of the form its target group's type demands and inside the
+            // number of targets that group holds, and whether the instance, address,
+            // function or load balancer it names exists is the owning service's state,
+            // which this operation is not modelled to consult. So no individual target
+            // fails, and the member reports the empty list rather than being left absent.
+            unsuccessful: Some(Vec::new()),
+        })
     }
 }

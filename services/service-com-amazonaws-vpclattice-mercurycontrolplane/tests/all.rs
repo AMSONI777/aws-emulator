@@ -45,6 +45,8 @@ mod state_roundtrip;
 mod target_group_required_config;
 #[path = "all/target_groups.rs"]
 mod target_groups;
+#[path = "all/targets.rs"]
+mod targets;
 #[path = "all/validation_pattern_rendering.rs"]
 mod validation_pattern_rendering;
 #[path = "all/vpclattice_service_slice.rs"]
