@@ -2037,8 +2037,6 @@ mod redshift_health_alarms_evaluate;
 // service crate's test target can create the index and then read the document back out.
 #[path = "all/bedrock_knowledge_base_over_an_aoss_collection.rs"]
 mod bedrock_knowledge_base_over_an_aoss_collection;
-#[path = "all/bedrock_agent_ingestion_populates_its_s3_vectors_index.rs"]
-mod bedrock_agent_ingestion_populates_its_s3_vectors_index;
 // Declared in the appended tail: whether an UpdateStack that changes an AWS::DynamoDB::Table
 // in place is reported complete only once DynamoDB reports that table ACTIVE again spans
 // CloudFormation (which makes the calls) and DynamoDB (which decides the table's status), so
@@ -2101,11 +2099,11 @@ mod cloudformation_scripted_queue_deploy;
 // its declaration for a moment when two branches each removed one of two duplicates, and it
 // is declared exactly once again.)
 // `cloudformation_scripted_queue_deploy` are each declared ONCE, in the spans above: two
+// landings each appended their own copy here, and a module may be declared only once.)
 // (`apigateway_sns_service_integration`, `lambda_signed_write_to_an_aoss_collection_endpoint`,
 // `cloudformation_metric_stream_estate_is_drainable` and `redshift_health_alarms_evaluate` are
 // each declared ONCE, further up this file: two landings each appended their own copy here, and
 // a module declared twice loads the same file twice, which compiles neither.)
-// region above: a module may be declared only once.)
 // `cloudformation_provisions_cloudfront_resources` is declared once, just below: two `mod`
 // items for one name is a redefinition that compiles neither.
 // Declared in the appended tail: whether the address a stack's DomainEndpoint output hands
@@ -2756,6 +2754,9 @@ mod iam_session_tag_authorization;
 // the HTTPS front door, both Cognito session suites and the IAM/Secrets Manager envelope are
 // each declared ONCE, further down this tail, for that same reason.)
 // are declared ONCE each, further up this tail, for that same reason.)
+#[path = "all/bedrock_agent_ingestion_populates_its_s3_vectors_index.rs"]
+mod bedrock_agent_ingestion_populates_its_s3_vectors_index;
+// region above: a module may be declared only once.)
 // (`apigateway_cognito_authorizer_app_client_audience` is declared once, in the sorted block
 // at the head of this file: a module may be declared only once, and two branches landing at
 // once appended a second declaration of it here.)

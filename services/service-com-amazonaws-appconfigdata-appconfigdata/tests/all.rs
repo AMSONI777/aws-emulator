@@ -27,6 +27,8 @@ mod next_poll_token_poll_rate;
 mod rollout_percentage_splits_sessions;
 #[path = "all/session_requires_a_deployment.rs"]
 mod session_requires_a_deployment;
+#[path = "all/sibling_applications_do_not_cross_deliver.rs"]
+mod sibling_applications_do_not_cross_deliver;
 #[path = "all/state_roundtrip.rs"]
 mod state_roundtrip;
 #[path = "all/stop_mid_rollout_withdraws_the_release.rs"]
