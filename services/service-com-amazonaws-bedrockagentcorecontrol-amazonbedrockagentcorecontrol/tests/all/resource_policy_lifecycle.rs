@@ -13,6 +13,12 @@
 //! resource this service holds and reports it back, `GetResourcePolicy` reports exactly the
 //! stored document, `DeleteResourcePolicy` removes it, and an ARN that names no resource of
 //! a type the feature covers — or a resource carrying no policy — is the modelled 404.
+//!
+//! A refusal is worded by the plane that owns the condition: an unresolvable `resourceArn`
+//! is answered in the resource-policy plane's OWN fixed sentence, echoing no part of the
+//! request and never carrying another resource family's lookup sentence or its retry
+//! guidance, whichever of the three operations was asked; a resource this service HOLDS that
+//! carries no document is the separate, differently-worded condition.
 
 use std::sync::Arc;
 
@@ -40,6 +46,16 @@ const POLICY_MISSING: &str = "Resource Policy doesn't exist for requested arn";
 /// How every resource-policy operation words a `resourceArn` that names no resource a
 /// policy can attach to (`crate::state::resource_arn_not_found`).
 const RESOURCE_MISSING: &str = "ResourceArn provided in the request does not exist";
+
+/// The retry guidance the gateway and runtime families' resource-lookup refusal carries. No
+/// resource-policy refusal may offer it: the resource-policy plane words its own refusals.
+const GENERIC_LOOKUP_GUIDANCE: &str = "Retry the request with a different resource identifier.";
+
+/// The published bounds of `PutResourcePolicy$resourceArn` and its siblings
+/// (`BedrockAgentcoreResourceArn`, `len 20..1011`, no pattern, from
+/// `smithy_query(query="shape", shape="BedrockAgentcoreResourceArn")`).
+const MIN_ARN_LEN: usize = 20;
+const MAX_ARN_LEN: usize = 1011;
 
 fn router() -> MultiServiceRouter {
     let engine: Arc<engine::InMemoryEngine> = Arc::new(engine::InMemoryEngine::new());
@@ -215,6 +231,22 @@ fn policy_document(sid: &str, action: &str) -> String {
         }],
     })
     .to_string()
+}
+
+/// A gateway ARN of exactly `length` characters, padded in its resource id, for a case that
+/// drives the `resourceArn` label to a published length bound. The padded id names no stored
+/// gateway, so the ARN resolves to nothing.
+fn arn_of_length(length: usize) -> String {
+    let mut arn = format!("arn:aws:bedrock-agentcore:{REGION}:{ACCOUNT}:gateway/");
+    assert!(
+        arn.len() < length,
+        "a padded ARN of {length} characters is longer than its prefix ({} characters)",
+        arn.len()
+    );
+    while arn.len() < length {
+        arn.push('z');
+    }
+    arn
 }
 
 /// A policy document of exactly `length` characters, padded in its statement id, for a case
@@ -463,8 +495,14 @@ async fn a_deleted_resource_carries_no_policy() {
 
 /// What the resource-policy operations refuse, and with which modelled error: an ARN that
 /// names no resource this service holds, one of a resource type the feature does not cover,
-/// one outside the request's own account or Region, a resource carrying no policy, and a
-/// document outside the modelled length range.
+/// one outside the request's own partition, account or Region, a resource carrying no policy,
+/// and a document or a label outside the modelled length range.
+///
+/// The unresolvable-ARN rows span what the rule generalises over rather than one cited ARN:
+/// the partition, the account, the Region, the resource type (covered-but-absent, a nested
+/// child of a covered resource, a type the feature does not cover, and another service's
+/// namespace), the case of that type, the shape of the resource part, and the label's length
+/// at each published bound of `BedrockAgentcoreResourceArn`.
 #[tokio::test]
 async fn the_resource_policy_operations_refuse_what_the_model_states_they_must() {
     let router = router();
@@ -477,7 +515,7 @@ async fn the_resource_policy_operations_refuse_what_the_model_states_they_must()
     // (case, the ARN addressed) — each is a well-formed `BedrockAgentcoreResourceArn`
     // (`len 20..1011`, no pattern), so every refusal below is the handler's and not the
     // boundary's.
-    let unresolved: [(&str, String); 6] = [
+    let unresolved: Vec<(&str, String)> = vec![
         (
             "a runtime ARN naming no stored runtime",
             format!("arn:aws:bedrock-agentcore:{REGION}:{ACCOUNT}:runtime/absent_runtime-0123456789"),
@@ -505,6 +543,46 @@ async fn the_resource_policy_operations_refuse_what_the_model_states_they_must()
         (
             "a stored gateway's id in another Region than the request",
             format!("arn:aws:bedrock-agentcore:eu-west-2:{ACCOUNT}:gateway/{gateway_id}"),
+        ),
+        (
+            "a stored gateway's id in the China partition",
+            format!("arn:aws-cn:bedrock-agentcore:cn-north-1:{ACCOUNT}:gateway/{gateway_id}"),
+        ),
+        (
+            "a stored runtime's id in the GovCloud partition",
+            format!(
+                "arn:aws-us-gov:bedrock-agentcore:us-gov-west-1:{ACCOUNT}:runtime/{runtime_id}"
+            ),
+        ),
+        (
+            // The resource type is matched as this service publishes it, so a differently
+            // cased spelling names nothing.
+            "a stored gateway's id under an upper-cased resource type",
+            format!("arn:aws:bedrock-agentcore:{REGION}:{ACCOUNT}:GATEWAY/{gateway_id}"),
+        ),
+        (
+            // No separator in the resource part at all: nothing names a type and an id.
+            "an ARN whose resource part names no type",
+            format!("arn:aws:bedrock-agentcore:{REGION}:{ACCOUNT}:{gateway_id}"),
+        ),
+        (
+            // An ARN of another service's namespace entirely.
+            "an S3 bucket ARN",
+            "arn:aws:s3:::a-bucket-that-is-not-agentcore".to_string(),
+        ),
+        ("an ARN at the published minimum length", {
+            let arn = "arn:aws:x:r:a:g/abcd".to_string();
+            assert_eq!(
+                arn.len(),
+                MIN_ARN_LEN,
+                "the shortest case is {MIN_ARN_LEN} characters long, got {}",
+                arn.len()
+            );
+            arn
+        }),
+        (
+            "an ARN at the published maximum length",
+            arn_of_length(MAX_ARN_LEN),
         ),
     ];
 
@@ -538,6 +616,53 @@ async fn the_resource_policy_operations_refuse_what_the_model_states_they_must()
                 ),
                 "case {case:?} ({operation}): expected HTTP 404 ResourceNotFoundException \
                  {expected_message:?}, got {status} {} ({answer})",
+                error_code(&answer)
+            );
+            // The sentence above is the resource-policy plane's own: it never falls back on
+            // the resource-lookup families' retry guidance, whose presence is what a client
+            // matching this plane's wording would trip over.
+            assert!(
+                !text(&answer, "message").contains(GENERIC_LOOKUP_GUIDANCE),
+                "case {case:?} ({operation}): the resource-policy plane offers no generic \
+                 resource-lookup retry guidance, got {:?}",
+                text(&answer, "message")
+            );
+        }
+    }
+
+    // One character past either published bound of the `resourceArn` label is the BOUNDARY's
+    // refusal, not the handler's not-found: that is what fixes the range the plane's own
+    // sentence applies inside.
+    let too_short = "arn:aws:x:r:a:g/abc".to_string();
+    assert_eq!(
+        too_short.len(),
+        MIN_ARN_LEN - 1,
+        "the short case is one character under the published minimum, got {}",
+        too_short.len()
+    );
+    for (case, arn) in [
+        ("a resourceArn one character under the minimum", too_short),
+        (
+            "a resourceArn one character over the maximum",
+            arn_of_length(MAX_ARN_LEN + 1),
+        ),
+    ] {
+        for (operation, (status, answer)) in [
+            (
+                "PutResourcePolicy",
+                put_policy(&router, &arn, &policy, REGION).await,
+            ),
+            ("GetResourcePolicy", get_policy(&router, &arn, REGION).await),
+            (
+                "DeleteResourcePolicy",
+                delete_policy(&router, &arn, REGION).await,
+            ),
+        ] {
+            assert_eq!(
+                (status, error_code(&answer).as_str()),
+                (400, "ValidationException"),
+                "case {case:?} ({operation}): expected HTTP 400 ValidationException, got \
+                 {status} {} ({answer})",
                 error_code(&answer)
             );
         }

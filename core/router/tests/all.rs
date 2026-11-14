@@ -4162,3 +4162,4 @@ mod lambda_in_function_cloudwatch_authorization;
 // tail is `E0753` and compiles nothing. `all/all_rs_declares_each_suite_once.rs` and
 // this file and every service crate's `tests/all.rs`, which is why this fragment stands as
 // an ordinary comment rather than the `//!` a landing appended it as.
+// comment is legal only before the first item of a crate root, so a `//!` line in this tail is

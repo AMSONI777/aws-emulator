@@ -131,6 +131,8 @@ mod registry_lifecycle;
 mod resource_error_message_wording;
 #[path = "all/resource_policy_lifecycle.rs"]
 mod resource_policy_lifecycle;
+#[path = "all/resource_policy_not_found_wording.rs"]
+mod resource_policy_not_found_wording;
 #[path = "all/runtime_code_object_vended_logs.rs"]
 mod runtime_code_object_vended_logs;
 #[path = "all/runtime_vended_log_group.rs"]
