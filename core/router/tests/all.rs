@@ -3214,3 +3214,7 @@ mod cloudformation_bucket_handles_drive_their_owning_services;
 // target until they were made ordinary comments.)
 // in `all/s3_notification_invokes_its_lambda_target.rs` and carries no test now. It is
 // declared ONCE, further up this tail, for that reason.
+// leaving a note here. (These lines are ordinary comments: an inner doc comment is only
+// legal before the first item of a module, and this note sits in the appended tail.)
+// leaving a note here. (Ordinary comments: an inner doc comment `//!` may only appear
+// before any item, so one in this appended tail is `E0753` and compiles nothing.)

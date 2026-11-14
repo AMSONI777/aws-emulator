@@ -25,8 +25,16 @@
 //! the clock stands relative to the generation's due instant and to the published rate —
 //! including the instant on each side of both — which identity drives the call, and what
 //! that caller is permitted.
+//!
+//! A row stands the clock where it needs it through the clock the EMULATOR holds
+//! ([`router_with_a_standing_clock`], [`pass_seconds`]): the emulator's clock is stood
+//! still for the whole suite and then moved on by a known span, so where the clock stands
+//! when a call is served is the span the row named and nothing else. No row depends on how
+//! long the host took to serve the calls before it, and none waits for real time to pass.
 
-use aws_smithy_types::DateTime;
+use std::sync::Arc;
+use std::time::Duration;
+
 use service_com_amazonaws_iam_awsidentitymanagementv20100508::ops::types::REPORT_STATE_TYPE_VALUES;
 use service_com_amazonaws_iam_awsidentitymanagementv20100508::state;
 use smithy_server_runtime::MultiServiceRouter;
@@ -53,22 +61,30 @@ pub(crate) async fn generate(router: &MultiServiceRouter, akid: Option<&str>) ->
     call_signed_by(router, akid, "GenerateCredentialReport", &[]).await
 }
 
-/// Move the account's credential-report generation `seconds` further into the PAST, so a
-/// row can stand the clock where it needs it without sleeping: the record holds the
-/// instant the generation was asked for and the instant it is due, and every state a call
-/// reports is read off those two.
+/// A router and the engine behind it, with this emulator's clock stood STILL.
 ///
-/// `pub(crate)` because the suite about READING the report stands the clock the same way:
-/// one rewind, so the two suites cannot disagree about where the clock is.
-pub(crate) fn rewind(engine: &engine::InMemoryEngine, seconds: i64) {
-    let store = state::service_state(engine).expect("the IAM store");
-    let mut held = store.lock();
-    let generation = held
-        .credential_report
-        .as_mut()
-        .expect("a credential report generation to rewind");
-    generation.requested = DateTime::from_secs(generation.requested.secs() - seconds);
-    generation.completes = DateTime::from_secs(generation.completes.secs() - seconds);
+/// Every span the service owes is then held open until [`pass_seconds`] brings the clock to
+/// it, so a row that asks for a generation in flight sees one however long the host takes,
+/// and a row that asks for one past its due instant stands exactly the span it named past it
+/// rather than that span plus whatever real time went by.
+///
+/// `pub(crate)` because the suite about READING the report stands its clock the same way:
+/// one clock, so the two suites cannot disagree about where it is.
+pub(crate) fn router_with_a_standing_clock() -> (MultiServiceRouter, Arc<engine::InMemoryEngine>) {
+    let (router, engine) = router_with_engine();
+    ::service_common::clock::stop(&*engine).expect("the emulator's clock");
+    (router, engine)
+}
+
+/// Move this emulator's clock `seconds` on, which is how a row crosses a span the service
+/// owes without sleeping for it: the generation record holds the instant the generation was
+/// asked for and the instant it is due, and every state a call reports is read off those two
+/// against this same clock.
+///
+/// `pub(crate)` for the same reason [`router_with_a_standing_clock`] is.
+pub(crate) fn pass_seconds(engine: &engine::InMemoryEngine, seconds: i64) {
+    let span = Duration::from_secs(u64::try_from(seconds).expect("a span the clock moves on by"));
+    ::service_common::clock::advance(engine, span).expect("the emulator's clock");
 }
 
 /// Whether the account holds a credential-report generation at all: what a refused call
@@ -129,7 +145,7 @@ async fn the_action_is_routed_rather_than_answered_as_an_unknown_action() {
 /// reached.
 #[tokio::test]
 async fn the_clock_and_the_held_generation_are_what_a_call_reports() {
-    let (router, engine) = router_with_engine();
+    let (router, engine) = router_with_a_standing_clock();
 
     // No generation on record: one is started.
     let (status, body) = generate(&router, None).await;
@@ -150,13 +166,14 @@ async fn the_clock_and_the_held_generation_are_what_a_call_reports() {
 
     // One second short of due: still running. The span is the emulator's own
     // (`state::CREDENTIAL_REPORT_GENERATION_SECONDS`), so the row is written against it
-    // rather than against a literal.
-    rewind(&engine, state::CREDENTIAL_REPORT_GENERATION_SECONDS - 1);
+    // rather than against a literal, and the clock stands exactly there because it is the
+    // emulator's clock the row moves.
+    pass_seconds(&engine, state::CREDENTIAL_REPORT_GENERATION_SECONDS - 1);
     let (status, body) = generate(&router, None).await;
     assert_state("one second short of due", status, &body, INPROGRESS);
 
     // Due: the completion the clock already made due is reported.
-    rewind(&engine, 1);
+    pass_seconds(&engine, 1);
     let (status, body) = generate(&router, None).await;
     assert_state("the generation has become due", status, &body, COMPLETE);
 
@@ -170,7 +187,7 @@ async fn the_clock_and_the_held_generation_are_what_a_call_reports() {
     }
 
     // One second short of the rate's end: still the held generation.
-    rewind(
+    pass_seconds(
         &engine,
         state::CREDENTIAL_REPORT_REGENERATION_SECONDS - state::CREDENTIAL_REPORT_GENERATION_SECONDS
             - 1,
@@ -179,7 +196,7 @@ async fn the_clock_and_the_held_generation_are_what_a_call_reports() {
     assert_state("one second short of the rate's end", status, &body, COMPLETE);
 
     // From the rate's end: a new generation starts, so the account can get a fresh report.
-    rewind(&engine, 1);
+    pass_seconds(&engine, 1);
     let (status, body) = generate(&router, None).await;
     assert_state("the rate now allows another report", status, &body, STARTED);
     let (status, body) = generate(&router, None).await;
@@ -191,7 +208,7 @@ async fn the_clock_and_the_held_generation_are_what_a_call_reports() {
 /// state, and the completion is reported to whichever call first finds it due.
 #[tokio::test]
 async fn the_reported_state_follows_the_generation_rather_than_the_caller() {
-    let (router, engine) = router_with_engine();
+    let (router, engine) = router_with_a_standing_clock();
     let grant = vec![(
         "generate".to_string(),
         statement("Allow", "iam:GenerateCredentialReport", "*"),
@@ -204,7 +221,7 @@ async fn the_reported_state_follows_the_generation_rather_than_the_caller() {
     let (status, body) = generate(&router, Some(&second)).await;
     assert_state("another caller polls the same generation", status, &body, INPROGRESS);
 
-    rewind(&engine, state::CREDENTIAL_REPORT_GENERATION_SECONDS);
+    pass_seconds(&engine, state::CREDENTIAL_REPORT_GENERATION_SECONDS);
     let (status, body) = generate(&router, Some(&second)).await;
     assert_state("the other caller finds it due", status, &body, COMPLETE);
     let (status, body) = generate(&router, Some(&first)).await;
@@ -320,4 +337,49 @@ async fn the_response_carries_one_state_and_one_description() {
         "expected exactly one <Description>, got {:?}: {body}",
         elements(&body, "Description")
     );
+}
+
+/// RULE: the span a generation takes and the rate that governs generating another report
+/// are crossed by the EMULATOR's clock — the generation records its due instant from that
+/// clock and every later call compares it against that same clock — so where the clock
+/// stands when a call is served is the only thing that decides the state, and a call served
+/// at a given span past the generation reports that span's state whatever the host was doing
+/// in between.
+///
+/// The rows are the spans a call can be served at, each measured from the generation the
+/// row's own emulator started: inside the generation span (at its start and the instant
+/// before its end), at the instant it falls due, inside the rate (the instant before its
+/// end), at the rate's end, and far past it.
+#[tokio::test]
+async fn the_emulators_own_clock_is_what_crosses_the_generation_span_and_the_rate() {
+    let generation = state::CREDENTIAL_REPORT_GENERATION_SECONDS;
+    let rate = state::CREDENTIAL_REPORT_REGENERATION_SECONDS;
+    let rows = [
+        ("no time at all past the generation", 0, INPROGRESS),
+        ("the instant before the generation is due", generation - 1, INPROGRESS),
+        ("the instant the generation falls due", generation, COMPLETE),
+        ("the instant before the rate's end", rate - 1, COMPLETE),
+        ("the instant the rate ends", rate, STARTED),
+        // 86_400 seconds: a day, so the row stands far past the rate rather than at its edge.
+        ("a whole day past the rate's end", rate + 86_400, STARTED),
+    ];
+
+    for (case, span, expected) in rows {
+        // One emulator per row, so the span the row names is the only time that has passed
+        // for the generation it is about.
+        let (router, engine) = router_with_a_standing_clock();
+        let (status, body) = generate(&router, None).await;
+        assert_state(&format!("{case}: the generation is started"), status, &body, STARTED);
+
+        pass_seconds(&engine, span);
+        let (status, body) = generate(&router, None).await;
+        assert_state(case, status, &body, expected);
+
+        // Asked again with the clock standing still, the state is still read off the record:
+        // the generation a row's call STARTED is now the one in flight, and every other state
+        // is reported again rather than consumed by having been asked for once.
+        let (status, body) = generate(&router, None).await;
+        let again = if expected == STARTED { INPROGRESS } else { expected };
+        assert_state(&format!("{case}, asked again"), status, &body, again);
+    }
 }

@@ -237,7 +237,12 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
             crate::state::authorization::ACCOUNT_WIDE_RESOURCE,
         )?;
 
-        let now = crate::state::now();
+        // The EMULATOR's clock, which is what the span this call may start is due after and
+        // what the span an earlier call started is measured against
+        // (`crate::state::clock_now`): one clock for recording a due instant and for finding
+        // it passed, so a generation this emulator owes is crossed by its own clock rather
+        // than by however much real time went by.
+        let now = crate::state::clock_now(&*self.engine);
         let caller_akid = ::engine::extract_akid(&ctx.parts().headers);
 
         // The generation the account already holds decides what this call does. Each arm

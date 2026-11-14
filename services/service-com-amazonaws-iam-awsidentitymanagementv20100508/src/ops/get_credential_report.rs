@@ -216,8 +216,11 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         };
 
         // The generation's own due instant, stored rather than slept for, is what makes a
-        // read taken straight after the generate see the report still being made.
-        let now = crate::state::now();
+        // read taken straight after the generate see the report still being made — read
+        // against the EMULATOR's clock, the one the generation recorded that instant from
+        // (`crate::state::clock_now`), so the two halves of the span cannot be measured
+        // against different clocks.
+        let now = crate::state::clock_now(&*self.engine);
         if now.as_secs_f64() < held.completes.as_secs_f64() {
             return Err(
                 GetCredentialReportErrorModeled::CredentialReportNotReadyException(

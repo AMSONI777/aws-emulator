@@ -7,7 +7,7 @@
 //! behaviour (status, awsQuery error code, XML members, the `text/csv` artifact a client
 //! decodes) a client on the socket sees. The awsQuery harness is the one
 //! `tests/all/user_lifecycle.rs` owns and the other suites in this crate share, and the
-//! `GenerateCredentialReport` call and the clock rewind are the ones
+//! `GenerateCredentialReport` call and the standing clock are the ones
 //! `tests/all/credential_report_generation.rs` owns.
 //!
 //! The rules being asserted:
@@ -38,7 +38,7 @@ use service_com_amazonaws_iam_awsidentitymanagementv20100508::ops::types::REPORT
 use service_com_amazonaws_iam_awsidentitymanagementv20100508::state;
 use smithy_server_runtime::MultiServiceRouter;
 
-use crate::credential_report_generation::{generate, rewind};
+use crate::credential_report_generation::{generate, pass_seconds, router_with_a_standing_clock};
 use crate::identity_policy_enforcement::{principal, statement};
 use crate::signing_certificates::certificate_pem;
 use crate::user_lifecycle::{
@@ -68,10 +68,9 @@ const PUBLISHED_HEADER: &str = "user,arn,user_creation_time,password_enabled,\
 
 /// How far short of the report's validity window the inside-the-window case stands.
 ///
-/// Generous on purpose: the case is read over a real HTTP call while the host's clock runs,
-/// so a margin of a second or two would make the outcome depend on how fast the machine is.
-/// A minute is far inside the window the service publishes
-/// (`state::CREDENTIAL_REPORT_VALIDITY_SECONDS`) and still one rewind away from its end.
+/// A minute, which is far inside the window the service publishes
+/// (`state::CREDENTIAL_REPORT_VALIDITY_SECONDS`) and still one move of the clock away from
+/// its end, so the case stands inside the window by a span a reader can see at a glance.
 const WINDOW_MARGIN_SECONDS: i64 = 60;
 
 /// One `GetCredentialReport` call, presented as signed by `akid` when a row names one. The
@@ -203,7 +202,7 @@ async fn generate_and_wait(router: &MultiServiceRouter, engine: &engine::InMemor
         status, 200,
         "the fixture GenerateCredentialReport must succeed, got {status}: {body}"
     );
-    rewind(engine, state::CREDENTIAL_REPORT_GENERATION_SECONDS);
+    pass_seconds(engine, state::CREDENTIAL_REPORT_GENERATION_SECONDS);
 }
 
 /// RULE: the action is a bound operation of this service, so a call reaches a handler and is
@@ -234,7 +233,7 @@ async fn the_action_is_routed_rather_than_answered_as_an_unknown_action() {
 /// in between carry the artifact.
 #[tokio::test]
 async fn the_clock_and_the_held_generation_are_what_a_read_answers() {
-    let (router, engine) = router_with_engine();
+    let (router, engine) = router_with_a_standing_clock();
 
     // No generation on record: there is no report to read.
     let (status, body) = get(&router, None).await;
@@ -253,13 +252,14 @@ async fn the_clock_and_the_held_generation_are_what_a_read_answers() {
 
     // One second short of due: still being made. The span is the emulator's own
     // (`state::CREDENTIAL_REPORT_GENERATION_SECONDS`), so the row is written against it
-    // rather than against a literal.
-    rewind(&engine, state::CREDENTIAL_REPORT_GENERATION_SECONDS - 1);
+    // rather than against a literal, and the clock stands exactly there because it is the
+    // emulator's clock the row moves.
+    pass_seconds(&engine, state::CREDENTIAL_REPORT_GENERATION_SECONDS - 1);
     let (status, body) = get(&router, None).await;
     refused("one second short of due", status, &body, 404, "ReportInProgress");
 
     // Due: the report is served.
-    rewind(&engine, 1);
+    pass_seconds(&engine, 1);
     let (status, body) = get(&router, None).await;
     let first = served("the generation has become due", status, &body);
 
@@ -282,15 +282,9 @@ async fn the_clock_and_the_held_generation_are_what_a_read_answers() {
     );
 
     // Inside the validity window, a margin short of its end: still served, and still the
-    // same report. The ARTIFACT is what is compared here: this suite stands the clock by
-    // moving the generation record into the past, so the instant the record names moves with
-    // it, while a real clock advancing leaves it where it was.
-    //
-    // The margin is generous rather than one second ([`WINDOW_MARGIN_SECONDS`]): the read
-    // below is a real HTTP call and the host's own clock keeps running while it is served, so
-    // a case standing one second short of the end answers differently on a loaded or slower
-    // machine. The window's far side is still measured exactly, by the rewind that follows.
-    rewind(
+    // same report. The ARTIFACT is what is compared here: a report is rendered once, so
+    // moving the clock on inside the window cannot change the bytes a read answers.
+    pass_seconds(
         &engine,
         state::CREDENTIAL_REPORT_VALIDITY_SECONDS
             - state::CREDENTIAL_REPORT_GENERATION_SECONDS
@@ -304,9 +298,9 @@ async fn the_clock_and_the_held_generation_are_what_a_read_answers() {
     );
 
     // From the window's end: the report has expired, and a fresh generation is what the
-    // account needs. Time only ever moves the record further past the end, so this side of
-    // the boundary is exact however long the call takes.
-    rewind(&engine, WINDOW_MARGIN_SECONDS);
+    // account needs. The clock stands exactly at the end, because it is the emulator's own
+    // clock the row moves and nothing else moves it.
+    pass_seconds(&engine, WINDOW_MARGIN_SECONDS);
     let (status, body) = get(&router, None).await;
     refused("the report has expired", status, &body, 410, "ReportExpired");
 
@@ -317,7 +311,7 @@ async fn the_clock_and_the_held_generation_are_what_a_read_answers() {
     );
     let (status, body) = get(&router, None).await;
     refused("the fresh generation is running", status, &body, 404, "ReportInProgress");
-    rewind(&engine, state::CREDENTIAL_REPORT_GENERATION_SECONDS);
+    pass_seconds(&engine, state::CREDENTIAL_REPORT_GENERATION_SECONDS);
     let (status, body) = get(&router, None).await;
     let second = served("the fresh report", status, &body);
     assert_ne!(
