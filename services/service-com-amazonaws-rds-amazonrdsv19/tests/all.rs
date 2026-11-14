@@ -145,6 +145,8 @@ mod db_shard_groups;
 mod db_snapshot_deletion;
 #[path = "all/db_snapshot_restore.rs"]
 mod db_snapshot_restore;
+#[path = "all/db_snapshot_tenant_databases.rs"]
+mod db_snapshot_tenant_databases;
 #[path = "all/db_subnet_group_deletion.rs"]
 mod db_subnet_group_deletion;
 #[path = "all/db_subnet_group_discovered_zone_coverage.rs"]

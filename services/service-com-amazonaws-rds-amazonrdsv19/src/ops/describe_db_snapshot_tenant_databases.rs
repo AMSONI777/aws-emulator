@@ -1,15 +1,9 @@
 // SPDX-License-Identifier: CC0-1.0
 
 //! @op DescribeDBSnapshotTenantDatabases
-//! SCAFFOLDED, NOT IMPLEMENTED: this operation answers HTTP 501 `NotImplemented` and
-//! asserts NOTHING about `DescribeDBSnapshotTenantDatabases`'s real behaviour. Implement it here — this is
-//! the ONLY file to touch for this operation.
-//!
-//! A 501 from this operation means "nobody has written it yet", never "the emulator is
-//! broken". Replace the `Err(..)` in [`DescribeDBSnapshotTenantDatabases::handle`] with real behaviour and
-//! delete the SCAFFOLDED marker line above; that line is the machine-readable record of
-//! which operations are still stubs (`grep -rl '^//! SCAFFOLDED, NOT IMPLEMENTED:' */src/ops/`),
-//! so leaving it on an implemented operation under-reports progress.
+//! Reports the tenant databases a DB SNAPSHOT captured, narrowed to the snapshot, the
+//! source DB instance, the instance's resource id, the snapshot type and the filters the
+//! request names. This is the ONLY file to touch for this operation.
 //!
 //! ## Shape of an operation
 //!
@@ -174,18 +168,296 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         input: Self::Input,
         ctx: &smithy_server_runtime::OperationContext<'_>,
     ) -> Result<Self::Output, Self::Error> {
-        // The engine is reachable from `&self` (constructor-injected); `ctx` carries
-        // request metadata. Both are bound here so an implementer has them in scope.
-        let _ = (&input, ctx, &self.engine);
-        // Implement `DescribeDBSnapshotTenantDatabases` here, then delete the SCAFFOLDED marker at the top of
-        // this file. Return modeled failures as
-        // `Err(DescribeDBSnapshotTenantDatabasesErrorModeled::Variant(..).into())` — the `From` impl above lifts it.
+        let region = crate::state::request_region(ctx)
+            .map_err(DescribeDBSnapshotTenantDatabasesError::validation)?;
+        let page_size = crate::state::check_max_records(input.max_records)
+            .map_err(DescribeDBSnapshotTenantDatabasesError::invalid_parameter_value)?;
+        let filters = input.filters.unwrap_or_default();
+        check_filter_names(&filters)
+            .map_err(DescribeDBSnapshotTenantDatabasesError::invalid_parameter_value)?;
+        crate::state::check_filter_terms(&filters)
+            .map_err(DescribeDBSnapshotTenantDatabasesError::invalid_parameter_value)?;
+
+        // No store means this service was mounted on an engine it has no state in, so it
+        // cannot serve the operation at all. Unreachable with the engine the router builds;
+        // 501 is the honest answer, never a fabricated empty list.
+        let Some(state) = crate::state::service_state(&*self.engine) else {
+            return Err(crate::scaffolded::Scaffolded::not_implemented(Self::NAME));
+        };
+        let mut store = state.lock();
+        // A report materialises the transitions the clock already made due: the ones owed at
+        // this instant whether or not anybody called.
+        store.settle_due_transitions(&region);
+
+        // `DBInstanceIdentifier` "isn't case-sensitive" and a DB instance identifier is
+        // stored as a lowercase string, so the request's spelling is folded before it is
+        // compared with the identifier the snapshot copied off its source instance.
+        let source_instance = input
+            .db_instance_identifier
+            .as_deref()
+            .map(str::to_ascii_lowercase);
+        // A request that NAMES a specific DB SNAPSHOT — by `DBSnapshotIdentifier` or by the
+        // `db-snapshot-id` filter — is answered with the one fault this operation models
+        // when that snapshot is no snapshot of this report's subject, rather than with an
+        // empty report: the member "must match the ID of an existing DB snapshot", so a
+        // caller that named one cannot tell "that snapshot holds no tenant databases" from
+        // "no such snapshot" out of an empty list. A `DBInstanceIdentifier`, "if supplied,
+        // must match the identifier of an existing DBInstance", so one that names no stored
+        // instance is the same fault. Every other narrowing — an instance that does exist, a
+        // DB resource id, a snapshot type, a tenant database's own members — is served as a
+        // report, empty when nothing matches.
+        if let Some(identifier) = &source_instance {
+            if !store
+                .db_instances
+                .contains_key(&(region.clone(), identifier.clone()))
+            {
+                // The identifier in the folded spelling the member resolves in, the way
+                // every other front door of this service words a DB instance it could not
+                // find.
+                return Err(not_found(db_instance_not_found_message(identifier)));
+            }
+        }
+
+        // RDS is regional: a request sees only the snapshots of the region it was signed
+        // for. Naming a snapshot narrows the report to that one snapshot's tenant databases.
         //
-        // To refuse a bad request this operation models no error for, return
-        // `Err(crate::scaffolded::Scaffolded::validation("..."))` — a 400
-        // `ValidationException`. Do NOT answer 501 for it: 501 means "not written yet",
-        // not "bad request". Modeled constraints are already refused BEFORE this
-        // handler runs, so reaching here means the input satisfies every one of them.
-        Err(crate::scaffolded::Scaffolded::not_implemented("DescribeDBSnapshotTenantDatabases"))
+        // `DBSnapshotIdentifier` is resolved verbatim, as the identifier the snapshot was
+        // taken under: the member documents "the value must match the ID of an existing DB
+        // snapshot", and that is how `DescribeDBSnapshots` and `DeleteDBSnapshot` read it, so
+        // one spelling resolves one record everywhere. The `db-snapshot-id` FILTER is the
+        // member that also matches a snapshot's ARN, the way the filter of the same name does
+        // in `DescribeDBSnapshots`.
+        let candidates: Vec<&crate::state::DbSnapshotRecord> = match &input
+            .db_snapshot_identifier
+        {
+            Some(requested) => store
+                .db_snapshots
+                .get(&(region.clone(), requested.clone()))
+                .into_iter()
+                .collect(),
+            None => store.snapshots_in(&region),
+        };
+
+        // The DB SNAPSHOTS this report reads tenant databases out of: the ones every
+        // snapshot-level selector and filter the request carries holds for.
+        let in_scope: Vec<&crate::state::DbSnapshotRecord> = candidates
+            .into_iter()
+            .filter(|snapshot| {
+                source_instance
+                    .as_ref()
+                    .is_none_or(|wanted| snapshot.db_instance_identifier == *wanted)
+            })
+            .filter(|snapshot| {
+                input
+                    .dbi_resource_id
+                    .as_ref()
+                    .is_none_or(|wanted| snapshot.dbi_resource_id == *wanted)
+            })
+            // `SnapshotType` selects the class of snapshot to report, exactly as it does in
+            // `DescribeDBSnapshots`; a request that names none reports every class.
+            .filter(|snapshot| {
+                input
+                    .snapshot_type
+                    .as_ref()
+                    .is_none_or(|wanted| snapshot.snapshot_type.eq_ignore_ascii_case(wanted))
+            })
+            // "This command only applies to RDS for Oracle DB instances in the multi-tenant
+            // configuration": a snapshot of a single-tenant instance holds no tenant
+            // database this report could read, so it is no subject of this report at all —
+            // naming one is naming a snapshot tenant database that does not exist, which the
+            // emptiness check below answers as the modelled fault.
+            .filter(|snapshot| crate::state::is_multi_tenant_engine(&snapshot.engine))
+            .filter(|snapshot| {
+                filters
+                    .iter()
+                    .all(|filter| matches_snapshot_filter(snapshot, filter))
+            })
+            .collect();
+        // The snapshot the request NAMED is no snapshot of this report's subject: it does
+        // not exist, the other selectors exclude it — a snapshot of another instance, of
+        // another DB resource or of another type is not the snapshot that was named either
+        // ("if you specify an automatic snapshot, you must also specify SnapshotType") — or
+        // it was taken of a single-tenant instance, which holds no tenant database to report.
+        if in_scope.is_empty() {
+            if let Some(named) = named_snapshot(
+                input.db_snapshot_identifier.as_deref(),
+                &filters,
+                |value| store.resolve_db_snapshot_key(&region, value).is_some(),
+            ) {
+                return Err(not_found(db_snapshot_not_found_message(named)));
+            }
+        }
+
+        let matching: Vec<(String, DBSnapshotTenantDatabase)> = in_scope
+            .into_iter()
+            // The report is of the tenant databases INSIDE the snapshots in scope, so each
+            // snapshot contributes the tenant databases it captured, in the order it holds
+            // them (by tenant name). A snapshot of a single-tenant instance captured none
+            // and so contributes nothing.
+            .flat_map(|snapshot| {
+                snapshot
+                    .tenant_databases
+                    .iter()
+                    .map(move |tenant| (snapshot, tenant))
+            })
+            .filter(|(snapshot, tenant)| {
+                filters
+                    .iter()
+                    .all(|filter| matches_filter(snapshot, tenant, filter))
+            })
+            .map(|(snapshot, tenant)| {
+                (
+                    // The position of one reported tenant database in this report's order:
+                    // the snapshot that holds it and its own name within that snapshot.
+                    format!("{}/{}", snapshot.snapshot_identifier, tenant.tenant_db_name),
+                    snapshot.tenant_database_to_wire(tenant),
+                )
+            })
+            .collect();
+
+        // A `Marker` is placed in the report's own order and the page resumes BEYOND it; a
+        // token this codec could not have produced is refused: see `crate::state::paginate`.
+        let page = crate::state::paginate(matching, input.marker.as_deref(), page_size)
+            .map_err(DescribeDBSnapshotTenantDatabasesError::invalid_parameter_value)?;
+        Ok(DescribeDBSnapshotTenantDatabasesOutput {
+            marker: page.next_marker,
+            db_snapshot_tenant_databases: Some(page.items),
+        })
+    }
+}
+
+/// The modelled fault this report answers a selector that names a resource this service
+/// does not hold with: `DBSnapshotNotFoundFault`, the one error the operation declares.
+fn not_found(message: String) -> DescribeDBSnapshotTenantDatabasesError {
+    DescribeDBSnapshotTenantDatabasesErrorModeled::DBSnapshotNotFoundFault(
+        DBSnapshotNotFoundFault {
+            message: Some(message),
+        },
+    )
+    .into()
+}
+
+/// The filter names that select on the SNAPSHOT a tenant database lives in rather than on
+/// the tenant database itself, so they narrow which DB snapshots this report reads at all.
+const SNAPSHOT_FILTER_NAMES: [&str; 4] = [
+    "db-instance-id",
+    "db-snapshot-id",
+    "dbi-resource-id",
+    "snapshot-type",
+];
+
+/// How this report words its `DBSnapshotNotFoundFault` for the DB snapshot a request named:
+/// the `<type> <name> not found.` form Amazon RDS answers it with here, carrying the
+/// request's own spelling. This operation's own sentence, beside the `DBSnapshot not found:
+/// <name>` the operations whose SUBJECT is the snapshot answer
+/// (`crate::state::db_snapshot_not_found_message`).
+fn db_snapshot_not_found_message(named: &str) -> String {
+    format!("DBSnapshot {named} not found.")
+}
+
+/// The same sentence for the DB INSTANCE a request named and this service does not hold, in
+/// the folded spelling the member resolves in — the wording `DescribeTenantDatabases`, the
+/// other report over tenant databases, answers for an instance it could not find.
+fn db_instance_not_found_message(identifier: &str) -> String {
+    format!("DBInstance {identifier} not found.")
+}
+
+/// The DB SNAPSHOT the request named, in its own spelling, or `None` when the request named
+/// none. `DBSnapshotIdentifier` and the `db-snapshot-id` filter name it the same way, so
+/// both are read here.
+///
+/// A filter may carry several snapshots, of which the fault can name only one: the first
+/// that `is_held` says this service does not hold — the value the caller has to fix — and
+/// the first value when it holds them all.
+fn named_snapshot<'a>(
+    db_snapshot_identifier: Option<&'a str>,
+    filters: &'a [Filter],
+    is_held: impl Fn(&str) -> bool,
+) -> Option<&'a str> {
+    if let Some(named) = db_snapshot_identifier {
+        return Some(named);
+    }
+    let values = filters
+        .iter()
+        .find(|filter| filter.name == "db-snapshot-id")
+        .map(|filter| filter.values.as_slice())?;
+    values
+        .iter()
+        .find(|value| !is_held(value))
+        .or_else(|| values.first())
+        .map(String::as_str)
+}
+
+/// The filter names this operation's `Filters` member documents: "`tenant-db-name`",
+/// "`tenant-database-resource-id`", "`dbi-resource-id`", "`db-instance-id`",
+/// "`db-snapshot-id`" and "`snapshot-type`". RDS refuses any other name, and so does this
+/// operation — with a 400, because quietly ignoring a filter would report tenant databases
+/// the caller excluded.
+const SUPPORTED_FILTER_NAMES: [&str; 6] = [
+    "db-instance-id",
+    "db-snapshot-id",
+    "dbi-resource-id",
+    "snapshot-type",
+    "tenant-database-resource-id",
+    "tenant-db-name",
+];
+
+/// Refuse a filter this operation does not support. "Filter names are case-sensitive."
+fn check_filter_names(filters: &[Filter]) -> Result<(), String> {
+    for filter in filters {
+        if !SUPPORTED_FILTER_NAMES.contains(&filter.name.as_str()) {
+            return Err(format!(
+                "unrecognized filter name: {}; supported filters are {}",
+                filter.name,
+                SUPPORTED_FILTER_NAMES.join(", ")
+            ));
+        }
+    }
+    Ok(())
+}
+
+/// Whether the SNAPSHOT `snapshot` matches one filter: true when any of the filter's values
+/// matches the snapshot member that filter names ("filter values are case-sensitive"), and
+/// true for every snapshot when the filter selects on a tenant database instead — such a
+/// filter narrows which tenant databases are reported, not which snapshots are read.
+fn matches_snapshot_filter(
+    snapshot: &crate::state::DbSnapshotRecord,
+    filter: &Filter,
+) -> bool {
+    if !SNAPSHOT_FILTER_NAMES.contains(&filter.name.as_str()) {
+        return true;
+    }
+    filter.values.iter().any(|wanted| match filter.name.as_str() {
+        "dbi-resource-id" => *wanted == snapshot.dbi_resource_id,
+        // "Accepts DB instance identifiers and DB instance Amazon Resource Names (ARNs)."
+        "db-instance-id" => {
+            *wanted == snapshot.db_instance_identifier
+                || *wanted
+                    == crate::state::db_instance_arn(
+                        &snapshot.region,
+                        &snapshot.db_instance_identifier,
+                    )
+        }
+        "db-snapshot-id" => *wanted == snapshot.snapshot_identifier || *wanted == snapshot.arn(),
+        "snapshot-type" => *wanted == snapshot.snapshot_type,
+        // Unreachable: every name in `SNAPSHOT_FILTER_NAMES` has an arm above. A `&str`
+        // match needs the arm all the same.
+        _ => false,
+    })
+}
+
+/// Whether the tenant database `tenant` of the snapshot `snapshot` matches one filter: the
+/// two tenant-level names select on the tenant database itself, and every other name on the
+/// snapshot that holds it ([`matches_snapshot_filter`]). "Filter values are
+/// case-sensitive."
+fn matches_filter(
+    snapshot: &crate::state::DbSnapshotRecord,
+    tenant: &crate::state::SnapshotTenantDatabaseRecord,
+    filter: &Filter,
+) -> bool {
+    match filter.name.as_str() {
+        "tenant-db-name" => filter.values.contains(&tenant.tenant_db_name),
+        "tenant-database-resource-id" => filter.values.contains(&tenant.resource_id),
+        _ => matches_snapshot_filter(snapshot, filter),
     }
 }

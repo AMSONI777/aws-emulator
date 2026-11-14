@@ -162,6 +162,9 @@ mod option_groups;
 mod parameter_groups;
 mod shard_groups;
 mod snapshots;
+// The tenant databases a DB snapshot CAPTURED, beside the snapshot records themselves:
+// their own concern, because they are what `DescribeDBSnapshotTenantDatabases` reports.
+mod snapshot_tenant_databases;
 // The Amazon SNS topic an event subscription delivers to, resolved against the service that
 // owns topics.
 mod sns_topics;
@@ -175,6 +178,7 @@ pub use event_subscriptions::*;
 pub use option_groups::*;
 pub use parameter_groups::*;
 pub use shard_groups::*;
+pub use snapshot_tenant_databases::*;
 pub use snapshots::*;
 pub use sns_topics::*;
 

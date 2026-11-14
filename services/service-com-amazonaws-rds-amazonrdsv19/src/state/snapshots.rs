@@ -577,6 +577,12 @@ pub struct DbSnapshotRecord {
     /// [`DB_SNAPSHOT_QUOTA_PER_REGION`] and [`MAX_REGIONS`], like every other record here.
     /// Deleting the snapshot drops it.
     pub storage: Option<::std::sync::Arc<data_plane::sql_engine::InstanceDatabase>>,
+    /// The tenant databases the source instance held when the snapshot was taken, copied
+    /// here like every other setting the snapshot carries — what
+    /// `DescribeDBSnapshotTenantDatabases` reports and what a restore of this snapshot
+    /// brings back. Empty for a snapshot of a single-tenant instance, which holds none; see
+    /// [`SnapshotTenantDatabaseRecord`].
+    pub tenant_databases: Vec<SnapshotTenantDatabaseRecord>,
     pub tags: Vec<Tag>,
 }
 
@@ -608,11 +614,17 @@ impl DbSnapshotRecord {
     /// `storage` is the copy of the instance's storage the caller took under the same
     /// state lock ([`ComAmazonawsRdsAmazonrdsv19State::capture_instance_storage`]), so the
     /// settings the snapshot reports and the data it holds are from one instant.
+    ///
+    /// `tenant_databases` is the copy of the instance's tenant databases taken under that
+    /// same lock ([`ComAmazonawsRdsAmazonrdsv19State::capture_tenant_databases`]), for the
+    /// same reason: the snapshot holds the tenant databases the instance had when it was
+    /// taken, not the ones it has later.
     pub fn from_instance(
         instance: &DbInstanceRecord,
         snapshot_identifier: &str,
         tags: Vec<Tag>,
         storage: Option<::std::sync::Arc<data_plane::sql_engine::InstanceDatabase>>,
+        tenant_databases: Vec<SnapshotTenantDatabaseRecord>,
     ) -> Self {
         Self {
             snapshot_identifier: snapshot_identifier.to_string(),
@@ -642,6 +654,7 @@ impl DbSnapshotRecord {
             instance_create_time: instance.instance_create_time,
             snapshot_create_time: now_as_wire_timestamp(),
             storage,
+            tenant_databases,
             tags,
         }
     }

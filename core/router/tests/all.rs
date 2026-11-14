@@ -3678,3 +3678,13 @@ mod iam_denial_reason_attribution;
 // leaving a note here. (A plain comment: an inner doc comment is only accepted before the
 // first item of a module.)
 // this file and for every service crate's `tests/all.rs`. (A plain comment, for the reason
+// leaving a note here. (Ordinary comments: these five lines are a fragment of this file's
+// own header that a merge of two appended tails landed down here, and an inner doc comment
+// `//!` may only appear before any item, so one here is `E0753` and compiles nothing.)
+// root's head, so one in this appended tail is `E0753` and compiles no suite at all.)
+// this file and for every service crate's `tests/all.rs`. (A line comment, for the reason
+// leaving a note here. (Ordinary comments, for the reason the notes above record: an
+// inner doc comment past the first item is `E0753` and compiles no suite of this target.)
+// comment past the first item is `E0753`, so this fragment of the module header stands as
+// ordinary comments here, and the header at the HEAD of this file carries the rule:
+// the fragment above records.)

@@ -375,11 +375,13 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
             // delete was accepted, copied above, so restoring it brings those rows back —
             // which is the point of taking a final snapshot before the delete.
             let source = &store.db_instances[&key];
+            let tenant_databases = store.capture_tenant_databases(&key.0, &key.1);
             let snapshot = crate::state::DbSnapshotRecord::from_instance(
                 source,
                 snapshot_identifier,
                 source.tags.clone(),
                 storage,
+                tenant_databases,
             );
             let snapshot_arn = snapshot.arn();
             store.db_snapshots.insert(snapshot_key, snapshot);

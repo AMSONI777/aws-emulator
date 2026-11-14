@@ -228,12 +228,16 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
 
         // Every setting the snapshot reports is COPIED from the source record, so a
         // later change to the instance does not rewrite history, beside the copy of the
-        // instance's storage taken above.
+        // instance's storage taken above and the copy of the instance's tenant databases
+        // taken here: a snapshot of a multi-tenant instance holds the tenant databases it
+        // had at this instant, which is what `DescribeDBSnapshotTenantDatabases` reports.
+        let tenant_databases = store.capture_tenant_databases(&region, &source_identifier);
         let snapshot = crate::state::DbSnapshotRecord::from_instance(
             source,
             &snapshot_identifier,
             input.tags.unwrap_or_default(),
             storage,
+            tenant_databases,
         );
 
         // The region's manual DB snapshot quota, and the number of regions this store

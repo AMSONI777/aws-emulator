@@ -307,11 +307,17 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
                 && store.has_room_for_region(&region)
             {
                 let source = &store.db_instances[&instance_key];
+                let tenant_databases =
+                    store.capture_tenant_databases(&instance_key.0, &instance_key.1);
                 let snapshot = crate::state::DbSnapshotRecord::from_instance(
                     source,
                     snapshot_identifier,
                     source.tags.clone(),
                     storage,
+                    // The final snapshot is taken BEFORE the tenant database goes, so it
+                    // holds the tenant database this call is deleting along with the
+                    // instance's others.
+                    tenant_databases,
                 );
                 let snapshot_arn = snapshot.arn();
                 store.db_snapshots.insert(snapshot_key, snapshot);

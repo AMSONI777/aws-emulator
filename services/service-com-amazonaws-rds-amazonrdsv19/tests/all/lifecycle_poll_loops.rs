@@ -76,7 +76,10 @@ macro_rules! params {
 /// This is the shape of the loop a real client writes, and the thing under test: `read`
 /// makes a REPORTING call and nothing else, so only a transition this service's clock owes
 /// can end the loop.
-async fn poll_until<Read, Fut>(
+///
+/// `pub(crate)` so the sibling suites of this one test target wait for the CONDITION they
+/// need through this loop rather than growing a second copy of it.
+pub(crate) async fn poll_until<Read, Fut>(
     case: &str,
     what: &str,
     read: Read,
