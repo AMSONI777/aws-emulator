@@ -1,36 +1,45 @@
 // SPDX-License-Identifier: CC0-1.0
 
-//! The WIDTH and the NAMESPACE LETTER of a field-level encryption path identifier are not what
-//! the service refuses a request on, end to end over HTTP.
+//! The WIDTH and the NAMESPACE LETTER of a field-level encryption path identifier are exactly
+//! what the service reads it by, end to end over HTTP.
 //!
 //! The rule under test: an operation addressed by a field-level encryption identifier answers
 //! its one modelled not-found code (404) for every identifier it cannot resolve, and reports
-//! the IDENTIFIER as unreadable ("Id format is invalid") only for a value it could not have
-//! read as an identifier of the addressed kind at all — one not written in CloudFront's
-//! identifier form (a leading namespace letter followed by a non-empty body of the identifier
-//! alphabet: ASCII digits and uppercase letters), or a minted identifier of ANOTHER kind of
-//! this service. Every identifier it DOES read and holds no resource for is the ABSENT
-//! resource ("The specified field level encryption config/profile does not exist."), and the
-//! members that carry these identifiers are plain `string` in the model — no `@pattern` and no
-//! `@length` (`smithy_query(query="operation",operation="GetFieldLevelEncryption,GetFieldLevelEncryptionConfig,GetFieldLevelEncryptionProfile,GetFieldLevelEncryptionProfileConfig")`)
-//! — so neither the number of characters in the body nor a namespace letter this emulator does
-//! not happen to mint under is something a request may be refused on.
+//! the ABSENT resource ("The specified field level encryption config/profile does not exist.")
+//! only for a value written the way CloudFront writes an identifier of the addressed kind —
+//! that kind's namespace letter followed by a body of the identifier alphabet (ASCII digits
+//! and uppercase letters) at the width CloudFront issues one at. Every other value is the
+//! IDENTIFIER reported unreadable ("Id format is invalid"): another namespace letter, a body
+//! of any other width, a minted identifier of another kind of this service, a lower-cased one,
+//! a UUID, a name, a caller reference.
+//!
+//! The two sentences are recorded CloudFront behaviour, and the recordings are what say which
+//! is which: the format sentence is what a read of an identifier outside the form its kind is
+//! issued in answers, while the absent-resource sentence is what a read of an identifier OF
+//! that form the account does not hold answers (a resource read back after its delete). The
+//! model states neither sentence — these members are plain `string`, with no `@pattern` and no
+//! `@length`
+//! (`smithy_query(query="operation",operation="GetFieldLevelEncryption,GetFieldLevelEncryptionConfig,GetFieldLevelEncryptionProfile,GetFieldLevelEncryptionProfileConfig")`)
+//! — so the shape the service reads cannot be derived from it.
 //!
 //! The rows therefore vary what the rule generalises over:
 //!
-//! * the BODY WIDTH, from one character up to three times the width this service mints,
-//!   including one short of and one past it;
-//! * the NAMESPACE LETTER: the addressed kind's own, and one no kind of this service mints
-//!   under;
+//! * the BODY WIDTH, from one character up to three times the width this service issues,
+//!   including one short of, one past it and the width itself;
+//! * the NAMESPACE LETTER: the addressed kind's own, and one no kind of this service issues an
+//!   identifier under;
 //! * both RESOURCE KINDS of this surface, each through every operation that addresses it by a
 //!   path identifier — both readers, the update and the delete;
 //! * against the values that are NOT identifiers of the addressed kind at all: a minted
 //!   identifier of each neighbouring kind, a bare namespace letter with no body, a minted id in
 //!   lower case, a UUID, a caller reference and a value that starts with a digit.
 //!
-//! The minted width is read off an identifier this emulator really issued, so no width here is
+//! The issued width is read off an identifier this emulator really issued, so no width here is
 //! written out by hand. The harness, the document builders and the create paths are the
-//! crate's own, reused rather than copied.
+//! crate's own, reused rather than copied — and the harness this suite builds ([`Kind`],
+//! [`seed`], [`address`], [`assert_refusal`]) is itself reused by
+//! `field_level_encryption_identifier_issued_form.rs`, which reads the same two sentences back
+//! through the resources' LIFECYCLE rather than through generated identifiers.
 
 use smithy_server_runtime::MultiServiceRouter;
 
@@ -58,7 +67,7 @@ const UNMINTED_NAMESPACE: char = 'W';
 
 /// Which field-level encryption resource an operation's path identifier names.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum Kind {
+pub(crate) enum Kind {
     Config,
     Profile,
 }
@@ -66,15 +75,16 @@ enum Kind {
 impl Kind {
     /// The modelled error code every operation addressed by an identifier of this kind answers
     /// an identifier it cannot resolve.
-    fn code(self) -> &'static str {
+    pub(crate) fn code(self) -> &'static str {
         match self {
             Self::Config => "NoSuchFieldLevelEncryptionConfig",
             Self::Profile => "NoSuchFieldLevelEncryptionProfile",
         }
     }
 
-    /// The sentence this kind answers an identifier the service READS and holds no resource for.
-    fn absent(self) -> &'static str {
+    /// The sentence this kind answers an identifier of its own form that the service READS
+    /// and holds no resource for.
+    pub(crate) fn absent(self) -> &'static str {
         match self {
             Self::Config => NO_SUCH_CONFIG,
             Self::Profile => NO_SUCH_PROFILE,
@@ -82,7 +92,7 @@ impl Kind {
     }
 
     /// The path segment the kind's resources live under, from each operation's `http` binding.
-    fn segment(self) -> &'static str {
+    pub(crate) fn segment(self) -> &'static str {
         match self {
             Self::Config => "field-level-encryption",
             Self::Profile => "field-level-encryption-profile",
@@ -93,11 +103,11 @@ impl Kind {
 /// The two resources this emulator really stored, with the documents and version tokens the
 /// updates and the deletes below submit, so every refusal is about the identifier rather than
 /// about a payload or a precondition.
-struct Seeded {
-    config_id: String,
+pub(crate) struct Seeded {
+    pub(crate) config_id: String,
     config_etag: String,
     config_document: String,
-    profile_id: String,
+    pub(crate) profile_id: String,
     profile_etag: String,
     profile_document: String,
 }
@@ -105,7 +115,7 @@ struct Seeded {
 impl Seeded {
     /// The identifier this emulator minted for `kind` — the row every width below is derived
     /// from.
-    fn minted(&self, kind: Kind) -> &str {
+    pub(crate) fn minted(&self, kind: Kind) -> &str {
         match kind {
             Kind::Config => &self.config_id,
             Kind::Profile => &self.profile_id,
@@ -113,7 +123,7 @@ impl Seeded {
     }
 
     /// The version token the kind's stored resource is currently at.
-    fn etag(&self, kind: Kind) -> &str {
+    pub(crate) fn etag(&self, kind: Kind) -> &str {
         match kind {
             Kind::Config => &self.config_etag,
             Kind::Profile => &self.profile_etag,
@@ -131,7 +141,7 @@ impl Seeded {
 
 /// Store one profile (encrypting with a freshly uploaded public key) and one configuration
 /// naming it.
-async fn seed(router: &MultiServiceRouter) -> Seeded {
+pub(crate) async fn seed(router: &MultiServiceRouter) -> Seeded {
     let key = upload_key(router, 0).await;
     let profile_document = Profile::new(
         "the seeded profile",
@@ -177,7 +187,7 @@ async fn seed(router: &MultiServiceRouter) -> Seeded {
 
 /// Send every operation addressed by an identifier of `kind` at `id`, each answer labelled with
 /// the operation's name.
-async fn address(
+pub(crate) async fn address(
     router: &MultiServiceRouter,
     kind: Kind,
     id: &str,
@@ -238,7 +248,7 @@ async fn address(
 }
 
 /// Assert one refusal: its status, its code and — the point of this suite — its message.
-fn assert_refusal(answer: &Answer, case: &str, code: &str, message: &str) {
+pub(crate) fn assert_refusal(answer: &Answer, case: &str, code: &str, message: &str) {
     assert_eq!(
         answer.status, 404,
         "case {case:?}: expected HTTP 404, got {} with {}",
@@ -257,8 +267,8 @@ fn assert_refusal(answer: &Answer, case: &str, code: &str, message: &str) {
     );
 }
 
-/// The widths this suite submits a body at, around the width this service mints (`minted`):
-/// one character, two, one short of the minted width, the minted width itself, one past it,
+/// The widths this suite submits a body at, around the width this service issues (`minted`):
+/// one character, two, one short of the issued width, the issued width itself, one past it,
 /// twice it and three times it.
 fn widths(minted: usize) -> Vec<usize> {
     vec![1, 2, minted - 1, minted, minted + 1, minted * 2, minted * 3]
@@ -275,11 +285,16 @@ fn never_minted_body(width: usize) -> String {
         .collect()
 }
 
-/// Every identifier of the CloudFront identifier form this suite submits where an identifier of
-/// `kind` belongs, each a value the service READS and the store holds nothing for: the
-/// addressed kind's own namespace letter and one no kind of this service mints, each at every
-/// width in [`widths`].
-fn readable_identifiers(kind: Kind, seeded: &Seeded) -> Vec<(String, String)> {
+/// Every identifier of the CloudFront identifier alphabet this suite submits where an
+/// identifier of `kind` belongs: the addressed kind's own namespace letter and one no kind of
+/// this service issues an identifier under, each at every width in [`widths`]. The third
+/// member of each row is whether the service READS the value as an identifier of that kind —
+/// true only for its own namespace letter at the width it is issued at, where the store holds
+/// nothing for it, and false for every other letter and width.
+fn identifiers_of_every_width_and_namespace(
+    kind: Kind,
+    seeded: &Seeded,
+) -> Vec<(String, String, bool)> {
     let minted = seeded.minted(kind);
     let namespace = minted.chars().next().unwrap_or(UNMINTED_NAMESPACE);
     let minted_width = minted.len() - 1;
@@ -295,6 +310,7 @@ fn readable_identifiers(kind: Kind, seeded: &Seeded) -> Vec<(String, String)> {
             rows.push((
                 format!("the namespace letter {letter} with a body of {width} characters"),
                 id,
+                letter == namespace && width == minted_width,
             ));
         }
     }
@@ -353,22 +369,24 @@ fn unreadable_identifiers(kind: Kind, seeded: &Seeded, public_key: &str) -> Vec<
     ]
 }
 
-/// An identifier in CloudFront's identifier form is READ whatever its width and whatever
-/// namespace letter it carries: every operation addressed by one answers the ABSENT resource,
-/// never the unreadable-identifier sentence.
+/// An identifier is READ only at the width and under the namespace letter the addressed kind's
+/// identifiers are issued with: such an identifier the store holds nothing for is the ABSENT
+/// resource, and every other width and letter is the unreadable-identifier sentence, through
+/// every operation addressed by one.
 #[tokio::test]
-async fn an_identifier_of_the_form_is_read_at_every_width_and_namespace() {
+async fn an_identifier_is_read_only_at_its_own_width_and_namespace() {
     let router = emulator();
     let seeded = seed(&router).await;
 
     for kind in [Kind::Config, Kind::Profile] {
-        for (case, id) in readable_identifiers(kind, &seeded) {
+        for (case, id, read) in identifiers_of_every_width_and_namespace(kind, &seeded) {
+            let expected = if read { kind.absent() } else { ID_FORMAT_INVALID };
             for (operation, answer) in address(&router, kind, &id, &seeded).await {
                 assert_refusal(
                     &answer,
                     &format!("{operation} with {case} ({id:?})"),
                     kind.code(),
-                    kind.absent(),
+                    expected,
                 );
             }
         }

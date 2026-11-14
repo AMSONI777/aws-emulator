@@ -5,15 +5,15 @@
 //!
 //! The rule under test: an operation ADDRESSED by a field-level encryption identifier answers
 //! its one modelled not-found code (404) for every identifier it cannot resolve, and the
-//! MESSAGE says which condition it was — a value the service could not have READ as an
-//! identifier of the addressed kind at all, because it is not written in CloudFront's
-//! identifier form (a namespace letter followed by a body of the id alphabet) or because it is
-//! a minted identifier of ANOTHER kind of this service, is the identifier itself reported
-//! unreadable ("Id format is invalid"), while every identifier it DOES read and holds nothing
-//! for — including one whose namespace letter or body width this service does not mint, since
-//! the model bounds these members by nothing — is the absent resource ("The specified field
-//! level encryption config/profile does not exist."). Both sentences are fixed text: neither
-//! echoes the value submitted.
+//! MESSAGE says which condition it was — only a value written the way CloudFront writes an
+//! identifier of the addressed kind (that kind's namespace letter followed by a body of the
+//! identifier alphabet, at the width it issues one at) is an identifier the service READS, so
+//! one of that form the store holds nothing for is the absent resource ("The specified field
+//! level encryption config/profile does not exist."), and every other value — another
+//! namespace letter, a body of another width, a lower-cased identifier, a minted identifier of
+//! ANOTHER kind of this service, a UUID, a word, a caller reference — is the identifier itself
+//! reported unreadable ("Id format is invalid"). Both sentences are fixed text: neither echoes
+//! the value submitted.
 //!
 //! So the rows span what the rule generalises over:
 //!
@@ -22,13 +22,13 @@
 //! * every OPERATION that addresses one by a path identifier: both readers of each kind, its
 //!   update and its delete;
 //! * the identifiers the service READS and finds nothing for: an id of the addressed kind that
-//!   was never minted, the minted id with its last character changed, a namespace letter no
-//!   kind of this service mints, and bodies one character short of, one character past and
-//!   well past the width it mints;
-//! * the identifiers it cannot read at all: the sibling kind's own minted id, a public key id,
-//!   the `E`-prefixed namespace other CloudFront entity ids are drawn from, a minted id in
-//!   lower case, a body outside the id alphabet, a UUID, a bare word and the resource's own
-//!   caller reference.
+//!   was never minted, and the minted id with its last character changed;
+//! * the identifiers it cannot read at all: bodies one character short of, one character past
+//!   and well past the width the kind is issued at, a namespace letter no kind of this service
+//!   issues an identifier under, the sibling kind's own minted id, a public key id, the
+//!   `E`-prefixed namespace other CloudFront entity ids are drawn from, a minted id in lower
+//!   case, a body outside the id alphabet, a UUID, a bare word and the resource's own caller
+//!   reference.
 //!
 //! Each kind's width and alphabet are read off an id this emulator really MINTED rather than
 //! written out here, so the table cannot drift from what the service issues.
@@ -294,27 +294,27 @@ fn shapes(kind: Kind, stored: &Stored, public_key: &str) -> Vec<Shape> {
             changed,
             true,
         ),
+        // A value that could not have been an identifier of this kind at all.
         Shape::new(
             "this kind's prefix with a body one character short",
             format!("{prefix}{}", &body[..body.len() - 1]),
-            true,
+            false,
         ),
         Shape::new(
             "this kind's prefix with a body one character too long",
             format!("{prefix}{body}A"),
-            true,
+            false,
         ),
         Shape::new(
             "a namespace letter no kind of this service mints",
             format!("W{body}"),
-            true,
+            false,
         ),
         Shape::new(
             "a namespace letter no kind of this service mints and a far longer body",
             format!("W{body}{body}"),
-            true,
+            false,
         ),
-        // A value that could not have been an identifier of this kind at all.
         Shape::new(
             "the sibling field-level encryption kind's own minted id",
             sibling,

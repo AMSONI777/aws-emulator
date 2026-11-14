@@ -964,18 +964,15 @@ async fn an_id_no_profile_holds_is_refused_by_both_readers() {
     let stored_id = created.root().text_at("Id").unwrap_or_default().to_string();
 
     // The rows span the ways an id can name no profile: a well-shaped profile id that was
-    // never minted, an id in the CloudFront identifier form of a width this service does not
-    // mint (which the service still READS as an identifier), and a value of no CloudFront
-    // identifier form at all — each with the sentence its shape earns.
+    // never minted (the one shape the service READS), an id in another namespace and of a
+    // width no identifier of this kind is issued at, and a value of no CloudFront identifier
+    // form at all — each with the sentence its shape earns.
     for (case, expected) in [
         (
             "P280MFCLSYOCVU",
             NO_SUCH_FIELD_LEVEL_ENCRYPTION_PROFILE_MESSAGE,
         ),
-        (
-            "EDFDVBD6EXAMPLE",
-            NO_SUCH_FIELD_LEVEL_ENCRYPTION_PROFILE_MESSAGE,
-        ),
+        ("EDFDVBD6EXAMPLE", ID_FORMAT_INVALID_MESSAGE),
         ("not-a-profile-id", ID_FORMAT_INVALID_MESSAGE),
     ] {
         for (reader, answer) in [

@@ -3549,3 +3549,5 @@ mod cloudformation_provisions_appsync_resources;
 // leaving a note here. (An ordinary comment: an inner doc comment may only appear before
 // an item, so a `//!` line in this appended tail is `E0753` and compiles no suite.)
 // same reason as the block above: `//!` is only legal before the first item.)
+// first item of this crate root, so a `//!` line in this appended tail is `E0753`.)
+// reason the notes around it record: `//!` mid-file annotates nothing and is `E0753`.)
