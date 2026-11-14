@@ -3069,3 +3069,4 @@ mod cloudformation_grants_acmpca_permissions;
 // (`bedrock_agent_ingestion_populates_its_s3_vectors_index` is declared ONCE, a few lines
 // above: two branches landing in the same window each appended their own copy here, and a
 // module declared twice compiles neither, so the second copy is removed.)
+// at the head of this file: a module may be declared only once.)

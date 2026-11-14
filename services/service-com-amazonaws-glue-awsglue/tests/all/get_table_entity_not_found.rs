@@ -1,14 +1,17 @@
 // SPDX-License-Identifier: CC0-1.0
 
-//! End-to-end tests for the refusal `GetTable` answers when the database it resolved
-//! does not hold the requested table.
+//! End-to-end tests for the refusal `GetTable` answers when it cannot resolve the table
+//! the request addresses — because the database does not hold it, or because the catalog
+//! holds no such database at all.
 //!
 //! The rule under test: that refusal's `Message` is a FIXED CONSTANT — one string the
-//! service answers for every such read, carrying no member of the request. So the body
-//! is byte-identical however the request is spelled (whichever database and table it
+//! service answers for every such read, carrying no member of the request, and the same
+//! string whichever step of the address resolved to nothing. So the body is
+//! byte-identical however the request is spelled (whichever database and table it
 //! names, in whatever casing, character set or length, with or without `CatalogId` and
 //! `AttributesToGet`), and it discloses neither the table, the database nor the catalog
-//! the read resolved.
+//! the read resolved. The operations that address a DATABASE itself keep their own
+//! templated sentence, which is the boundary the second suite here pins.
 //!
 //! `error_messages.rs` pins that constant's wording against the recorded wire case and
 //! pins it apart from the wording the table WRITES answer, and this suite reuses its
@@ -25,7 +28,7 @@ use serde_json::{json, Value};
 use smithy_server_runtime::MultiServiceRouter;
 
 use crate::error_messages::{assert_refusal, assert_withholds};
-use crate::wire::{emulator, error_message, ok, table_names, ACCOUNT_ID};
+use crate::wire::{call, emulator, error_code, error_message, ok, table_names, ACCOUNT_ID};
 
 /// The wording the read's miss answers, written out here as a literal so this suite pins
 /// it rather than restating the service's own constant.
@@ -215,5 +218,208 @@ async fn the_get_table_miss_answers_one_constant_for_every_request() {
         absent_pairs().len() * request_shapes().len(),
         "every row and request shape must have been exercised, got {} cases",
         answered.len()
+    );
+}
+
+// ---------------------------------------------------------------------------
+// The database step of the address
+// ---------------------------------------------------------------------------
+
+/// The database holding the control table every row below reads back.
+const PRESENT_DATABASE: &str = "present_db";
+
+/// A table name no database in these rows ever held.
+const UNKNOWN_TABLE: &str = "never_created_tbl";
+
+/// The table a released database held while it existed: the address stays spelled the
+/// same after the database is gone, so the read's two steps both miss on it.
+const RELEASED_TABLE: &str = "released_tbl";
+
+/// How a `DatabaseName` comes to resolve to nothing.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Absence {
+    /// A name the catalog never held a database under.
+    NeverCreated,
+    /// A name whose database (and the table in it) the catalog held and then released.
+    Released,
+}
+
+/// `(row, database, how it is absent)` rows spanning both axes the rule generalises
+/// over: how the database came to be unresolvable, and how its name is spelled — value,
+/// length, casing, character set and punctuation. The first row is the shape of the
+/// recorded behavioural case; the `Released` rows are the teardown shape (the catalog
+/// held the entry and released it); the last sits at the documented ceiling of
+/// `NameString` (length 1..255, from `smithy_query` on `GetTable`'s `DatabaseName`).
+fn absent_databases() -> Vec<(&'static str, String, Absence)> {
+    vec![
+        (
+            "recorded behavioural shape, never created",
+            "sim2real_athorigin_b13fe7a5fa41_db".to_string(),
+            Absence::NeverCreated,
+        ),
+        (
+            "single character, never created",
+            "d".to_string(),
+            Absence::NeverCreated,
+        ),
+        (
+            "mixed case, never created",
+            "Warehouse_DB".to_string(),
+            Absence::NeverCreated,
+        ),
+        (
+            "punctuation and digits, never created",
+            "team.data_lake-2026".to_string(),
+            Absence::NeverCreated,
+        ),
+        (
+            "non-ascii character set, never created",
+            "donnees_brutes_\u{e9}t\u{e9}".to_string(),
+            Absence::NeverCreated,
+        ),
+        (
+            "at the 255 ceiling, never created",
+            "d".repeat(255),
+            Absence::NeverCreated,
+        ),
+        (
+            "released after holding the table",
+            "released_db".to_string(),
+            Absence::Released,
+        ),
+        (
+            "released, mixed case name",
+            "Released_DB_Two".to_string(),
+            Absence::Released,
+        ),
+    ]
+}
+
+/// `GetTable` whose `DatabaseName` resolves to no database answers the SAME constant the
+/// table step's miss answers: one `EntityNotFoundException` wording for the whole
+/// address, carrying neither name the request sent.
+///
+/// Each row also drives the control the rule is bounded by — the operation that
+/// addresses the database ITSELF still answers its own templated sentence — so the two
+/// refusals stay distinguishable on the wire.
+#[tokio::test]
+async fn the_get_table_miss_is_one_constant_whichever_step_of_the_address_missed() {
+    let router = emulator();
+    // A database that exists, holding a table that exists: the table step's miss is read
+    // from here, and is what every database-step miss below must answer identically.
+    ok(
+        &router,
+        "CreateDatabase",
+        &json!({ "DatabaseInput": { "Name": PRESENT_DATABASE } }),
+    )
+    .await;
+    ok(
+        &router,
+        "CreateTable",
+        &json!({ "DatabaseName": PRESENT_DATABASE, "TableInput": { "Name": PRESENT_TABLE } }),
+    )
+    .await;
+    let table_step_miss = error_message(
+        &assert_refusal(
+            &router,
+            "table step of the address",
+            "GetTable",
+            &json!({ "DatabaseName": PRESENT_DATABASE, "Name": UNKNOWN_TABLE }),
+            "EntityNotFoundException",
+            ENTITY_NOT_FOUND,
+        )
+        .await,
+    );
+
+    let mut cases_run = 0usize;
+    for (row, database, absence) in &absent_databases() {
+        if *absence == Absence::Released {
+            ok(
+                &router,
+                "CreateDatabase",
+                &json!({ "DatabaseInput": { "Name": database } }),
+            )
+            .await;
+            ok(
+                &router,
+                "CreateTable",
+                &json!({ "DatabaseName": database, "TableInput": { "Name": RELEASED_TABLE } }),
+            )
+            .await;
+            // The address resolved while the database was there, so the refusal below is
+            // about the release and not about a request the read never served.
+            let served = ok(
+                &router,
+                "GetTable",
+                &json!({ "DatabaseName": database, "Name": RELEASED_TABLE }),
+            )
+            .await;
+            assert_eq!(
+                served["Table"]["Name"].as_str(),
+                Some(RELEASED_TABLE),
+                "case {row}: the table must be served while its database exists, got {served}"
+            );
+            ok(&router, "DeleteDatabase", &json!({ "Name": database })).await;
+        }
+
+        for table in [RELEASED_TABLE, UNKNOWN_TABLE] {
+            for shape in &request_shapes() {
+                let case = format!("{row} / table {table} / {label}", label = shape.label);
+                let body = assert_refusal(
+                    &router,
+                    &case,
+                    "GetTable",
+                    &get_table_request(database, table, shape),
+                    "EntityNotFoundException",
+                    ENTITY_NOT_FOUND,
+                )
+                .await;
+                let message = error_message(&body);
+                // One wording for the whole address: the database step's miss is the
+                // table step's miss, byte for byte.
+                assert_eq!(
+                    message, table_step_miss,
+                    "case {case}: the database step must answer the table step's constant \
+                     {table_step_miss:?}, got {message:?}"
+                );
+                assert_withholds(&case, &message, database);
+                assert_withholds(&case, &message, table);
+                assert_withholds(&case, &message, ACCOUNT_ID);
+                cases_run += 1;
+            }
+        }
+
+        // The boundary: the read that addresses the DATABASE itself answers its own
+        // templated sentence, so the two refusals are still tellable apart. Only the
+        // template's shape is asserted here — its name rendering is pinned by
+        // `error_messages.rs`.
+        let (status, body) = call(&router, "GetDatabase", &json!({ "Name": database })).await;
+        assert_eq!(
+            status, 400,
+            "case {row}: GetDatabase for an absent database must answer 400, got {status} \
+             with {body}"
+        );
+        assert!(
+            error_code(&body).contains("EntityNotFoundException"),
+            "case {row}: expected EntityNotFoundException from GetDatabase, got {body}"
+        );
+        let database_message = error_message(&body);
+        assert!(
+            database_message != ENTITY_NOT_FOUND
+                && database_message.starts_with("Database ")
+                && database_message.ends_with(" not found."),
+            "case {row}: GetDatabase must keep its own templated sentence, got \
+             {database_message:?}"
+        );
+
+        // A refused read changes nothing a later caller sees: the database that exists
+        // still serves the table it holds.
+        assert_present_table_is_served(&router, row, PRESENT_DATABASE).await;
+    }
+
+    assert_eq!(
+        cases_run,
+        absent_databases().len() * 2 * request_shapes().len(),
+        "every row, table name and request shape must have been exercised, got {cases_run} cases"
     );
 }

@@ -11,8 +11,12 @@
 //! rather than omitted: `IsMultiDialectView`, `IsMaterializedView` and
 //! `IsRegisteredWithLakeFormation` as explicit booleans, and
 //! `StorageDescriptor.SortColumns` as an empty list for a table that defines no sort
-//! order (see `crate::state::to_storage_descriptor`). An absent catalog, database or
-//! table is `EntityNotFoundException`. A table of a FEDERATED database is NOT answered
+//! order (see `crate::state::to_storage_descriptor`). A target this read cannot resolve
+//! is `EntityNotFoundException` carrying this read's ONE constant
+//! (`crate::state::messages::TABLE_ENTITY_NOT_FOUND`), whichever step of the address
+//! resolved to nothing — the database the request names or the table inside it — so the
+//! refusal never borrows the sentence the database-addressing operations answer. A table
+//! of a FEDERATED database is NOT answered
 //! from the catalog: that database "points to an entity outside the Glue Data Catalog", so
 //! the table is held by the source its registration names, and no such source can be
 //! reached from here — which is `FederationSourceRetryableException`

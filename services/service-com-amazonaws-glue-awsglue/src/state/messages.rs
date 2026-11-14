@@ -884,8 +884,11 @@ pub const CONNECTION_NOT_FOUND_FOR_DELETE: &str = "Connection not found";
 /// recorded `CreateDatabase` duplicate does for its own resource.
 pub const CONNECTION_ALREADY_EXISTS: &str = "Connection already exists.";
 
-/// `GetTable` for a table the database does not hold. Recorded constant: this
-/// read's refusal names neither the table nor the database.
+/// `GetTable` for an address it cannot resolve — a table the database does not hold, or
+/// a `DatabaseName` the catalog holds no database under. Recorded constant: this read
+/// answers ONE wording whichever step of the address missed, and it names neither the
+/// table nor the database, which is why the read does not share
+/// [`database_not_found`] with the operations that address a database itself.
 pub const TABLE_ENTITY_NOT_FOUND: &str = "Entity Not Found";
 
 /// `DeleteTable` (and `UpdateTable`, the other write that addresses one table), the
