@@ -18,7 +18,7 @@ use crate::harness::{emulator, rpc, Emulator, PAST_EVALUATION_DELAY};
 use crate::sns_action_topic_policy::{
     action_items, alarm_arn, allow_everyone, assert_action_item, delivered,
     given_topic_with_subscriber, poll_delivered, policy, set_topic_policy, statement,
-    CLOUDWATCH_PRINCIPAL,
+    Outcome, CLOUDWATCH_PRINCIPAL, EXPLICIT_DENY,
 };
 
 /// Poll the alarm's `Action` history the way a client waiting for an asynchronous action
@@ -100,15 +100,19 @@ async fn an_evaluated_transition_decides_its_actions_the_same_way() {
         2,
         "the evaluated transition must execute and record both actions, got {items:?}"
     );
-    for (case, topic, published) in [
-        ("the topic that denies nothing", &allowed, true),
-        ("the denying topic", &denied, false),
+    for (case, topic, outcome) in [
+        ("the topic that denies nothing", &allowed, Outcome::Published),
+        (
+            "the denying topic",
+            &denied,
+            Outcome::Withheld(EXPLICIT_DENY),
+        ),
     ] {
         let (_, item) = items
             .iter()
             .find(|(resource, _)| resource == topic)
             .unwrap_or_else(|| panic!("no Action item for {topic}: {items:?}"));
-        assert_action_item(case, item, topic, published);
+        assert_action_item(case, item, topic, outcome);
     }
     let withheld = delivered(&emulator, &denied_queue).await;
     assert_eq!(
@@ -127,7 +131,12 @@ async fn an_evaluated_transition_decides_its_actions_the_same_way() {
         1,
         "the fresh alarm's action must be executed and recorded, got {items:?}"
     );
-    assert_action_item("the deny removed", &items[0].1, &denied, true);
+    assert_action_item(
+        "the deny removed",
+        &items[0].1,
+        &denied,
+        Outcome::Published,
+    );
     let reached = poll_delivered(&emulator, &denied_queue, 1).await;
     assert_eq!(
         reached, 1,
@@ -177,14 +186,24 @@ async fn two_alarms_firing_one_topic_are_decided_for_the_alarm_each_publish_come
         1,
         "the alarm the deny names must record its refused action, got {refused_items:?}"
     );
-    assert_action_item("the alarm the deny names", &refused_items[0].1, &topic, false);
+    assert_action_item(
+        "the alarm the deny names",
+        &refused_items[0].1,
+        &topic,
+        Outcome::Withheld(EXPLICIT_DENY),
+    );
     let served_items = poll_action_items(&emulator, served, 1).await;
     assert_eq!(
         served_items.len(),
         1,
         "the other alarm must record its action too, got {served_items:?}"
     );
-    assert_action_item("the alarm the deny does not name", &served_items[0].1, &topic, true);
+    assert_action_item(
+        "the alarm the deny does not name",
+        &served_items[0].1,
+        &topic,
+        Outcome::Published,
+    );
 
     let waiting = poll_delivered(&emulator, &queue, 1).await;
     assert_eq!(

@@ -253,6 +253,8 @@ mod rds_alarm_action_delivery;
 mod replay_probe;
 #[path = "all/resource_tags.rs"]
 mod resource_tags;
+#[path = "all/sns_action_publish_grant.rs"]
+mod sns_action_publish_grant;
 #[path = "all/sns_action_queue_policy.rs"]
 mod sns_action_queue_policy;
 #[path = "all/sns_action_topic_policy.rs"]

@@ -43,6 +43,7 @@ mod cloudwatch_alarm_ssm_ops_item_action;
 // crate's test target can deploy the pipeline and then read the objects it delivered.
 #[path = "all/cloudformation_metric_stream_filter_update.rs"]
 mod cloudformation_metric_stream_filter_update;
+// Declared here, in this same head region, for the reason the entry above records: a
 // Lambda handler run as the work of a Step Functions task writes with the SDK the managed
 // runtime supplies it spans Step Functions, IAM, Lambda, Amazon S3 and DynamoDB at once, so no
 // single service crate's test target can run the chain and then read each write back.
@@ -93,6 +94,13 @@ mod ses_event_publication_reaches_firehose_s3;
 // IAM at once, so no single service's test target can ask it.
 #[path = "all/cloudformation_http_api_cors_lambda_default_route.rs"]
 mod cloudformation_http_api_cors_lambda_default_route;
+// Declared here, in this same head region, for the reason the entry above records: the IaC
+// form of an EventBridge fan-out — one stack's rule with a Lambda target and a Step Functions
+// target under a target role — spans CloudFormation, EventBridge, Lambda, Step Functions, IAM,
+// STS and Amazon SQS at once, so no single crate's test target can deploy it and then watch
+// each target.
+#[path = "all/cloudformation_eventbridge_fan_out_to_lambda_and_sfn.rs"]
+mod cloudformation_eventbridge_fan_out_to_lambda_and_sfn;
 // Declared here, in this same head region, for the reason the entry above records: a
 // guardrail the Amazon Bedrock control plane creates and the Bedrock Runtime data plane
 // applies spans those two crates at once, so neither crate's own test target can see
@@ -406,6 +414,8 @@ mod cloudformation_provisions_kms_aliases;
 mod cloudwatch_alarm_action_reaches_its_subscribed_queue;
 #[path = "all/cloudwatch_breaching_alarm_fires_through_the_whole_router.rs"]
 mod cloudwatch_breaching_alarm_fires_through_the_whole_router;
+#[path = "all/cloudwatch_cfn_alarm_action_topic_policy.rs"]
+mod cloudwatch_cfn_alarm_action_topic_policy;
 // Declared beside the entry above, at the head, for the same reason.
 #[path = "all/cloudwatch_composite_alarm_rule_decides_its_sns_action.rs"]
 mod cloudwatch_composite_alarm_rule_decides_its_sns_action;
@@ -1901,6 +1911,13 @@ mod elbv2_lambda_target_published_address;
 // (`apigateway_sns_service_integration` is declared once, further up this tail: a module may
 // be declared only once, and two branches landing at once appended it here as well.)
 // be declared only once, and two branches landing at once each appended it here.)
+// be declared only once, and two branches landing at once appended it here as well.)
+// be declared only once, and two landings each appended it here.)
+// `cloudformation_provisions_cloudfront_resources` is declared once, in the sorted span
+// (`cloudformation_monitored_alb_search_estate`, `cloudformation_domain_endpoint_outputs`,
+// `cloudformation_stack_clock` and `elbv2_lambda_target_published_address` are each declared
+// once, a few lines above in this same tail: two landings each appended the group here, and a
+// module declared twice loads the same file twice, which compiles neither.)
 // (`apigateway_sns_service_integration` is declared ONCE, a few lines above in this same
 // tail: it was appended here as well while two branches were landing at once, which
 // declared it a second time and compiled neither.)
@@ -1924,6 +1941,9 @@ mod apigateway_sns_service_integration;
 // crate's test target can drive it.
 #[path = "all/lambda_signed_write_to_an_aoss_collection_endpoint.rs"]
 mod lambda_signed_write_to_an_aoss_collection_endpoint;
+// (`apigateway_cognito_authorizer_app_client_audience` is declared once, in the head region
+// above: a file loaded as a module twice compiles neither copy.)
+// above, and `cloudformation_metric_stream_estate_is_drainable` once further down this tail:
 // (`apigateway_cognito_authorizer_app_client_audience` and
 // `cloudformation_metric_stream_estate_is_drainable` are declared in the head region and the
 // sorted span above: each was appended here as well while two branches were landing at once,
@@ -1944,6 +1964,11 @@ mod lambda_signed_write_to_an_aoss_collection_endpoint;
 // Declared ONCE, in the head region above beside the other API Gateway suites: it was
 // appended here as well while two branches were landing at once, which declared it a second
 // time and compiled neither.
+// (The API Gateway/Cognito authorizer suite is declared ONCE, in the head region above:
+// a module may be declared only once, and two branches landing at once appended it here
+// as well.)
+// (`apigateway_cognito_authorizer_app_client_audience` is declared in the head region above:
+// a module may be declared only once.)
 // (`apigateway_cognito_authorizer_app_client_audience` is declared once in the head region
 // above, and `cloudformation_metric_stream_estate_is_drainable` once in the tail below: a
 // module may be declared only once, and a second declaration compiles neither.)
@@ -1977,6 +2002,12 @@ mod cloudformation_metric_stream_estate_is_drainable;
 // once appended a second declaration of each here, which compiled neither, so the copies
 // that stood here are gone.)
 // once appended a second declaration of each here, which compiled neither.)
+// (Declared ONCE, in that span above: two branches landing in the same window appended a
+// second declaration of it here, which compiled neither.)
+// (`zz_probe` is declared ONCE, further up this file: two branches landing in the same window
+// appended a second declaration of it here, which compiled neither.)
+// once appended a second declaration of each here, which compiled neither, so the copies
+// that stood here are gone.)
 // (The `zz_probe` declaration that stood here was the second copy of it, for that same
 // reason: it is declared ONCE further up this tail.)
 // (`cloudtrail_read_only_api_calls` is declared in the SORTED CloudTrail span above: two
@@ -1998,9 +2029,16 @@ mod redshift_health_alarms_evaluate;
 // (`zz_probe` is declared ONCE, further up this tail: a module may be declared only once.)
 // (`cloudwatch_alarm_ssm_ops_item_action` is declared once, in the head region above: a
 // module may be declared only once.)
+// (`cloudformation_metric_stream_filter_update` is declared once, in the head region above: a
+// module may be declared only once, and two branches landing at once each appended it here.)
+// (`cloudwatch_alarm_ssm_ops_item_action` is declared in the head region above: a module may
+// be declared only once.)
 // (`cloudformation_metric_stream_filter_update` is declared ONCE, in the head region above
 // beside the other `cloudformation_…` suites: it was appended here as well while two
 // branches were landing at once, which declared it a second time and compiled neither.)
+// (`cloudformation_metric_stream_filter_update` is declared once, in the head region above:
+// (`cloudwatch_alarm_ssm_ops_item_action` is declared in the head region above: a module may
+// be declared only once.)
 // (`cloudformation_metric_stream_filter_update` is declared ONCE, in the head region above: a
 // module may be declared only once, and the line appended here while two branches landed at
 // once compiled neither.)
@@ -2040,6 +2078,9 @@ mod redshift_health_alarms_evaluate;
 // only once.)
 // (`zz_probe` is declared further up this tail already: two branches landing in the same
 // window each appended it, and a module may be declared only once.)
+// (Declared ONCE, in the head region above beside the other `cloudformation_…` suites: two
+// branches landing in the same window appended a second declaration of it here, which compiled
+// neither.)
 // file beside the other `cloudformation_…` suites: the declaration that stood here was a
 // second copy two branches landing in the same window each appended.)
 // beside the other `cloudformation_…` suites: the copy that stood here is gone, because a
@@ -2084,6 +2125,27 @@ mod https_front_door_concurrent_pooled_producer;
 // words the refusal), so no single service crate's test target can drive it.
 #[path = "all/apigatewaymanagementapi_manage_connections_authorization.rs"]
 mod apigatewaymanagementapi_manage_connections_authorization;
+// (`sdb_legacy_query_api_on_the_assembled_router`,
+// `apigateway_cognito_authorizer_app_client_audience`,
+// `lambda_sqs_event_source_visibility_hold`, `codebuild_s3_build_output` and
+// `cloudformation_scripted_queue_deploy` are each declared ONCE, in the sorted spans at the
+// head of this file: two branches landing at once declared each of them here as well, which
+// compiled neither.)
+// (`lambda_signed_write_to_an_aoss_collection_endpoint`,
+// `cloudformation_metric_stream_estate_is_drainable`, `redshift_health_alarms_evaluate` and
+// `https_front_door_concurrent_pooled_producer` are each declared ONCE further up this tail:
+// two branches landing at once appended a second declaration of each here, which compiled
+// (`apigateway_sns_service_integration` is declared ONCE, in the span above: the suite lost
+// its declaration for a moment when two branches each removed one of two duplicates, and it
+// is declared exactly once again.)
+// `cloudformation_scripted_queue_deploy` are each declared ONCE, in the spans above: two
+// The CloudFormation search-estate and domain-endpoint-output suites are declared ONCE, in
+// the span above: two landings each appended their own copy here, and a module declared
+// twice loads the same file twice, which does not compile.
+// (`apigateway_sns_service_integration`, `lambda_signed_write_to_an_aoss_collection_endpoint`,
+// `cloudformation_metric_stream_estate_is_drainable` and `redshift_health_alarms_evaluate` are
+// each declared ONCE, further up this file: two landings each appended their own copy here, and
+// a module declared twice loads the same file twice, which compiles neither.)
 // Declared here, in this same head region, for the reason the entry above records: whether
 // the one service that claims the `sdb` signing name serves BOTH of that endpoint's APIs is
 // only observable against the whole service set, where that key is resolved.
@@ -2109,6 +2171,7 @@ mod codebuild_s3_build_output;
 // deploy-wait-use-delete workflow over the ASSEMBLED emulator, which is what a waiter polls.
 #[path = "all/cloudformation_scripted_queue_deploy.rs"]
 mod cloudformation_scripted_queue_deploy;
+// region above: a module may be declared only once.)
 // The CloudFormation search-estate and domain-endpoint-output suites are declared ONCE, in
 // the span above: two landings each appended their own copy here, and a module declared
 // twice loads the same file twice, which does not compile.
@@ -2142,6 +2205,7 @@ mod cloudformation_scripted_queue_deploy;
 // observe both ends of it.
 #[path = "all/cloudformation_domain_endpoint_is_dialled_by_consumers.rs"]
 mod cloudformation_domain_endpoint_is_dialled_by_consumers;
+// (`https_front_door_concurrent_pooled_producer` is declared ONCE, further up this file: a
 // (`https_front_door_concurrent_pooled_producer` is declared once, further up this tail: a
 // module may be declared only once, and two branches landing at once appended it here as
 // (`cloudformation_metric_stream_estate_is_drainable` is declared once, further up this
@@ -2320,6 +2384,8 @@ mod ses_delivery_event_advances_the_subscribed_queue;
 // (`zz_probe` is declared once, in the head region above: a module may be declared only
 // once, and two branches landing at once had appended a second declaration of it here.)
 // above: two branches landing at once had appended a second declaration of it here.)
+// (`ses_event_destination_reaches_an_eventbridge_rule_target` is declared ONCE, further up this
+// tail: two branches landing in the same window declared it here as well, which compiled
 // (The suite that reads which app client's token a COGNITO_USER_POOLS authorizer admits is
 // declared in the head region at the top of this file already: a module may be declared only
 // once.)
@@ -2421,7 +2487,6 @@ mod route53_health_check_string_match;
 // (`apigateway_sns_service_integration` is declared ONCE, further up this tail: two branches
 // landing at once each appended their own copy here, and a module declared twice loads the
 // head of this file: two branches landing at once each appended their own copy here, and a
-// module declared twice loads the same file twice, which compiles neither.)
 // (`cloudformation_provisions_cloudfront_resources` is declared in the head region above: a
 // module may be declared only once, and two `mod` items for one file compile the suite twice.)
 // (`apigateway_sns_service_integration`, `cloudformation_monitored_alb_search_estate` and
@@ -2496,13 +2561,17 @@ mod lambda_sqs_event_source_failed_batch_keeps_its_message;
 // then read what each target was handed.
 #[path = "all/events_one_envelope_reaches_every_target_kind.rs"]
 mod events_one_envelope_reaches_every_target_kind;
-// `cloudformation_provisions_cloudfront_resources` is declared once, in the sorted span
 // are declared once, further up this tail: a module may be declared only once, so the second
 // copy of the pair this span used to carry is gone.)
 // a module may be declared only once, and two branches landing at once each appended a copy
 // (`cloudformation_metric_stream_estate_is_drainable` is declared once, further up this tail:
 // (`cloudformation_domain_endpoint_is_dialled_by_consumers` is declared once, a few lines
 // a copy of it here.)
+// (`apigateway_cognito_authorizer_app_client_audience` and
+// (Declared ONCE, further up this file: two branches landing in the same window each appended
+// a declaration of it here, and a module declared twice compiles neither copy.)
+// (Declared ONCE, further up this tail, for that reason: two branches landing in the same
+// window each appended a declaration of it here.)
 // (Declared ONCE, further up this file: the copy that stood here was a second declaration
 // two branches landing in the same window each appended, which compiled neither.)
 // this file: a module may be declared only once, and the line appended here while two
@@ -2536,7 +2605,6 @@ mod sts_session_credential_refusals;
 #[path = "all/cloudformation_drift_detection_status_change_events.rs"]
 mod cloudformation_drift_detection_status_change_events;
 // be declared only once, and two branches landing at once each re-added it here.)
-// (`cloudformation_metric_stream_filter_update` is declared once, in the head region above: a
 // module may be declared only once, and two branches landing at once each re-added it here.)
 // (`cloudformation_metric_stream_filter_update` is declared ONCE, in the head region
 // above: a module may be declared only once. Its subject — a stack-deployed metric-stream
@@ -2614,6 +2682,16 @@ mod s3_object_created_invalidates_the_distribution_edge;
 // branches landing in the same window declared it here as well, which compiled neither.)
 // (`cloudformation_metric_stream_estate_is_drainable` is declared ONCE, above: two branches
 // landing in the same window declared it here as well, which compiled neither.)
+#[path = "all/sfn_relayed_dynamodb_request_id.rs"]
+mod sfn_relayed_dynamodb_request_id;
+// (`cloudformation_provisions_cloudfront_resources` is declared ONCE, further up this tail: two
+// (`cloudformation_kms_encrypted_sns_sqs_pipeline` is declared ONCE, in the head region above:
+// two landings in the same window each appended a declaration of it here.)
+// (`pricing_plan_subscription_resource_eligibility` is declared ONCE, in the head region
+// above: two landings in the same window each appended a declaration of it here.)
+// (The Pricing Plan Manager subscription-eligibility suite is declared ONCE, further up this
+// tail: a module may be declared only once, and two landings each appended a declaration of
+// (`sfn_relayed_dynamodb_request_id` is declared ONCE, a few lines above in this same tail:
 // (`pricing_plan_subscription_resource_eligibility` is declared ONCE, further up this tail:
 // two branches landing in the same window each appended their own copy here.)
 // (`cloudformation_kms_encrypted_sns_sqs_pipeline` is declared ONCE, in the sorted span
@@ -2627,8 +2705,8 @@ mod s3_object_created_invalidates_the_distribution_edge;
 // (`pricing_plan_subscription_resource_eligibility` is declared ONCE, further up this tail: a
 // (The Pricing Plan Manager subscription-eligibility suite is declared ONCE, further up this
 // tail: a module may be declared only once, and two landings each appended a declaration of
-#[path = "all/sfn_relayed_dynamodb_request_id.rs"]
-mod sfn_relayed_dynamodb_request_id;
+// (`sfn_relayed_dynamodb_request_id` is declared ONCE, further up this tail: two landings in
+// the same window each appended a declaration of it here.)
 #[path = "all/cloudformation_provisions_cloudfront_resources.rs"]
 mod cloudformation_provisions_cloudfront_resources;
 // (`cloudformation_provisions_cloudfront_resources` is declared ONCE, further up this file:
@@ -2737,8 +2815,8 @@ mod iam_session_tag_authorization;
 // target under a target role — spans CloudFormation, EventBridge, Lambda, Step Functions, IAM,
 // STS and Amazon SQS at once, so no single crate's test target can deploy it and then watch
 // each target.
-#[path = "all/cloudformation_eventbridge_fan_out_to_lambda_and_sfn.rs"]
-mod cloudformation_eventbridge_fan_out_to_lambda_and_sfn;
+// (Declared ONCE, in the head region above, for that reason: two landings in the same window
+// each appended a declaration of it here.)
 // (`apigateway_cognito_authorizer_app_client_audience` is declared ONCE, in the sorted span
 // above beside the other API Gateway suites: it was appended here as well while two branches
 // were landing at once, which declared it a second time and compiled neither.)
@@ -2775,6 +2853,8 @@ mod cloudformation_eventbridge_fan_out_to_lambda_and_sfn;
 // this tail: a module may be declared only once, and two branches landing at once appended
 // it here as well.)
 // this tail: the merge of two tails that had both edited this list declared it twice.)
+// (`bedrock_agent_ingestion_populates_its_s3_vectors_index` is declared ONCE, further up this
+// file: two landings in the same window each appended a declaration of it here.)
 // (`cloudtrail_read_only_api_calls` is declared in the sorted block above, beside the other
 // CloudTrail suites: a module may be declared only once.)
 // (`zz_probe` is declared once, further up this file: a module may be declared only once.)
@@ -2841,6 +2921,23 @@ mod bedrock_agent_ingestion_populates_its_s3_vectors_index;
 // comments: an inner doc comment is only legal before an item, so appended here it is
 // `E0753` and compiles nothing in this target.)
 // leaving a note here.
+// Declared here, in the appended tail: WAFv2 protection a stack provisions.
+// Declared here, in this head region, for the reason those entries record: the appended tail
+// at the end of this file and the `e…` span are where every suite landing in the same window
+// `c…`/`s…` spans are regions concurrently landing suites add their line to.
+// target tracking scaling policy a scaling plan installs is an Application Auto Scaling
+// resource, written over an in-process call addressed as a client's own
+// `application-autoscaling`-scoped call is, so only the whole mounted set can show the
+// policy AWS Auto Scaling reports being the one that service holds for the DynamoDB table
+// it scales.
+#[path = "all/autoscaling_plans_policies_reach_application_auto_scaling.rs"]
+mod autoscaling_plans_policies_reach_application_auto_scaling;
+// `cloudformation_metric_stream_estate_is_drainable` are declared in the head region and the
+// sorted span above: each was appended here as well while two branches were landing at once,
+// landings each appended their own copy here, and a module may be declared only once.)
+// this tail: the entry was appended here as well while two branches were landing at once,
+// (`pricing_plan_subscription_resource_eligibility` is declared ONCE, further up this tail:
+// two branches landing in the same window each appended their own copy here.)
 // (Written as ordinary comments: an inner doc comment is only legal at the TOP of a crate
 // root, so this note — appended here by a landing that copied it out of the header — is
 // `E0753` in this position and compiled none of the suites in this target.)
@@ -2857,6 +2954,7 @@ mod bedrock_agent_ingestion_populates_its_s3_vectors_index;
 // name is `E0428` and fails every suite in this target.
 // `all/all_rs_declares_each_suite_once.rs` checks that for this file and for every service
 // crate's `tests/all.rs`, so check there rather than leaving a note here.
+// A suite left at the top level of `tests/` fails the build. Declare each suite exactly
 // leaving a note here. (An inner doc comment only opens a file, so this note travelled
 // here as `//` rather than `//!`.)
 // leaving a note here. (This note sits mid-file, so it is a plain comment: an inner doc
@@ -2870,8 +2968,8 @@ mod bedrock_agent_ingestion_populates_its_s3_vectors_index;
 // `application-autoscaling`-scoped call is, so only the whole mounted set can show the
 // policy AWS Auto Scaling reports being the one that service holds for the DynamoDB table
 // it scales.
-#[path = "all/autoscaling_plans_policies_reach_application_auto_scaling.rs"]
-mod autoscaling_plans_policies_reach_application_auto_scaling;
+// (Declared ONCE, further up this file: two landings in the same window each appended a
+// declaration of it here.)
 // Declared here, beside the other CloudFormation/Lambda suites, rather than in the appended
 // tail every concurrently landing router suite adds its line to.
 #[path = "all/cloudformation_provisions_lambda_event_invoke_configs.rs"]
@@ -3054,7 +3152,6 @@ mod cloudformation_cognito_identity_role_attachment_refusal;
 // its line while the name is already declared further up, a module declared twice loads the
 // same file twice and compiles neither, and two branches removing the same duplicate each
 // leave none. One block, one declaration per suite.
-// (`pricing_plan_subscription_resource_eligibility` is declared ONCE, in the head region
 // above: a module may be declared only once, and two branches landing at once each kept a
 // different copy of it.)
 // a module may be declared only once, and a second declaration fails this whole target.)
@@ -3183,6 +3280,11 @@ mod ecr_scan_on_push_event_reaches_its_queue_target;
 // ONCE, since this is one crate root and a second `mod` for the same name is `E0428` and
 // fails every suite in this target. `all/all_rs_declares_each_suite_once.rs` checks both,
 // for this file and for every service crate's `tests/all.rs`.)
+// (The same note, landed again as `//!` lines by another branch and so turned into ordinary
+// comments here: a suite left at the top level of `tests/` fails the build; each suite is
+// declared exactly ONCE, since a second `mod` for the same name is `E0428` and fails every
+// suite in this target; and `all/all_rs_declares_each_suite_once.rs` checks that for this
+// file and for every service crate's `tests/all.rs`.)
 // (Two more lines of that same note, landed in this tail as `//!` while branches were
 // merging: an inner doc comment is legal only before the first item, so they stand as
 // ordinary comments. A suite left at the top level of `tests/` fails the build, and
@@ -3309,6 +3411,8 @@ mod apigateway_wafv2_waf_log_destination_gate;
 // were landing at once: it belongs at the head of this file or nowhere, so it is a line
 // comment — `all/all_rs_declares_each_suite_once.rs` is what checks this file and every
 // service crate's `tests/all.rs`.)
+// (One more fragment of that same header landed here as a `//!` line, which is `E0753`
+// mid-file: a suite left at the top level of `tests/` fails the build.)
 // suite left at the top level of `tests/` fails the build.
 // (The last line of that same header fragment, an ordinary comment here for the same
 // reason: an inner doc comment is legal only before the first item of a crate root, so a
@@ -3350,6 +3454,9 @@ mod all_rs_inner_doc_comments_precede_the_first_item;
 // reason the lines above record.)
 // leaving a note here. (Mid-file, so a plain comment: an inner doc comment is only
 // accepted before the first item of a module.)
+// (And one more: the rule it states — that `all/all_rs_declares_each_suite_once.rs` checks
+// this file and every service crate's `tests/all.rs` — stands in the module doc at the HEAD
+// of this file.)
 // this file and for every service crate's `tests/all.rs`. (One more line of that same
 // header fragment, an ordinary comment for the reason the lines above record.)
 // this file and for every service crate's `tests/all.rs`. (Same appended header fragment,

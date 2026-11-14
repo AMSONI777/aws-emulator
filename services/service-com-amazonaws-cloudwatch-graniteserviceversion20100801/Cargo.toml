@@ -74,6 +74,15 @@ aws-sdk-ssm = { version = "1", default-features = false }
 # (`state::alarm_actions::state_change_events`), through the shared client construction in
 # `service-common`. Only the generated client is needed — the emulator supplies the transport.
 aws-sdk-eventbridge = { version = "1", default-features = false }
+# The AWS SDK for AWS KMS, driven over the same in-process callback: a topic an alarm action
+# publishes to may seal its messages under a customer managed key, and the key's manager, its
+# state, the grants in force on it and its key policy are what decide whether this service may
+# have the notification sealed under it (`state::alarm_actions::sns_topic_authorization`). Asked
+# of KMS's own API rather than of its store, because this crate cannot depend on the KMS service
+# crate: that edge is a cycle cargo refuses
+# (cloudwatch -> kms -> sts -> cognitoidentityprovider -> cloudwatch). Only the generated client
+# is needed — the emulator supplies the transport.
+aws-sdk-kms = { version = "1", default-features = false }
 # The AWS SDK for Amazon Data Firehose, driven over the same in-process callback: a running
 # metric stream exports its records into the delivery stream its `FirehoseArn` names with
 # `PutRecord` (`state::metric_stream_export`). Pinned to the release the other producers of
@@ -135,6 +144,10 @@ service-com-amazonaws-sns-amazonsimplenotificationservice = { workspace = true }
 # SQS is mounted with them, because the subscriber of the alarm's topic is a queue and that
 # is where the delivered notification is read.
 service-com-amazonaws-sqs-amazonsqs = { workspace = true }
+# AWS KMS is mounted with them in the publish-grant suite, because a topic that encrypts its
+# messages puts its KEY's own authorities in force over the publish, and those are KMS's: the
+# suite writes the key policy with `PutKeyPolicy` and asserts what the alarm action then does.
+service-com-amazonaws-kms-trentservice = { workspace = true }
 # EC2 is mounted with them for the alarm-action suites that drive an EC2 INSTANCE action: the
 # action is an operation on an instance, so what it did is asserted on the instance EC2 itself
 # reports.

@@ -7,17 +7,20 @@
 //!
 //! The RULE asserted here: executing an alarm action is a cross-service request this service
 //! makes as the service principal `cloudwatch.amazonaws.com`, so the target topic's own
-//! resource policy decides it: an explicit deny of `SNS:Publish` for that principal on that
-//! topic suppresses the publish — the topic's subscribers see nothing and the action is
-//! recorded in the alarm's history with `actionState` `Failed`, an `error` naming the
-//! authorization failure and the topic, and no `publishedMessage` — while a policy that
-//! denies nothing about that publish leaves the action executed and `Succeeded`.
+//! resource policy decides it — the publish is made only where that policy ALLOWS
+//! `SNS:Publish` for that principal on that topic under the keys the request carries. A policy
+//! that explicitly denies it, and one that states no such grant at all, both suppress the
+//! publish: the topic's subscribers see nothing and the action is recorded in the alarm's
+//! history with `actionState` `Failed`, an `error` naming the authorization failure, the topic
+//! and which reading withheld the grant, and no `publishedMessage`. A policy that allows it
+//! leaves the action executed and `Succeeded`.
 //!
 //! The rows differ along what the rule generalises over: the FORM the topic's policy takes
 //! (the one a topic with no policy of its own carries, an allow of this principal by name, an
-//! allow of every principal, an allow of someone else, an allow of another action) and, for a
-//! deny, WHICH request it is about — the principal it names, the action it names (by name or
-//! as a wildcard), the resource it is scoped to and the condition it is scoped by.
+//! allow of every principal, an allow of someone else, an allow of another action, a document
+//! with no statement at all) and, for a deny, WHICH request it is about — the principal it
+//! names, the action it names (by name or as a wildcard), the resource it is scoped to and the
+//! condition it is scoped by.
 
 use serde_json::{json, Value};
 
@@ -34,7 +37,29 @@ pub(crate) const CLOUDWATCH_PRINCIPAL: &str = "cloudwatch.amazonaws.com";
 const REFUSED_ACTION: &str = "not authorized to perform: SNS:Publish";
 
 /// The reading that refused the publish, as the recorded `error` words it.
-const EXPLICIT_DENY: &str = "with an explicit deny in a resource-based policy";
+pub(crate) const EXPLICIT_DENY: &str = "with an explicit deny in a resource-based policy";
+
+/// The other reading that refuses it: a policy stating no grant for this publish at all, which
+/// is IAM's default deny.
+pub(crate) const NO_ALLOW: &str = "because no resource-based policy allows the SNS:Publish action";
+
+/// What the topic's own policy said about the publish, as the recorded `Action` item reports it.
+#[derive(Debug, Clone, Copy)]
+pub(crate) enum Outcome {
+    /// The publish was made: the action is `Succeeded` and the subscriber receives the
+    /// notification.
+    Published,
+    /// The publish was withheld, and the recorded `error` carries `reason` — which reading of
+    /// the policy refused it.
+    Withheld(&'static str),
+}
+
+impl Outcome {
+    /// How many notifications the queue subscribed to the topic receives under this outcome.
+    pub(crate) fn deliveries(self) -> usize {
+        usize::from(matches!(self, Self::Published))
+    }
+}
 
 /// One policy statement, as a topic's owner writes it: an effect, a principal, an action and
 /// whatever else (`Resource`, `Condition`) the row scopes it by.
@@ -227,8 +252,11 @@ pub(crate) async fn poll_delivered(emulator: &Emulator, url: &str, wanted: usize
 }
 
 /// Assert one `Action` item against what the topic's policy said about the publish.
-pub(crate) fn assert_action_item(case: &str, item: &Value, topic_arn: &str, published: bool) {
-    let expected = if published { "Succeeded" } else { "Failed" };
+pub(crate) fn assert_action_item(case: &str, item: &Value, topic_arn: &str, outcome: Outcome) {
+    let expected = match outcome {
+        Outcome::Published => "Succeeded",
+        Outcome::Withheld(_) => "Failed",
+    };
     let state = item["actionState"].as_str().unwrap_or_default();
     assert_eq!(
         state, expected,
@@ -236,7 +264,7 @@ pub(crate) fn assert_action_item(case: &str, item: &Value, topic_arn: &str, publ
     );
     let error = item["error"].as_str();
     let message = item["publishedMessage"].as_str();
-    if published {
+    let Outcome::Withheld(reason) = outcome else {
         assert_eq!(
             error, None,
             "case {case:?}: a published action records no error, got {item}"
@@ -249,7 +277,7 @@ pub(crate) fn assert_action_item(case: &str, item: &Value, topic_arn: &str, publ
              {item}"
         );
         return;
-    }
+    };
     assert_eq!(
         message, None,
         "case {case:?}: a refused action hands nothing over, so it records no published \
@@ -257,9 +285,9 @@ pub(crate) fn assert_action_item(case: &str, item: &Value, topic_arn: &str, publ
     );
     let error = error.unwrap_or_default();
     assert!(
-        error.contains(REFUSED_ACTION) && error.contains(topic_arn) && error.contains(EXPLICIT_DENY),
+        error.contains(REFUSED_ACTION) && error.contains(topic_arn) && error.contains(reason),
         "case {case:?}: the error must name the {REFUSED_ACTION:?} failure, the topic \
-         {topic_arn:?} and {EXPLICIT_DENY:?}, got {error:?}"
+         {topic_arn:?} and {reason:?}, got {error:?}"
     );
 }
 
@@ -278,13 +306,13 @@ fn written(build: impl Fn(&str, &str) -> Vec<Value> + 'static) -> PolicyFor {
 }
 
 #[tokio::test]
-async fn an_alarm_action_is_published_unless_the_topic_policy_denies_this_service() {
-    // (case, the topic's policy, whether the notification is published)
-    let rows: Vec<(&str, PolicyFor, bool)> = vec![
+async fn an_alarm_action_is_published_only_where_the_topic_policy_allows_this_service() {
+    // (case, the topic's policy, what the policy says about the publish)
+    let rows: Vec<(&str, PolicyFor, Outcome)> = vec![
         (
             "the policy a topic with none of its own carries",
             no_policy(),
-            true,
+            Outcome::Published,
         ),
         (
             "an allow of this service principal by name",
@@ -296,14 +324,43 @@ async fn an_alarm_action_is_published_unless_the_topic_policy_denies_this_servic
                     json!({}),
                 )]
             }),
-            true,
+            Outcome::Published,
         ),
         (
             "an allow of every principal for every action of the service",
             written(|_topic, _alarm| {
                 vec![statement("Allow", json!("*"), json!("sns:*"), json!({}))]
             }),
-            true,
+            Outcome::Published,
+        ),
+        (
+            "an allow of this principal scoped to the alarm this publish comes from",
+            written(|topic, alarm| {
+                vec![statement(
+                    "Allow",
+                    json!({"Service": CLOUDWATCH_PRINCIPAL}),
+                    json!("sns:Publish"),
+                    json!({
+                        "Resource": topic,
+                        "Condition": {"ArnEquals": {"aws:SourceArn": alarm}},
+                    }),
+                )]
+            }),
+            Outcome::Published,
+        ),
+        (
+            "an allow of this principal scoped to another alarm",
+            written(|_topic, alarm| {
+                vec![statement(
+                    "Allow",
+                    json!({"Service": CLOUDWATCH_PRINCIPAL}),
+                    json!("sns:Publish"),
+                    json!({
+                        "Condition": {"ArnEquals": {"aws:SourceArn": format!("{alarm}-elsewhere")}},
+                    }),
+                )]
+            }),
+            Outcome::Withheld(NO_ALLOW),
         ),
         (
             "an allow of another service principal only",
@@ -315,7 +372,7 @@ async fn an_alarm_action_is_published_unless_the_topic_policy_denies_this_servic
                     json!({}),
                 )]
             }),
-            true,
+            Outcome::Withheld(NO_ALLOW),
         ),
         (
             "an allow of this principal for another action only",
@@ -327,7 +384,24 @@ async fn an_alarm_action_is_published_unless_the_topic_policy_denies_this_servic
                     json!({}),
                 )]
             }),
-            true,
+            Outcome::Withheld(NO_ALLOW),
+        ),
+        (
+            "a policy carrying no statement at all",
+            written(|_topic, _alarm| Vec::new()),
+            Outcome::Withheld(NO_ALLOW),
+        ),
+        (
+            "an allow of this principal scoped to another topic",
+            written(|topic, _alarm| {
+                vec![statement(
+                    "Allow",
+                    json!({"Service": CLOUDWATCH_PRINCIPAL}),
+                    json!("sns:Publish"),
+                    json!({"Resource": format!("{topic}-elsewhere")}),
+                )]
+            }),
+            Outcome::Withheld(NO_ALLOW),
         ),
         (
             "an explicit deny of this principal by name",
@@ -342,7 +416,7 @@ async fn an_alarm_action_is_published_unless_the_topic_policy_denies_this_servic
                     ),
                 ]
             }),
-            false,
+            Outcome::Withheld(EXPLICIT_DENY),
         ),
         (
             "an explicit deny written as an action wildcard",
@@ -357,7 +431,7 @@ async fn an_alarm_action_is_published_unless_the_topic_policy_denies_this_servic
                     ),
                 ]
             }),
-            false,
+            Outcome::Withheld(EXPLICIT_DENY),
         ),
         (
             "an explicit deny aimed at every principal",
@@ -367,7 +441,7 @@ async fn an_alarm_action_is_published_unless_the_topic_policy_denies_this_servic
                     statement("Deny", json!("*"), json!("sns:Publish"), json!({})),
                 ]
             }),
-            false,
+            Outcome::Withheld(EXPLICIT_DENY),
         ),
         (
             "an explicit deny scoped to this very topic",
@@ -382,7 +456,7 @@ async fn an_alarm_action_is_published_unless_the_topic_policy_denies_this_servic
                     ),
                 ]
             }),
-            false,
+            Outcome::Withheld(EXPLICIT_DENY),
         ),
         (
             "an explicit deny scoped to the alarm this publish comes from",
@@ -397,7 +471,7 @@ async fn an_alarm_action_is_published_unless_the_topic_policy_denies_this_servic
                     ),
                 ]
             }),
-            false,
+            Outcome::Withheld(EXPLICIT_DENY),
         ),
         (
             "an explicit deny of another service principal",
@@ -412,7 +486,7 @@ async fn an_alarm_action_is_published_unless_the_topic_policy_denies_this_servic
                     ),
                 ]
             }),
-            true,
+            Outcome::Published,
         ),
         (
             "an explicit deny of another action for this principal",
@@ -427,7 +501,7 @@ async fn an_alarm_action_is_published_unless_the_topic_policy_denies_this_servic
                     ),
                 ]
             }),
-            true,
+            Outcome::Published,
         ),
         (
             "an explicit deny scoped to another topic",
@@ -442,7 +516,7 @@ async fn an_alarm_action_is_published_unless_the_topic_policy_denies_this_servic
                     ),
                 ]
             }),
-            true,
+            Outcome::Published,
         ),
         (
             "an explicit deny scoped to an account this publish does not come from",
@@ -461,11 +535,11 @@ async fn an_alarm_action_is_published_unless_the_topic_policy_denies_this_servic
                     ),
                 ]
             }),
-            true,
+            Outcome::Published,
         ),
     ];
 
-    for (case, document, published) in rows {
+    for (case, document, outcome) in rows {
         let emulator = emulator();
         let (topic, queue) = given_topic_with_subscriber(&emulator, "orders").await;
         let alarm = "orders-backlog-high";
@@ -487,14 +561,14 @@ async fn an_alarm_action_is_published_unless_the_topic_policy_denies_this_servic
             resource, &topic,
             "case {case:?}: the item must name the topic the action aimed at, got {item}"
         );
-        assert_action_item(case, item, &topic, published);
+        assert_action_item(case, item, &topic, outcome);
 
-        let waiting = poll_delivered(&emulator, &queue, usize::from(published)).await;
+        let wanted = outcome.deliveries();
+        let waiting = poll_delivered(&emulator, &queue, wanted).await;
         assert_eq!(
-            waiting,
-            usize::from(published),
-            "case {case:?}: expected {} notification(s) on the subscribed queue, got {waiting}",
-            usize::from(published)
+            waiting, wanted,
+            "case {case:?}: expected {wanted} notification(s) on the subscribed queue, got \
+             {waiting}"
         );
     }
 }
@@ -532,15 +606,19 @@ async fn one_transition_decides_each_of_its_actions_on_its_own_topic() {
         2,
         "both actions of the transition must be recorded, got {items:?}"
     );
-    for (case, topic, published) in [
-        ("the topic that denies nothing", &allowed, true),
-        ("the denying topic", &denied, false),
+    for (case, topic, outcome) in [
+        ("the topic that denies nothing", &allowed, Outcome::Published),
+        (
+            "the denying topic",
+            &denied,
+            Outcome::Withheld(EXPLICIT_DENY),
+        ),
     ] {
         let (_, item) = items
             .iter()
             .find(|(resource, _)| resource == topic)
             .unwrap_or_else(|| panic!("no Action item for {topic}: {items:?}"));
-        assert_action_item(case, item, topic, published);
+        assert_action_item(case, item, topic, outcome);
     }
 
     let reached = poll_delivered(&emulator, &allowed_queue, 1).await;
