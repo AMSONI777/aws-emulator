@@ -3013,6 +3013,12 @@ mod s3_object_events_update_their_search_index;
 #[path = "all/cloudformation_cognito_identity_role_attachment_refusal.rs"]
 mod cloudformation_cognito_identity_role_attachment_refusal;
 // A suite left at the top level of `tests/` fails the build. Declare each suite exactly
+// ONCE: this is one crate root, so a second `mod` for the same name is `E0428` and fails
+// every suite in this target. `all/all_rs_declares_each_suite_once.rs` checks that for
+// this file and for every service crate's `tests/all.rs`, so check there rather than
+// leaving a note here. (These five lines are another fragment of this file's own header
+// that a merge of two appended tails landed down here; they are ordinary comments
+// because an inner doc comment may only appear before an item.)
 // it was appended here as well while two branches were landing at the same time.)
 // (`redshift_health_alarms_evaluate` is declared ONCE, further up this tail: a module may
 // be declared only once, and two branches landing at once appended it twice.)
@@ -3058,6 +3064,7 @@ mod cloudformation_task_definition_runs_an_ecs_service;
 // this file and for every service crate's `tests/all.rs`. It is a LINE comment here: an
 // inner doc comment is only legal before the first item, so landing it in this tail failed
 // every suite in this target.)
+// this file and for every service crate's `tests/all.rs`.
 // (A module doc comment belongs at the head of this file, before any item: these lines were
 // appended here as `//!` while two branches were landing at once, which is `E0753` and
 // compiles no suite of this target, so they stand as ordinary comments. Declare each suite

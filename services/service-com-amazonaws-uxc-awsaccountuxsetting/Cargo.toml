@@ -7,6 +7,11 @@ publish = false
 build = "build.rs"
 
 [dependencies]
+# `service-common` carries the shared half of this service's front door: the code and
+# the message a refused body is answered with, the reading that places a violated
+# member in the request body, and the rendering of a `@pattern` as the expression a
+# service advertises.
+service-common = { path = "../common" }
 engine = { workspace = true }
 smithy-macros = { workspace = true }
 aws-smithy-schema = { workspace = true }

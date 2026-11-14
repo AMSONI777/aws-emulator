@@ -39,6 +39,8 @@ mod pattern_refusal_rendering;
 mod reported_account_color;
 #[path = "all/service_catalog.rs"]
 mod service_catalog;
+#[path = "all/shared_front_door_readings.rs"]
+mod shared_front_door_readings;
 #[path = "all/state_roundtrip.rs"]
 mod state_roundtrip;
 #[path = "all/support.rs"]
