@@ -47,6 +47,8 @@ mod infrastructure_configuration;
 mod infrastructure_configuration_listing;
 #[path = "all/infrastructure_configuration_update.rs"]
 mod infrastructure_configuration_update;
+#[path = "all/parameter_value_refusal_wording.rs"]
+mod parameter_value_refusal_wording;
 #[path = "all/parameter_value_refusals.rs"]
 mod parameter_value_refusals;
 #[path = "all/recipe_group_and_pipeline_listing.rs"]

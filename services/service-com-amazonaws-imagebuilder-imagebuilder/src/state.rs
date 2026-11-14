@@ -4116,13 +4116,18 @@ pub const INSTANCE_PROFILE_NAME_MEMBER: &str = "instanceProfileName";
 /// `instanceProfileName` is "the instance profile to associate with the instance used to
 /// customize your Amazon EC2 AMI" — an IAM resource of the caller's account, which the model
 /// can only constrain the SHAPE of, so whether it exists is resolved against IAM itself
-/// ([`instance_profile_named`]). The wording names the member the value arrived in and
-/// states that no such profile exists; nothing of the value is echoed.
+/// ([`instance_profile_named`]). A value this service cannot accept is refused in the ONE
+/// sentence it states every parameter refusal in
+/// (`service_common::validation_message::parameter_value_mismatch`), whatever established
+/// that the value is not one it admits — a constraint of the model, or a lookup of the
+/// resource the value names. The requirement clause states that no such profile exists;
+/// nothing of the value is echoed.
 #[must_use]
 pub fn missing_instance_profile_message(member: &str) -> String {
-    format!(
-        "Invalid parameter value for {member}: The provided instance profile does not exist. \
-         Please specify a different instance profile and try again."
+    ::service_common::validation_message::parameter_value_mismatch(
+        member,
+        "The provided instance profile does not exist. Please specify a different instance \
+         profile and try again.",
     )
 }
 
@@ -4382,12 +4387,15 @@ pub fn arn_resource_type(arn: &str) -> String {
 /// Why a policy document that is not parseable JSON is refused.
 ///
 /// A resource policy is a JSON document, so a value that cannot be parsed as one is an
-/// invalid value for the member it arrived in — which the wording names.
+/// invalid value for the member it arrived in — refused in the ONE sentence this service
+/// states every parameter refusal in
+/// (`service_common::validation_message::parameter_value_mismatch`), whose requirement
+/// clause states that the document cannot be parsed.
 #[must_use]
 pub fn malformed_policy_message(member: &str) -> String {
-    format!(
-        "The value supplied for parameter '{member}' is not valid. Policy is malformed and cannot \
-         be parsed"
+    ::service_common::validation_message::parameter_value_mismatch(
+        member,
+        "Policy is malformed and cannot be parsed",
     )
 }
 

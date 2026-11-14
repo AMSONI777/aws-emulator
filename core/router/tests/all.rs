@@ -3663,11 +3663,6 @@ mod cloudformation_provisions_appsync_resources;
 // leaving a note here. (Ordinary comments: an inner doc comment `//!` is only legal
 // before the first item of a crate root, so landing these lines here as `//!` is `E0753`
 // and compiles no suite of this target.)
-// suite left at the top level of `tests/` fails the build. (A fragment of this file's own
-// header, landed down here: past the first item a `//!` line is `E0753`, so it stands as an
-// ordinary comment.)
-// this file and for every service crate's `tests/all.rs`. (Same appended header fragment,
-// an ordinary comment for the reason the lines above record.)
 // suite left at the top level of `tests/` fails the build. (An ordinary comment: this is a
 // fragment of this file's own header that a landing appended here, and an inner doc comment
 // is only legal before the first item.)
@@ -3950,3 +3945,6 @@ mod cloudformation_provisions_redshift_snapshot_copy_grants;
 // no suite of this target.)
 // reason the lines above record: a `//!` line after the first item of this crate root is
 // `E0753`.)
+// suite left at the top level of `tests/` fails the build. (An ordinary comment: a `//!`
+// line past the first item is `E0753` and compiles no suite in this target.)
+// this file and for every service crate's `tests/all.rs`. (An ordinary comment: a `//!`
