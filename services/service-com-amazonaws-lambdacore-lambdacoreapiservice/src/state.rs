@@ -592,40 +592,24 @@ pub fn request_region(parts: &::http::request::Parts) -> String {
         .unwrap_or_else(|| DEFAULT_REGION.to_string())
 }
 
-/// The `ResourceNotFoundException` payload for an identifier that names no
-/// connector (or no such version of one), for the operations that CHANGE a
-/// connector.
+/// The `ResourceNotFoundException` payload for an identifier that names no connector (or
+/// no such version of one), for every operation addressed by a
+/// `NetworkConnectorIdentifier`.
 ///
-/// The message echoes the identifier the request SUPPLIED, byte for byte, and
-/// nothing else: `NetworkConnectorIdentifier` is "a flexible identifier that
-/// accepts a network connector ID, name, or ARN", the three forms are
-/// interchangeable in the request, and what a write could not change is the thing
-/// the caller addressed — so a request by id is refused naming that id, one by
-/// name that name, and one by ARN that ARN, each with whatever version suffix it
-/// carried.
+/// The message names the RESOURCE the identifier determines, which is what the request
+/// could not reach: `NetworkConnectorIdentifier` is "a flexible identifier that accepts a
+/// network connector ID, name, or ARN", and an `Id` IS an ARN's resource part
+/// ([`connector_arn`]), so an ARN is the resource already and an id determines the ARN that
+/// carries it, while a NAME determines no ARN (the resource part being an id a name does
+/// not carry) and is stated exactly as supplied. A version-qualified identifier keeps its
+/// suffix: the version is part of what was not found.
 ///
-/// The operations that REPORT a connector resolve the identifier instead
-/// ([`connector_not_found_resolved`]), which is the one place the two refusals
-/// differ.
+/// WHICH form that is follows from the identifier itself and not from what the operation
+/// does, so one rule answers for a read and for a write alike.
 ///
-/// The service states it as `Network connector not found: <what was addressed>`
+/// The service states it as `Network connector not found: <the resource addressed>`
 /// ([`NOT_FOUND_PREFIX`]).
-pub fn connector_not_found(identifier: &str) -> ResourceNotFoundException {
-    not_found(identifier)
-}
-
-/// The `ResourceNotFoundException` payload for the same identifier from an
-/// operation that REPORTS a connector (`GetNetworkConnector`,
-/// `ListNetworkConnectorVersions`).
-///
-/// A read resolves the identifier to the RESOURCE it determines and names that,
-/// which is the resource it would have reported: an ARN is one already, and an
-/// `Id` IS an ARN's resource part ([`connector_arn`]), so a read addressed by id
-/// is refused naming the ARN that id determines. A NAME determines no ARN (the
-/// resource part being an id a name does not carry), so it is stated exactly as
-/// supplied. A version-qualified identifier keeps its suffix: the version is part
-/// of what was not found.
-pub fn connector_not_found_resolved(region: &str, identifier: &str) -> ResourceNotFoundException {
+pub fn connector_not_found(region: &str, identifier: &str) -> ResourceNotFoundException {
     let parsed = parse_identifier(identifier);
     if identifier.contains(ARN_RESOURCE_INFIX) || !names_a_connector_id(&parsed.key) {
         return not_found(identifier);
@@ -637,7 +621,7 @@ pub fn connector_not_found_resolved(region: &str, identifier: &str) -> ResourceN
     }
 }
 
-/// The refusal naming `addressed` exactly, which is what the two helpers above
+/// The refusal naming `addressed` exactly, which is what [`connector_not_found`]
 /// resolved the request's identifier to.
 fn not_found(addressed: &str) -> ResourceNotFoundException {
     ResourceNotFoundException {

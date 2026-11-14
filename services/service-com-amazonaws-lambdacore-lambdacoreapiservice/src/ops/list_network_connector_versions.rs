@@ -225,7 +225,7 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         let Some((connector, _)) = store.settled_mut(&input.identifier, now) else {
             return Err(
                 ListNetworkConnectorVersionsErrorModeled::ResourceNotFoundException(
-                    crate::state::connector_not_found_resolved(&region, &input.identifier),
+                    crate::state::connector_not_found(&region, &input.identifier),
                 )
                 .into(),
             );

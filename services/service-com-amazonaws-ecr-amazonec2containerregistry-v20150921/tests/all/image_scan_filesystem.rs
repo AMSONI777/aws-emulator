@@ -2,20 +2,22 @@
 
 //! What a basic image scan makes of the image's FILESYSTEM — end to end over the wire.
 //!
-//! The rule under test: a basic scan's terminal status is a function of the scanned
-//! image's content. A run reaches `COMPLETE` — the status whose findings block, with its
-//! completion instant and its per-severity counts, is readable — exactly where the layers
-//! the image's manifest declares carry, between them, an operating-system release file
-//! and the installed-package database of a package manager; an image missing either is
-//! one basic scanning does not support, and the run ends `FAILED` with the
-//! unsupported-image description and no findings block. Both outcomes are reachable, and
-//! neither is the default.
+//! The rule under test: a basic scan's terminal status AND its description are a function
+//! of the scanned image's content. A run reaches `COMPLETE` — the status whose findings
+//! block, with its completion instant and its per-severity counts, is readable — exactly
+//! where the layers the image's manifest declares carry, between them, an operating-system
+//! release file and the installed-package database of a package manager; an image missing
+//! either ends `FAILED`, and the description says WHY it could not be examined: the
+//! operating-system/package-manager sentence where the scan READ the image's filesystem and
+//! found nothing there to enumerate packages from, and the image-not-supported sentence
+//! where the layers are no filesystem it can read at all. None of the three outcomes is the
+//! default.
 //!
 //! The rows differ along what the rule generalises over: which release file and which
 //! package database the filesystem carries, how the layer's bytes are encoded (gzipped
-//! tar, plain tar, bytes that are no archive), whether the two sit in one layer or in
-//! different ones, and whether the image carries one of the two or neither. The report's
-//! own case is the first row.
+//! tar, plain tar, bytes that are no archive), whether the archive carries any member at
+//! all, whether the two sit in one layer or in different ones, and whether the image carries
+//! one of the two or neither. The report's own case is the first row.
 //!
 //! The wire harness is `crate::wire`'s: every case goes through the router, so it
 //! exercises routing, deserialization, the handlers, the persisted state and
@@ -31,12 +33,17 @@ use crate::wire::{at, emulator, given_layer, ok, ok_until};
 
 use ecr::state;
 
-/// The `description` Amazon ECR reports beside the terminal status of a run whose image it
-/// could not scan, spelled out here rather than imported so a change to the constant the
-/// handler reads fails this suite. Shared with `crate::scan_on_push`, so the two suites
-/// cannot drift apart on it.
+/// The `description` Amazon ECR reports beside the terminal status of a run whose image is
+/// not one basic scanning scans at all, spelled out here rather than imported so a change to
+/// the constant the handler reads fails this suite. Shared with `crate::scan_on_push`, so the
+/// two suites cannot drift apart on it.
 pub(crate) const UNSUPPORTED_IMAGE_DESCRIPTION: &str =
     "UnsupportedImageError: The image is not supported.";
+
+/// The `description` of a run that read the image's filesystem and identified no operating
+/// system or no package manager in it, spelled out here for the same reason.
+const UNSUPPORTED_FILESYSTEM_DESCRIPTION: &str =
+    "UnsupportedImageError: The operating system and/or package manager are not supported.";
 
 /// The `description` of a run that examined the image and finished, spelled out here for
 /// the same reason as [`UNSUPPORTED_IMAGE_DESCRIPTION`].
@@ -97,6 +104,38 @@ fn tar_bytes(files: Files<'_>) -> Vec<u8> {
     builder.into_inner().expect("the test archive closes")
 }
 
+/// Where a basic scan of one row's image ENDS.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Outcome {
+    /// The scan examined the filesystem and finished: findings are readable.
+    Complete,
+    /// The scan read the image's filesystem and identified no operating system, or no
+    /// package manager whose packages it could report on.
+    UnsupportedFilesystem,
+    /// The image's layers are no filesystem basic scanning can read at all.
+    UnsupportedImage,
+}
+
+impl Outcome {
+    /// The whole `imageScanStatus` this outcome answers with.
+    fn status(self) -> Value {
+        match self {
+            Self::Complete => json!({
+                "status": state::SCAN_STATUS_COMPLETE,
+                "description": COMPLETE_DESCRIPTION,
+            }),
+            Self::UnsupportedFilesystem => json!({
+                "status": state::SCAN_STATUS_FAILED,
+                "description": UNSUPPORTED_FILESYSTEM_DESCRIPTION,
+            }),
+            Self::UnsupportedImage => json!({
+                "status": state::SCAN_STATUS_FAILED,
+                "description": UNSUPPORTED_IMAGE_DESCRIPTION,
+            }),
+        }
+    }
+}
+
 /// One row of the filesystem table.
 struct Case<'a> {
     /// What the row is about.
@@ -105,9 +144,8 @@ struct Case<'a> {
     repository: &'a str,
     /// The layers the image's manifest declares, in order.
     layers: Vec<Layer<'a>>,
-    /// Whether a basic scan of that filesystem reaches the status whose findings are
-    /// readable.
-    complete: bool,
+    /// Where a basic scan of that filesystem ends.
+    outcome: Outcome,
 }
 
 /// Push a Docker image manifest V2 schema 2 image built on `layers` into `repository`,
@@ -166,7 +204,7 @@ async fn the_terminal_scan_status_follows_the_scanned_filesystem() {
                 ("lib/apk/db/installed", ""),
                 ("marker.txt", "pushed by the suite"),
             ])],
-            complete: true,
+            outcome: Outcome::Complete,
         },
         Case {
             case: "a debian filesystem: dpkg's installed-package status file",
@@ -181,7 +219,7 @@ async fn the_terminal_scan_status_follows_the_scanned_filesystem() {
                     "Package: bash\nStatus: install ok installed\nVersion: 5.2.15-2\n\n",
                 ),
             ])],
-            complete: true,
+            outcome: Outcome::Complete,
         },
         Case {
             case: "an rpm database at the location newer distributions moved it to",
@@ -190,7 +228,7 @@ async fn the_terminal_scan_status_follows_the_scanned_filesystem() {
                 ("etc/os-release", "NAME=\"Amazon Linux\"\nID=amzn\nVERSION_ID=\"2023\"\n"),
                 ("usr/lib/sysimage/rpm/rpmdb.sqlite", "rpm database"),
             ])],
-            complete: true,
+            outcome: Outcome::Complete,
         },
         Case {
             case: "a release file of the older per-distribution kind, beside an rpm database",
@@ -202,7 +240,7 @@ async fn the_terminal_scan_status_follows_the_scanned_filesystem() {
                 ),
                 ("var/lib/rpm/Packages", "rpm database"),
             ])],
-            complete: true,
+            outcome: Outcome::Complete,
         },
         Case {
             case: "an os-release file that carries a NAME but no ID",
@@ -211,7 +249,7 @@ async fn the_terminal_scan_status_follows_the_scanned_filesystem() {
                 ("usr/lib/os-release", "NAME=\"Ubuntu\"\nVERSION_ID=\"24.04\"\n"),
                 ("var/lib/dpkg/status", "Package: dash\nVersion: 0.5.12-2\n\n"),
             ])],
-            complete: true,
+            outcome: Outcome::Complete,
         },
         Case {
             case: "entry names written with the leading ./ one tool emits",
@@ -220,7 +258,7 @@ async fn the_terminal_scan_status_follows_the_scanned_filesystem() {
                 ("./etc/os-release", ALPINE_OS_RELEASE),
                 ("./lib/apk/db/installed", ""),
             ])],
-            complete: true,
+            outcome: Outcome::Complete,
         },
         Case {
             case: "an uncompressed tar layer",
@@ -229,7 +267,7 @@ async fn the_terminal_scan_status_follows_the_scanned_filesystem() {
                 ("etc/os-release", ALPINE_OS_RELEASE),
                 ("lib/apk/db/installed", "the apk database"),
             ])],
-            complete: true,
+            outcome: Outcome::Complete,
         },
         Case {
             case: "the release file and the package database in different layers",
@@ -241,7 +279,7 @@ async fn the_terminal_scan_status_follows_the_scanned_filesystem() {
                     "Package: coreutils\nVersion: 9.1-1\n\n",
                 )]),
             ],
-            complete: true,
+            outcome: Outcome::Complete,
         },
         Case {
             case: "a filesystem with a release file but no package database",
@@ -250,7 +288,7 @@ async fn the_terminal_scan_status_follows_the_scanned_filesystem() {
                 ("etc/os-release", ALPINE_OS_RELEASE),
                 ("usr/bin/app", "the application this image ships"),
             ])],
-            complete: false,
+            outcome: Outcome::UnsupportedFilesystem,
         },
         Case {
             case: "a filesystem with a package database but no release file",
@@ -259,7 +297,7 @@ async fn the_terminal_scan_status_follows_the_scanned_filesystem() {
                 ("lib/apk/db/installed", ""),
                 ("usr/bin/app", "the application this image ships"),
             ])],
-            complete: false,
+            outcome: Outcome::UnsupportedFilesystem,
         },
         Case {
             case: "a file named like the rpm database directory, which is not one",
@@ -268,7 +306,7 @@ async fn the_terminal_scan_status_follows_the_scanned_filesystem() {
                 ("etc/os-release", "ID=rhel\nVERSION_ID=\"9.3\"\n"),
                 ("var/lib/rpm", "not the database directory"),
             ])],
-            complete: false,
+            outcome: Outcome::UnsupportedFilesystem,
         },
         Case {
             case: "a filesystem carrying neither a release file nor a package database",
@@ -277,25 +315,57 @@ async fn the_terminal_scan_status_follows_the_scanned_filesystem() {
                 ("usr/bin/app", "the application this image ships"),
                 ("etc/hostname", "builder\n"),
             ])],
-            complete: false,
+            outcome: Outcome::UnsupportedFilesystem,
+        },
+        Case {
+            // The recorded case: a single-layer image whose layer is an EMPTY gzipped tar,
+            // so the scan read a filesystem carrying no member at all.
+            case: "a gzipped archive carrying no member at all",
+            repository: "fs-empty-archive",
+            layers: vec![Layer::Gzipped(&[])],
+            outcome: Outcome::UnsupportedFilesystem,
+        },
+        Case {
+            case: "an uncompressed archive carrying no member at all",
+            repository: "fs-empty-plain-archive",
+            layers: vec![Layer::Plain(&[])],
+            outcome: Outcome::UnsupportedFilesystem,
+        },
+        Case {
+            case: "bytes that are no archive beside an archive carrying no filesystem",
+            repository: "fs-opaque-and-archive",
+            layers: vec![
+                Layer::Opaque("these bytes are no tar archive"),
+                Layer::Gzipped(&[("usr/bin/app", "the application this image ships")]),
+            ],
+            outcome: Outcome::UnsupportedFilesystem,
         },
         Case {
             case: "layer bytes that are not an archive at all",
             repository: "fs-not-an-archive",
             layers: vec![Layer::Opaque("these bytes are no tar archive")],
-            complete: false,
+            outcome: Outcome::UnsupportedImage,
+        },
+        Case {
+            case: "several layers of bytes that are no archive",
+            repository: "fs-no-archive-at-all",
+            layers: vec![
+                Layer::Opaque("the first layer is no archive"),
+                Layer::Opaque("and neither is the second"),
+            ],
+            outcome: Outcome::UnsupportedImage,
         },
     ];
 
     let router = emulator();
     // Every row's scan is started before any is read, so the runs the clock owes proceed
     // together rather than one row at a time.
-    let mut started_rows: Vec<(&str, &str, String, bool)> = Vec::new();
+    let mut started_rows: Vec<(&str, &str, String, Outcome)> = Vec::new();
     for Case {
         case,
         repository,
         layers,
-        complete,
+        outcome,
     } in &cases
     {
         ok(
@@ -319,21 +389,12 @@ async fn the_terminal_scan_status_follows_the_scanned_filesystem() {
             "case {case:?}: the run is queued when it is admitted, got {:?}",
             at(&started, "/imageScanStatus")
         );
-        started_rows.push((case, repository, digest, *complete));
+        started_rows.push((case, repository, digest, *outcome));
     }
 
-    for (case, repository, digest, complete) in started_rows {
-        let expected_status = if complete {
-            json!({
-                "status": state::SCAN_STATUS_COMPLETE,
-                "description": COMPLETE_DESCRIPTION,
-            })
-        } else {
-            json!({
-                "status": state::SCAN_STATUS_FAILED,
-                "description": UNSUPPORTED_IMAGE_DESCRIPTION,
-            })
-        };
+    for (case, repository, digest, outcome) in started_rows {
+        let expected_status = outcome.status();
+        let complete = outcome == Outcome::Complete;
         // The terminal status is the clock's to owe, so the suite looks again until the
         // run has ended rather than waiting out a span of wall clock. The poll waits for
         // TERMINALITY alone, so the status it ended at is judged by the assertion below.

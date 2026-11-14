@@ -7,27 +7,22 @@
 //! (`smithy_query(query="shape",shape="NetworkConnectorIdentifier")`) — refuses an
 //! identifier that names no connector, and an identifier that qualifies a version the
 //! connector does not hold, with `HTTP 404` / `ResourceNotFoundException` whose `Message`
-//! is BUILT FROM THE REQUEST: `Network connector not found: ` followed by what the
-//! operation addressed. Which of the three interchangeable forms that is follows from what
-//! the operation DOES:
+//! is BUILT FROM THE REQUEST: `Network connector not found: ` followed by the RESOURCE the
+//! identifier determines, which is what the request could not reach. Which of the three
+//! interchangeable forms that is follows from the identifier itself and NOT from what the
+//! operation does: an ARN is the resource already, and an `Id` IS an ARN's resource part
+//! (`NetworkConnectorArn` is `…:network-connector:[a-zA-Z0-9-_]+`), so a request addressed
+//! by id is refused naming the ARN that id determines, while a NAME determines no ARN and is
+//! stated exactly as supplied.
 //!
-//! * an operation that REPORTS a connector (`GetNetworkConnector`,
-//!   `ListNetworkConnectorVersions`) resolves the identifier to the resource it would have
-//!   reported, and names that: an ARN is one already, and an `Id` IS an ARN's resource part
-//!   (`NetworkConnectorArn` is `…:network-connector:[a-zA-Z0-9-_]+`), so a read addressed by
-//!   id is refused naming the ARN that id determines, while a NAME determines no ARN and is
-//!   stated exactly as supplied;
-//! * an operation that CHANGES one (`UpdateNetworkConnector`, `DeleteNetworkConnector`)
-//!   names the identifier the request supplied, byte for byte, resolved into no other form.
-//!
-//! A version-qualified identifier keeps its suffix either way: the version is part of what
-//! was not found. Nothing is read off a record — the record is gone, or never existed.
+//! A version-qualified identifier keeps its suffix: the version is part of what was not
+//! found. Nothing is read off a record — the record is gone, or never existed.
 //!
 //! The rows span what the rule generalises over:
 //!
 //! * which OPERATION refuses (`GetNetworkConnector`, `UpdateNetworkConnector`,
 //!   `DeleteNetworkConnector`, `ListNetworkConnectorVersions` — every operation this model
-//!   binds under `/{Identifier}`), which is what decides between the two forms above;
+//!   binds under `/{Identifier}`), each naming the same resource for the same identifier;
 //! * which identifier FORM was supplied (a name, a connector id, an unqualified ARN, a
 //!   version-qualified ARN), and the length of it (one character, and the 140 characters
 //!   `NetworkConnectorIdentifier`'s `@length` admits at most);
@@ -103,12 +98,6 @@ impl Addressed {
     fn reporting(identifier: &str) -> Vec<Self> {
         Self::reaching(identifier)
     }
-
-    /// Whether this operation REPORTS a connector, which is what makes its refusal name the
-    /// resource the identifier determines rather than the identifier as supplied.
-    fn reports(self) -> bool {
-        matches!(self, Self::Get | Self::ListVersions)
-    }
 }
 
 /// Whether `identifier` qualifies a version: its last colon-separated segment is a positive
@@ -142,14 +131,10 @@ async fn send(
     }
 }
 
-/// The message the rule requires for `identifier` from an operation that REPORTS a
-/// connector (`reports`) or from one that CHANGES one: the resource the identifier
-/// determines for the first — the ARN for an id, an ARN as supplied, a name as supplied,
-/// each keeping any version suffix — and the identifier exactly as supplied for the second.
-pub(crate) fn expected_message(reports: bool, identifier: &str) -> String {
-    if !reports {
-        return format!("Network connector not found: {identifier}");
-    }
+/// The message the rule requires for `identifier`: the resource that identifier determines —
+/// the ARN for an id, an ARN as supplied, a name as supplied, each keeping any version
+/// suffix.
+pub(crate) fn expected_message(identifier: &str) -> String {
     let (addressed, version) = match identifier.rsplit_once(':') {
         Some((head, suffix)) if names_a_version(identifier) => (head, Some(suffix)),
         _ => (identifier, None),
@@ -180,10 +165,11 @@ fn assert_not_found(case: &str, operation: Addressed, identifier: &str, answer: 
         "case {case:?}: expected the error code {RESOURCE_NOT_FOUND}, got {code:?}"
     );
     let message = text(&answer.body, "/Message");
-    let expected = expected_message(operation.reports(), identifier);
+    let expected = expected_message(identifier);
     assert_eq!(
         message, expected,
-        "case {case:?}: expected the message {expected:?}, got {message:?}"
+        "case {case:?} through {operation:?}: expected the message {expected:?}, got \
+         {message:?}"
     );
     // Whichever form the caller used, the resource it named is in the message.
     let named = identifier
@@ -238,10 +224,10 @@ async fn an_identifier_that_names_no_connector_is_refused_naming_it() {
 }
 
 /// RULE, the case the recording was taken from: a connector that EXISTED and was deleted is
-/// refused naming the identifier that was asked for — never another form of the connector
-/// whose record is gone, which the caller did not use.
+/// refused naming the resource the identifier determines — never a form of the connector
+/// whose record is gone that the identifier does not determine.
 #[tokio::test]
-async fn a_deleted_connector_is_refused_naming_the_identifier_that_was_asked_for() {
+async fn a_deleted_connector_is_refused_naming_the_resource_the_identifier_determines() {
     let router = emulator();
     let name = "deleted-connector";
     let created = create(&router, minimal_create(name)).await;
@@ -292,25 +278,26 @@ async fn a_deleted_connector_is_refused_naming_the_identifier_that_was_asked_for
             assert!(
                 // A connector's ARN carries its Id in its resource segment, so the id may
                 // appear only where the identifier the caller supplied carries it, or where
-                // the operation resolves an id to the ARN that carries it.
-                operation.reports() || identifier.contains(&id) || !message.contains(&id),
+                // the identifier DETERMINES the ARN that carries it (an id does, a name does
+                // not).
+                identifier.contains(&id) || !message.contains(&id),
                 "case {case:?} through {operation:?}: the refusal must not name the \
-                 connector id {id:?} the caller never used, got {message:?}"
+                 connector id {id:?} the identifier does not determine, got {message:?}"
             );
         }
     }
 }
 
-/// RULE: which form the refusal names follows from what the OPERATION does, not from the
-/// form the caller wrote: a write echoes the identifier it was given, while a read names the
-/// resource that identifier determines — so the two answers differ for exactly the one form
-/// that determines another (an `Id`, which is a connector ARN's resource part).
+/// RULE: which form the refusal names follows from the IDENTIFIER and not from what the
+/// operation does: every operation bound under `/{Identifier}` answers the same resource for
+/// the same identifier — the ARN an `Id` determines (an id being a connector ARN's resource
+/// part), an ARN as supplied, a name as supplied.
 ///
 /// The rows are the forms `NetworkConnectorIdentifier` admits, of a connector this account
 /// held and deleted (so every form named one resource) and of one it never held, through
 /// every operation bound under `/{Identifier}`.
 #[tokio::test]
-async fn which_form_the_refusal_names_follows_from_the_operation() {
+async fn which_form_the_refusal_names_follows_from_the_identifier() {
     let router = emulator();
     let name = "echoed-connector";
     let created = create(&router, minimal_create(name)).await;
@@ -342,29 +329,27 @@ async fn which_form_the_refusal_names_follows_from_the_operation() {
         ("an ARN that never existed", expected_arn("nc-00000000000000ff")),
     ];
     for (case, identifier) in &supplied {
+        let mut answered: Vec<String> = Vec::new();
         for operation in Addressed::reaching(identifier) {
             let answer = send(&router, operation, identifier).await;
             let message = text(&answer.body, "/Message");
-            let expected = expected_message(operation.reports(), identifier);
+            let expected = expected_message(identifier);
             assert_eq!(
                 message, expected,
                 "case {case:?} through {operation:?}: expected the message {expected:?}, got \
                  {message:?}"
             );
-            // The write's answer is the identifier itself, whatever form that is.
-            if !operation.reports() {
-                assert_eq!(
-                    message,
-                    format!("Network connector not found: {identifier}"),
-                    "case {case:?} through {operation:?}: a write states the identifier as \
-                     supplied, got {message:?}"
-                );
-            }
+            answered.push(message);
         }
+        assert!(
+            answered.windows(2).all(|pair| pair[0] == pair[1]),
+            "case {case:?}: every operation names the same resource for one identifier, got \
+             {answered:?}"
+        );
     }
 
-    // The one form the two answers differ on: an id-addressed read names the ARN that id
-    // determines, while an id-addressed write names the id.
+    // The one form that determines ANOTHER: an id-addressed request is refused naming the
+    // ARN that id determines, through the read and through the write alike.
     let read = text(&get(&router, &id).await.body, "/Message");
     let written = text(
         &update(
@@ -383,8 +368,8 @@ async fn which_form_the_refusal_names_follows_from_the_operation() {
     );
     assert_eq!(
         written,
-        format!("Network connector not found: {id}"),
-        "case an id-addressed write: expected the id as supplied, got {written:?}"
+        format!("Network connector not found: {arn}"),
+        "case an id-addressed write: expected the ARN the id determines, got {written:?}"
     );
 }
 

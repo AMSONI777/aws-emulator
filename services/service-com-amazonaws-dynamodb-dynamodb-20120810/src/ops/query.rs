@@ -532,7 +532,7 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
                         comparison.attribute == table.partition_key_name()
                             && comparison.operator == Operator::Equal
                     })
-                    .map(|comparison| comparison.operands.first()),
+                    .map(|comparison| comparison.operands.first().and_then(Operand::defined)),
             ),
         ) {
             return Err(crate::scaffolded::Scaffolded::access_denied(denial));
@@ -969,7 +969,101 @@ struct Comparison {
     /// enum value rather than as expression text, and its entries are held to their own
     /// rules ([`crate::state::check_legacy_comparison`]).
     written: Option<Operator>,
-    operands: Vec<AttributeValue>,
+    operands: Vec<Operand>,
+}
+
+/// One operand of a key condition as the expression WROTE it: the value the request
+/// defined for its `:placeholder`, or a placeholder `ExpressionAttributeValues` does not
+/// define.
+///
+/// An undefined placeholder is KEPT here rather than refused where it is read, because the
+/// two defects an operand can carry — a placeholder the request never defined, and a value
+/// of a type the operator or function it was written with does not compare — are answered
+/// in the order the expression wrote the operands ([`first_operand_defect`]), so an
+/// expression carrying both earns the one its text states first.
+#[derive(Debug, Clone)]
+enum Operand {
+    /// The value `ExpressionAttributeValues` defines for the placeholder the expression
+    /// wrote, or the value a legacy `KeyConditions` entry carried directly.
+    Defined(AttributeValue),
+    /// A `:placeholder` the expression dereferences and `ExpressionAttributeValues` does
+    /// not define.
+    Undefined(String),
+}
+
+impl Operand {
+    /// The value this operand stands for, or `None` for a placeholder the request never
+    /// defined — which is a defect of the request and not a value at all.
+    fn defined(&self) -> Option<&AttributeValue> {
+        match self {
+            Self::Defined(value) => Some(value),
+            Self::Undefined(_) => None,
+        }
+    }
+}
+
+/// What is wrong with the first defective OPERAND of a key condition.
+#[derive(Debug, Clone)]
+enum OperandDefect {
+    /// A `:placeholder` `ExpressionAttributeValues` does not define — a defect the REQUEST
+    /// alone settles.
+    Undefined(String),
+    /// An operand of a type the operator or function it was written with does not compare —
+    /// a fact of the key the comparison binds to.
+    Type { written: Operator, datatype: String },
+}
+
+impl OperandDefect {
+    /// The refusal this defect is stated with, worded the way this service words that
+    /// defect wherever it is noticed.
+    fn refusal(&self) -> crate::state::RequestError {
+        match self {
+            Self::Undefined(placeholder) => {
+                crate::state::undefined_value(KEY_CONDITION_MEMBER, placeholder)
+            }
+            Self::Type { written, datatype } => incorrect_operand_type(*written, datatype),
+        }
+    }
+}
+
+/// The defect the FIRST defective operand of `comparisons` carries, read in the order the
+/// expression wrote the operands, or `None` where every operand is one its comparison can
+/// be made with.
+///
+/// Both defects an operand can carry are read in this one walk, so a key condition carrying
+/// two of them is refused for the one its TEXT states first rather than for whichever check
+/// happened to run: "the following types are allowed for the attributes of a key: String,
+/// Number, Binary" — so an operand of any other `AttributeValue` type is no operand for a
+/// comparison on a key at all, and `begins_with` takes only the two types that have a prefix
+/// ([`Operator::compares`]) — and a placeholder the request never defined stands for no
+/// value.
+fn first_operand_defect(comparisons: &[Comparison]) -> Option<OperandDefect> {
+    for comparison in comparisons {
+        for operand in &comparison.operands {
+            match operand {
+                Operand::Undefined(placeholder) => {
+                    return Some(OperandDefect::Undefined(placeholder.clone()))
+                }
+                Operand::Defined(value) => {
+                    // A legacy `KeyConditions` entry states its comparison as a
+                    // `ComparisonOperator` value rather than as expression text, and its
+                    // operands are held to that member's own rules
+                    // ([`crate::state::check_legacy_comparison`]).
+                    let Some(written) = comparison.written else {
+                        continue;
+                    };
+                    let datatype = crate::state::attribute_value_type(value);
+                    if !written.compares(datatype) {
+                        return Some(OperandDefect::Type {
+                            written,
+                            datatype: datatype.to_string(),
+                        });
+                    }
+                }
+            }
+        }
+    }
+    None
 }
 
 /// The key conditions a `Query` runs, encoded against the key schema the query was
@@ -1030,18 +1124,13 @@ impl KeyCondition {
         schema: &[KeySchemaElement],
         comparisons: Vec<Comparison>,
     ) -> Result<Self, crate::state::RequestError> {
-        // "The following types are allowed for the attributes of a key: String, Number,
-        // Binary" — so an operand of any other `AttributeValue` type is no operand for a
-        // comparison on a key at all, and `begins_with` takes only the two types that have
-        // a prefix ([`Operator::compares`]). Read in the order the expression wrote the
-        // operands, and before each is held to the type the schema declares for its key.
-        for comparison in &comparisons {
-            let Some(written) = comparison.written else {
-                continue;
-            };
-            for operand in &comparison.operands {
-                check_operand_type(written, operand)?;
-            }
+        // Every operand of an expression-stated condition was held to what an operand may BE
+        // when the expression was read ([`parse_key_condition_expression`]); a legacy
+        // `KeyConditions` entry states its operands directly and is held to that member's own
+        // rules. The walk stays here so this binding is total whichever reader produced the
+        // comparisons.
+        if let Some(defect) = first_operand_defect(&comparisons) {
+            return Err(defect.refusal());
         }
         // A key condition binds its comparisons to the key attributes of the schema it
         // reads — "You must provide the name of the partition key attribute and a single
@@ -1104,7 +1193,16 @@ impl KeyCondition {
             let encoded = comparison
                 .operands
                 .iter()
-                .map(|value| table.key_condition_value(&comparison.attribute, value))
+                .map(|operand| match operand {
+                    Operand::Defined(value) => {
+                        table.key_condition_value(&comparison.attribute, value)
+                    }
+                    // A placeholder standing for no value is the defect the walk above
+                    // answered; stating it here too keeps this mapping total.
+                    Operand::Undefined(placeholder) => {
+                        Err(OperandDefect::Undefined(placeholder.clone()).refusal())
+                    }
+                })
                 .collect::<Result<Vec<_>, _>>()?;
             if let Some(at) = at_hash {
                 // "The partition key equality test is required": no other comparison
@@ -1378,30 +1476,15 @@ fn begins_with(
 /// does not compare: AWS names the operator AS THE EXPRESSION WROTE IT — so a
 /// comparison the operand came first in reports the operator it reads, not its mirror
 /// image — and the `AttributeValue` type of the operand it would not take.
+///
+/// One of the two defects [`first_operand_defect`] reads off the operands, in the order the
+/// expression wrote them.
 fn incorrect_operand_type(written: Operator, datatype: &str) -> crate::state::RequestError {
     crate::state::RequestError::Validation(format!(
         "Invalid KeyConditionExpression: Incorrect operand type for operator or function; \
          operator or function: {}, operand type: {datatype}",
         written.as_str()
     ))
-}
-
-/// Hold one operand of a key condition to the types its operator compares
-/// ([`Operator::compares`]).
-///
-/// Read where the operand BINDS to the key attribute its comparison names
-/// ([`KeyCondition::resolve`]) — so after the table the condition is read against has
-/// been resolved, and before the operand is held to the type that table declared for that
-/// key ([`crate::state::Table::key_condition_value`]).
-fn check_operand_type(
-    written: Operator,
-    operand: &AttributeValue,
-) -> Result<(), crate::state::RequestError> {
-    let datatype = crate::state::attribute_value_type(operand);
-    if written.compares(datatype) {
-        return Ok(());
-    }
-    Err(incorrect_operand_type(written, datatype))
 }
 
 /// The key conditions this request states, from `KeyConditionExpression` or from the
@@ -1479,7 +1562,9 @@ fn legacy_comparison(
         // The legacy member states its comparison as a `ComparisonOperator` value, not as
         // expression text, so no refusal here names an operator "as written".
         written: None,
-        operands,
+        // Every value a legacy entry carries is one the request stated directly: that
+        // member dereferences no substitution token at all.
+        operands: operands.into_iter().map(Operand::Defined).collect(),
     })
 }
 
@@ -1743,10 +1828,13 @@ fn invalid_key_condition_operator() -> crate::state::RequestError {
 /// `ExpressionAttributeValues`.
 ///
 /// Every defect the PARSE reads is reported where it sits, so an expression carrying two
-/// of them earns the one its text states first: a syntax error, and a substitution token
-/// the request uses but never defined. What the parse does NOT judge is what an operand
-/// may be — that is a fact of the key the comparison binds to, read against the table the
-/// query is pointed at ([`KeyCondition::resolve`]).
+/// of them earns the one its text states first: a syntax error, a substitution token the
+/// request uses but never defined, and an operand of a type the operator or function it was
+/// written with does not compare — the last two in the order the expression wrote the
+/// operands ([`first_operand_defect`]). All three are settled by the REQUEST alone, so all
+/// three are answered before any table is resolved; what the parse does NOT judge is how the
+/// condition BINDS to a key schema, which is read against the table the query is pointed at
+/// ([`KeyCondition::resolve`]).
 fn parse_key_condition_expression(
     expression: &str,
     names: Option<&std::collections::HashMap<String, String>>,
@@ -1760,10 +1848,31 @@ fn parse_key_condition_expression(
         names,
         values,
         reserved: None,
+        undefined: None,
     };
-    let comparisons = parser.conjunction()?;
+    let parsed = parser.conjunction();
+    // The parse stops AT the token it cannot read, so a placeholder the request never
+    // defined that was already read sits before it: the expression still earns the defect
+    // its text states first.
+    let syntax = |parser: &Parser<'_>, syntax: crate::state::RequestError| match &parser.undefined {
+        Some(placeholder) => crate::state::undefined_value(KEY_CONDITION_MEMBER, placeholder),
+        None => syntax,
+    };
+    let comparisons = match parsed {
+        Ok(comparisons) => comparisons,
+        Err(error) => return Err(syntax(&parser, error)),
+    };
     if parser.at != tokens.len() {
-        return Err(parser.syntax());
+        let error = parser.syntax();
+        return Err(syntax(&parser, error));
+    }
+    // A placeholder `ExpressionAttributeValues` does not define stands for no value, and an
+    // operand of a type the operator or function it was written with does not compare is no
+    // operand for it: both are settled by the REQUEST alone, so both are answered here,
+    // whatever table the request addressed — in the order the expression wrote the operands,
+    // so a condition carrying two defects earns the one its text states first.
+    if let Some(defect) = first_operand_defect(&comparisons) {
+        return Err(defect.refusal());
     }
     // A reserved word written out as a name is refused once the expression has PARSED:
     // in an expression the grammar cannot read, a keyword is not yet an attribute name
@@ -1791,6 +1900,11 @@ struct Parser<'a> {
     /// The first name the expression wrote out that is a DynamoDB reserved word, noted
     /// as it is read and refused once the whole expression has parsed.
     reserved: Option<String>,
+    /// The first `:placeholder` the expression dereferenced that
+    /// `ExpressionAttributeValues` does not define, noted as it is read so a parse that
+    /// STOPS later still answers the defect the expression's text states first
+    /// ([`parse_key_condition_expression`]).
+    undefined: Option<String>,
 }
 
 impl Parser<'_> {
@@ -1903,7 +2017,7 @@ impl Parser<'_> {
                     return Err(self.syntax());
                 };
                 self.at += 1;
-                let operand = self.placeholder_value(&placeholder)?;
+                let operand = self.placeholder_value(&placeholder);
                 let attribute = self.attribute()?;
                 Ok(Comparison {
                     attribute,
@@ -1956,30 +2070,34 @@ impl Parser<'_> {
         }
     }
 
-    /// A `:placeholder` token, resolved through `ExpressionAttributeValues`. What TYPE the
-    /// operand may have is not read here: it is a fact of the key the comparison binds to
-    /// ([`KeyCondition::resolve`]).
-    fn value(&mut self) -> Result<AttributeValue, crate::state::RequestError> {
+    /// A `:placeholder` token, read through `ExpressionAttributeValues`. Neither what the
+    /// placeholder stands for nor what TYPE it may be is judged here: both are defects of an
+    /// OPERAND, answered in the order the expression wrote the operands
+    /// ([`first_operand_defect`]).
+    fn value(&mut self) -> Result<Operand, crate::state::RequestError> {
         match self.peek().cloned() {
             Some(Token::Value(placeholder)) => {
                 self.at += 1;
-                self.placeholder_value(&placeholder)
+                Ok(self.placeholder_value(&placeholder))
             }
             _ => Err(self.syntax()),
         }
     }
 
-    /// What a `:placeholder` stands for. One the request never defined is the one
+    /// What a `:placeholder` stands for, or the placeholder itself where the request never
+    /// defined it — which is noted ([`Parser::undefined`]) and answered as the
     /// undefined-token refusal every expression member of this service states
-    /// (`crate::state::undefined_value`).
-    fn placeholder_value(
-        &self,
-        placeholder: &str,
-    ) -> Result<AttributeValue, crate::state::RequestError> {
-        self.values
-            .and_then(|values| values.get(placeholder))
-            .cloned()
-            .ok_or_else(|| crate::state::undefined_value(KEY_CONDITION_MEMBER, placeholder))
+    /// (`crate::state::undefined_value`), in the order the expression's operands are read.
+    fn placeholder_value(&mut self, placeholder: &str) -> Operand {
+        match self.values.and_then(|values| values.get(placeholder)) {
+            Some(value) => Operand::Defined(value.clone()),
+            None => {
+                if self.undefined.is_none() {
+                    self.undefined = Some(placeholder.to_string());
+                }
+                Operand::Undefined(placeholder.to_string())
+            }
+        }
     }
 
     /// `#alias` resolves through `ExpressionAttributeNames`; any other name is the

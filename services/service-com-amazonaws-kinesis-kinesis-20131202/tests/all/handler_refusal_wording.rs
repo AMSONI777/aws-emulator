@@ -12,10 +12,9 @@
 //! * a dry run says the request would have SUCCEEDED and names the operation that judged it,
 //!   and stores nothing;
 //! * a stream nothing holds is `Stream <name> under account <account> not found.`; a read
-//!   that asked for a SHARD is worded at the shard, in the sentence its CONDITION earns —
-//!   `Shard <shardId> in stream <name> under account <account> does not exist` for a stream
-//!   this account does not hold at all, `Could not find shard <shardId> in stream <name>
-//!   under account <account>.` for a shard the HELD stream's map does not carry; and a
+//!   that asked for a SHARD is worded at the shard — `Shard <shardId> in stream <name> under
+//!   account <account> does not exist`, whether the stream itself is one this account does
+//!   not hold at all or one whose shard map does not carry the id; and a
 //!   listing narrowed by a creation instant names that instant too;
 //! * a pair of identifiers that disagree names BOTH halves, since either one may be the
 //!   wrong one, and the pair is reconciled from the request before any lookup;
@@ -32,7 +31,7 @@
 use serde_json::{json, Value};
 use service_com_amazonaws_kinesis_kinesis_20131202::state::{
     dry_run_succeeded_message, hash_key_out_of_range_message, shard_id,
-    shard_not_found_message, shard_not_in_stream_message, stream_creation_time_not_found_message,
+    shard_not_found_message, stream_creation_time_not_found_message,
     stream_identifier_mismatch_message, stream_not_found_message, ON_DEMAND_SHARD_COUNT_MESSAGE,
     SHARD_ITERATOR_TYPE_TRIM_HORIZON, STREAM_MODE_ON_DEMAND,
 };
@@ -257,32 +256,24 @@ async fn a_missing_resource_is_worded_at_what_was_asked_for() {
         );
     }
 
-    // A read that asked for a SHARD is worded at the shard, in the sentence the CONDITION
-    // earns: a stream this account and region do not hold at all states that the shard does
-    // not exist, while a stream that IS held — whose shard map the id was looked up in and
-    // missed — states that the shard could not be found in it.
-    let shard_reads: Vec<(&str, &str, String, bool)> = vec![
-        (
-            "a shard of a stream nothing holds",
-            absent,
-            shard_id(0),
-            false,
-        ),
-        ("another shard of that stream", absent, shard_id(7), false),
-        (
-            "a shard the held stream does not have",
-            held,
-            shard_id(9),
-            true,
-        ),
+    // A read that asked for a SHARD is worded at the shard, in the ONE sentence this service
+    // words that condition with: a stream this account and region do not hold at all, and a
+    // stream that IS held whose shard map the id was looked up in and missed, both state that
+    // the shard does not exist — the request asked for a shard, so that is what the refusal is
+    // about.
+    // Each row: the case, the stream the request names (one this account holds and one it
+    // does not), and the shard it asks for.
+    let shard_reads: Vec<(&str, &str, String)> = vec![
+        ("a shard of a stream nothing holds", absent, shard_id(0)),
+        ("another shard of that stream", absent, shard_id(7)),
+        ("a shard the held stream does not have", held, shard_id(9)),
         (
             "a shard id of no shape this service mints",
             held,
             "shard-9".to_string(),
-            true,
         ),
     ];
-    for (case, stream, shard, stream_is_held) in shard_reads {
+    for (case, stream, shard) in shard_reads {
         let shard = shard.as_str();
         let (code, message) = refusal(
             &emulator,
@@ -299,28 +290,17 @@ async fn a_missing_resource_is_worded_at_what_was_asked_for() {
             code, "ResourceNotFoundException",
             "case {case}: expected the modelled not-found, got {code} with {message:?}"
         );
-        let expected = if stream_is_held {
-            format!(
-                "Could not find shard {shard} in stream {stream} under account {}.",
-                engine::EMULATOR_ACCOUNT_ID
-            )
-        } else {
-            format!(
-                "Shard {shard} in stream {stream} under account {} does not exist",
-                engine::EMULATOR_ACCOUNT_ID
-            )
-        };
+        let expected = format!(
+            "Shard {shard} in stream {stream} under account {} does not exist",
+            engine::EMULATOR_ACCOUNT_ID
+        );
         assert_eq!(
             message, expected,
             "case {case}: expected the sentence that condition is worded with"
         );
-        let crate_sentence = if stream_is_held {
-            shard_not_in_stream_message(shard, stream)
-        } else {
-            shard_not_found_message(shard, stream)
-        };
         assert_eq!(
-            message, crate_sentence,
+            message,
+            shard_not_found_message(shard, stream),
             "case {case}: the crate's own sentence is the one the wire carries"
         );
     }

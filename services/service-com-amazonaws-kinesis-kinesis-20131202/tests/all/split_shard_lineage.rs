@@ -32,7 +32,7 @@
 use serde_json::{json, Value};
 use service_com_amazonaws_kinesis_kinesis_20131202::state::{
     retention_period_not_longer_message, retention_period_not_shorter_message,
-    shard_not_in_stream_message, stream_not_found_message, DEFAULT_RETENTION_PERIOD_HOURS,
+    shard_not_found_message, stream_not_found_message, DEFAULT_RETENTION_PERIOD_HOURS,
     STREAM_ACTIVE, stream_identifier_mismatch_message, STREAM_IDENTIFIER_REQUIRED_MESSAGE,
     STREAM_MODE_PROVISIONED, STREAM_UPDATING,
 };
@@ -592,7 +592,7 @@ async fn a_refusal_names_the_stream_the_request_resolved_by_name() {
                     "ShardIteratorType": "TRIM_HORIZON",
                 })
             },
-            says: |name| shard_not_in_stream_message(ABSENT_SHARD_ID, name),
+            says: |name| shard_not_found_message(ABSENT_SHARD_ID, name),
             code: "ResourceNotFoundException",
         },
     ];

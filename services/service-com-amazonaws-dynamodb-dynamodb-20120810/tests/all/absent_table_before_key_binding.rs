@@ -4,25 +4,25 @@
 //! condition can carry.
 //!
 //! THE RULE: a `KeyConditionExpression` defect that the REQUEST alone settles — the
-//! expression's syntax, and a substitution token the expression uses but the request never
-//! defined — is refused before the addressed table is resolved, so it is answered even for a
+//! expression's syntax, a substitution token the expression uses but the request never
+//! defined, and an operand of a type the operator or function it was written with does not
+//! compare — is refused before the addressed table is resolved, so it is answered even for a
 //! table this account does not hold. Every other key-condition rule is about how the
 //! condition BINDS to the key attributes of the schema it is read against — how many
-//! comparisons that schema has key attributes for, and what `AttributeValue` type each
-//! operand may be for the comparison it is written in — so it is only reached once the table
-//! has been found, and a `Query` naming an absent table is refused
-//! `ResourceNotFoundException` ("the operation tried to access a nonexistent table or
-//! index") whatever its operands and however many clauses it states.
+//! comparisons that schema has key attributes for, which attributes they name, and the type
+//! that schema declares for each key — so it is only reached once the table has been found,
+//! and a `Query` naming an absent table is refused `ResourceNotFoundException` ("the
+//! operation tried to access a nonexistent table or index") however many clauses it states.
 //!
 //! The rows span what the rule generalises over: which KIND of defect the condition carries
 //! (syntax, an undefined value placeholder, an undefined name alias, an operand of a type no
 //! comparison orders, an operand of a type `begins_with` has no prefix for, more clauses than
-//! the schema has key attributes, and the combinations of a binding defect with another
+//! the schema has key attributes, and the combinations of a request-settled defect with a
 //! binding defect), whether the table is absent or present, and whether the read is a `Query`
 //! on the table itself or on one of its secondary indexes.
 //!
-//! The same rows against a table that IS there pin the other half: the binding refusals are
-//! still stated, so nothing here is "absent tables answer everything".
+//! The same rows against a table that IS there pin the other half: every row earns its own
+//! refusal, so the lookup only orders them.
 
 use serde_json::{json, Value};
 
@@ -125,14 +125,14 @@ fn rows() -> Vec<Row> {
             case: "an operand of a type no comparison orders",
             condition: "pk = :p",
             values: json!({":p": {"BOOL": true}}),
-            before_the_lookup: None,
+            before_the_lookup: Some(incorrect_operand("=", "BOOL")),
             against_the_table: incorrect_operand("=", "BOOL"),
         },
         Row {
             case: "a number where begins_with needs a prefix",
             condition: "pk = :p AND begins_with(sk, :n)",
             values: json!({":p": {"S": "p"}, ":n": {"N": "1"}}),
-            before_the_lookup: None,
+            before_the_lookup: Some(incorrect_operand("begins_with", "N")),
             against_the_table: incorrect_operand("begins_with", "N"),
         },
         Row {
@@ -145,19 +145,19 @@ fn rows() -> Vec<Row> {
                 .to_string(),
         },
         Row {
-            // The recorded case: both binding defects in one condition, so neither can be
-            // what makes the absent table answer.
+            // The recorded case: a wrong-typed operand, which the request settles, beside a
+            // third clause, which only the schema can settle — so the operand answers first.
             case: "a wrong-typed operand and a third clause together",
             condition: "pk = :p AND begins_with(sk, :n) AND pk3 = :o",
             values: json!({":p": {"S": "p"}, ":n": {"N": "1"}, ":o": {"S": "o"}}),
-            before_the_lookup: None,
+            before_the_lookup: Some(incorrect_operand("begins_with", "N")),
             against_the_table: incorrect_operand("begins_with", "N"),
         },
         Row {
             case: "an operand written before its operator, of a type no comparison orders",
             condition: ":p = pk",
             values: json!({":p": {"NULL": true}}),
-            before_the_lookup: None,
+            before_the_lookup: Some(incorrect_operand("=", "NULL")),
             against_the_table: incorrect_operand("=", "NULL"),
         },
     ]
@@ -239,21 +239,25 @@ async fn the_same_conditions_are_still_refused_once_the_table_is_there() {
 }
 
 /// RULE: the same ordering holds for a read addressed to a secondary INDEX of an absent
-/// table — the table is what has to be resolved before any key schema is, so a binding
-/// defect cannot be reported for a schema that does not exist.
+/// table — a defect the request settles is answered whichever schema the read names, while a
+/// BINDING defect cannot be reported for a schema that does not exist.
 #[tokio::test]
 async fn an_absent_table_answers_before_an_index_key_schema_binds() {
     let router = emulator();
-    for (case, condition, values) in [
+    // Each row: the condition, and what the rule requires of it against an absent table —
+    // the request-settled defect, or the table's own refusal.
+    for (case, condition, values, expected) in [
         (
             "a wrong-typed operand on an index read",
             "gpk = :p",
             json!({":p": {"BOOL": false}}),
+            ("ValidationException", incorrect_operand("=", "BOOL")),
         ),
         (
             "a third clause on an index read",
             "gpk = :p AND gsk = :s AND pk3 = :o",
             json!({":p": {"S": "p"}, ":s": {"S": "a"}, ":o": {"S": "o"}}),
+            ("ResourceNotFoundException", NOT_FOUND.to_string()),
         ),
     ] {
         let (status, body) = call(
@@ -268,9 +272,9 @@ async fn an_absent_table_answers_before_an_index_key_schema_binds() {
         )
         .await;
         assert_eq!(
-            (status, error_code(&body).as_str(), message(&body).as_str()),
-            (400, "ResourceNotFoundException", NOT_FOUND),
-            "case {case:?}: the absent table decides first, got {status} with {body}"
+            (status, error_code(&body), message(&body)),
+            (400, expected.0.to_string(), expected.1.clone()),
+            "case {case:?}: expected {expected:?}, got {status} with {body}"
         );
     }
 }

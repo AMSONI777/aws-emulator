@@ -4847,15 +4847,16 @@ impl ShardIteratorToken {
     }
 }
 
-/// How a read states that the stream the request named holds no shard under the `ShardId`
-/// it named, worded the way this service words that error class: "Shard `<shardId>` in
+/// How a read states that the shard the request named is no shard of the stream it
+/// addresses, worded the way this service words that error class: "Shard `<shardId>` in
 /// stream `<streamName>` under account `<account>` does not exist".
 ///
-/// This is the sentence for a shard of a stream this account and region do not hold AT ALL:
-/// a read asked for one shard, so the refusal is worded at the shard rather than at the
-/// stream, and nothing about that shard can be stated beyond the identifiers the request
-/// carried. A shard missing from a stream that IS held is a different condition and carries
-/// its own sentence ([`shard_not_in_stream_message`]).
+/// ONE sentence for the whole class: a request asked for one shard, so the refusal is worded
+/// at the SHARD rather than at the stream, whether the stream this account and region hold
+/// nothing for is the reason the shard is not there, or the stream IS held and its shard map
+/// carries no such entry — a shard id of no shape this service mints, one of another
+/// stream's map, or one a reshard closed and removed. Nothing about the shard can be stated
+/// beyond the identifiers the request carried either way.
 ///
 /// Built FROM the request and the emulator's own account: the shard id at fault, and the
 /// stream NAME, which an identifier that is a `StreamARN` carries in its resource segment
@@ -4864,22 +4865,6 @@ impl ShardIteratorToken {
 pub fn shard_not_found_message(shard_id: &str, stream_identifier: &str) -> String {
     format!(
         "Shard {shard_id} in stream {} under account {} does not exist",
-        stream_name_in(stream_identifier),
-        ::engine::emulator_account_id()
-    )
-}
-
-/// How a read states that the stream it resolved carries no shard under the `ShardId` the
-/// request named, worded the way this service words THAT error class: "Could not find shard
-/// `<shardId>` in stream `<streamName>` under account `<account>`."
-///
-/// The other half of the rule [`shard_not_found_message`] words: the stream is held, so the
-/// shard map it carries is what the request was looked up in and failed to name — a shard id
-/// of no shape this service mints, one of another stream's map, or one a reshard closed and
-/// removed. Built FROM the request, the resolved stream and the emulator's own account.
-pub fn shard_not_in_stream_message(shard_id: &str, stream_identifier: &str) -> String {
-    format!(
-        "Could not find shard {shard_id} in stream {} under account {}.",
         stream_name_in(stream_identifier),
         ::engine::emulator_account_id()
     )

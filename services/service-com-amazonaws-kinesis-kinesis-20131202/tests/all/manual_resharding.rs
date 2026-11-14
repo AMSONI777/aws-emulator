@@ -30,7 +30,7 @@
 
 use serde_json::{json, Value};
 use service_com_amazonaws_kinesis_kinesis_20131202::state::{
-    shard_not_in_stream_message, shard_not_open_message,
+    shard_not_found_message, shard_not_open_message,
     split_hash_key_outside_the_parent_message, stream_not_found_message,
     stream_on_demand_message, STREAM_ACTIVE, STREAM_IDENTIFIER_REQUIRED_MESSAGE,
     STREAM_MODE_ON_DEMAND, STREAM_MODE_PROVISIONED, STREAM_UPDATING,
@@ -514,7 +514,7 @@ async fn a_refused_reshard_changes_nothing() {
                 })
             },
             code: "ResourceNotFoundException",
-            says: |name, _| shard_not_in_stream_message("shardId-000000000099", name),
+            says: |name, _| shard_not_found_message("shardId-000000000099", name),
         },
         Refusal {
             case: "split-a-closed-shard",
@@ -640,7 +640,7 @@ async fn a_refused_reshard_changes_nothing() {
                 })
             },
             code: "ResourceNotFoundException",
-            says: |name, _| shard_not_in_stream_message("shardId-000000000099", name),
+            says: |name, _| shard_not_found_message("shardId-000000000099", name),
         },
         Refusal {
             case: "merge-a-closed-shard",

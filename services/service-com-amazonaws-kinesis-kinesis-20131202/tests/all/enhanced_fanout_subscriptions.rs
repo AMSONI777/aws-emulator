@@ -445,8 +445,8 @@ async fn a_subscription_naming_a_resource_that_is_not_there_is_refused() {
                 "StartingPosition": { "Type": "TRIM_HORIZON" },
             }),
             format!(
-                "Could not find shard {ABSENT_SHARD} in stream {stream} under account \
-                 {account}."
+                "Shard {ABSENT_SHARD} in stream {stream} under account {account} does not \
+                 exist"
             ),
         ),
         (
@@ -457,8 +457,8 @@ async fn a_subscription_naming_a_resource_that_is_not_there_is_refused() {
                 "StartingPosition": { "Type": "TRIM_HORIZON" },
             }),
             format!(
-                "Could not find shard {other_shard} in stream {stream} under account \
-                 {account}."
+                "Shard {other_shard} in stream {stream} under account {account} does not \
+                 exist"
             ),
         ),
     ];

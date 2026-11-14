@@ -19,6 +19,13 @@ pub struct LayerFilesystem {
     /// The package manager whose installed-package database the layer carries (see
     /// [`PACKAGE_DATABASE_PATHS`]), or `None` where it carries none.
     pub package_manager: Option<String>,
+    /// Whether the layer's bytes READ as a filesystem archive, so that a scan of them saw
+    /// the image's filesystem at all — an archive carrying none of the two above included.
+    ///
+    /// It is what tells the two unsupported outcomes apart: a run that read the filesystem
+    /// and found nothing to enumerate packages from is a different answer from one whose
+    /// image is not a filesystem basic scanning can read ([`basic_scan_outcome`]).
+    pub read_as_archive: bool,
 }
 
 impl LayerFilesystem {
@@ -30,7 +37,8 @@ impl LayerFilesystem {
 
     /// Take over whatever `other` identified that this one has not: an image's
     /// filesystem is the union of its layers', so a release file in one layer and a
-    /// package database in another identify the same image between them.
+    /// package database in another identify the same image between them — and an image one
+    /// of whose layers read as an archive is one whose filesystem a scan read.
     pub(super) fn absorb(&mut self, other: &Self) {
         if self.operating_system.is_none() {
             self.operating_system = other.operating_system.clone();
@@ -38,6 +46,7 @@ impl LayerFilesystem {
         if self.package_manager.is_none() {
             self.package_manager = other.package_manager.clone();
         }
+        self.read_as_archive |= other.read_as_archive;
     }
 }
 
@@ -104,7 +113,9 @@ pub(super) const MAX_RELEASE_FILE_BYTES: u64 = 64 * 1024;
 /// they carry the gzip magic and then walked as a tar: a release file in them names the
 /// operating system, and a package manager's database in them is the installed-package
 /// set the scan would report on. Bytes that are not a readable archive identify nothing,
-/// which is the answer for anything that is not a filesystem layer at all.
+/// which is the answer for anything that is not a filesystem layer at all — and that is
+/// recorded as such ([`LayerFilesystem::read_as_archive`]), because an archive carrying
+/// neither of the two is a filesystem the scan DID read.
 ///
 /// Entry names are compared after their leading `./` or `/` is dropped, because a layer
 /// built by one tool lists `etc/os-release` and one built by another lists
@@ -124,12 +135,20 @@ pub fn scan_layer_filesystem(blob: &[u8]) -> LayerFilesystem {
     let Ok(entries) = archive.entries() else {
         return found;
     };
+    // The bytes read as a filesystem archive until a member says otherwise: an archive that
+    // ENDS at its first header is one carrying no members, while bytes whose first header
+    // cannot be read are no archive at all.
+    found.read_as_archive = true;
+    let mut read_a_member = false;
     for entry in entries.take(MAX_SCANNED_LAYER_ENTRIES) {
         // A member this archive cannot read is where the archive ends: what was read
-        // before it still stands, and nothing past it is guessed at.
+        // before it still stands, and bytes whose FIRST member is unreadable are not a
+        // filesystem at all.
         let Ok(entry) = entry else {
+            found.read_as_archive = read_a_member;
             break;
         };
+        read_a_member = true;
         let Ok(path) = entry.path() else {
             continue;
         };
@@ -401,23 +420,31 @@ pub fn basic_scan_findings(
 /// statement about the image, exactly where the scan identified in the image's filesystem
 /// both the operating system and the package manager whose installed packages it reports
 /// on ([`scanned_filesystem`]); an image missing either is one basic scanning does not
-/// support, and the run ends `FAILED` with [`UNSUPPORTED_IMAGE_SCAN_DESCRIPTION`] — the
-/// outcome that reports the image as one that is not supported. Neither outcome is the
-/// default: each follows from what the layers carry.
+/// support, and the run ends `FAILED` with the description of WHY it could not be examined
+/// — [`UNSUPPORTED_FILESYSTEM_SCAN_DESCRIPTION`] where the scan read the image's filesystem
+/// and found nothing there to enumerate packages from, and
+/// [`UNSUPPORTED_IMAGE_SCAN_DESCRIPTION`] where the image's layers are no filesystem it can
+/// read at all. None of the three outcomes is the default: each follows from what the layers
+/// carry.
 pub fn basic_scan_outcome(
     image: &ImageRecord,
     layers: &BTreeMap<String, LayerBlob>,
 ) -> ImageScanStatus {
-    if scanned_filesystem(image, layers).is_complete() {
-        ImageScanStatus {
+    let identified = scanned_filesystem(image, layers);
+    if identified.is_complete() {
+        return ImageScanStatus {
             status: Some(SCAN_STATUS_COMPLETE.to_string()),
             description: Some(SCAN_COMPLETE_DESCRIPTION.to_string()),
-        }
+        };
+    }
+    let description = if identified.read_as_archive {
+        UNSUPPORTED_FILESYSTEM_SCAN_DESCRIPTION
     } else {
-        ImageScanStatus {
-            status: Some(SCAN_STATUS_FAILED.to_string()),
-            description: Some(UNSUPPORTED_IMAGE_SCAN_DESCRIPTION.to_string()),
-        }
+        UNSUPPORTED_IMAGE_SCAN_DESCRIPTION
+    };
+    ImageScanStatus {
+        status: Some(SCAN_STATUS_FAILED.to_string()),
+        description: Some(description.to_string()),
     }
 }
 

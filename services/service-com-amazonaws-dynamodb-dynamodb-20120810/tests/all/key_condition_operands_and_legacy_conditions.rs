@@ -17,7 +17,9 @@
 //! * either side of a comparison may carry the operand: `:v >= sk` states about the
 //!   attribute exactly what `sk <= :v` does;
 //! * every defect is reported where the reading of the expression reaches it, so the
-//!   defect an expression states FIRST is the one answered, and a syntax error names the
+//!   defect an expression states FIRST is the one answered — the two defects an OPERAND can
+//!   carry (a placeholder the request never defined, a value of a type the operator does not
+//!   compare) in the order the expression wrote the operands — and a syntax error names the
 //!   token the parse stopped at;
 //! * a key condition over a schema declaring several RANGE key attributes constrains them
 //!   from the first: a condition on one of them needs an equality on every range key
@@ -352,10 +354,27 @@ async fn the_defect_a_key_condition_states_first_is_the_one_answered() {
             "the bad operand is written first",
             "begins_with(sk, :n) AND pk = :undef",
             json!({":n": {"N": "1"}}),
-            // The undefined token is a defect of the REQUEST, read as the expression is
-            // parsed; an operand's type is judged later, where it binds to the key, so
-            // the undefined token is answered whichever of the two the text states first.
+            // Both defects are read off the OPERANDS, in the order the expression wrote
+            // them, so the one written first is the one answered whichever kind it is.
+            incorrect_operand("begins_with", "N"),
+        ),
+        (
+            "the bad operand is written first, in a BETWEEN",
+            "sk BETWEEN :n AND :undef",
+            json!({":n": {"BOOL": true}}),
+            incorrect_operand("BETWEEN", "BOOL"),
+        ),
+        (
+            "the undefined value is written first, in a BETWEEN",
+            "sk BETWEEN :undef AND :n",
+            json!({":n": {"BOOL": true}}),
             undefined.to_string(),
+        ),
+        (
+            "the bad operand is written first, operand-first in its own comparison",
+            ":n < sk AND pk = :undef",
+            json!({":n": {"NULL": true}}),
+            incorrect_operand("<", "NULL"),
         ),
         (
             "a stray operator between the two operands",

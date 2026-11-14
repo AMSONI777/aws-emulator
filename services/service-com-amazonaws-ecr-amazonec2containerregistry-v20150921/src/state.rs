@@ -261,12 +261,23 @@ pub const SCAN_COMPLETE_DESCRIPTION: &str = "The scan was completed successfully
 /// — the wording Amazon ECR reports beside [`SCAN_STATUS_IN_PROGRESS`].
 pub const SCAN_IN_PROGRESS_DESCRIPTION: &str = "The scan is in progress.";
 
-/// The `imageScanStatus.description` of a run whose image carries no operating system
-/// basic scanning can examine — the wording Amazon ECR reports for that outcome. The
-/// whole sentence is FIXED text with no part taken from the request or from state, and
-/// the `UnsupportedImageError: ` prefix is the machine-readable part of it.
+/// The `imageScanStatus.description` of a run whose image is not one basic scanning scans
+/// at all — the wording Amazon ECR reports for that outcome. The whole sentence is FIXED
+/// text with no part taken from the request or from state, and the `UnsupportedImageError: `
+/// prefix is the machine-readable part of it.
+///
+/// A run that DID read the image's filesystem and found nothing to enumerate packages from
+/// reports the other unsupported outcome ([`UNSUPPORTED_FILESYSTEM_SCAN_DESCRIPTION`]): the
+/// description says WHY the image could not be examined, so the two are not one constant.
 pub const UNSUPPORTED_IMAGE_SCAN_DESCRIPTION: &str =
     "UnsupportedImageError: The image is not supported.";
+
+/// The `imageScanStatus.description` of a run that read the image's filesystem and
+/// identified no operating system, or no package manager whose installed packages it could
+/// report on — the wording Amazon ECR reports for that outcome, fixed text like
+/// [`UNSUPPORTED_IMAGE_SCAN_DESCRIPTION`] and carrying the same prefix.
+pub const UNSUPPORTED_FILESYSTEM_SCAN_DESCRIPTION: &str =
+    "UnsupportedImageError: The operating system and/or package manager are not supported.";
 
 /// How often one image may be scanned: "A basic image scan can only be started once per
 /// 24 hours on an individual image. This limit includes if an image was scanned on
