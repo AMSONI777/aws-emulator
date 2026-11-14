@@ -3341,3 +3341,9 @@ mod cloudformation_s3tables_table_bucket_maintenance;
 // this file and for every service crate's `tests/all.rs`. (A LINE comment: an inner doc
 // comment is only legal before the first item of a crate root, so this appended line was
 // `E0753` and compiled nothing in this target.)
+// (`cloudfront_edge_4xx_share_decides_the_alarm` is declared ONCE, in the head region above:
+// a module may be declared only once, and two branches landing in the same window each
+// appended a copy here.)
+// (`cloudformation_kms_encrypted_sns_sqs_pipeline` is declared ONCE, in the head region
+// above: a module may be declared only once, and two branches landing in the same window
+// each appended a copy here.)

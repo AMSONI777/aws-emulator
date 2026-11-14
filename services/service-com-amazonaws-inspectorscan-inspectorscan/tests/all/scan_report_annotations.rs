@@ -91,7 +91,10 @@ fn message_for(report: &Value, purl: &str) -> Option<String> {
 
 /// An advisory the seeded catalog does not carry, pushed into the SAME store the
 /// handler reads so a scan matches it like any other.
-fn inject_advisory(
+///
+/// The record carries NO vendor publication — no canonical page and no reference
+/// URL — which is also the row `scan_inspector_alt_form.rs` needs.
+pub(crate) fn inject_advisory(
     engine: &Arc<engine::InMemoryEngine>,
     id: &str,
     package_type: &str,

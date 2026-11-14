@@ -834,7 +834,8 @@ async fn every_output_format_reports_the_same_finding_set() {
         );
     }
 
-    // INSPECTOR_ALT: the same matches, keyed by vulnerability id.
+    // INSPECTOR_ALT: the same matches, one node per matched advisory, in a list
+    // (the form's own members are pinned in `scan_inspector_alt_form.rs`).
     let (status, response) = post_scan(
         &router,
         &json!({ "sbom": submitted, "outputFormat": "INSPECTOR_ALT" }),
@@ -844,11 +845,14 @@ async fn every_output_format_reports_the_same_finding_set() {
         status, 200,
         "INSPECTOR_ALT: expected HTTP 200, got {response}"
     );
-    let keyed = response["sbom"]["vulnerabilities"]
-        .as_object()
+    let nodes = response["sbom"]["vulnerabilities"]
+        .as_array()
         .cloned()
         .unwrap_or_default();
-    let ids: BTreeSet<String> = keyed.keys().cloned().collect();
+    let ids: BTreeSet<String> = nodes
+        .iter()
+        .map(|node| node["id"].as_str().unwrap_or_default().to_string())
+        .collect();
     assert_eq!(
         ids, expected,
         "INSPECTOR_ALT: expected finding ids {expected:?}, got {ids:?}"

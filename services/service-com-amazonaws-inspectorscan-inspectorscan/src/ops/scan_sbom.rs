@@ -86,7 +86,7 @@ use crate::state::{OutputFormat, ScanRecord, VulnRecord};
 use aws_smithy_types::{Document, Number};
 use serde_json::{json, Map, Value};
 use sha2::Digest;
-use std::collections::{BTreeSet, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 // `#[operation_error]` below expands to an invocation of the LOCAL declarative
@@ -1518,6 +1518,100 @@ fn cyclonedx_report(
     Value::Object(report)
 }
 
+/// Which of the two Inspector-native forms a report is rendered in.
+///
+/// Both carry the same envelope and report the same matches; the form decides
+/// how a `vulnerabilities` node is built. Either way that member is a LIST of
+/// vulnerability nodes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum InspectorForm {
+    /// `INSPECTOR`: one node per match — one component against one advisory —
+    /// carrying no vendor-advisory data.
+    PerMatch,
+    /// `INSPECTOR_ALT`: one node per matched advisory, carrying every component
+    /// of this scan that advisory affects plus the vendor advisories published
+    /// for it.
+    PerAdvisory,
+}
+
+/// The `vulnerablePackages[]` entry for one matched component.
+fn inspector_vulnerable_package(finding: &Finding) -> Value {
+    let component = &finding.component;
+    json!({
+        "name": component.package_name,
+        "version": component.version,
+        "packageManager": inspector_package_manager(&component.package_type),
+        "fixedInVersion": finding.advisory.fixed_in_version,
+        "purl": component.purl,
+        "bomRef": component.bom_ref,
+    })
+}
+
+/// The vendor advisories published for one matched advisory — the `INSPECTOR_ALT`
+/// form's per-node vendor data.
+///
+/// Every entry is a projection of the matched [`VulnRecord`]: the publisher that
+/// issued the advisory, one of its publications (its canonical page first, then
+/// each reference URL the record carries, with no URL repeated), the BASE (NVD)
+/// severity the record holds — reported here beside the Inspector-adjusted
+/// `severity` on the node rather than instead of it, which is exactly the
+/// discrepancy the operation's documentation warns of — and the instants the
+/// advisory was published and last revised.
+fn vendor_advisories(advisory: &VulnRecord) -> Vec<Value> {
+    let mut urls: Vec<&str> = Vec::new();
+    for url in advisory
+        .source_url
+        .iter()
+        .chain(advisory.advisories.iter())
+        .map(String::as_str)
+        .filter(|url| !url.is_empty())
+    {
+        if !urls.contains(&url) {
+            urls.push(url);
+        }
+    }
+    urls.into_iter()
+        .map(|url| {
+            json!({
+                "id": advisory.cve_id,
+                "source": advisory.source,
+                "url": url,
+                "severity": SeverityBucket::of(&advisory.nvd_severity).as_str(),
+                "vendorCreatedAt": advisory.published,
+                "vendorUpdatedAt": advisory.modified,
+            })
+        })
+        .collect()
+}
+
+/// One `INSPECTOR_ALT` vulnerability node: the advisory `matches` all share,
+/// every component of this scan it affects, and the vendor advisories for it.
+///
+/// The node is the same projection of the advisory the `INSPECTOR` form reports,
+/// so the two forms can never disagree about a match; it differs only in listing
+/// one `vulnerablePackages[]` entry per affected component and in carrying
+/// `vendorAdvisories`. `None` for an empty group, which names no advisory.
+fn inspector_alt_vulnerability(matches: &[&Finding]) -> Option<Value> {
+    let primary = matches.first()?;
+    let mut node = inspector_finding(primary);
+    if let Value::Object(members) = &mut node {
+        members.insert(
+            "vulnerablePackages".to_string(),
+            Value::Array(
+                matches
+                    .iter()
+                    .map(|finding| inspector_vulnerable_package(finding))
+                    .collect(),
+            ),
+        );
+        members.insert(
+            "vendorAdvisories".to_string(),
+            Value::Array(vendor_advisories(&primary.advisory)),
+        );
+    }
+    Some(node)
+}
+
 /// The Inspector-native finding for one match.
 fn inspector_finding(finding: &Finding) -> Value {
     let advisory = &finding.advisory;
@@ -1566,14 +1660,7 @@ fn inspector_finding(finding: &Finding) -> Value {
         "inspectorScore": advisory.inspector_score,
         "inspectorScoreDetails": { "adjustedCvss": adjusted },
         "cvss": base,
-        "vulnerablePackages": [ {
-            "name": component.package_name,
-            "version": component.version,
-            "packageManager": inspector_package_manager(&component.package_type),
-            "fixedInVersion": advisory.fixed_in_version,
-            "purl": component.purl,
-            "bomRef": component.bom_ref,
-        } ],
+        "vulnerablePackages": [ inspector_vulnerable_package(finding) ],
         "remediation": { "recommendation": { "text": remediation } },
     })
 }
@@ -1581,14 +1668,20 @@ fn inspector_finding(finding: &Finding) -> Value {
 /// The Inspector-native report — the `INSPECTOR` and `INSPECTOR_ALT` forms.
 ///
 /// Both carry the same envelope and the same matches, computed from the same
-/// findings as the CycloneDX form, so the formats can never disagree. They
-/// differ only in how the matches are presented: `INSPECTOR` as a list in the
-/// report's order, `INSPECTOR_ALT` as a map keyed by vulnerability id (one entry
-/// per id, listing every component that id affects).
+/// findings as the CycloneDX form, so the formats can never disagree. In BOTH,
+/// `vulnerabilities` is a LIST of vulnerability nodes, each an object naming at
+/// least the advisory `id` and the `severity` it was rated at: a client reads a
+/// report's collection member by indexing and iterating the entities in it, so
+/// an entity collection is never presented as a map keyed by one of the
+/// entities' own fields. The forms differ in how a node is built
+/// ([`InspectorForm`]): `INSPECTOR` reports one node per match, in the report's
+/// order, with no vendor-advisory data; `INSPECTOR_ALT` reports one node per
+/// matched advisory, listing every component that advisory affects, and carries
+/// `vendorAdvisories` on each node — the data a caller selects that form in
+/// order to read.
 ///
-/// What the report says about the scan as a whole is NOT chosen: it carries
-/// `vulnerabilities` (one entry per matched advisory, each naming the advisory
-/// `id` and the `severity` it was rated at), the unconditional per-severity
+/// What the report says about the scan as a whole is NOT chosen either: beside
+/// `vulnerabilities` it carries the unconditional per-severity
 /// `vulnerability_count`, and `messages`, one entry per component the scan drew
 /// no conclusion about — each carrying the condition that fired for it — so a
 /// reader can tell a clean scan from an uncovered one, and an uncovered
@@ -1596,16 +1689,14 @@ fn inspector_finding(finding: &Finding) -> Value {
 /// any of them.
 ///
 /// The rest of the ENVELOPE IS CHOSEN, NOT MODELLED. `sbom` is a Smithy
-/// `document`, and neither the model nor this operation's documentation states
-/// what distinguishes `INSPECTOR` from `INSPECTOR_ALT`; the model's
-/// `OutputFormat` enum only names the two values. So the wrapper members
-/// (`scanId`, `scanTimestamp`, `sbomFormat`, `sbomSpecVersion`,
-/// `componentCount`, `findingCount`) and the list-vs-map difference are this
-/// emulator's choice, and a recorded response should correct them rather than be
-/// read as a regression. What is NOT chosen is the content of a match: every
-/// field of it is a projection of a matched [`crate::state::VulnRecord`] onto
-/// the component it was matched against, the same records the CycloneDX form
-/// reports.
+/// `document`, so the wrapper members (`scanId`, `scanTimestamp`, `sbomFormat`,
+/// `sbomSpecVersion`, `componentCount`, `findingCount`) are this emulator's
+/// choice. `findingCount` counts MATCHES — one component against one advisory —
+/// which is the `vulnerabilities` length in the `INSPECTOR` form and at least it
+/// in `INSPECTOR_ALT`, where the matches of one advisory share a node. What is
+/// NOT chosen is the content of a match: every field of it is a projection of a
+/// matched [`crate::state::VulnRecord`] onto the component it was matched
+/// against, the same records the CycloneDX form reports.
 fn inspector_report(
     scan_id: &str,
     timestamp: &str,
@@ -1613,25 +1704,35 @@ fn inspector_report(
     findings: &[Finding],
     messages: Vec<Value>,
     summary: &ScanSummary,
-    keyed_by_id: bool,
+    form: InspectorForm,
 ) -> Value {
-    let rendered: Vec<Value> = findings.iter().map(inspector_finding).collect();
-    let vulnerabilities = if keyed_by_id {
-        let mut by_id: Map<String, Value> = Map::new();
-        for (finding, value) in findings.iter().zip(&rendered) {
-            match by_id.get_mut(&finding.advisory.cve_id) {
-                Some(Value::Array(list)) => list.push(value.clone()),
-                _ => {
-                    by_id.insert(
-                        finding.advisory.cve_id.clone(),
-                        Value::Array(vec![value.clone()]),
-                    );
-                }
+    let vulnerabilities: Vec<Value> = match form {
+        InspectorForm::PerMatch => findings.iter().map(inspector_finding).collect(),
+        InspectorForm::PerAdvisory => {
+            // Grouped by the matched ADVISORY — a vulnerability as it applies to
+            // one package, which is what one stored record is — so every match
+            // on a node shares the package the node names, and a vulnerability
+            // affecting two packages reports one node per package rather than
+            // one node naming whichever came first. The key also orders the
+            // nodes (by id, then by the package), so a repeat of this
+            // `@idempotent` scan answers the identical list.
+            let mut by_advisory: BTreeMap<(&str, &str, &str), Vec<&Finding>> = BTreeMap::new();
+            for finding in findings {
+                let advisory = &finding.advisory;
+                by_advisory
+                    .entry((
+                        advisory.cve_id.as_str(),
+                        advisory.package_type.as_str(),
+                        advisory.package_name.as_str(),
+                    ))
+                    .or_default()
+                    .push(finding);
             }
+            by_advisory
+                .values()
+                .filter_map(|matches| inspector_alt_vulnerability(matches))
+                .collect()
         }
-        Value::Object(by_id)
-    } else {
-        Value::Array(rendered)
     };
 
     json!({
@@ -1852,7 +1953,7 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
                 &findings,
                 messages,
                 &summary,
-                false,
+                InspectorForm::PerMatch,
             ),
             OutputFormat::InspectorAlt => inspector_report(
                 &scan_id,
@@ -1861,7 +1962,7 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
                 &findings,
                 messages,
                 &summary,
-                true,
+                InspectorForm::PerAdvisory,
             ),
         };
 
