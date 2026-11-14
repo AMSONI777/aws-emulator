@@ -59,6 +59,8 @@ mod inference_generation_and_refusal_wording;
 mod inference_input_limits;
 #[path = "all/inference_stop_sequences.rs"]
 mod inference_stop_sequences;
+#[path = "all/inference_token_accounting.rs"]
+mod inference_token_accounting;
 #[path = "all/inline_guardrail_error_taxonomy.rs"]
 mod inline_guardrail_error_taxonomy;
 #[path = "all/invoke_model_malformed_body_refusal.rs"]

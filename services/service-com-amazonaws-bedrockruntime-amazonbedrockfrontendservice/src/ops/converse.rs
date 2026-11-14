@@ -335,66 +335,77 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         // the conversation carries, by the id that request was issued under.
         crate::state::validate_tool_results(messages).map_err(validation)?;
 
-        // The input-size stage: a model reads a bounded prompt, so a request
-        // whose counted input tokens are past the resolved model's context
-        // window is refused rather than served against a shortened prompt (see
-        // `crate::state::context_window`). The Converse API reports it as the
-        // model-side error it is.
-        let submitted_tokens = crate::state::converse_input_tokens(
-            input.system.as_ref(),
-            input.messages.as_ref(),
-            input.tool_config.as_ref(),
-        );
-        if crate::state::context_window::exceeds_context_window(&model, submitted_tokens) {
-            return Err(validation(crate::state::context_window::model_errors_message(
-                crate::state::context_window::INPUT_TOKENS_EXCEEDED_MESSAGE,
-            )));
-        }
-
-        // The tool stage: a mandatory `toolChoice` obliges the turn to request a
-        // tool, and a choice left to the model is decided from the conversation
-        // (`crate::state::tool_use_turn`) — under an id minted here.
-        let tool_use = state
-            .lock()
-            .tool_use_for_turn(
-                input.tool_config.as_ref(),
-                input.messages.as_ref(),
-                crate::state::now_millis(),
-            )
-            .map_err(validation)?;
-
-        // The prompt-cache stage both Converse operations share: a `cachePoint`
-        // marker delimits a cacheable prefix, which this call writes to the
-        // cache or reads back from it, and which is then no longer charged as
-        // ordinary input tokens.
-        let cache = crate::state::serve_prompt_cache(
+        // The CPU-bound stage of this turn, run OFF the async worker: the input
+        // tokens are a byte-pair encode over the prompt the CALLER chose the size
+        // of, so counting them, refusing an input past the resolved model's
+        // context window (`crate::state::context_window`), minting the tool
+        // request the turn makes and serving the prompt cache all happen on the
+        // blocking pool, under the one budget every CPU-bound stage of this
+        // service makes a caller wait for. `ConverseStream` composes its turn
+        // through the same function, so neither surface can compose differently.
+        let composed = crate::state::turn_composition::compose_converse_turn(
             &state,
-            &model.model_id,
-            input.system.as_ref(),
-            input.messages.as_ref(),
-            input.tool_config.as_ref(),
-        );
-
-        let turn = crate::state::converse_turn(
             &model,
             input.system.as_ref(),
             input.messages.as_ref(),
             input.tool_config.as_ref(),
-            crate::state::TurnInference::of(input.inference_config.as_ref()),
-            tool_use,
-            cache,
-        );
+            input.inference_config.as_ref(),
+        )
+        .await;
+        let turn = match composed {
+            Ok(crate::state::turn_composition::Composed::Served(turn)) => turn,
+            // The input-size stage's refusal, or the tool stage's: the Converse
+            // API reports both as the 400 they are, in the words the stage that
+            // made the refusal owns.
+            Ok(crate::state::turn_composition::Composed::Refused(message)) => {
+                return Err(validation(message))
+            }
+            // Nothing was composed, so there is no turn to serve.
+            Err(failed) => {
+                return Err(ConverseErrorModeled::InternalServerException(
+                    InternalServerException {
+                        message: Some(failed.message),
+                    },
+                )
+                .into())
+            }
+        };
         // The guardrail stage: the account-enforced guardrail is applied to this
         // request whether or not it asked for a guardrail, and a turn it blocked
         // carries the guardrail's blocked messaging and ends on
-        // `guardrail_intervened`.
-        let turn = crate::state::enforced_guardrail::guard_converse_turn(
-            &*self.engine,
-            &model,
-            input.system.as_ref(),
-            input.messages.as_ref(),
-            turn,
-        );
+        // `guardrail_intervened`. Its recognizers are synchronous, CPU-bound work
+        // over caller-supplied text, so like every such stage of this service it
+        // runs off the async worker, under the one budget a caller waits for.
+        let turn = {
+            let engine = ::std::sync::Arc::clone(&self.engine);
+            let model = model.clone();
+            let system = input.system.clone();
+            let messages = input.messages.clone();
+            match crate::state::turn_composition::off_worker(move || {
+                crate::state::enforced_guardrail::guard_converse_turn(
+                    &*engine,
+                    &model,
+                    system.as_ref(),
+                    messages.as_ref(),
+                    turn,
+                )
+            })
+            .await
+            {
+                Ok(turn) => turn,
+                // The guardrail did not answer, so there is no turn to serve: a
+                // turn served unguarded would be one this account requires to be
+                // guarded.
+                Err(failed) => {
+                    return Err(ConverseErrorModeled::InternalServerException(
+                        InternalServerException {
+                            message: Some(failed.message),
+                        },
+                    )
+                    .into())
+                }
+            }
+        };
         // The guardrail the REQUEST named, evaluated by the very stage
         // `ApplyGuardrail` evaluates the same policies with, so the two surfaces
         // cannot disagree about what this guardrail does to this text. A request
@@ -419,42 +430,24 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
             input.messages.as_ref(),
         )
         .map_err(validation)?;
-        // The policies are synchronous, CPU-bound work over caller-supplied text, so
-        // they run off the async worker and under the one budget every surface that
-        // runs these recognizers waits for.
+        // The same seam, for the same reason: these policies are synchronous,
+        // CPU-bound work over caller-supplied text.
         let (turn, guardrail_trace) = match guardrail {
             None => (turn, None),
             Some(guardrail) => {
-                match ::tokio::time::timeout(
-                    crate::state::guardrail_checks::EVALUATION_TIME_BUDGET,
-                    ::tokio::task::spawn_blocking(move || {
-                        crate::state::guardrail_evaluation::guard_turn(guardrail, turn)
-                    }),
-                )
+                match crate::state::turn_composition::off_worker(move || {
+                    crate::state::guardrail_evaluation::guard_turn(guardrail, turn)
+                })
                 .await
                 {
-                    Ok(Ok(guarded)) => guarded,
+                    Ok(guarded) => guarded,
                     // The guardrail did not answer, so there is no turn to serve: a
                     // turn served unguarded would be one this request asked to be
                     // guarded.
-                    Ok(Err(error)) => {
+                    Err(failed) => {
                         return Err(ConverseErrorModeled::InternalServerException(
                             InternalServerException {
-                                message: Some(format!(
-                                    "the guardrail evaluation did not complete: {error}"
-                                )),
-                            },
-                        )
-                        .into())
-                    }
-                    Err(_) => {
-                        return Err(ConverseErrorModeled::InternalServerException(
-                            InternalServerException {
-                                message: Some(format!(
-                                    "the guardrail evaluation did not complete within {} seconds",
-                                    crate::state::guardrail_checks::EVALUATION_TIME_BUDGET
-                                        .as_secs()
-                                )),
+                                message: Some(failed.message),
                             },
                         )
                         .into())

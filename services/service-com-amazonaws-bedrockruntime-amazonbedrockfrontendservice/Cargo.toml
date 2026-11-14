@@ -73,6 +73,11 @@ rustrict = "0.7"
 # with it too: every word the policy blocks goes into ONE pattern, so a request's
 # text is scanned once in linear time however many words are configured.
 regex = "1.12"
+# The byte-pair tokenizer every token count of this service is measured with
+# (`state::count_text_tokens`): it ships the published `cl100k_base` vocabulary, so a
+# prompt is counted at the granularity a model's own tokenizer counts it at instead of
+# by a character heuristic.
+tiktoken-rs = "0.12"
 
 [build-dependencies]
 emulator-core-build-support = { workspace = true }

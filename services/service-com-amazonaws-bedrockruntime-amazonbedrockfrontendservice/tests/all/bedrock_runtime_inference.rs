@@ -921,9 +921,10 @@ fn cap_rows() -> Vec<CapRow> {
 
 /// RULE: `inferenceConfig.maxTokens` is the maximum number of tokens to ALLOW in
 /// the generated response — a ceiling, not a target — so a turn whose completion
-/// finishes inside that ceiling stops on `end_turn` however much of the budget
-/// is left over, and `max_tokens` is reported only by a completion the ceiling
-/// genuinely cut off; either way the output count never exceeds the ceiling.
+/// finishes with budget to spare stops on `end_turn` however modest that ceiling
+/// is, and `max_tokens` is reported by a turn generation ran into the ceiling of:
+/// one with more left to say whose served tokens use the whole ceiling up. Either
+/// way the output count never exceeds the ceiling.
 #[tokio::test]
 async fn converse_reports_max_tokens_only_for_a_completion_the_ceiling_cut_off() {
     let router = emulator();
@@ -969,10 +970,13 @@ async fn converse_reports_max_tokens_only_for_a_completion_the_ceiling_cut_off()
             output,
             "case {case:?}: expected outputTokens to be the tokens of {text:?}, got {output}"
         );
-        // A completion is cut off only by a ceiling it cannot fit the shortest
-        // completion in; every other ceiling leaves the turn finished.
+        // Generation ran into the ceiling when the completion still had something
+        // to say and the ceiling was spent in full — which a ceiling at or below
+        // the shortest completion always is, since the clauses that follow that
+        // sentence cannot fit beside it. A larger ceiling leaves budget unspent,
+        // so the turn stopped because it was finished.
         let expected = match row.max_tokens {
-            Some(cap) if cap < floor => "max_tokens",
+            Some(cap) if cap <= floor => "max_tokens",
             _ => "end_turn",
         };
         assert_eq!(
@@ -1001,16 +1005,17 @@ async fn converse_reports_max_tokens_only_for_a_completion_the_ceiling_cut_off()
 
 /// RULE (same ceiling rule, on the `InvokeModel` surface): the generation cap a
 /// model family's own request body carries is a ceiling too, so a body whose cap
-/// admits the completion is answered with that family's completed stop reason,
-/// and its length stop reason is reported only for a completion the cap cut off.
+/// leaves the completion budget to spare is answered with that family's completed
+/// stop reason, and its length stop reason is reported for a turn whose served
+/// tokens spend the whole cap with more left to say.
 #[tokio::test]
 async fn invoke_model_reports_a_length_stop_only_for_a_completion_the_cap_cut_off() {
     let router = emulator();
     let floor = state::count_text_tokens(state::EMULATED_COMPLETION_FLOOR);
 
-    // One row per family, each sent twice: once with a cap that admits the
-    // shortest completion and once with a cap below it. The cap member per
-    // family is the one `state::body_max_tokens` documents.
+    // One row per family, each sent with caps at, just above and below the
+    // shortest completion and one far above it. The cap member per family is the
+    // one `state::body_max_token_pointers` documents.
     let rows: &[(&str, state::ModelFamily, &str, &str, &str)] = &[
         (
             "anthropic messages",
@@ -1057,7 +1062,13 @@ async fn invoke_model_reports_a_length_stop_only_for_a_completion_the_cap_cut_of
     ];
 
     for (case, family, model_id, template, stop_pointer) in rows {
-        for (cap, cut_off) in [(floor, false), (floor - 1, true), (1, true), (512, false)] {
+        for (cap, cut_off) in [
+            (floor, true),
+            (floor + 1, false),
+            (floor - 1, true),
+            (1, true),
+            (512, false),
+        ] {
             let case = format!("{case} at a cap of {cap}");
             let body = template.replace("CAP", &cap.to_string());
             let call = send(

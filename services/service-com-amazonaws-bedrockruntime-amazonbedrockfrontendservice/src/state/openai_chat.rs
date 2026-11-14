@@ -54,8 +54,10 @@ pub const MALFORMED_BODY_MESSAGE: &str =
     "The JSON object in the request body is malformed. Fix the syntax errors and retry your \
      request.";
 
-/// The JSON Pointer this envelope binds the generation cap to.
-pub const MAX_TOKENS_POINTER: &str = "/max_tokens";
+/// The JSON Pointers this envelope binds the generation cap to: the `max_tokens`
+/// it has always published and the `max_completion_tokens` that replaced it, both
+/// naming the one cap, so a body written against either spelling is bounded by it.
+pub const MAX_TOKENS_POINTERS: &[&str] = &["/max_tokens", "/max_completion_tokens"];
 
 /// The JSON Pointer this envelope binds the stop sequences to.
 pub const STOP_SEQUENCES_POINTER: &str = "/stop";

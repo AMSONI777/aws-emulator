@@ -238,11 +238,11 @@ fn window_rows() -> Vec<WindowRow> {
     ]
 }
 
-/// A prompt of exactly `tokens` tokens: this emulator's tokenizer makes one token of a run
-/// of at most [`state::MAX_CHARS_PER_TOKEN`] alphanumerics, so one four-character word per
-/// token counts exactly.
+/// A prompt of exactly `tokens` tokens: one common word per token, since the tokenizer
+/// every count of this service is measured with keeps an ordinary word whole and makes the
+/// space before it part of that word's token.
 fn prompt_of_tokens(tokens: usize) -> String {
-    let built = "word ".repeat(tokens);
+    let built = vec!["word"; tokens].join(" ");
     assert_eq!(
         state::count_text_tokens(&built) as usize,
         tokens,

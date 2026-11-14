@@ -87,7 +87,6 @@
 use super::types::*;
 
 use crate::state::guardrail_checks;
-use crate::state::guardrail_checks::EVALUATION_TIME_BUDGET;
 
 // `#[operation_error]` below expands to an invocation of the LOCAL declarative
 // `smithy!` macro, which this line is what emits into the module. Without it the
@@ -223,35 +222,21 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         }
 
         // The recognizers are synchronous, CPU-bound work over caller-supplied text
-        // and have no await of their own, so they run on the blocking pool: the
-        // worker serving this request is released while they do, and the wait is
-        // bounded by EVALUATION_TIME_BUDGET.
-        let evaluation = match ::tokio::time::timeout(
-            EVALUATION_TIME_BUDGET,
-            ::tokio::task::spawn_blocking(move || guardrail_checks::evaluate(&requested, &texts)),
-        )
+        // and have no await of their own, so they run through the one seam every
+        // such stage of this service runs through: the worker serving this request
+        // is released while they do, and the wait is bounded.
+        let evaluation = match crate::state::turn_composition::off_worker(move || {
+            guardrail_checks::evaluate(&requested, &texts)
+        })
         .await
         {
-            Ok(Ok(evaluation)) => evaluation,
+            Ok(evaluation) => evaluation,
             // Nothing was evaluated, so there is no verdict to report: the service's
             // own server error says so rather than an empty set of findings.
-            Ok(Err(error)) => {
+            Err(failed) => {
                 return Err(InvokeGuardrailChecksErrorModeled::InternalServerException(
                     InternalServerException {
-                        message: Some(format!(
-                            "the guardrail check evaluation did not complete: {error}"
-                        )),
-                    },
-                )
-                .into())
-            }
-            Err(_) => {
-                return Err(InvokeGuardrailChecksErrorModeled::InternalServerException(
-                    InternalServerException {
-                        message: Some(format!(
-                            "the guardrail check evaluation did not complete within {} seconds",
-                            EVALUATION_TIME_BUDGET.as_secs()
-                        )),
+                        message: Some(failed.message),
                     },
                 )
                 .into())

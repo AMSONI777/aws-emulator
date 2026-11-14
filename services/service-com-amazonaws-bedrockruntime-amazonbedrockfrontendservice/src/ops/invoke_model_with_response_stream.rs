@@ -123,7 +123,7 @@ impl<Eng: Send + Sync + 'static> InvokeModelWithResponseStream<Eng> {
     ///
     /// `region` is the Region the request was signed for, which is where this
     /// account's invocation records are delivered from.
-    fn respond(
+    async fn respond(
         &self,
         protocol: &dyn ServerHttpProtocol,
         req: &Request,
@@ -194,33 +194,46 @@ impl<Eng: Send + Sync + 'static> InvokeModelWithResponseStream<Eng> {
         )
         .map_err(validation)?;
 
-        // The input-size stage `InvokeModel` runs, for the same reason: a model
-        // reads a bounded prompt, so a body whose counted prompt tokens are past
-        // the resolved model's context window is refused rather than streamed
-        // against a shortened prompt.
-        if crate::state::context_window::exceeds_context_window(
-            &model,
-            crate::state::body_input_tokens(body),
-        ) {
-            return Err(validation(
-                crate::state::context_window::INPUT_TOKENS_EXCEEDED_MESSAGE.to_string(),
-            ));
-        }
-
-        // The same inference `InvokeModel` serves, so the two surfaces cannot
-        // drift; here the turn is delivered as the model family's own streaming
-        // events rather than as the unary response body.
-        let turn = crate::state::invoke_turn(&model, family, body);
+        // The CPU-bound stage `InvokeModel` runs, through the same function, so
+        // the two surfaces cannot drift: the body's prompt tokens are counted, a
+        // body past the resolved model's context window is refused rather than
+        // streamed against a shortened prompt, and the inference is served — all
+        // on the blocking pool, under the one budget every CPU-bound stage of this
+        // service makes a caller wait for. Here the turn is delivered as the model
+        // family's own streaming events rather than as the unary response body.
+        let composed = crate::state::turn_composition::compose_invoke_turn(&model, family, body)
+            .await;
+        let turn = match composed {
+            Ok(crate::state::turn_composition::Composed::Served(turn)) => turn,
+            Ok(crate::state::turn_composition::Composed::Refused(message)) => {
+                return Err(validation(message))
+            }
+            Err(failed) => return Err(internal(failed.message)),
+        };
         // The guardrail stage `InvokeModel` runs, for the same reason: the
         // account-enforced guardrail applies to this invocation whether or not
-        // the request asked for one.
-        let (turn, guardrail_action) = crate::state::enforced_guardrail::guard_invoke_turn(
-            &*self.engine,
-            &model,
-            family,
-            body,
-            turn,
-        );
+        // the request asked for one — and like every synchronous, CPU-bound stage
+        // over caller-supplied text it runs off the async worker, under the one
+        // budget a caller waits for.
+        let (turn, guardrail_action) = {
+            let engine = Arc::clone(&self.engine);
+            let model = model.clone();
+            let guarded_body = body.to_vec();
+            match crate::state::turn_composition::off_worker(move || {
+                crate::state::enforced_guardrail::guard_invoke_turn(
+                    &*engine,
+                    &model,
+                    family,
+                    &guarded_body,
+                    turn,
+                )
+            })
+            .await
+            {
+                Ok(guarded) => guarded,
+                Err(failed) => return Err(internal(failed.message)),
+            }
+        };
         let first_byte_latency_ms = crate::state::latency_ms(started.elapsed());
 
         let logged = crate::state::InvocationLogEntry {
@@ -327,7 +340,10 @@ impl<Eng: Send + Sync + 'static> service_common::event_stream::EventStreamOperat
     ) -> BoxFuture<'r, Response> {
         Box::pin(async move {
             let protocol = svc.definition().protocol();
-            let response = match self.respond(protocol, req, &crate::state::request_region(ctx.parts())) {
+            let response = match self
+                .respond(protocol, req, &crate::state::request_region(ctx.parts()))
+                .await
+            {
                 Ok(response) => response,
                 Err(error) => error_response(protocol, &error),
             };

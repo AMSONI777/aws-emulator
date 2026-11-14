@@ -101,6 +101,10 @@ pub mod invocation_logging;
 /// response shape of the providers Amazon Bedrock serves on that schema.
 pub mod openai_chat;
 
+/// The CPU-bound stage of a served inference call — counting the request's own input
+/// tokens, and the turn composed from that count — run off the async worker.
+pub mod turn_composition;
+
 // Re-exported so every handler and every caller of this module reaches the
 // generation stage where it reached it before: the stage MOVED into its own
 // module, it did not change, and nothing about the text a turn serves differs.
@@ -1724,46 +1728,89 @@ pub fn millis_of_datetime(value: &::aws_smithy_types::DateTime) -> i64 {
 // The tokenizer
 // ---------------------------------------------------------------------------
 
-/// The longest run of characters this emulator's tokenizer puts in one token.
+/// The tokenizer every token count of this service is measured with, built once:
+/// loading a vocabulary is the expensive part and no request may pay it.
 ///
-/// The tokenizer is the emulator's own, and deliberately simple: a word is cut
-/// into pieces of at most this many characters and every punctuation mark is a
-/// token of its own. It is NOT any vendor's BPE vocabulary — no tokenizer
-/// vocabulary ships with this emulator — but it is deterministic and it is the
-/// SINGLE tokenizer every operation counts with, which is the property
-/// `CountTokens` and `Converse` have to share.
-pub const MAX_CHARS_PER_TOKEN: usize = 4;
+/// A model's tokenizer is a byte-pair encoder over a vocabulary: a word the
+/// vocabulary holds is ONE token however long it is, a word it does not hold is
+/// cut into the pieces it does hold, and a leading space belongs to the word it
+/// precedes. That granularity is what a token count MEANS — it is what a caller
+/// meters, budgets and bills against — so this emulator measures with a real
+/// byte-pair tokenizer over a published vocabulary rather than with a count of
+/// fixed-width character runs, which has no vocabulary at all and so overcounts
+/// every ordinary word and every punctuation mark.
+///
+/// No AWS model publishes its own vocabulary, so the vocabulary is not the
+/// invoked model's: it is the `cl100k_base` one the tokenizer crate itself ships.
+/// It is deterministic and it is the SINGLE tokenizer every operation of this
+/// service counts with, which is the property `CountTokens` and `Converse` have
+/// to share.
+///
+/// Nothing is read from the host or the network to build it and no caller input
+/// reaches it: what is loaded is a constant of the build, like the patterns
+/// [`guardrail_checks`] compiles.
+fn tokenizer() -> &'static ::tiktoken_rs::CoreBPE {
+    static TOKENIZER: ::std::sync::OnceLock<::tiktoken_rs::CoreBPE> = ::std::sync::OnceLock::new();
+    TOKENIZER
+        .get_or_init(|| ::tiktoken_rs::cl100k_base().expect("the shipped vocabulary is readable"))
+}
+
+/// The tokens `text` encodes to, in order.
+///
+/// The text is caller-supplied content and nothing in it is a control marker, so
+/// it is encoded as ORDINARY text: a request that spells out one of the
+/// vocabulary's special markers is counted as the characters it wrote, not as
+/// that marker.
+fn text_tokens(text: &str) -> Vec<u32> {
+    tokenizer().encode_ordinary(text)
+}
 
 /// The byte offset at which each token of `text` ends.
+///
+/// Each offset is a char boundary of `text`: the vocabulary is a BYTE-pair one,
+/// so a character whose UTF-8 encoding is spread over several tokens has a token
+/// ending inside it, and such an end is reported at the start of that character.
+/// The offsets are therefore non-decreasing, the last one is the length of
+/// `text`, and the text between two of them is always a valid slice.
+///
+/// It is the boundaries, not the count, that need this: [`count_text_tokens`]
+/// counts without them. Each token is decoded once, so the walk is linear in the
+/// tokens of `text`, and the callers that need WHERE a token ends — cutting a
+/// completion to the generation cap ([`truncate_to_tokens`], applied to
+/// [`EMULATED_COMPLETION_FLOOR`]) and framing a content block into stream
+/// increments ([`stream_framing::delta_pieces`], whose longest block is a tool
+/// input bounded by [`MAX_ARGUMENT_BYTES`]) — both work on bounded text.
 fn token_ends(text: &str) -> Vec<usize> {
+    let tokenizer = tokenizer();
     let mut ends = Vec::new();
-    let mut chars_in_piece = 0usize;
-    for (offset, ch) in text.char_indices() {
-        if ch.is_alphanumeric() {
-            if chars_in_piece == MAX_CHARS_PER_TOKEN {
-                ends.push(offset);
-                chars_in_piece = 0;
-            }
-            chars_in_piece += 1;
-        } else {
-            if chars_in_piece > 0 {
-                ends.push(offset);
-                chars_in_piece = 0;
-            }
-            if !ch.is_whitespace() {
-                ends.push(offset + ch.len_utf8());
-            }
-        }
-    }
-    if chars_in_piece > 0 {
-        ends.push(text.len());
+    let mut at = 0usize;
+    for token in text_tokens(text) {
+        // Each token is decoded ONCE, to the bytes it contributes: the encoding is
+        // lossless over bytes, so the ends accumulate in a single pass over the
+        // tokens.
+        at = at.saturating_add(
+            tokenizer
+                .decode_bytes(&[token])
+                .map(|bytes| bytes.len())
+                .unwrap_or_default(),
+        );
+        ends.push(floor_char_boundary(text, at));
     }
     ends
 }
 
+/// The largest offset at or before `at` that `text` can be split on.
+fn floor_char_boundary(text: &str, at: usize) -> usize {
+    let mut at = at.min(text.len());
+    while at > 0 && !text.is_char_boundary(at) {
+        at -= 1;
+    }
+    at
+}
+
 /// How many tokens `text` is.
 pub fn count_text_tokens(text: &str) -> u32 {
-    u32::try_from(token_ends(text).len()).unwrap_or(u32::MAX)
+    u32::try_from(text_tokens(text).len()).unwrap_or(u32::MAX)
 }
 
 /// A token count as the modelled `Integer`.
@@ -2400,12 +2447,18 @@ impl ConverseTurn {
     }
 
     /// The modelled `TokenUsage` for this turn: the counts actually served, with
-    /// `totalTokens` their sum.
+    /// `totalTokens` their sum, and the per-tool accounting the Converse APIs
+    /// report beside them ([`Self::server_tool_requests`]).
     ///
     /// A turn that engaged the prompt cache reports the two cache counters too,
     /// and `totalTokens` closes over all four: the prefix tokens are billed as
     /// a cache write on the call that cached them and as a cache read on the
     /// call that matched them, never a second time as `inputTokens`.
+    ///
+    /// `serverToolUsage` is always present, so a client that reads it finds an
+    /// object rather than nothing — empty for a turn no system-defined tool
+    /// served anything for. `Converse` and `ConverseStream` report one turn's
+    /// usage, so both report it.
     pub fn usage(&self) -> TokenUsage {
         let cached_tokens = self
             .cache
@@ -2432,7 +2485,22 @@ impl ConverseTurn {
                 .cache
                 .as_ref()
                 .map(|cache| cache.cache_details.clone()),
+            server_tool_usage: Some(self.server_tool_requests()),
         }
+    }
+
+    /// How many requests each SYSTEM-DEFINED tool served while this turn was
+    /// generated, by tool name.
+    ///
+    /// A system-defined tool is one "created and provided by the model provider"
+    /// (the modelled `SystemTool`), which the SERVICE runs while generating the
+    /// turn rather than handing back to the caller. Nothing provider-side runs in
+    /// this emulator — a turn that asks for a tool, system-defined or not, hands
+    /// that request back as a `toolUse` block for the caller to answer — so no
+    /// system-defined tool served a request while this turn was served and the
+    /// accounting it reports is empty.
+    pub fn server_tool_requests(&self) -> HashMap<String, i32> {
+        HashMap::new()
     }
 }
 
@@ -2494,18 +2562,22 @@ impl<'a> TurnInference<'a> {
 /// when the request marked a cacheable prefix, the tokens this turn is charged
 /// as input are only those after the last marker, the prefix itself having been
 /// accounted for as a cache read or a cache write.
+///
+/// `submitted_tokens` is the count the input-size stage already took of this same
+/// input ([`converse_input_tokens`]), handed over rather than taken again: one
+/// request's prompt is counted ONCE, and the count a turn is charged for is the
+/// count its input-size refusal was decided on.
 pub fn converse_turn(
     model: &ModelEntry,
-    system: Option<&Vec<SystemContentBlock>>,
     messages: Option<&Vec<Message>>,
-    tool_config: Option<&ToolConfiguration>,
     inference: TurnInference<'_>,
     tool_use: Option<ToolUseBlock>,
     cache: Option<PromptCacheOutcome>,
+    submitted_tokens: u32,
 ) -> ConverseTurn {
     let input_tokens = match &cache {
         Some(cache) => cache.input_tokens,
-        None => converse_input_tokens(system, messages, tool_config),
+        None => submitted_tokens,
     };
     if let Some(tool_use) = tool_use {
         let output_tokens = content_block_tokens(&ContentBlock::toolUse(tool_use.clone()));
@@ -2579,10 +2651,11 @@ pub const PROMPT_TEXT_FIELDS: [&str; 6] = [
 pub const TOOL_DEFINITION_FIELDS: [&str; 2] = ["tools", "toolConfig"];
 
 /// Every string the body binds under a [`PROMPT_TEXT_FIELDS`] name, plus every
-/// string inside a [`TOOL_DEFINITION_FIELDS`] subtree, joined by newlines in key
-/// order. The walk stops at [`MAX_DOCUMENT_DEPTH`], so a deeply nested body
-/// cannot drive unbounded recursion.
-fn prompt_text_of_json(value: &serde_json::Value) -> String {
+/// string inside a [`TOOL_DEFINITION_FIELDS`] subtree, as the ordered PIECES of
+/// prompt text they are (key order within an object). The walk stops at
+/// [`MAX_DOCUMENT_DEPTH`], so a deeply nested body cannot drive unbounded
+/// recursion.
+fn prompt_text_pieces_of_json(value: &serde_json::Value) -> Vec<String> {
     fn walk(
         value: &serde_json::Value,
         field: Option<&str>,
@@ -2624,29 +2697,47 @@ fn prompt_text_of_json(value: &serde_json::Value) -> String {
     }
     let mut parts = Vec::new();
     walk(value, None, false, 0, &mut parts);
-    parts.join("\n")
+    parts
 }
 
-/// The field a request body of each family carries its generation cap in.
+
+/// EVERY field a request body of each family carries its generation cap in, in
+/// the order the family's request formats are read.
+///
+/// A parameter the provider publishes under more than one name is the SAME
+/// parameter: a family whose request schema has grown a second spelling for its
+/// cap accepts a body written in either, since the ceiling a caller asked for
+/// cannot depend on which published spelling the body used. So this is a list
+/// per family rather than one pointer, and the cap is the first of them the body
+/// binds.
 ///
 /// Source: the per-family request formats in "Inference request parameters and
 /// response fields for foundation models" (Amazon Bedrock User Guide) —
-/// Anthropic's `max_tokens`, Titan's `textGenerationConfig.maxTokenCount`,
-/// Nova's `inferenceConfig.max_new_tokens`, Llama's `max_gen_len`, and
-/// Mistral's and Cohere's `max_tokens`.
+/// Anthropic's `max_tokens` (Messages API) and `max_tokens_to_sample` (the Text
+/// Completions API body the same provider still accepts), Titan's
+/// `textGenerationConfig.maxTokenCount`, Nova's `inferenceConfig.max_new_tokens`
+/// beside the `inferenceConfig.maxTokens` of the Converse-shaped request its body
+/// is, Llama's `max_gen_len`, and Mistral's and Cohere's `max_tokens`.
+pub fn body_max_token_pointers(family: ModelFamily) -> &'static [&'static str] {
+    match family {
+        ModelFamily::AnthropicMessages => &["/max_tokens", "/max_tokens_to_sample"],
+        ModelFamily::TitanText => &["/textGenerationConfig/maxTokenCount"],
+        ModelFamily::Nova => &["/inferenceConfig/max_new_tokens", "/inferenceConfig/maxTokens"],
+        ModelFamily::Llama => &["/max_gen_len"],
+        ModelFamily::Mistral | ModelFamily::CohereCommand => &["/max_tokens"],
+        ModelFamily::OpenAiChat => openai_chat::MAX_TOKENS_POINTERS,
+    }
+}
+
+/// The generation cap a request body carries for `family`, or `None` when it
+/// carries none of the names [`body_max_token_pointers`] lists for that family.
 pub fn body_max_tokens(family: ModelFamily, body: &serde_json::Value) -> Option<u32> {
-    let pointer = match family {
-        ModelFamily::AnthropicMessages => "/max_tokens",
-        ModelFamily::TitanText => "/textGenerationConfig/maxTokenCount",
-        ModelFamily::Nova => "/inferenceConfig/max_new_tokens",
-        ModelFamily::Llama => "/max_gen_len",
-        ModelFamily::Mistral | ModelFamily::CohereCommand => "/max_tokens",
-        ModelFamily::OpenAiChat => openai_chat::MAX_TOKENS_POINTER,
-    };
-    body.pointer(pointer)
-        .and_then(serde_json::Value::as_u64)
-        .and_then(|value| u32::try_from(value).ok())
-        .filter(|value| *value > 0)
+    body_max_token_pointers(family)
+        .iter()
+        .filter_map(|pointer| body.pointer(pointer))
+        .filter_map(serde_json::Value::as_u64)
+        .filter_map(|value| u32::try_from(value).ok())
+        .find(|value| *value > 0)
 }
 
 /// The stop sequences a request body of each family configures, in the order the
@@ -2972,7 +3063,17 @@ pub struct InvokeTurn {
 /// [`invoke_model_stream_chunks`]). `family` is the model's own response family,
 /// which the caller has already resolved (a model this emulator renders no
 /// envelope for is refused before any inference is served).
-pub fn invoke_turn(model: &ModelEntry, family: ModelFamily, body: &[u8]) -> InvokeTurn {
+///
+/// `input_tokens` is the count the input-size stage already took of this same
+/// body ([`body_input_tokens`]), handed over rather than taken again: one
+/// request's prompt is counted ONCE, and the count the response reports is the
+/// count its input-size refusal was decided on.
+pub fn invoke_turn(
+    model: &ModelEntry,
+    family: ModelFamily,
+    body: &[u8],
+    input_tokens: u32,
+) -> InvokeTurn {
     let parsed_body = serde_json::from_slice::<serde_json::Value>(body).ok();
     // The generation cap the body carries for this family, bounded by the model's
     // own ceiling. It is a ceiling, so the completion is composed to fit it and
@@ -2984,7 +3085,6 @@ pub fn invoke_turn(model: &ModelEntry, family: ModelFamily, body: &[u8]) -> Invo
         .unwrap_or(model.max_output_tokens)
         .min(model.max_output_tokens);
 
-    let input_tokens = body_input_tokens(body);
     // The stop sequences the body carries for this family. Generation halts
     // where the first of them completes, so the text the envelope and the
     // streaming events carry ends with that sequence and nothing follows it.
@@ -3032,26 +3132,39 @@ pub fn invoke_turn(model: &ModelEntry, family: ModelFamily, body: &[u8]) -> Invo
     }
 }
 
-/// The prompt text an `InvokeModel` body carries.
+/// The prompt text an `InvokeModel` body carries, piece by piece.
 ///
 /// A JSON body contributes the strings it binds under a prompt-bearing field
 /// name; a body that is not JSON, or that binds no such field, contributes its
-/// own bytes as text, so no request is counted as zero tokens just because this
-/// emulator does not know the field it used.
-pub fn prompt_text_of_body(body: &[u8]) -> String {
+/// own bytes as one piece of text, so no request is counted as zero tokens just
+/// because this emulator does not know the field it used.
+pub fn prompt_text_pieces_of_body(body: &[u8]) -> Vec<String> {
     if let Ok(value) = serde_json::from_slice::<serde_json::Value>(body) {
-        let text = prompt_text_of_json(&value);
-        if !text.trim().is_empty() {
-            return text;
+        let pieces = prompt_text_pieces_of_json(&value);
+        if pieces.iter().any(|piece| !piece.trim().is_empty()) {
+            return pieces;
         }
     }
-    String::from_utf8_lossy(body).into_owned()
+    vec![String::from_utf8_lossy(body).into_owned()]
 }
 
-/// The tokens an `InvokeModel` body is. `CountTokens`'s `invokeModel` variant
-/// and `InvokeModel` itself both count with this.
+/// The same pieces as the one prompt text they assemble into.
+pub fn prompt_text_of_body(body: &[u8]) -> String {
+    prompt_text_pieces_of_body(body).join("\n")
+}
+
+/// The tokens an `InvokeModel` body is: the tokens of each piece of prompt text
+/// it carries, as [`converse_input_tokens`] counts a Converse-shaped input's
+/// pieces — so one piece of prompt text costs the same tokens wherever it
+/// arrives, and adding a piece to a body adds exactly that piece's tokens.
+/// `CountTokens`'s `invokeModel` variant and `InvokeModel` itself both count
+/// with this.
 pub fn body_input_tokens(body: &[u8]) -> u32 {
-    count_text_tokens(&prompt_text_of_body(body))
+    prompt_text_pieces_of_body(body)
+        .iter()
+        .fold(0u32, |total, piece| {
+            total.saturating_add(count_text_tokens(piece))
+        })
 }
 
 // ---------------------------------------------------------------------------

@@ -42,9 +42,9 @@ pub const TOKENS_PER_DELTA: usize = 4;
 ///
 /// The EMULATOR's bound: past it the pieces grow instead of the event count, so
 /// the size of a block decides how much each event carries rather than how many
-/// events one request frames. Whatever follows the last whole token group joins
-/// the final piece, so this is the count a block is framed into and not one less
-/// than it.
+/// events one request frames. Whatever follows the last whole token group is a
+/// piece of its own unless that would take the block past this bound, in which
+/// case it joins the final piece.
 pub const MAX_DELTAS: usize = 64;
 
 /// `text` cut into the pieces the deltas of one content block carry, in order.
@@ -73,12 +73,15 @@ pub fn delta_pieces(text: &str) -> Vec<&str> {
         pieces.push(&text[cut..*end]);
         cut = *end;
     }
-    // Whatever follows the last whole token group belongs to the piece before it,
-    // so the number of pieces stays inside [`MAX_DELTAS`].
+    // Whatever follows the last whole token group is the final increment: a block
+    // of more tokens than one increment carries is delivered in more than one
+    // event, whether or not its token count divides evenly. It joins the piece
+    // before it only when the block has already been cut into as many events as
+    // [`MAX_DELTAS`] allows.
     if cut < text.len() {
-        let from = match pieces.pop() {
-            Some(last) => cut - last.len(),
-            None => cut,
+        let from = match pieces.len() >= MAX_DELTAS {
+            true => pieces.pop().map_or(cut, |last| cut - last.len()),
+            false => cut,
         };
         pieces.push(&text[from..]);
     }

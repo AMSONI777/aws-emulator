@@ -218,15 +218,35 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
             .into());
         }
 
-        let input_tokens = match &input.input {
+        // The count itself is a byte-pair encode over the input the CALLER chose
+        // the size of, so it runs OFF the async worker, under the one budget every
+        // CPU-bound stage of this service makes a caller wait for — the same stage
+        // the inference surfaces count their own input with, so the count this
+        // operation answers is the one they charge.
+        let counted = match &input.input {
             CountTokensInput2::invokeModel(request) => {
-                crate::state::body_input_tokens(&request.body)
+                crate::state::turn_composition::counted_body_tokens(&request.body).await
             }
-            CountTokensInput2::Converse(request) => crate::state::converse_input_tokens(
-                request.system.as_ref(),
-                request.messages.as_ref(),
-                request.tool_config.as_ref(),
-            ),
+            CountTokensInput2::Converse(request) => {
+                crate::state::turn_composition::counted_converse_tokens(
+                    request.system.as_ref(),
+                    request.messages.as_ref(),
+                    request.tool_config.as_ref(),
+                )
+                .await
+            }
+        };
+        let input_tokens = match counted {
+            Ok(input_tokens) => input_tokens,
+            // Nothing was counted, so there is no count to answer with.
+            Err(failed) => {
+                return Err(CountTokensErrorModeled::InternalServerException(
+                    InternalServerException {
+                        message: Some(failed.message),
+                    },
+                )
+                .into())
+            }
         };
 
         let input_tokens = crate::state::token_count_i32(input_tokens);

@@ -618,7 +618,10 @@ fn invoke_model_output(model: &runtime::ModelEntry, model_input: &Value) -> Resu
     // requires, cannot be invoked — so that record is one that failed to process rather
     // than one answered with an envelope nothing was inferred for.
     runtime::validate_invoke_request(family, None, None, &body, None, None)?;
-    Ok(runtime::invoke_turn(model, family, &body).response)
+    // The prompt tokens the operation counts for this body, counted here and handed to the
+    // turn, so a record's accounting is the operation's own.
+    let input_tokens = runtime::body_input_tokens(&body);
+    Ok(runtime::invoke_turn(model, family, &body, input_tokens).response)
 }
 
 /// The `modelOutput` of one record invoked through the `Converse` endpoint: the turn that
@@ -672,7 +675,10 @@ fn converse_output(model: &runtime::ModelEntry, model_input: &Value) -> Result<V
         .unwrap_or_default();
     let body = serde_json::to_vec(model_input).map_err(|error| error.to_string())?;
     let started = ::std::time::Instant::now();
-    let input_tokens = runtime::count_text_tokens(&runtime::prompt_text_of_body(&body));
+    // The tokens the inference surfaces count for this same input: each piece of prompt
+    // text on its own ([`runtime::body_input_tokens`]), so a record of a batch job and a
+    // `Converse` call carrying the same conversation are charged one count.
+    let input_tokens = runtime::body_input_tokens(&body);
     let completion = runtime::emulated_completion(
         &model.model_id,
         u32::try_from(messages.len()).unwrap_or(u32::MAX),

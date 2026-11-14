@@ -123,6 +123,7 @@ pub struct TokenUsage {
     pub cache_read_input_tokens: Option<i32>,
     pub cache_write_input_tokens: Option<i32>,
     pub cache_details: Option<Vec<CacheDetail>>,
+    pub server_tool_usage: Option<std::collections::HashMap<String, i32>>,
 }
 
 #[smithy_macros::smithy(shape = "com.amazonaws.bedrockruntime#CacheDetail")]

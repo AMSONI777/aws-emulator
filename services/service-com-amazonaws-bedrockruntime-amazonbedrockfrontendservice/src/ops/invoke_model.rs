@@ -300,34 +300,67 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         )
         .map_err(validation)?;
 
-        // The input-size stage: a model reads a bounded prompt, so a body whose
-        // counted prompt tokens are past the resolved model's context window is
-        // refused rather than served against a shortened prompt (see
-        // `crate::state::context_window`). A truncate-and-serve path does not
-        // exist: a response served on part of a prompt is indistinguishable from
-        // one served on all of it.
-        if crate::state::context_window::exceeds_context_window(
-            &model,
-            crate::state::body_input_tokens(body),
-        ) {
-            return Err(validation(
-                crate::state::context_window::INPUT_TOKENS_EXCEEDED_MESSAGE.to_string(),
-            ));
-        }
-
-        // The inference itself: the same turn the streaming surface serves, so
-        // the payload the two answer for identical input agrees by construction.
-        let turn = crate::state::invoke_turn(&model, family, body);
+        // The CPU-bound stage of this invocation, run OFF the async worker: the
+        // body's prompt tokens are a byte-pair encode over the body the CALLER
+        // chose the size of, so counting them, refusing a body past the resolved
+        // model's context window (see `crate::state::context_window`) and serving
+        // the inference all happen on the blocking pool, under the one budget
+        // every CPU-bound stage of this service makes a caller wait for. A
+        // truncate-and-serve path does not exist: a response served on part of a
+        // prompt is indistinguishable from one served on all of it. The streaming
+        // surface composes its turn through the same function, so the payload the
+        // two answer for identical input agrees by construction.
+        let composed = crate::state::turn_composition::compose_invoke_turn(&model, family, body)
+            .await;
+        let turn = match composed {
+            Ok(crate::state::turn_composition::Composed::Served(turn)) => turn,
+            Ok(crate::state::turn_composition::Composed::Refused(message)) => {
+                return Err(validation(message))
+            }
+            Err(failed) => {
+                return Err(InvokeModelErrorModeled::InternalServerException(
+                    InternalServerException {
+                        message: Some(failed.message),
+                    },
+                )
+                .into())
+            }
+        };
         // The guardrail stage: the account-enforced guardrail is applied to this
         // invocation whether or not the request asked for one, and the action it
-        // took is reported on the body the caller gets back.
-        let (turn, guardrail_action) = crate::state::enforced_guardrail::guard_invoke_turn(
-            &*self.engine,
-            &model,
-            family,
-            body,
-            turn,
-        );
+        // took is reported on the body the caller gets back. Its recognizers are
+        // synchronous, CPU-bound work over the caller's own body, so like every
+        // such stage of this service it runs off the async worker, under the one
+        // budget a caller waits for.
+        let (turn, guardrail_action) = {
+            let engine = ::std::sync::Arc::clone(&self.engine);
+            let model = model.clone();
+            let guarded_body = body.to_vec();
+            match crate::state::turn_composition::off_worker(move || {
+                crate::state::enforced_guardrail::guard_invoke_turn(
+                    &*engine,
+                    &model,
+                    family,
+                    &guarded_body,
+                    turn,
+                )
+            })
+            .await
+            {
+                Ok(guarded) => guarded,
+                // The guardrail did not answer, so there is no inference to serve:
+                // one served unguarded would be one this account requires to be
+                // guarded.
+                Err(failed) => {
+                    return Err(InvokeModelErrorModeled::InternalServerException(
+                        InternalServerException {
+                            message: Some(failed.message),
+                        },
+                    )
+                    .into())
+                }
+            }
+        };
         let input_tokens = turn.input_tokens;
         let output_tokens = turn.output_tokens;
         let mut response = turn.response;

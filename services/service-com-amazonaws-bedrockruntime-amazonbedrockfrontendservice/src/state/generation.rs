@@ -25,8 +25,7 @@ use super::{count_text_tokens, halt_at_stop_sequence, truncate_to_tokens};
 /// A generation cap is a CEILING on the response, not a target, so a completion
 /// is composed to FIT the budget the caller allowed: this sentence is the part
 /// that is always said, and [`emulated_completion`] appends the further clauses
-/// that still fit. A budget below this sentence is the only way generation is
-/// cut off mid-completion, which is what a length stop reason reports.
+/// that still fit.
 pub const EMULATED_COMPLETION_FLOOR: &str = "No language model runs in this emulator.";
 
 /// One synthesized completion: the text served, and whether the generation cap
@@ -36,8 +35,9 @@ pub struct EmulatedCompletion {
     /// The assistant text. Never the request's own text echoed back as if
     /// generated.
     pub text: String,
-    /// `true` only when the cap was reached before the completion was finished,
-    /// i.e. the budget was too small even for [`EMULATED_COMPLETION_FLOOR`].
+    /// `true` when the generation cap, rather than the completion itself, is what
+    /// ended generation: there was more of the completion left to say and the
+    /// whole budget the caller allowed had been used saying what came before it.
     pub truncated: bool,
     /// `true` when one of the request's configured stop sequences completed
     /// inside this text, so generation ended ON that sequence rather than
@@ -55,11 +55,17 @@ pub struct EmulatedCompletion {
 /// text echoed back as if generated.
 ///
 /// The caller's cap is the maximum number of tokens to ALLOW in the generated
-/// response, so a completion that has nothing left to say inside that ceiling
-/// has finished (`truncated` is `false`) however much room is left over: the
-/// clauses are appended in order only while the next one still fits. Only a
-/// budget smaller than [`EMULATED_COMPLETION_FLOOR`] genuinely reaches the
-/// ceiling, and that completion is reported as cut off.
+/// response, so the clauses are appended in order only while the next one still
+/// fits, and a completion that has nothing left to say has finished
+/// (`truncated` is `false`) however much room is left over.
+///
+/// Generation ran into the ceiling — which is what a length stop reason reports —
+/// exactly when BOTH hold: there was more of the completion left to say, and the
+/// tokens served use up the whole budget the caller allowed. A completion that
+/// stops with budget to spare stopped because it was finished, not because the
+/// cap cut it off, which is why a modest ceiling on a short turn is not reported
+/// as truncation; a budget too small even for [`EMULATED_COMPLETION_FLOOR`] cuts
+/// that sentence itself off and is always reported as truncation.
 ///
 /// `stop_sequences` are the sequences the request configured, applied by
 /// [`halt_at_stop_sequence`]: generation ends where the first of them completes,
@@ -122,6 +128,9 @@ pub fn emulated_completion_with(
         );
     }
     let mut text = EMULATED_COMPLETION_FLOOR.to_string();
+    // Whether anything of the completion was left unsaid: the clause that did not
+    // fit the budget, and everything after it.
+    let mut left_unsaid = false;
     for clause in [
         format!(" {model_id} generated no text for this request."),
         format!(" The request carried {messages} message(s) and {input_tokens} input token(s)."),
@@ -131,9 +140,14 @@ pub fn emulated_completion_with(
     {
         let extended = format!("{text}{clause}");
         if count_text_tokens(&extended) > max_output_tokens {
+            left_unsaid = true;
             break;
         }
         text = extended;
     }
-    halted(text, false)
+    // The ceiling ended generation only when it left no room for what came next
+    // AND the whole budget was spent on what came before: a completion that
+    // stopped with budget to spare stopped because it had nothing left to say.
+    let reached_ceiling = left_unsaid && count_text_tokens(&text) >= max_output_tokens;
+    halted(text, reached_ceiling)
 }
