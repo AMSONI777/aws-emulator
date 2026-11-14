@@ -112,7 +112,10 @@
 //! answers either the status and output of the program it provides for it, or `None` for a
 //! name it provides none for — and `None` is the same closed failure as before. Nothing here
 //! resolves a command against a host `PATH`, and an [`EnvironmentPrograms`] is handed no way
-//! to reach a process, a file or the host: it answers out of what its own caller holds.
+//! to reach a process, a file or the host: it answers out of what its own caller holds, and
+//! the FILES of this session's own tree ([`ProgramFiles`]), which is what a program whose
+//! work is to carry a file somewhere reads and writes — still the one tree above, where a
+//! path is a key and no host path is reachable.
 //!
 //! # Command substitution
 //!
@@ -212,14 +215,47 @@ pub struct ProgramOutcome {
 /// utilities ([`BUILT_IN_COMMANDS`]).
 ///
 /// A session asks this for a command whose name the catalog does not hold. An
-/// implementation answers only out of state its own caller holds — there is no process to
-/// start, no host `PATH` to resolve against and no file to open here — and answers `None`
+/// implementation answers only out of state its own caller holds and out of the FILES of the
+/// session's tree it is handed ([`ProgramFiles`]) — there is no process to start, no host
+/// `PATH` to resolve against and no file of the host to open here — and answers `None`
 /// for every name it provides no program for, which the session then reports as a command
 /// it could not run.
 pub trait EnvironmentPrograms: ::std::fmt::Debug + Send + Sync {
     /// What this environment's program `name` answers for `arguments`, or `None` when this
-    /// environment provides no program called `name`.
-    fn run(&self, name: &str, arguments: &[String]) -> Option<ProgramOutcome>;
+    /// environment provides no program called `name` — or performs nothing of that
+    /// invocation of it.
+    ///
+    /// `files` is the tree of the session the command was written in: the files a program
+    /// carrying one somewhere reads its source out of and writes its destination into. A
+    /// program whose work touches no file leaves it alone.
+    fn run(
+        &self,
+        name: &str,
+        arguments: &[String],
+        files: &mut dyn ProgramFiles,
+    ) -> Option<ProgramOutcome>;
+}
+
+/// The FILES of the tree a session works over, as the ENVIRONMENT's own programs reach them.
+///
+/// It is the same tree the session's redirections write and its `cat` reads — a machine's
+/// where it was given one, and the session's own otherwise — so a program hands a file the
+/// commands around it wrote on, and leaves one they read back. A path is a KEY of that tree:
+/// nothing here opens, creates or removes a path of the host.
+pub trait ProgramFiles {
+    /// What reading `path` answers in that tree, or `None` when it holds no file there.
+    fn read(&self, path: &str) -> Option<String>;
+
+    /// Write `contents` at `path`, replacing what the tree holds there.
+    ///
+    /// `false` is a write that did not happen — a path the tree does not accept, an entry it
+    /// will not let a program write, or a write past one of its bounds — which the program
+    /// reports as its own failure.
+    fn write(&mut self, path: &str, contents: &str) -> bool;
+
+    /// Remove the file at `path`, answering whether there was one to remove — what a program
+    /// that MOVES a file does to the one it carried away.
+    fn remove(&mut self, path: &str) -> bool;
 }
 
 /// The commands a session whose tree is a MACHINE's — or its own WORKING tree
@@ -502,6 +538,29 @@ pub struct ShellSession {
     /// Set when a write to the file a redirection named did not happen, which is what makes
     /// the command carrying it answer as one that could not be run.
     redirect_failed: bool,
+}
+
+/// The FILES of the tree this session works over, handed to the ENVIRONMENT's programs
+/// while one of them runs ([`ShellSession::run_environment_program`]).
+///
+/// It reaches the one tree the session's own commands read and write ([`ShellSession::read_path`],
+/// [`ShellSession::write_path`]) and nothing else of the session.
+struct SessionFiles<'a> {
+    session: &'a mut ShellSession,
+}
+
+impl ProgramFiles for SessionFiles<'_> {
+    fn read(&self, path: &str) -> Option<String> {
+        self.session.read_path(path)
+    }
+
+    fn write(&mut self, path: &str, contents: &str) -> bool {
+        self.session.write_path(path, contents, false)
+    }
+
+    fn remove(&mut self, path: &str) -> bool {
+        self.session.tree_remove_file(path)
+    }
 }
 
 impl ShellSession {
@@ -1206,17 +1265,27 @@ impl ShellSession {
     /// substitution captures it, and nothing else keeps it. A name the environment provides
     /// no program for is a command this session could not run, which is the same closed
     /// failure as a command neither catalog names.
+    ///
+    /// The program is handed this session's own FILES ([`ProgramFiles`]), so a program whose
+    /// work is to carry a file somewhere reads the one the commands around it wrote and
+    /// leaves the one they read back. The programs are taken OFF the session while it runs
+    /// and put back after, which is what lets it be handed the session's tree at the same
+    /// time; nothing else of the session is reachable from it.
     fn run_environment_program(
         &mut self,
         name: &str,
         arguments: &[String],
         redirections: &Redirections,
     ) -> i32 {
-        let Some(outcome) = self
-            .programs
-            .as_ref()
-            .and_then(|programs| programs.run(name, arguments))
-        else {
+        let Some(programs) = self.programs.take() else {
+            return self.config.statuses.could_not_run;
+        };
+        let answered = {
+            let mut files = SessionFiles { session: self };
+            programs.run(name, arguments, &mut files)
+        };
+        self.programs = Some(programs);
+        let Some(outcome) = answered else {
             return self.config.statuses.could_not_run;
         };
         for line in outcome.output {
@@ -2006,8 +2075,8 @@ fn formatted(format: &str, arguments: &[String]) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::{
-        Bounds, EnvironmentPrograms, OutputLimits, ProgramOutcome, SessionConfig, ShellSession,
-        ShellVolume, Statuses, BUILT_IN_COMMANDS,
+        Bounds, EnvironmentPrograms, OutputLimits, ProgramFiles, ProgramOutcome, SessionConfig,
+        ShellSession, ShellVolume, Statuses, BUILT_IN_COMMANDS,
     };
     use std::collections::BTreeMap;
 
@@ -2521,12 +2590,150 @@ mod tests {
     struct OneProgram;
 
     impl EnvironmentPrograms for OneProgram {
-        fn run(&self, name: &str, arguments: &[String]) -> Option<ProgramOutcome> {
+        fn run(
+            &self,
+            name: &str,
+            arguments: &[String],
+            _files: &mut dyn ProgramFiles,
+        ) -> Option<ProgramOutcome> {
             let queried: Vec<&str> = arguments.iter().map(String::as_str).collect();
             (name == "report" && queried == ["--version"]).then(|| ProgramOutcome {
                 status: 0,
                 output: vec!["report 1.2.3".to_string()],
             })
+        }
+    }
+
+    /// An environment whose one program CARRIES a file: `carry <from> <to>` moves what the
+    /// session's tree holds at one path to the other, which is the whole of what a program
+    /// that takes a file somewhere does to the tree.
+    #[derive(Debug)]
+    struct CarryingProgram;
+
+    impl EnvironmentPrograms for CarryingProgram {
+        fn run(
+            &self,
+            name: &str,
+            arguments: &[String],
+            files: &mut dyn ProgramFiles,
+        ) -> Option<ProgramOutcome> {
+            if name != "carry" || arguments.len() != 2 {
+                return None;
+            }
+            let Some(carried) = files.read(&arguments[0]) else {
+                return Some(ProgramOutcome {
+                    status: 1,
+                    output: vec![format!("carry: {}: no such file", arguments[0])],
+                });
+            };
+            if !files.write(&arguments[1], &carried) {
+                return Some(ProgramOutcome {
+                    status: 1,
+                    output: vec![format!("carry: {}: not written", arguments[1])],
+                });
+            }
+            files.remove(&arguments[0]);
+            Some(ProgramOutcome {
+                status: 0,
+                output: vec![format!("carry: {} to {}", arguments[0], arguments[1])],
+            })
+        }
+    }
+
+    /// RULE: a program of the environment reads, writes and removes the FILES of the session
+    /// it was invoked in, so a file the commands around it wrote is the one it carries, a file
+    /// it leaves is one they read back, and a file it took away is gone — and a path the tree
+    /// holds nothing at is the program's own failure.
+    #[test]
+    fn an_environments_program_carries_the_sessions_own_files() {
+        /// One row: the program, the status it answers, and what the tree then holds at the
+        /// destination and at the source.
+        struct Row {
+            case: &'static str,
+            program: &'static str,
+            status: i32,
+            destination_holds: Option<&'static str>,
+            source_holds: Option<&'static str>,
+        }
+
+        let statuses = Statuses::default();
+        let rows = [
+            Row {
+                case: "a file a redirection left behind",
+                program: "echo carried > /tmp/source && carry /tmp/source /tmp/destination",
+                status: statuses.success,
+                destination_holds: Some("carried\n"),
+                source_holds: None,
+            },
+            Row {
+                case: "a file the program left, read back by the catalog",
+                program: "echo carried > /tmp/source; carry /tmp/source /tmp/destination; \
+                          cat /tmp/destination > /tmp/read-back",
+                status: statuses.success,
+                destination_holds: Some("carried\n"),
+                source_holds: None,
+            },
+            Row {
+                case: "a source the tree holds nothing at",
+                program: "echo kept > /tmp/source; carry /tmp/absent /tmp/destination",
+                status: statuses.failure,
+                destination_holds: None,
+                source_holds: Some("kept\n"),
+            },
+            Row {
+                case: "an invocation this environment performs nothing of",
+                program: "echo kept > /tmp/source; carry /tmp/source",
+                status: statuses.could_not_run,
+                destination_holds: None,
+                source_holds: Some("kept\n"),
+            },
+        ];
+        for Row {
+            case,
+            program,
+            status: expected_status,
+            destination_holds,
+            source_holds,
+        } in rows
+        {
+            let mut session = ShellSession::with_programs(
+                BTreeMap::new(),
+                SessionConfig::default(),
+                Box::new(CarryingProgram),
+            );
+            let status = session.run(program);
+            assert_eq!(
+                status, expected_status,
+                "case {case:?}: expected status {expected_status}, got {status}"
+            );
+            let stored = session.tree_files();
+            let held = |path: &str| {
+                stored
+                    .iter()
+                    .find(|(held, _)| *held == path)
+                    .map(|(_, contents)| *contents)
+            };
+            let destination = held("/tmp/destination");
+            assert_eq!(
+                destination, destination_holds,
+                "case {case:?}: expected the destination to hold {destination_holds:?}, got \
+                 {destination:?}"
+            );
+            let source = held("/tmp/source");
+            assert_eq!(
+                source, source_holds,
+                "case {case:?}: expected the source to hold {source_holds:?}, got {source:?}"
+            );
+            // The read-back row proves the catalog's own `cat` reads the file the program
+            // left, over the same tree.
+            if case.contains("read back") {
+                let read_back = held("/tmp/read-back");
+                assert_eq!(
+                    read_back, destination_holds,
+                    "case {case:?}: expected `cat` to read the carried file back, got \
+                     {read_back:?}"
+                );
+            }
         }
     }
 

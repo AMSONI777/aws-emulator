@@ -168,15 +168,24 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         )
         .await;
         // The same for a step that submitted a COMMAND, whose status this service answers with
-        // a PARSE and a fixed allow-list of session-local utilities
-        // (`crate::state::step_command_status`): no host command, process or shell is ever
-        // started, and a command outside that list is refused with the status a shell gives a
+        // a PARSE, a fixed allow-list of session-local utilities and the AWS CLI's Amazon S3
+        // transfers (`crate::state::step_command_status`,
+        // `crate::state::step_command_transfers`): no host command, process or shell is ever
+        // started, a command line's own transfer is really made against this emulator's object
+        // store, and a command outside that list is refused with the status a shell gives a
         // command it could not find, so the step reports that its work was not run. The call
         // resolves the cluster itself and answers only for steps that cluster has already
         // started, so a request naming no cluster of this account answers for nothing; it runs
-        // with no store guard held so one caller's bounded parse cannot hold this service's
+        // with no store guard held so one caller's bounded command cannot hold this service's
         // state against another's.
-        crate::state::resolve_due_step_commands(&*self.engine, &input.cluster_id, now);
+        crate::state::resolve_due_step_commands(
+            &*self.engine,
+            ctx,
+            &crate::state::request_region(ctx.parts()),
+            &input.cluster_id,
+            now,
+        )
+        .await;
 
         // The store is taken and RELEASED inside this block: the publication below reaches
         // EventBridge's own handler, which may call back into this service, so this

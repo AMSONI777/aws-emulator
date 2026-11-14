@@ -109,6 +109,8 @@ mod security_configurations;
 mod spark_step_application;
 #[path = "all/state_roundtrip.rs"]
 mod state_roundtrip;
+#[path = "all/step_command_object_transfers.rs"]
+mod step_command_object_transfers;
 #[path = "all/step_concurrency_band_sentences.rs"]
 mod step_concurrency_band_sentences;
 #[path = "all/step_state_change_events.rs"]

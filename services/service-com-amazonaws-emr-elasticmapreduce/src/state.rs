@@ -154,6 +154,12 @@ pub use spark_step_run::*;
 mod step_command_status;
 pub use step_command_status::*;
 
+/// The Amazon S3 TRANSFERS such a command line asks for — the AWS CLI's `aws s3` commands,
+/// really performed against this emulator's own object store as the role the step runs as —
+/// split out and re-exported the same way.
+mod step_command_transfers;
+pub use step_command_transfers::*;
+
 /// WHEN that answer is given, and what one call may spend giving it: the queue side of the
 /// same concern, split out and re-exported the same way.
 mod command_step_run;

@@ -47,7 +47,7 @@
 
 use std::collections::BTreeMap;
 
-use ::service_common::posix_shell_session::{EnvironmentPrograms, ProgramOutcome};
+use ::service_common::posix_shell_session::{EnvironmentPrograms, ProgramFiles, ProgramOutcome};
 
 /// One program a version of a runtime carries: the name a command line invokes it by, the
 /// arguments that ask it for its version, and the line it writes for one.
@@ -321,7 +321,14 @@ impl EnvironmentPrograms for InstalledRuntimes {
     /// Every other invocation answers `None` — a program this environment did not perform —
     /// because running one with the runtime is what this environment does not do, and a
     /// status for a program nothing ran would be a status for work nothing performed.
-    fn run(&self, name: &str, arguments: &[String]) -> Option<ProgramOutcome> {
+    ///
+    /// A version query reads and writes no file, so the session's own tree is left alone.
+    fn run(
+        &self,
+        name: &str,
+        arguments: &[String],
+        _files: &mut dyn ProgramFiles,
+    ) -> Option<ProgramOutcome> {
         let program = self.programs.get(name)?;
         let queries_version = arguments.len() == 1
             && program

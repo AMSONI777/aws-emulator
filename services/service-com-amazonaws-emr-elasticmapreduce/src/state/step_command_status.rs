@@ -6,21 +6,25 @@
 //! # NO host command, process or shell is ever started
 //!
 //! Nothing in this module — and nothing it calls — spawns a process, invokes a shell, opens a
-//! socket or touches a file. There is no `std::process::Command`, no `exec`, no `sh -c` and no
-//! host binary lookup anywhere on this path, and the one maintained shell ENGINE that could
-//! provide them, `brush-core`, is deliberately not a dependency of this workspace (see
+//! socket or touches a host file. There is no `std::process::Command`, no `exec`, no `sh -c`
+//! and no host binary lookup anywhere on this path, and the one maintained shell ENGINE that
+//! could provide them, `brush-core`, is deliberately not a dependency of this workspace (see
 //! [`::service_common::posix_shell_session`], which states why).
 //!
 //! What a step's command reaches instead is a PARSE and a fixed allow-list. The command's text
 //! is parsed into a syntax tree by `brush-parser` — a library that builds a tree and runs
 //! nothing — and the status is answered by that session's catalog of SESSION-LOCAL utilities,
 //! whose whole effect is inside the session itself: `echo` (a line of the session's own
-//! output, which a step keeps none of), `true`, `false` and `:` (a status), `exit` (a status,
-//! ending the session) and `export`/`unset` (the session's own variables). Every command
-//! outside that allow-list, and every command FORM or expansion the session does not perform,
-//! is REFUSED with the status a shell gives a command it could not find, and the step then
-//! reports that its work was not run ([`STEP_NOT_EXECUTED_REASON`]) — never a status nothing
-//! produced. Nothing a caller can write makes that list longer.
+//! output, which a step keeps none of), `cat` (a file of the session's own tree), `true`,
+//! `false` and `:` (a status), `exit` (a status, ending the session) and `export`/`unset` (the
+//! session's own variables) — beside the ONE program the environment of a step's command line
+//! provides, the AWS CLI's Amazon S3 transfers ([`super::step_command_transfers`]), which are
+//! really made against this emulator's own object store so the object a step's command line
+//! names exists once the step has run. Every command outside those, and every command FORM or
+//! expansion the session does not perform, is REFUSED with the status a shell gives a command
+//! it could not find, and the step then reports that its work was not run
+//! ([`STEP_NOT_EXECUTED_REASON`]) — never a status nothing produced. Nothing a caller can
+//! write makes that list longer.
 //!
 //! # The rule this module implements
 //!
@@ -54,7 +58,7 @@
 //! cluster's Hive metastore ([`super::step_runner`]) — answer for themselves, so a step
 //! submitting one of them is never read as a command.
 
-use ::service_common::posix_shell_session::{SessionConfig, ShellSession};
+use ::service_common::posix_shell_session::{EnvironmentPrograms, SessionConfig, ShellSession};
 
 use super::*;
 
@@ -154,9 +158,14 @@ impl StepCommand {
 /// way `AddJobFlowSteps` documents: a zero status is the step's completion, and any other
 /// status is the modelled failure state carrying the status in both members the model gives a
 /// step failure.
+///
+/// `cli` is the ONE program the environment of a step's command line provides, so a command
+/// line that carries a file to or from Amazon S3 really carries it; a command performed
+/// WITHOUT one — there is no runtime to make a call on — reaches no object store, and such a
+/// command line is then one the session reports it could not run.
 #[must_use]
-pub fn command_outcome(command: &StepCommand) -> Option<StepOutcome> {
-    let status = answered_status(command)?;
+pub fn command_outcome(command: &StepCommand, cli: Option<StepObjectCli>) -> Option<StepOutcome> {
+    let status = answered_status(command, cli)?;
     if status == 0 {
         return Some(StepOutcome {
             state: step_state::COMPLETED.to_string(),
@@ -175,15 +184,24 @@ pub fn command_outcome(command: &StepCommand) -> Option<StepOutcome> {
 /// The status the session answered for `command`, or `None` when it answered for nothing of
 /// it.
 ///
-/// The session holds the parse and the allow-list this module's header states, and nothing
-/// else: no process is started here. It is given no variables either — a step's command is
-/// handed no environment, so a parameter it expands is one the command itself set. The one
-/// status that is not an answer about the command is the one a shell gives a utility it could
-/// not find, which is what the session answers for every command outside its catalog — unless
-/// the program ENDED the session itself, which is a status the command really asked for.
-fn answered_status(command: &StepCommand) -> Option<i32> {
+/// The session holds the parse, the allow-list and the one environment program this module's
+/// header states, and nothing else: no process is started here. It is given no variables
+/// either — a step's command is handed no environment, so a parameter it expands is one the
+/// command itself set, and the credential the CLI's own calls are signed with is held by that
+/// program rather than by the session. The one status that is not an answer about the command
+/// is the one a shell gives a utility it could not find, which is what the session answers for
+/// every command outside its catalog — unless the program ENDED the session itself, which is a
+/// status the command really asked for.
+fn answered_status(command: &StepCommand, cli: Option<StepObjectCli>) -> Option<i32> {
     let config = SessionConfig::default();
-    let mut session = ShellSession::new(BTreeMap::new(), config);
+    let mut session = match cli {
+        Some(cli) => ShellSession::with_programs(
+            BTreeMap::new(),
+            config,
+            Box::new(cli) as Box<dyn EnvironmentPrograms>,
+        ),
+        None => ShellSession::new(BTreeMap::new(), config),
+    };
     let status = session.run(&command.as_line());
     if status == config.statuses.could_not_run && session.exit_status().is_none() {
         return None;
