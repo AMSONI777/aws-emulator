@@ -699,3 +699,9 @@ mod stage_invoke_route_order;
 // once to recover the document it set.
 #[path = "all/rest_api_policy_reporting.rs"]
 mod rest_api_policy_reporting;
+// Appended for the reason the note above gives: what a `COGNITO_USER_POOLS`-gated method whose
+// integration is an `AWS_PROXY` Lambda function answers a value that is no verifiable user-pool
+// token, and that the function behind it never runs — across API Gateway, Amazon Cognito, AWS
+// Lambda and Amazon DynamoDB on one engine.
+#[path = "all/stage_cognito_gate_spares_its_backend.rs"]
+mod stage_cognito_gate_spares_its_backend;
