@@ -3454,3 +3454,13 @@ mod chime_deleted_meeting_tagging;
 // (The note about declaring each suite exactly once is part of this file's HEADER, at the
 // top: an inner doc comment is only accepted before the first item, so a copy of it down
 // here compiles nothing. It was appended here while two branches were landing at once.)
+// declared it here as well, which compiled neither copy.)
+// this file: a module may be declared only once, and two branches landing in the same window
+// each declared it here as well, which compiled neither copy.)
+// leaving a note here. (An inner doc comment `//!` cannot stand here: it may only appear
+// before any item, and this note sits in the appended tail, after thousands of them.)
+// leaving a note here. (Written as ordinary `//` comments: an inner doc comment `//!` may
+// only appear before any item, so one here stops this whole target compiling — `E0753`.)
+// (… and for every service crate's `tests/all.rs`: the tail of that same appended note,
+// which has to be an ordinary `//` comment here, since an inner doc comment may only
+// precede the first item of the file.)

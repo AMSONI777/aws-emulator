@@ -170,12 +170,21 @@ pub(crate) fn router_over(engine: Arc<engine::InMemoryEngine>) -> MultiServiceRo
 /// helper sets the same two fields directly so a create can be tested without waiting a
 /// deletion out, and everything a test then asserts goes over the wire.
 pub(crate) fn empty_account_router() -> MultiServiceRouter {
+    empty_account().0
+}
+
+/// The SAME fixture with the engine behind it, for a test that also has to read or move a
+/// stored due instant (the clock's business, not the wire's).
+///
+/// Owned here rather than copied into each suite that needs it: several suites set up this
+/// one account state, and one copy is what keeps them setting up the same thing.
+pub(crate) fn empty_account() -> (MultiServiceRouter, Arc<engine::InMemoryEngine>) {
     let engine: Arc<engine::InMemoryEngine> = Arc::new(engine::InMemoryEngine::new());
     with_store(&engine, |store| {
         store.instances.clear();
         store.ambient_instance_enabled = true;
     });
-    router_over(engine)
+    (router_over(Arc::clone(&engine)), engine)
 }
 
 /// The instance id the organization instance below is held under: `ssoins-` + 16 of

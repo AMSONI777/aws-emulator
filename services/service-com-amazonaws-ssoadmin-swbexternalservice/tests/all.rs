@@ -161,6 +161,8 @@ mod listed_instance_state_by_enablement_path;
 mod listed_instance_state_by_region_count;
 #[path = "all/listed_instance_state_every_entry.rs"]
 mod listed_instance_state_every_entry;
+#[path = "all/listed_instance_state_for_a_polling_client.rs"]
+mod listed_instance_state_for_a_polling_client;
 #[path = "all/listed_instance_state_generated_accounts.rs"]
 mod listed_instance_state_generated_accounts;
 #[path = "all/listed_instance_state_at_the_list_bound.rs"]

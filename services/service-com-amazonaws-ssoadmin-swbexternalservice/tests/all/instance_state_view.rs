@@ -35,19 +35,9 @@ use service_com_amazonaws_ssoadmin_swbexternalservice::state;
 use smithy_server_runtime::MultiServiceRouter;
 
 use crate::instance_create::hold_activation;
-use crate::ssoadmin_permission_sets::{call_in_region, hold_deletion, router_over, with_store};
-
-/// A router over an account that holds NO instance yet, so `CreateInstance` is the call
-/// that enables the account's one instance — and the engine behind it, for the stored due
-/// instants a phase has to be moved past.
-fn empty_account() -> (MultiServiceRouter, Arc<engine::InMemoryEngine>) {
-    let engine: Arc<engine::InMemoryEngine> = Arc::new(engine::InMemoryEngine::new());
-    with_store(&engine, |store| {
-        store.instances.clear();
-        store.ambient_instance_enabled = true;
-    });
-    (router_over(Arc::clone(&engine)), engine)
-}
+use crate::ssoadmin_permission_sets::{
+    call_in_region, empty_account, hold_deletion, router_over, with_store,
+};
 
 /// A router over an account whose instance is the AMBIENT one — the instance a client
 /// discovers with no create first — and the engine behind it.
