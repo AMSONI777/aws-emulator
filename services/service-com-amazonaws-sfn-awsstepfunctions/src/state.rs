@@ -3407,6 +3407,24 @@ pub fn state_machine_arn_prefix(region: &str) -> String {
     state_machine_arn(region, "")
 }
 
+/// The ARN naming EVERY resource of this service in `region`: this service's own ARN
+/// form with both the parts that name ONE resource — its type and its name — left as
+/// IAM's wildcard, which is how a call that fixes neither is written.
+///
+/// It is the same total function of the region the ARN of one resource is
+/// ([`state_machine_arn`], [`activity_arn`]), so the account and the partition a
+/// wildcard ARN carries are the ones every ARN of this service carries.
+pub fn every_resource_arn(region: &str) -> String {
+    ::engine::emulator_arn(
+        ARN_SERVICE,
+        region,
+        &format!("{ARN_WILDCARD}:{ARN_WILDCARD}"),
+    )
+}
+
+/// IAM's wildcard, which stands for every value a part of an ARN can take.
+const ARN_WILDCARD: &str = "*";
+
 /// The prefix every activity ARN of `region` begins with: the ARN of the empty
 /// name, which no activity can take (`name` is modelled 1..80).
 pub fn activity_arn_prefix(region: &str) -> String {

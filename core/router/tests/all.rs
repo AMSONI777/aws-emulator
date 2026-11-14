@@ -3845,3 +3845,4 @@ mod cloudformation_provisions_redshift_snapshot_copy_grants;
 // this file and every service crate's `tests/all.rs`.
 // doc comment is legal only before the first item of this crate root, so a `//!` line in
 // this tail is `E0753` and compiles no suite of this target.)
+// doc comment is only legal before the first item of this crate root.)

@@ -48,19 +48,19 @@ use crate::state_machine_lifecycle::{
 
 /// This crate's Smithy model — the source the catalog in `service::identity_authorization`
 /// is a transcription of, read back here so the two cannot drift.
-const MODEL_PATH: &str = concat!(
+pub(crate) const MODEL_PATH: &str = concat!(
     env!("CARGO_MANIFEST_DIR"),
     "/smithy-model/com-amazonaws-sfn-awsstepfunctions.json"
 );
 
 /// The code and status AWS refuses an authorization failure with.
-const ACCESS_DENIED: &str = "AccessDeniedException";
-const ACCESS_DENIED_STATUS: u16 = 400;
+pub(crate) const ACCESS_DENIED: &str = "AccessDeniedException";
+pub(crate) const ACCESS_DENIED_STATUS: u16 = 400;
 
 /// The access-key id standing for the account's own published credential: neither STS nor
 /// IAM holds a record of it, so it resolves to the account's ambient identity, which no
 /// identity policy governs — the position AWS account root credentials are in.
-const ACCOUNT_KEY: &str = "AKIDEXAMPLE";
+pub(crate) const ACCOUNT_KEY: &str = "AKIDEXAMPLE";
 
 /// The API versions the IAM and STS setup calls below are made at.
 const IAM_VERSION: &str = "2010-05-08";
@@ -68,19 +68,25 @@ const STS_VERSION: &str = "2011-06-15";
 
 /// A principal a call is signed as: the access key id it presents, and the ARN a refusal
 /// must blame it by — what `sts:GetCallerIdentity` reports for that key.
-struct Principal {
-    access_key_id: String,
-    arn: String,
+pub(crate) struct Principal {
+    pub(crate) access_key_id: String,
+    pub(crate) arn: String,
 }
 
 /// Step Functions, IAM and STS over ONE engine, so the documents a decision reads are the
 /// ones IAM's handlers wrote and the session a call signs as is one STS minted.
-struct Emulator {
+pub(crate) struct Emulator {
     router: MultiServiceRouter,
 }
 
+impl Default for Emulator {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl Emulator {
-    fn new() -> Self {
+    pub(crate) fn new() -> Self {
         let engine: Arc<engine::InMemoryEngine> = Arc::new(engine::InMemoryEngine::new());
         let mut router = MultiServiceRouter::new();
         // The suite signs nothing: the `Authorization` header carries only the credential
@@ -100,7 +106,12 @@ impl Emulator {
 
     /// Call one Step Functions operation with `access_key_id` in the SigV4 credential
     /// scope, and answer `(status, body)`.
-    async fn call_as(&self, access_key_id: &str, operation: &str, body: &Value) -> (u16, Value) {
+    pub(crate) async fn call_as(
+        &self,
+        access_key_id: &str,
+        operation: &str,
+        body: &Value,
+    ) -> (u16, Value) {
         let authorization = format!(
             "AWS4-HMAC-SHA256 Credential={access_key_id}/20260101/{REGION}/{}/aws4_request, \
              SignedHeaders=host;x-amz-target, Signature=0123456789abcdef",
@@ -188,7 +199,7 @@ impl Emulator {
 
     /// An IAM user carrying `policy` as its inline policy, with a long-term access key of
     /// its own.
-    async fn user(&self, user_name: &str, policy: &Value) -> Principal {
+    pub(crate) async fn user(&self, user_name: &str, policy: &Value) -> Principal {
         let created = self
             .query(
                 "iam",
@@ -228,7 +239,7 @@ impl Emulator {
     /// An IAM role carrying `policy` as its inline policy, assumed through STS: the
     /// session's access key id and the session ARN — the identity a function's own calls
     /// are made as.
-    async fn assumed_role(&self, role_name: &str, policy: &Value) -> Principal {
+    pub(crate) async fn assumed_role(&self, role_name: &str, policy: &Value) -> Principal {
         let trust = json!({
             "Version": "2012-10-17",
             "Statement": [{
@@ -276,6 +287,22 @@ impl Emulator {
             "PutRolePolicy",
             &[
                 ("RoleName", role_name.to_string()),
+                ("PolicyName", POLICY_NAME.to_string()),
+                ("PolicyDocument", policy.to_string()),
+            ],
+        )
+        .await;
+    }
+
+    /// Replace the inline policy of the USER `user_name`, which is how a grant is put in
+    /// place for a long-term key and withdrawn again.
+    pub(crate) async fn put_user_policy(&self, user_name: &str, policy: &Value) {
+        self.query(
+            "iam",
+            IAM_VERSION,
+            "PutUserPolicy",
+            &[
+                ("UserName", user_name.to_string()),
                 ("PolicyName", POLICY_NAME.to_string()),
                 ("PolicyDocument", policy.to_string()),
             ],
@@ -342,7 +369,7 @@ impl Emulator {
 const POLICY_NAME: &str = "inline";
 
 /// An identity policy allowing `actions` on `resources`.
-fn allowing(actions: &[&str], resources: &[&str]) -> Value {
+pub(crate) fn allowing(actions: &[&str], resources: &[&str]) -> Value {
     json!({
         "Version": "2012-10-17",
         "Statement": [{ "Effect": "Allow", "Action": actions, "Resource": resources }]
@@ -351,24 +378,31 @@ fn allowing(actions: &[&str], resources: &[&str]) -> Value {
 
 /// The sentence AWS states an authorization failure with: who was refused, which action,
 /// on which resource, and which of IAM's rules refused it.
-fn not_authorized(principal: &str, action: &str, resource: &str, reason: &str) -> String {
+pub(crate) fn not_authorized(principal: &str, action: &str, resource: &str, reason: &str) -> String {
     format!(
         "User: {principal} is not authorized to perform: {action} on resource: {resource} {reason}"
     )
 }
 
 /// The clause a request no document in force allows is refused with.
-fn no_grant(action: &str) -> String {
+pub(crate) fn no_grant(action: &str) -> String {
     format!("because no identity-based policy allows the {action} action")
 }
 
 /// The message a refusal carries, whichever casing the envelope spells it in.
-fn message(body: &Value) -> String {
+pub(crate) fn message(body: &Value) -> String {
     body.get("message")
         .or_else(|| body.get("Message"))
         .and_then(Value::as_str)
         .unwrap_or_default()
         .to_string()
+}
+
+/// The ARN naming every resource of this service in the Region every call below is signed
+/// for: what a request that names no resource of this service in a member of its own is
+/// judged against, and what a refusal of such a call names.
+pub(crate) fn every_resource() -> String {
+    format!("arn:aws:states:{REGION}:{ACCOUNT}:*:*")
 }
 
 /// The ARN of the activity `name` in the Region every call below is signed for.
@@ -425,7 +459,9 @@ fn rows(index: usize, machine: &str, execution: &str) -> Vec<Row> {
             case: "a listing that addresses no single resource",
             operation: "ListStateMachines",
             body: json!({}),
-            resource: "*".to_string(),
+            // A call that names no resource of this service is judged against every
+            // resource of it in the Region, written as this service's own wildcard ARN.
+            resource: every_resource(),
         },
         Row {
             case: "a read of a resource's tags",

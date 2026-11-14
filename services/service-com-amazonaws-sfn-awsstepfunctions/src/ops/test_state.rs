@@ -324,10 +324,13 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         // EventBridge connection adds to modify the HTTP request headers, query
         // parameters, and body." No state tested here calls an HTTP Task and no
         // EventBridge connection adds anything to one, so there is no secret for the
-        // member to include or omit either way; the `states:RevealSecrets` permission
-        // it is gated on is an IAM policy decision, and this emulator verifies request
-        // SIGNATURES rather than evaluating policies, so the member is read and
-        // deliberately inert rather than silently missed.
+        // member to include or omit from the answer either way. What the member DOES
+        // decide is what the call asks IAM for: "if you set revealSecrets to true, you
+        // must make sure that the IAM user that calls the TestState API has permission
+        // for the states:RevealSecrets action ... without this permission, Step
+        // Functions throws an access denied error" — the decision every call of this
+        // service is taken behind, so it is taken once in front of this handler
+        // (`crate::service::identity_authorization`) and never twice here.
         let _ = input.reveal_secrets;
 
         // The modelled lengths (`definition` 1..1048576, `input`/`variables`/`context`

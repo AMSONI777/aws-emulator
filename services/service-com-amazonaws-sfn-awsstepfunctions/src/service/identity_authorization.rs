@@ -49,16 +49,27 @@
 //! operation's shape name, spelled by [`super::authorization::operation_action`] — so one
 //! statement scoped to `states:*` covers every operation of it and nothing outside it.
 //!
+//! A request may ask for MORE than the operation it names: a member that switches on a
+//! capability AWS gates on an action of its own makes the call ask for that action TOO, and
+//! the caller has to hold both ([`CAPABILITY_ACTIONS`]). Each asked-for action is decided by
+//! the same rule, in the order the request asks for them, and the first one the documents in
+//! force do not allow refuses the call — so a caller allowed the operation but not the
+//! capability is served every call that does not ask for it and refused the ones that do.
+//!
 //! The resource is what the request ADDRESSES: the ARN it carries in the member THAT
 //! OPERATION names its resource by ([`ADDRESSED_BY`], keyed by operation so a member
 //! another operation names its resource by cannot decide this one), the ARN a create would
-//! MINT for the name it carries ([`minted_resource`]), and otherwise [`ANY_RESOURCE`] — a
-//! call that names no resource of this service in a member of its own, which a statement
-//! has to grant on every resource to cover. A request that names one only INSIDE another
-//! structure (`CreateStateMachineAlias`, whose routing configuration carries the version
-//! ARNs the alias is to point at) is in that last group: the ARN it would be judged against
-//! is not a member of the request, so such a call is decided against every resource rather
-//! than against an ARN read out of a nested shape.
+//! MINT for the name it carries ([`minted_resource`]), and otherwise [`any_resource`] — a
+//! call that names no resource of this service in a member of its own, which is judged
+//! against EVERY resource of this service in the account and Region the request was made
+//! for, written in this service's own ARN form with the parts that name one resource
+//! wildcarded (`crate::state::every_resource_arn`) rather than as a bare `*`: that ARN is
+//! what AWS reports such a call was refused on, and it is what a statement has to cover to
+//! grant it. A request that names one only INSIDE another structure
+//! (`CreateStateMachineAlias`, whose routing configuration carries the version ARNs the
+//! alias is to point at) is in that last group: the ARN it would be judged against is not a
+//! member of the request, so such a call is decided against every resource rather than
+//! against an ARN read out of a nested shape.
 
 use ::std::sync::Arc;
 
@@ -66,17 +77,23 @@ use ::aws_smithy_runtime_api::http::{Request as RtRequest, Response as RtRespons
 use ::aws_smithy_schema_server::protocol::ServerProtocol;
 use ::smithy_server_runtime::{BoxFuture, ErasedOperation, OperationContext, Service};
 
-use super::authorization::{caller_action_denial, operation_action};
+use super::authorization::{caller_action_denial, operation_action, service_action};
 
 /// The wire error code of an identity-based authorization refusal, as AWS's "Common
 /// Errors" table names it — what a client branches on for "not permitted".
 pub const ACCESS_DENIED_CODE: &str = "AccessDeniedException";
 
 /// The resource a request that names no resource of this service in a member of its own is
-/// judged against, as IAM writes it for such a request: a listing, a call addressed by a
-/// task token, a definition validated without a state machine, and a create whose
-/// resource is named only inside a nested shape (see the module docs).
-pub const ANY_RESOURCE: &str = "*";
+/// judged against, as AWS writes it for such a request — a listing, a call addressed by a
+/// task token, a state tested without a state machine, a definition validated without one,
+/// and a create whose resource is named only inside a nested shape (see the module docs):
+/// every resource of this service in the Region the request was made for and the account
+/// this emulator serves, spelled by the one place this crate writes that ARN
+/// ([`crate::state::every_resource_arn`]).
+#[must_use]
+pub fn any_resource(region: &str) -> String {
+    crate::state::every_resource_arn(region)
+}
 
 /// The member of each operation's INPUT that names the ARN of the resource that request
 /// addresses, keyed by the operation's shape name: the one member (or, where the model
@@ -161,6 +178,56 @@ pub fn served_operation(routing_key: &str) -> Option<&'static str> {
         .map(|(named, _)| *named)
 }
 
+/// A capability a request can ask for BESIDE the operation it names: the operation that
+/// models it, the boolean member that switches it on, and the name of the action AWS grants
+/// it by — the request is decided against that action as well as the operation's own, so a
+/// caller that holds the operation but not the capability is refused exactly the calls that
+/// ask for the capability.
+///
+/// Source: every member of this model whose own documentation names an IAM action of this
+/// service as its requirement — `TestStateInput$revealSecrets`
+/// (`smithy_query(query="doc",shape="TestStateInput",member="revealSecrets",model_path="services/service-com-amazonaws-sfn-awsstepfunctions/smithy-model/com-amazonaws-sfn-awsstepfunctions.json")`:
+/// "If you set revealSecrets to true, you must make sure that the IAM user that calls the
+/// TestState API has permission for the states:RevealSecrets action ... Without this
+/// permission, Step Functions throws an access denied error"). Public, so that reading of
+/// the model is checked against the model itself by this crate's own tests
+/// (`tests/all/test_state_reveal_secrets_authorization.rs`) rather than only transcribed
+/// here.
+pub const CAPABILITY_ACTIONS: &[(&str, &str, &str)] =
+    &[("TestState", "revealSecrets", "RevealSecrets")];
+
+/// The capabilities `operation` can be asked for beside itself, as `(member, action name)`
+/// pairs — empty for an operation that models none, which is every other one.
+#[must_use]
+pub fn capabilities(operation: &str) -> Vec<(&'static str, &'static str)> {
+    CAPABILITY_ACTIONS
+        .iter()
+        .filter(|(models, _, _)| *models == operation)
+        .map(|(_, member, action)| (*member, *action))
+        .collect()
+}
+
+/// Every IAM action this submitted input asks for, in the order they are decided: the
+/// operation's OWN action first, then the action of each capability a member of the request
+/// switches on.
+///
+/// A capability member that is absent, is `false` or carries anything but a boolean asks for
+/// nothing — the modelled default of such a member is `false`, so a request that does not
+/// switch it on is decided exactly as one that does not model it at all.
+fn requested_actions(submitted: Option<&::serde_json::Value>, operation: &str) -> Vec<String> {
+    let mut asked = vec![operation_action(operation)];
+    for (member, action) in capabilities(operation) {
+        let switched_on = submitted
+            .and_then(|body| body.get(member))
+            .and_then(::serde_json::Value::as_bool)
+            .unwrap_or(false);
+        if switched_on {
+            asked.push(service_action(action));
+        }
+    }
+    asked
+}
+
 /// The member a request that MINTS a resource names it by.
 const NAME_MEMBER: &str = "name";
 
@@ -182,18 +249,14 @@ pub fn minted_resource(operation: &str, region: &str, name: &str) -> Option<Stri
     }
 }
 
-/// The resource this request is judged against: what it ADDRESSES (see the module docs).
-///
-/// Read off the request's own body, which on this protocol is the operation's input as
-/// JSON. A body that is not a JSON document at all addresses nothing of this service, so
-/// it is judged exactly as a request that named no resource.
-fn addressed_resource(ctx: &OperationContext<'_>, operation: &str, req: &RtRequest) -> String {
-    let submitted: Option<::serde_json::Value> = req
-        .body()
+/// The operation's input as this protocol carries it: the request body read as JSON, and
+/// `None` for a body that is not a JSON document at all — which names no resource of this
+/// service and asks for no capability, so it is judged exactly as a request that carried
+/// neither.
+fn submitted_input(req: &RtRequest) -> Option<::serde_json::Value> {
+    req.body()
         .bytes()
-        .and_then(|body| ::serde_json::from_slice(body).ok());
-    let region = crate::state::request_region(ctx.parts());
-    addressed_in(submitted.as_ref(), operation, &region)
+        .and_then(|body| ::serde_json::from_slice(body).ok())
 }
 
 /// The resource the submitted input `submitted` addresses, for `operation` in `region`
@@ -216,25 +279,33 @@ fn addressed_in(submitted: Option<&::serde_json::Value>, operation: &str, region
     }
     member(NAME_MEMBER)
         .and_then(|name| minted_resource(operation, region, &name))
-        .unwrap_or_else(|| ANY_RESOURCE.to_string())
+        .unwrap_or_else(|| any_resource(region))
 }
 
-/// Why the policies in force do not let this caller perform `operation`, or `None` when
-/// they do — including every caller the gate does not bound (see the module docs).
+/// Why the policies in force do not let this caller perform what this request asks for —
+/// `operation` itself and every capability a member of it switches on ([`requested_actions`])
+/// — or `None` when they let it, including every caller the gate does not bound (see the
+/// module docs).
 ///
 /// Call it BEFORE the operation runs: a refused request must read and write nothing. The
 /// decision itself is [`super::authorization::caller_action_denial`], the one place this
 /// service asks what the documents in force on a caller say about an `(action, resource)`
-/// pair; this reads the pair off the request.
+/// pair; this reads the pairs off the request.
 fn denial<Eng: Send + Sync + 'static>(
     engine: &Eng,
     ctx: &OperationContext<'_>,
     operation: &str,
     req: &RtRequest,
 ) -> Option<String> {
-    let action = operation_action(operation);
-    let resource = addressed_resource(ctx, operation, req);
-    caller_action_denial(engine, ctx, &action, &resource)
+    let submitted = submitted_input(req);
+    let region = crate::state::request_region(ctx.parts());
+    let resource = addressed_in(submitted.as_ref(), operation, &region);
+    // Every action the request asks for has to be allowed, so the FIRST one the documents
+    // in force do not cover refuses the call — and the refusal names that action, which is
+    // what tells the caller which grant it is missing.
+    requested_actions(submitted.as_ref(), operation)
+        .iter()
+        .find_map(|action| caller_action_denial(engine, ctx, action, &resource))
 }
 
 /// Every modelled operation of this service, served only to a caller IAM allows to perform
@@ -367,6 +438,12 @@ mod tests {
     /// The Region the ARNs below are read in.
     const REGION: &str = "us-west-2";
 
+    /// Every resource of this service in that Region: what a request naming none of them
+    /// is judged against.
+    fn any_resource_of_the_region() -> String {
+        any_resource(REGION)
+    }
+
     /// RULE: a request is judged against the ARN it NAMES, in the member ITS OWN
     /// operation names its resource by; one that names none of them is judged against the
     /// ARN its name mints, and otherwise against every resource of this service.
@@ -450,31 +527,37 @@ mod tests {
                 "an alias create, whose resource is named only inside its routing shape",
                 "CreateStateMachineAlias",
                 json!({ "name": "PROD", "routingConfiguration": [] }),
-                ANY_RESOURCE.to_string(),
+                any_resource_of_the_region(),
             ),
             (
                 "a listing that names no resource",
                 "ListStateMachines",
                 json!({}),
-                ANY_RESOURCE.to_string(),
+                any_resource_of_the_region(),
             ),
             (
                 "a call addressed by a task token",
                 "SendTaskSuccess",
                 json!({ "taskToken": "token", "output": "{}" }),
-                ANY_RESOURCE.to_string(),
+                any_resource_of_the_region(),
+            ),
+            (
+                "a state tested with no state machine around it",
+                "TestState",
+                json!({ "definition": r#"{"Type":"Pass","End":true}"# }),
+                any_resource_of_the_region(),
             ),
             (
                 "a member carrying no text at all",
                 "DescribeExecution",
                 json!({ "executionArn": "" }),
-                ANY_RESOURCE.to_string(),
+                any_resource_of_the_region(),
             ),
             (
                 "a member carrying a value of another type",
                 "DescribeExecution",
                 json!({ "executionArn": 7 }),
-                ANY_RESOURCE.to_string(),
+                any_resource_of_the_region(),
             ),
             (
                 "a member the operation does not model, carried beside the one it does",
@@ -486,7 +569,7 @@ mod tests {
                 "a member the operation does not model, carried alone",
                 "ListStateMachines",
                 json!({ "stateMachineArn": machine }),
-                ANY_RESOURCE.to_string(),
+                any_resource_of_the_region(),
             ),
         ];
         for (case, operation, body, expected) in rows {
@@ -498,10 +581,77 @@ mod tests {
         }
         // A body that is no JSON document at all names nothing either.
         let unreadable = addressed_in(None, "DescribeExecution", REGION);
+        let every_resource = any_resource_of_the_region();
         assert_eq!(
-            unreadable, ANY_RESOURCE,
-            "case \"a body that is not a JSON document\": expected {ANY_RESOURCE:?}, got \
+            unreadable, every_resource,
+            "case \"a body that is not a JSON document\": expected {every_resource:?}, got \
              {unreadable:?}"
+        );
+    }
+
+    /// RULE: a request asks for the action of its own operation, plus the action of every
+    /// capability a member of it switches ON — so a capability member left at its `false`
+    /// default asks for nothing more than the operation.
+    ///
+    /// The rows span the capability switched on and off, left out, carrying a value of
+    /// another type, an operation that models no capability at all, and the capability
+    /// member carried on an operation that does not model it.
+    #[test]
+    fn a_request_asks_for_the_action_of_every_capability_it_switches_on() {
+        let pass = r#"{"Type":"Pass","End":true}"#;
+        // (case, operation, the request body, the actions it asks for)
+        let rows: Vec<(&str, &str, ::serde_json::Value, Vec<&str>)> = vec![
+            (
+                "the capability switched on",
+                "TestState",
+                json!({ "definition": pass, "revealSecrets": true }),
+                vec!["states:TestState", "states:RevealSecrets"],
+            ),
+            (
+                "the capability switched off",
+                "TestState",
+                json!({ "definition": pass, "revealSecrets": false }),
+                vec!["states:TestState"],
+            ),
+            (
+                "the capability left out",
+                "TestState",
+                json!({ "definition": pass }),
+                vec!["states:TestState"],
+            ),
+            (
+                "the capability member carrying a value of another type",
+                "TestState",
+                json!({ "definition": pass, "revealSecrets": "true" }),
+                vec!["states:TestState"],
+            ),
+            (
+                "an operation that models no capability",
+                "DescribeExecution",
+                json!({ "executionArn": "arn" }),
+                vec!["states:DescribeExecution"],
+            ),
+            (
+                "the capability member on an operation that does not model it",
+                "ListStateMachines",
+                json!({ "revealSecrets": true }),
+                vec!["states:ListStateMachines"],
+            ),
+        ];
+        for (case, operation, body, expected) in rows {
+            let asked = requested_actions(Some(&body), operation);
+            assert_eq!(
+                asked, expected,
+                "case {case:?}: expected the request to ask for {expected:?}, got {asked:?}"
+            );
+        }
+        // A body that is no JSON document at all switches nothing on.
+        let asked = requested_actions(None, "TestState");
+        assert_eq!(
+            asked,
+            vec!["states:TestState".to_string()],
+            "case \"a body that is not a JSON document\": expected the operation's action alone, \
+             got {asked:?}"
         );
     }
 }

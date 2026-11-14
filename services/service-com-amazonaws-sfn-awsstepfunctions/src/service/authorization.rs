@@ -94,12 +94,20 @@ pub const PASS_ROLE_ACTION: &str = "iam:PassRole";
 /// prefix a policy names one of its calls by.
 const ACTION_NAMESPACE: &str = "states";
 
-/// The IAM action the operation named `operation` performs: `<namespace>:<Operation>`,
-/// the one rule AWS names an action of this service by — so an operation passes its
-/// own modelled name and no call site spells an action string of its own.
+/// The IAM action of THIS service named `name`: `<namespace>:<Name>`, the one rule AWS
+/// names an action of this service by — so a call site passes the name AWS documents
+/// and none of them spells a namespace of its own.
+#[must_use]
+pub fn service_action(name: &str) -> String {
+    format!("{ACTION_NAMESPACE}:{name}")
+}
+
+/// The IAM action the operation named `operation` performs: the action of this service
+/// named after the operation itself — so an operation passes its own modelled name and
+/// no call site spells an action string of its own.
 #[must_use]
 pub fn operation_action(operation: &str) -> String {
-    format!("{ACTION_NAMESPACE}:{operation}")
+    service_action(operation)
 }
 
 /// `iam:PassedToService` — IAM's condition key for the SERVICE a role is being passed
