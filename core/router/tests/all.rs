@@ -3483,3 +3483,7 @@ mod chime_deleted_meeting_tagging;
 // (An orphaned line of that same appended note; it stands as an ordinary comment for the
 // reason the span above records.) this file and for every service crate's `tests/all.rs`.
 // (Declare each suite exactly ONCE: this is one crate root, so a second `mod` for the same
+// leaving a note here. (An inner doc comment may only appear before an item, so this
+// fragment of the file's own header, which a merge of two appended tails landed down here,
+// is an ordinary comment.)
+// (A stray line of that same repeated rule, an ordinary comment for the same reason:)
