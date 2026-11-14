@@ -2805,12 +2805,8 @@ mod bedrock_agent_ingestion_populates_its_s3_vectors_index;
 // `all/all_rs_declares_each_suite_once.rs` checks that for this file and for every service
 // crate's `tests/all.rs`, so check there rather than leaving a note here.
 // A suite left at the top level of `tests/` fails the build. Declare each suite exactly
-// ONCE: this is one crate root, so a second `mod` for the same name is `E0428` and fails
-// every suite in this target. `all/all_rs_declares_each_suite_once.rs` checks that for
-// this file and for every service crate's `tests/all.rs`, so check there rather than
 // leaving a note here. (An inner doc comment only opens a file, so this note travelled
 // here as `//` rather than `//!`.)
-// suite left at the top level of `tests/` fails the build. Declare each suite exactly
 // leaving a note here.
 // leaving a note here. (This note sits mid-file, so it is a plain comment: an inner doc
 // comment is only accepted before the first item of a module.)
@@ -2921,10 +2917,6 @@ mod s3_object_read_identity_or_bucket_policy;
 // `cloudformation_domain_endpoint_is_dialled_by_consumers` is declared ONCE, in the span
 // above, for the reason the entry there records.
 // (`zz_probe` is declared ONCE, further up this tail, for the reason recorded there: two
-// suite left at the top level of `tests/` fails the build. Declare each suite exactly
-// ONCE: this is one crate root, so a second `mod` for the same name is `E0428` and fails
-// every suite in this target. `all/all_rs_declares_each_suite_once.rs` checks that for
-// this file and for every service crate's `tests/all.rs`, so check there rather than
 // leaving a note here. (Line comments: an inner doc comment is only legal at a crate
 // root's head, so one in this tail is `E0753` and compiles no suite at all.)
 // suite's rule — what becomes of the record a client puts on the stream a stack deployed,

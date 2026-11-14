@@ -673,6 +673,29 @@ pub const APIS: &[Api] = &[
         },
         answer_model: Some(&CODEDEPLOY_ANSWERS),
     },
+    // `services/service-com-amazonaws-codepipeline-codepipeline-20150709/smithy-model/
+    // com-amazonaws-codepipeline-codepipeline-20150709.json`: awsJson1_1, sigv4Name
+    // `codepipeline`, endpointPrefix `codepipeline`, sdkId `CodePipeline`, service shape
+    // `CodePipeline_20150709`.
+    //
+    // A function that is a PIPELINE'S OWN INVOKE ACTION has to reach this service:
+    // CodePipeline hands the function the job of that action and the function "must call
+    // either PutJobSuccessResult or PutJobFailureResult" — the call every such function AWS
+    // documents ends with, and the one that publishes the action's output variables for the
+    // actions after it — so a handler that cannot reach CodePipeline cannot report the
+    // outcome it was invoked to produce, and the action it performs never settles.
+    Api {
+        sdk_token: "codepipeline",
+        signing_name: "codepipeline",
+        endpoint_prefix: "codepipeline",
+        model: Some(CODEPIPELINE_MODEL),
+        protocol: Protocol::AwsJson {
+            target_prefix: "CodePipeline_20150709",
+            json_version: "1.1",
+            query_compatible: false,
+        },
+        answer_model: Some(&CODEPIPELINE_ANSWERS),
+    },
     // `services/service-com-amazonaws-cloudfront-cloudfront2020-05-31/smithy-model/
     // com-amazonaws-cloudfront-cloudfront2020-05-31.json`: restXml, sigv4Name `cloudfront`,
     // endpointPrefix `cloudfront`, sdkId `CloudFront`. Its operations bind their input to a
@@ -910,6 +933,10 @@ pub(super) const CODEDEPLOY_MODEL: &str = include_str!(
     "../../../../service-com-amazonaws-codedeploy-codedeploy-20141006/smithy-model/\
      com-amazonaws-codedeploy-codedeploy-20141006.json"
 );
+pub(super) const CODEPIPELINE_MODEL: &str = include_str!(
+    "../../../../service-com-amazonaws-codepipeline-codepipeline-20150709/smithy-model/\
+     com-amazonaws-codepipeline-codepipeline-20150709.json"
+);
 pub(super) const REKOGNITION_MODEL: &str = include_str!(
     "../../../../service-com-amazonaws-rekognition-rekognitionservice/smithy-model/\
      com-amazonaws-rekognition-rekognitionservice.json"
@@ -1034,6 +1061,11 @@ static CODEDEPLOY_ANSWERS: super::blob_members::ServiceModel = super::blob_membe
     source: CODEDEPLOY_MODEL,
     plan: ::std::sync::OnceLock::new(),
 };
+static CODEPIPELINE_ANSWERS: super::blob_members::ServiceModel =
+    super::blob_members::ServiceModel {
+        source: CODEPIPELINE_MODEL,
+        plan: ::std::sync::OnceLock::new(),
+    };
 static REKOGNITION_ANSWERS: super::blob_members::ServiceModel = super::blob_members::ServiceModel {
     source: REKOGNITION_MODEL,
     plan: ::std::sync::OnceLock::new(),

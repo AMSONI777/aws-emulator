@@ -336,6 +336,18 @@ pub fn record_success(
     run.last_status_change = now;
     record.last_update_time = now;
 
+    // The variables the worker published are this action execution's own output, so they
+    // are recorded on the RUN — which is where `ActionExecutionOutput$outputVariables` is
+    // reported from, for an action declaring a namespace and for one declaring none
+    // alike. The values are kept exactly as the result stated them: they are opaque
+    // strings, so nothing here re-encodes, trims or converts one.
+    if let Some(variables) = &output_variables {
+        run.output_variables = variables
+            .iter()
+            .map(|(name, value)| (name.clone(), value.clone()))
+            .collect();
+    }
+
     // An action's output variables are read by the later actions of the same execution
     // through the namespace that action declares, which is the namespace the engine
     // resolves `#{namespace.key}` placeholders against.

@@ -316,6 +316,17 @@ pub struct ActionRun {
     /// `InProgress` and is settled from that run's own terminal status, which is read each
     /// time the action's next step falls due ([`ACTION_STEP`]) rather than waited for.
     pub external_run: Option<String>,
+    /// The output variables THIS run published, keyed by bare name — whatever published
+    /// them: the work the engine performed, or the result a job worker reported for the
+    /// job the action was dispatched as.
+    ///
+    /// `ActionExecutionOutput$outputVariables` is "the outputVariables field shows the
+    /// variable key-value pairs that were produced by the action", so they are a fact
+    /// about the RUN and are recorded on it. The `namespace` an action declares is a
+    /// separate matter — it is the prefix under which the execution's LATER actions
+    /// resolve `#{namespace.key}` references (`super::PipelineExecutionRecord::variables_map`)
+    /// — so an action that declares none still published what it published.
+    pub output_variables: BTreeMap<String, String>,
 }
 
 impl ActionRun {
@@ -532,6 +543,7 @@ fn plan_action(action: &ActionDeclaration, now: SystemTime) -> ActionRun {
         start_time: None,
         external_execution_id: None,
         external_run: None,
+        output_variables: BTreeMap::new(),
     }
 }
 
@@ -1035,5 +1047,21 @@ pub enum JobOutcome {
         external_run: String,
         /// What the action is doing, as the action's summary.
         summary: String,
+    },
+    /// The work was HANDED to the worker that reports this action's outcome itself, so
+    /// there is no outcome to record yet: the action stays `InProgress` until that
+    /// worker reports a result for the job it was handed
+    /// ([`super::jobs::record_success`] / [`super::jobs::record_failure`]).
+    ///
+    /// This is the shape of an `Invoke` action, whose function "must call back" to
+    /// CodePipeline with `PutJobSuccessResult` or `PutJobFailureResult`: the invocation's
+    /// own answer settles nothing, exactly as a custom action's dispatch settles nothing.
+    /// Nothing about the action is claimed as done here — no artifact, no revision, no
+    /// status but the one it already reports.
+    Dispatched {
+        /// What the action is doing, as the action's summary.
+        summary: String,
+        /// The id of the run performing the work, as a client sees it.
+        external_id: Option<String>,
     },
 }

@@ -2804,8 +2804,37 @@ pub fn enqueue_job_into(queue: &mut JobQueue, id: &ActionTypeId, job: JobRecord)
     if id.owner != ACTION_OWNER_CUSTOM {
         return false;
     }
+    push_job_into(queue, job);
+    true
+}
+
+/// Record `job` as a job CodePipeline has DISPATCHED to the worker that performs it —
+/// the function an `Invoke` action's declaration names, which CodePipeline invokes
+/// itself.
+///
+/// The counterpart of [`enqueue_job_into`] for an action whose owner is not `Custom`:
+/// nothing polls for this job (`PollForJobs` serves `Custom` owners only), so it is
+/// recorded in the state it is already in — handed to its worker — and what it is there
+/// for is the RESULT that worker reports for it ("your Lambda function must call either
+/// PutJobSuccessResult or PutJobFailureResult"), which is addressed by the job's id and
+/// settles the action the job belongs to ([`jobs::record_success`]).
+///
+/// One store for both kinds, so every rule already written about a job holds for this
+/// one too: the [`MAX_QUEUED_JOBS`] bound, the sweep of the jobs whose action has
+/// finished ([`ComAmazonawsCodepipelineCodepipeline20150709State::retire_finished_jobs`])
+/// and the one lookup a reported result goes through.
+pub fn dispatch_job_into(queue: &mut JobQueue, job: JobRecord) {
+    push_job_into(queue, job);
+}
+
+/// Hold `job` in `queue` under its own action type, oldest first, within the
+/// [`MAX_QUEUED_JOBS`] bound — the bound and the ordering both kinds of job share.
+///
+/// Past the bound the OLDEST job across every action type is dropped, so a queue entry
+/// can never be added without one being releasable.
+fn push_job_into(queue: &mut JobQueue, job: JobRecord) {
     queue
-        .entry(ActionTypeKey::from_id(id))
+        .entry(ActionTypeKey::from_id(&job.action_type))
         .or_default()
         .push(job);
     while queued_job_count(queue) > MAX_QUEUED_JOBS {
@@ -2823,7 +2852,6 @@ pub fn enqueue_job_into(queue: &mut JobQueue, id: &ActionTypeId, job: JobRecord)
             }
         }
     }
-    true
 }
 
 /// How many jobs a [`JobQueue`] is holding, across every action type.
@@ -3217,8 +3245,12 @@ impl ActionExecutionRecord {
 /// the artifacts it actually produced into the artifact store (an empty list for an
 /// action that produced none, which is a fact about the run rather than a missing
 /// member), the external run its work was performed as, the summary that run reported,
-/// the `errorDetails` of a failure, and the output variables it published under the
-/// namespace it declares.
+/// the `errorDetails` of a failure, and the output variables it published.
+///
+/// `outputVariables` is what the RUN published ([`ActionRun::output_variables`]), so it
+/// is reported for every action that published any — the `namespace` an action declares
+/// is the prefix its execution's LATER actions resolve those variables through
+/// ([`PipelineExecutionRecord::variables_map`]) and not a condition on reporting them.
 fn action_execution_output(
     execution: &PipelineExecutionRecord,
     action_run: &ActionRun,
@@ -3243,20 +3275,11 @@ fn action_execution_output(
             })
         })
         .collect();
-    let output_variables: HashMap<String, String> = action
-        .namespace
-        .as_deref()
-        .map(|namespace| {
-            let prefix = format!("{namespace}.");
-            execution
-                .variables_map
-                .iter()
-                .filter_map(|(key, value)| {
-                    Some((key.strip_prefix(&prefix)?.to_string(), value.clone()))
-                })
-                .collect()
-        })
-        .unwrap_or_default();
+    let output_variables: HashMap<String, String> = action_run
+        .output_variables
+        .iter()
+        .map(|(name, value)| (name.clone(), value.clone()))
+        .collect();
     Some(ActionExecutionOutput {
         output_artifacts: Some(output_artifacts),
         execution_result: Some(ActionExecutionResult {

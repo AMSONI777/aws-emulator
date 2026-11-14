@@ -73,6 +73,8 @@ mod job_claim_nonce_window;
 mod job_result_state_statements;
 #[path = "all/job_worker_refusals_and_poll_results.rs"]
 mod job_worker_refusals_and_poll_results;
+#[path = "all/lambda_invoke_job_results.rs"]
+mod lambda_invoke_job_results;
 #[path = "all/management_event_recording.rs"]
 mod management_event_recording;
 #[path = "all/pipeline_declaration_wire_form.rs"]

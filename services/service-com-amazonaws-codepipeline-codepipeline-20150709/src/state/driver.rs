@@ -1041,8 +1041,12 @@ fn start_action(
     if provider == PROVIDER_LAMBDA {
         // A Lambda action's work IS the invocation of the function its configuration
         // names ("the function to invoke" is the action's `FunctionName`), with
-        // `UserParameters` passed through to it, so the action is performed by calling
-        // that function and its outcome is what the invocation answered.
+        // `UserParameters` passed through to it. CodePipeline DISPATCHES that invocation
+        // and the function "must call back" to it — "your Lambda function must call
+        // either PutJobSuccessResult or PutJobFailureResult" — so what settles the action
+        // is the RESULT reported for the job the function was handed, not what the
+        // invocation answered; until one is reported the action stays `InProgress`,
+        // exactly as a custom action's does while its worker holds its job.
         let Some(function_name) = config.get(CONFIG_FUNCTION_NAME) else {
             fail_action(
                 action,
@@ -1071,7 +1075,7 @@ fn start_action(
             };
             inputs.push((name.clone(), location));
         }
-        let outputs = output_artifacts
+        let outputs: Vec<(String, ArtifactRef)> = output_artifacts
             .iter()
             .map(|name| {
                 (
@@ -1085,6 +1089,38 @@ fn start_action(
                 )
             })
             .collect();
+        // The JOB the function is handed, and the id it reports its result for: the
+        // event carries `CodePipeline.job.id` and the function answers `PutJobSuccessResult`
+        // / `PutJobFailureResult` for exactly that id, so the job has to be held before
+        // the invocation is dispatched — the report can reach this service while the
+        // function is still running. It is recorded as being worked on: CodePipeline
+        // handed it to that function, so no poll hands it out and no nonce claims it
+        // ("PollForJobs is valid only for action types with Custom in the owner field",
+        // which this action's owner is not).
+        let job_id = random_uuid_v4();
+        let dispatched = super::JobRecord {
+            pipeline_name: pipeline_name.clone(),
+            pipeline_arn: pipeline_arn.clone(),
+            pipeline_execution_id: execution_id.clone(),
+            stage_name: stage_name.clone(),
+            action_name: action.name.clone(),
+            action_execution_id: action.action_execution_id.clone(),
+            stage,
+            action: index,
+            input_artifacts: inputs
+                .iter()
+                .map(|(name, location)| super::job_artifact(name, location))
+                .collect(),
+            output_artifacts: outputs
+                .iter()
+                .map(|(name, location)| super::job_artifact(name, location))
+                .collect(),
+            configuration: config.clone(),
+            encryption_key: artifact_encryption,
+            status: super::JOB_STATUS_IN_PROGRESS.to_string(),
+            ..super::JobRecord::new(job_id.clone(), declared.action_type_id.clone(), now)
+        };
+        super::dispatch_job_into(context.jobs, dispatched);
         action.claimed = Some(now);
         return Some(Job::LambdaInvoke {
             execution_id,
@@ -1092,12 +1128,7 @@ fn start_action(
             action: index,
             function_name: function_name.clone(),
             user_parameters: config.get(CONFIG_USER_PARAMETERS).cloned(),
-            // The id the event publishes for this run. CodePipeline does not queue a
-            // pollable job for an action it owns ("PollForJobs is valid only for action
-            // types with Custom in the owner field"), so the handle the event carries is
-            // the action execution's own id, which is how every reporting operation of
-            // this service addresses this run.
-            job_id: action.action_execution_id.clone(),
+            job_id,
             inputs,
             outputs,
         });
@@ -1470,6 +1501,11 @@ fn record_outcome(
             action.summary = Some(within(summary, MAX_EXECUTION_SUMMARY));
             action.last_status_change = now;
             action.external_execution_id = external_id;
+            // What the run published, recorded on the RUN: it is this action execution's
+            // own output ([`ActionRun::output_variables`](super::execution::ActionRun::output_variables)),
+            // whether or not the action declares the namespace its execution's later
+            // actions would reference it through.
+            action.output_variables = variables.clone();
             let produced = match job {
                 Job::S3Source { outputs, .. }
                 | Job::CodeCommitSource { outputs, .. }
@@ -1536,6 +1572,27 @@ fn record_outcome(
             // the next step reads it by.
             action.external_execution_id = Some(external_run.clone());
             action.external_run = Some(external_run);
+        }
+        // The work was handed to the worker that reports this action's outcome itself,
+        // so nothing is settled here: the action keeps the `InProgress` status it
+        // already reports and waits for that worker's result, exactly as a custom
+        // action's does. The claim is released, because no call is performing the work
+        // any more — and nothing re-starts the action either: a started action is only
+        // ever stepped again once it is terminal.
+        //
+        // A worker that has ALREADY reported — which happens whenever its report
+        // reaches this service before the dispatching call returns — has left the action
+        // terminal, and that outcome stands rather than being written over by the
+        // dispatch it answered.
+        JobOutcome::Dispatched {
+            summary,
+            external_id,
+        } => {
+            if !action.is_terminal() {
+                action.claimed = None;
+                action.summary = Some(within(summary, MAX_EXECUTION_SUMMARY));
+                action.external_execution_id = external_id;
+            }
         }
     }
     record.last_update_time = now;
@@ -2130,13 +2187,24 @@ async fn run_code_commit_source(
     }
 }
 
-/// Invoke the function a Lambda action names, and report what the invocation answered.
+/// DISPATCH the invocation of the function a Lambda action names, and report that it was
+/// handed over.
 ///
 /// The event is the one CodePipeline publishes for such an action: the job's id, the
 /// action's `UserParameters` and the artifacts the function is handed and is to write.
 /// A function the service does not hold cannot be invoked as the declaration states it
-/// (`ConfigurationError`); a function it holds but whose invocation did not run is the
-/// run's own failure (`JobFailed`), and NOTHING is reported as having run in that case.
+/// (`ConfigurationError`); a function it holds but whose invocation could not be accepted
+/// is the run's own failure (`JobFailed`), and NOTHING is reported as having run in that
+/// case.
+///
+/// The invocation is handed over ASYNCHRONOUSLY, and the action's outcome is not read off
+/// it: the function "must call either PutJobSuccessResult or PutJobFailureResult" for the
+/// job it was handed, so the result it reports is the action's outcome
+/// ([`JobOutcome::Dispatched`]) — a function that answered an error without reporting one
+/// has not settled the action any more than one that is still running has. Dispatching
+/// also means no call to this service waits for a function run: a client's
+/// `StartPipelineExecution` is answered while the functions of the executions already in
+/// flight are still running, exactly as it is on the real service.
 async fn run_lambda_invoke(
     lambda: &::aws_sdk_lambda::Client,
     function_name: &str,
@@ -2187,32 +2255,19 @@ async fn run_lambda_invoke(
     let invoked = lambda
         .invoke()
         .function_name(function_name)
+        // "Event – Invoke the function asynchronously… A success response (202
+        // Accepted) indicates that the request is queued for invocation": the
+        // invocation's answer is not this action's outcome, so the call that hands it
+        // over does not wait for the run either.
+        .invocation_type(::aws_sdk_lambda::types::InvocationType::Event)
         .payload(::aws_smithy_types::Blob::new(event.to_string().into_bytes()))
         .send()
         .await;
     match invoked {
-        Ok(answer) => {
-            // A function that ran and reported a handler error did not do the action's
-            // work, so the action failed with what the function reported.
-            if let Some(error) = answer.function_error {
-                return JobOutcome::Failed {
-                    code: FAILURE_JOB_FAILED.to_string(),
-                    message: format!(
-                        "the function {function_name} reported {error} for the action's \
-                         invocation"
-                    ),
-                    external_id: Some(function_name.to_string()),
-                };
-            }
-            JobOutcome::Done {
-                summary: format!("Invoked the function {function_name}"),
-                // The invocation is not a revision of anything: a Lambda action
-                // produces no source revision.
-                revision: None,
-                variables: BTreeMap::new(),
-                external_id: Some(function_name.to_string()),
-            }
-        }
+        Ok(_) => JobOutcome::Dispatched {
+            summary: format!("Invoked the function {function_name}"),
+            external_id: Some(function_name.to_string()),
+        },
         Err(err) => {
             let absent = err
                 .as_service_error()
@@ -2280,6 +2335,42 @@ where
     }
 }
 
+/// The bytes of one object this engine reads, held to the figure one artifact may carry.
+///
+/// Every read here is of an object a CALLER put in the bucket, so its size is caller
+/// chosen: the body is therefore taken in chunks and accounted against
+/// [`MAX_SOURCE_BYTES`] as they arrive, so no object can drive an allocation past that
+/// figure — the same bound the other source paths pack a revision under. The length the
+/// answer STATES is checked first, so an object already known to be too large is refused
+/// before any of it is read, and the running total is still checked as the chunks arrive,
+/// so an absent or untruthful length cannot defeat the bound.
+///
+/// `Err` carries the clause saying why the object was not read, for the caller to report
+/// as its action's failure.
+async fn bounded_object_bytes(
+    content_length: Option<i64>,
+    mut body: ::aws_sdk_s3::primitives::ByteStream,
+) -> Result<::bytes::Bytes, String> {
+    let too_large = format!(
+        "it carries more than the {MAX_SOURCE_BYTES} bytes this emulator reads into one \
+         artifact"
+    );
+    if content_length.is_some_and(|stated| {
+        usize::try_from(stated).is_ok_and(|stated| stated > MAX_SOURCE_BYTES)
+    }) {
+        return Err(too_large);
+    }
+    let mut collected = ::bytes::BytesMut::new();
+    while let Some(chunk) = body.next().await {
+        let chunk = chunk.map_err(|err| err.to_string())?;
+        if collected.len().saturating_add(chunk.len()) > MAX_SOURCE_BYTES {
+            return Err(too_large);
+        }
+        collected.extend_from_slice(&chunk);
+    }
+    Ok(collected.freeze())
+}
+
 /// Read the source object and write it into the artifact store.
 async fn run_source(
     client: &::aws_sdk_s3::Client,
@@ -2310,12 +2401,18 @@ async fn run_source(
     };
     let version = object.version_id().map(str::to_string);
     let etag = object.e_tag().map(|etag| etag.trim_matches('"').to_string());
-    let bytes = match object.body.collect().await {
-        Ok(bytes) => bytes.into_bytes(),
-        Err(err) => {
+    // The object's bytes, held to what one artifact may carry
+    // ([`bounded_object_bytes`]). `Bytes` is reference counted, so the clone each output
+    // below is handed is a handle on this one buffer rather than a second copy of it.
+    let length = object.content_length();
+    let bytes = match bounded_object_bytes(length, object.body).await {
+        Ok(bytes) => bytes,
+        Err(detail) => {
             return JobOutcome::Failed {
                 code: FAILURE_REVISION_UNAVAILABLE.to_string(),
-                message: format!("the source object s3://{bucket}/{key} could not be read: {err}"),
+                message: format!(
+                    "the source object s3://{bucket}/{key} could not be read: {detail}"
+                ),
                 external_id: None,
             }
         }
@@ -2393,12 +2490,17 @@ async fn run_deploy(
             }
         }
     };
-    let bytes = match object.body.collect().await {
-        Ok(bytes) => bytes.into_bytes(),
-        Err(err) => {
+    // The artifact's bytes, held to what one artifact may carry
+    // ([`bounded_object_bytes`]): an artifact is an object a caller's own action wrote,
+    // so its size is caller chosen here too. The buffer is reference counted, so what
+    // the extraction below is handed is a handle on this one buffer.
+    let length = object.content_length();
+    let bytes = match bounded_object_bytes(length, object.body).await {
+        Ok(bytes) => bytes,
+        Err(detail) => {
             return JobOutcome::Failed {
                 code: FAILURE_JOB_FAILED.to_string(),
-                message: format!("the input artifact could not be read: {err}"),
+                message: format!("the input artifact could not be read: {detail}"),
                 external_id: None,
             }
         }

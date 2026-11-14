@@ -20,9 +20,10 @@
 //!   saying why, produces no artifact, fails its execution, and the stage after it never
 //!   starts — so no action execution exists for it and its state carries no
 //!   `latestExecution`;
-//! * an action whose provider is `Lambda` performs its work by INVOKING the function its
-//!   configuration names, so the action reaches a terminal status reporting that function
-//!   as its external execution, and what it reports is what the invocation answered.
+//! * an action whose provider is `Lambda` performs its work by DISPATCHING an invocation
+//!   of the function its configuration names and is settled by the result that function
+//!   reports for the job it was handed, so the action reports that function as its
+//!   external execution and waits for a result rather than for the invocation's answer.
 
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -742,12 +743,18 @@ async fn a_source_action_that_cannot_resolve_its_branch_fails_with_a_configurati
     }
 }
 
-/// RULE: an action whose provider is `Lambda` performs its work by INVOKING the function
-/// its configuration names: the action reaches a terminal status that reports that
-/// function as its external execution, and what it reports is the outcome of that
-/// invocation — a function the service does not hold cannot be invoked as declared
-/// (`ConfigurationError`), and a function it does hold is invoked and the action reports
-/// what the invocation answered.
+/// RULE: an action whose provider is `Lambda` performs its work by DISPATCHING an
+/// invocation of the function its configuration names and is settled by the RESULT that
+/// function reports for the job it was handed — AWS documents that "your Lambda function
+/// must call either `PutJobSuccessResult` or `PutJobFailureResult`" — so a function the
+/// service does not hold cannot be invoked as declared and fails the action
+/// (`ConfigurationError`), while a function it does hold is invoked and the action waits,
+/// `InProgress`, for a result rather than being settled by what the invocation answered.
+///
+/// The round trip through a reported result — the action reaching `Succeeded` with the
+/// variables its function published — is the `lambda_invoke_job_results` suite's; what
+/// these rows pin is that the invocation is DISPATCHED and the action settles on nothing
+/// else.
 ///
 /// Both rows run behind a CodeCommit source action that succeeds, so each also pins that
 /// the stage after a source action that DID resolve its revision is reached.
@@ -789,7 +796,9 @@ async fn a_lambda_action_performs_its_work_by_invoking_the_function_it_names() {
             )
             .await;
 
-        wait_for_terminal(&emulator, &pipeline).await;
+        // The invoking action is reached either way, which is what the source action
+        // having run its revision is what allows.
+        let deploy = wait_for_action(&emulator, case, &pipeline, "Dep").await;
 
         // The source action ran its revision, which is what let the execution reach the
         // invoking action at all.
@@ -805,47 +814,78 @@ async fn a_lambda_action_performs_its_work_by_invoking_the_function_it_names() {
             "case {case:?}: the source action read the branch tip, got {source}"
         );
 
-        let deploy = action_execution(&emulator, &pipeline, "Dep")
-            .await
-            .unwrap_or_else(|| panic!("case {case:?}: the invoking action was reached"));
-        let status = deploy["status"].as_str().unwrap_or_default().to_string();
-        assert_eq!(
-            deploy["output"]["executionResult"]["externalExecutionId"],
-            json!(function),
-            "case {case:?}: the external execution is the function it invoked, got {deploy}"
-        );
-        let error = &deploy["output"]["executionResult"]["errorDetails"];
         if !exists {
             // A function the service does not hold cannot be invoked as the declaration
-            // states it, so this row has ONE admissible outcome.
+            // states it, so this row has ONE admissible outcome, and it is terminal.
+            wait_for_terminal(&emulator, &pipeline).await;
+            let deploy = action_execution(&emulator, &pipeline, "Dep")
+                .await
+                .unwrap_or_else(|| panic!("case {case:?}: the invoking action was reached"));
+            let error = &deploy["output"]["executionResult"]["errorDetails"];
             assert_eq!(
-                (status.clone(), error["code"].clone()),
-                ("Failed".to_string(), json!(CONFIGURATION_ERROR)),
+                (deploy["status"].clone(), error["code"].clone()),
+                (json!("Failed"), json!(CONFIGURATION_ERROR)),
                 "case {case:?}: a function that is not there cannot be invoked, got {deploy}"
             );
-        } else {
-            // A function the service does holds IS invoked, and the action reports what
-            // the invocation answered — which is an outcome either way.
-            assert!(
-                matches!(status.as_str(), "Succeeded" | "Failed"),
-                "case {case:?}: the invoking action reaches an outcome, got {deploy}"
+            assert_eq!(
+                deploy["output"]["executionResult"]["externalExecutionId"],
+                json!(function),
+                "case {case:?}: the external execution is the function it named, got {deploy}"
             );
-            if status == "Failed" {
-                assert_eq!(
-                    error["code"],
-                    json!("JobFailed"),
-                    "case {case:?}: an invocation that did not run the function is the \
-                     run's own failure, got {deploy}"
-                );
-            }
-        }
-        if status == "Failed" {
             assert!(
                 error["message"]
                     .as_str()
                     .is_some_and(|message| message.contains(&function)),
                 "case {case:?}: a failed invocation says which function it was, got {deploy}"
             );
+            continue;
         }
+
+        // A function the service DOES hold is invoked, and nothing about that invocation
+        // settles the action: it waits for the result the function reports, which this
+        // function (whose package carries no handler to report one with) never does. So
+        // the action is still running and has produced no output, and the state reports
+        // the function as the run performing it.
+        assert_eq!(
+            deploy["status"],
+            json!("InProgress"),
+            "case {case:?}: an action nobody reported a result for is still running, got \
+             {deploy}"
+        );
+        assert!(
+            deploy["output"].is_null(),
+            "case {case:?}: an action that has reported nothing has no output, got {deploy}"
+        );
+        let state = emulator
+            .cp_ok("GetPipelineState", &json!({"name": pipeline}))
+            .await;
+        let invoking = state["stageStates"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .find(|stage| stage["stageName"] == json!("Deploy"))
+            .cloned()
+            .unwrap_or_else(|| panic!("case {case:?}: the invoking stage is reported, got {state}"));
+        assert_eq!(
+            invoking["actionStates"][0]["latestExecution"]["externalExecutionId"],
+            json!(function),
+            "case {case:?}: the external execution is the function it invoked, got {invoking}"
+        );
+    }
+}
+
+/// The action execution reported for `action`, waited for until there is one.
+async fn wait_for_action(emulator: &Emulator, case: &str, pipeline: &str, action: &str) -> Value {
+    let deadline = Instant::now() + WAIT;
+    loop {
+        if let Some(detail) = action_execution(emulator, pipeline, action).await {
+            return detail;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "case {case:?}: the action {action} of {pipeline} was never reached, last {:?}",
+            action_executions(emulator, pipeline).await
+        );
+        tokio::time::sleep(Duration::from_millis(50)).await;
     }
 }

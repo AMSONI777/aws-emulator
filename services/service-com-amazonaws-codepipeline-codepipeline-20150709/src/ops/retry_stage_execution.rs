@@ -270,6 +270,9 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
                     action.error = None;
                     action.summary = None;
                     action.token = None;
+                    // Nothing this run of the action published is carried into the next
+                    // one: the variables it reports are the ones the RE-RUN publishes.
+                    action.output_variables.clear();
                     action.action_execution_id = crate::state::random_uuid_v4();
                     action.last_status_change = now;
                 }
