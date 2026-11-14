@@ -148,6 +148,9 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         ctx: &smithy_server_runtime::OperationContext<'_>,
     ) -> Result<Self::Output, Self::Error> {
         let _ = ctx;
+        // The region the plan's policies were installed in, read off this request's own
+        // credential scope before the store is touched.
+        let region = crate::state::application_auto_scaling::request_region(ctx.parts());
         // The name's own modelled `@pattern` is refused before any lookup, in the
         // constraint-violation envelope the framework serializes the constraints it
         // enforces itself in: the constraint belongs to the shape, so it holds on every
@@ -157,29 +160,48 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
             &input.scaling_plan_name,
         )
         .map_err(DeleteScalingPlanError::validation)?;
-        let state = crate::state::service_state(&*self.engine).ok_or_else(internal)?;
         let now = ::std::time::SystemTime::now();
-        let mut state = state.lock();
-        state.settle_due(now);
+        // Everything this call writes is written with the store held, and the store is
+        // RELEASED here, before the plan's policies are retired: the calls go back into
+        // this emulator, so nothing may hold this service's lock across them.
+        let retired = {
+            let state = crate::state::service_state(&*self.engine).ok_or_else(internal)?;
+            let mut state = state.lock();
+            state.settle_due(now);
 
-        // The admission rule every mutating operation shares — resolve the plan this
-        // request names, then refuse one whose lifecycle transition is still in flight —
-        // lives in `crate::state::admit_plan_mutation`; this operation answers the
-        // not-found refusal in its own modelled shape, and the overlapping-mutation one
-        // through the service's own refusal, which every mutating operation answers it
-        // with.
-        let plan = state
-            .admit_plan_mutation(&input.scaling_plan_name, input.scaling_plan_version)
-            .map_err(|refusal| match refusal {
-                crate::state::PlanMutationRefusal::NotFound(message) => not_found(message),
-                crate::state::PlanMutationRefusal::InProgress => concurrent_update(),
-            })?;
+            // The admission rule every mutating operation shares — resolve the plan this
+            // request names, then refuse one whose lifecycle transition is still in flight
+            // — lives in `crate::state::admit_plan_mutation`; this operation answers the
+            // not-found refusal in its own modelled shape, and the overlapping-mutation
+            // one through the service's own refusal, which every mutating operation
+            // answers it with.
+            let plan = state
+                .admit_plan_mutation(&input.scaling_plan_name, input.scaling_plan_version)
+                .map_err(|refusal| match refusal {
+                    crate::state::PlanMutationRefusal::NotFound(message) => not_found(message),
+                    crate::state::PlanMutationRefusal::InProgress => concurrent_update(),
+                })?;
 
-        plan.begin(
-            crate::state::STATUS_DELETION_IN_PROGRESS,
-            crate::state::PendingOutcome::Removed,
-            now,
-        );
+            let retired = plan.scaling_instructions.clone();
+            plan.begin(
+                crate::state::STATUS_DELETION_IN_PROGRESS,
+                crate::state::PendingOutcome::Removed,
+                now,
+            );
+            retired
+        };
+
+        // Deleting the plan deletes the target tracking scaling policies it installed in
+        // the service that owns them: nothing is left tracking a metric for a plan that
+        // is gone (`crate::state::application_auto_scaling`).
+        crate::state::application_auto_scaling::install(
+            ctx.callback(),
+            &region,
+            &input.scaling_plan_name,
+            &retired,
+            &[],
+        )
+        .await;
 
         Ok(DeleteScalingPlanOutput {})
     }

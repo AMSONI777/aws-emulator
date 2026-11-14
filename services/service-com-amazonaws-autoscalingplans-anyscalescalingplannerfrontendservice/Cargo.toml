@@ -28,6 +28,9 @@ hex = { workspace = true }
 # the metric it was minted from, and both are unbounded caller text, so each enters the
 # bounded PolicyName as a fixed-width digest of itself.
 sha2 = { workspace = true }
+# The in-process SigV4 signature a call this service makes to Application Auto Scaling —
+# the service that owns the target tracking scaling policies a plan installs — carries.
+service-common = { path = "../common" }
 
 [build-dependencies]
 emulator-core-build-support = { workspace = true }

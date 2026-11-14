@@ -589,7 +589,7 @@ fn first_reported_instant(from: i64, shift_secs: i64) -> i64 {
 ///
 /// Which instruction names a resource is [`crate::state::resource_identity`], the one
 /// definition this crate gives that identity — the same one the write paths hold one
-/// instruction per resource by, the update merge pairs instructions by and the paged read
+/// instruction per resource by, a policy of that resource is named after and the paged read
 /// of a plan's resources is ordered and tokenized by — so this read matches by whatever
 /// rule those paths match by.
 fn instruction_for<'a>(

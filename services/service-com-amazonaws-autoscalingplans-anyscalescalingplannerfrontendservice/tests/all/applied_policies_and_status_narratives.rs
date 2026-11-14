@@ -3,7 +3,7 @@
 //! What the two describe envelopes report BESIDE the identity of a plan and its
 //! resources — each over a TABLE of inputs rather than the one request that exposed it.
 //!
-//! Three rules are pinned here:
+//! Two rules are pinned here:
 //!
 //! * every status a describe reports comes with the narrative that explains it:
 //!   `ScalingPlan$StatusMessage` is "A simple message about the current status of the
@@ -18,13 +18,10 @@
 //!   specified target tracking configurations" — so an applied resource reports one
 //!   `TargetTrackingScaling` policy per target tracking configuration of its own
 //!   instruction, echoing that configuration, and an instruction that turned dynamic
-//!   scaling off reports none;
-//! * an update does not re-point a target tracking policy a resource already has: the
-//!   target value in force for a metric the resource already tracks is kept — not even
-//!   `ScalingPolicyUpdateBehavior` (`ReplaceExternalPolicies`, which deletes "any
-//!   scaling policies that are external to AWS Auto Scaling") re-points one the plan
-//!   itself applied — while everything else the update carries, including the rest of
-//!   that metric's configuration, is applied.
+//!   scaling off reports none.
+//!
+//! What an `UpdateScalingPlan` puts in force, and the narrative the applied plan reports
+//! afterwards, is spanned by [`crate::update_replaces_the_instruction_set`].
 //!
 //! The harness (router, dispatch, lifecycle clock) is reused from
 //! [`crate::scaling_plan_lifecycle`]; nothing here builds a second one.
@@ -161,15 +158,16 @@ async fn every_described_status_carries_the_narrative_that_explains_it() {
 
         emulator.make_all_due();
         if operation == "UpdateScalingPlan" {
-            // The settled plan reports the applied narrative on both envelopes.
+            // The settled plan reports the applied narrative on both envelopes — on the
+            // plan, the narrative of the mutation that was applied, which here was an
+            // update (the rule is spanned by
+            // [`crate::update_replaces_the_instruction_set`]).
             let plan = described(&emulator, "my-plan").await;
             assert_eq!(
                 (plan.get("StatusCode"), plan.get("StatusMessage")),
                 (
                     Some(&json!("Active")),
-                    Some(&json!(
-                        "Scaling plan has been created and applied to all resources."
-                    ))
+                    Some(&json!("Scaling plan has been updated successfully."))
                 ),
                 "case {label}: an applied plan reports the applied narrative, got {plan:?}"
             );
@@ -421,28 +419,29 @@ async fn an_applied_resource_reports_one_policy_per_target_tracking_configuratio
     }
 }
 
-/// One row of the update-merge table: the instructions in force, the instructions the
-/// update carries and what the plan reports afterwards.
-struct MergeCase {
+/// One row of the update-replacement table: the instructions in force, the instructions
+/// the update carries and what the plan reports afterwards.
+struct ReplacementCase {
     label: &'static str,
     in_force: Vec<Value>,
     requested: Vec<Value>,
     expected: Vec<Value>,
 }
 
-/// The table the merge test spans. Rows differ along what the rule generalises over:
-/// which metric the update's configuration names (one already tracked vs a new one),
-/// which members of a tracked metric's configuration the update changes (the target
+/// The table the replacement test spans. Rows differ along what the rule generalises
+/// over: which metric the update's configuration names (one already tracked vs a new
+/// one), which members of a tracked metric's configuration the update changes (the target
 /// value vs the cooldowns and the scale-in flag), whether the instruction asks for the
 /// resource's policies to be replaced, the FORM of the metric (predefined vs
-/// customized), and whether the resource is one the plan already covers.
-fn merge_cases() -> Vec<MergeCase> {
+/// customized), and whether the resource is one the plan already covers. Whatever the
+/// row, what the plan reports afterwards is the instruction set the update carried.
+fn replacement_cases() -> Vec<ReplacementCase> {
     let tracked = table_instruction("DynamoDBReadCapacityUtilization", 50.0);
     vec![
-        MergeCase {
+        ReplacementCase {
             label: "a new target value for a metric already tracked",
             in_force: vec![tracked.clone()],
-            // The capacity bounds move; the target value of the tracked metric does not.
+            // The capacity bounds and the target value of the tracked metric both move.
             requested: vec![instruction(
                 "dynamodb",
                 "table/my-table",
@@ -459,10 +458,10 @@ fn merge_cases() -> Vec<MergeCase> {
                 4,
                 400,
                 "DynamoDBReadCapacityUtilization",
-                50.0,
+                75.0,
             )],
         },
-        MergeCase {
+        ReplacementCase {
             label: "the same new target value, asking for the policies to be replaced",
             in_force: vec![tracked.clone()],
             requested: vec![json!({
@@ -480,8 +479,8 @@ fn merge_cases() -> Vec<MergeCase> {
                 "ScalingPolicyUpdateBehavior": "ReplaceExternalPolicies"
             })],
             // `ReplaceExternalPolicies` deletes the policies that are EXTERNAL to AWS
-            // Auto Scaling; the policy this plan applied itself is not one of them, so
-            // the configuration in force is kept here too.
+            // Auto Scaling; the policy this plan applied itself is re-pointed by the
+            // instruction set the update carries, like it is without that behaviour.
             expected: vec![json!({
                 "ServiceNamespace": "dynamodb",
                 "ResourceId": "table/my-table",
@@ -492,16 +491,16 @@ fn merge_cases() -> Vec<MergeCase> {
                     "PredefinedScalingMetricSpecification": {
                         "PredefinedScalingMetricType": "DynamoDBReadCapacityUtilization"
                     },
-                    "TargetValue": 50.0
+                    "TargetValue": 75.0
                 }],
                 "ScalingPolicyUpdateBehavior": "ReplaceExternalPolicies"
             })],
         },
-        MergeCase {
+        ReplacementCase {
             label: "cooldowns and the scale-in flag on a metric already tracked",
             in_force: vec![tracked.clone()],
-            // Only the target value an applied policy tracks to is kept; every other
-            // member of the configuration is the update's to set.
+            // Every member of the configuration is the update's to set, the target value
+            // included.
             requested: vec![json!({
                 "ServiceNamespace": "dynamodb",
                 "ResourceId": "table/my-table",
@@ -528,14 +527,14 @@ fn merge_cases() -> Vec<MergeCase> {
                     "PredefinedScalingMetricSpecification": {
                         "PredefinedScalingMetricType": "DynamoDBReadCapacityUtilization"
                     },
-                    "TargetValue": 50.0,
+                    "TargetValue": 75.0,
                     "DisableScaleIn": true,
                     "ScaleOutCooldown": 90,
                     "ScaleInCooldown": 600
                 }]
             })],
         },
-        MergeCase {
+        ReplacementCase {
             label: "a configuration for a metric the resource does not track yet",
             in_force: vec![tracked.clone()],
             requested: vec![json!({
@@ -572,7 +571,7 @@ fn merge_cases() -> Vec<MergeCase> {
                         "PredefinedScalingMetricSpecification": {
                             "PredefinedScalingMetricType": "DynamoDBReadCapacityUtilization"
                         },
-                        "TargetValue": 50.0
+                        "TargetValue": 75.0
                     },
                     {
                         "CustomizedScalingMetricSpecification": {
@@ -585,7 +584,7 @@ fn merge_cases() -> Vec<MergeCase> {
                 ]
             })],
         },
-        MergeCase {
+        ReplacementCase {
             label: "an instruction for a resource the plan did not cover",
             in_force: vec![tracked.clone()],
             requested: vec![instruction(
@@ -607,7 +606,7 @@ fn merge_cases() -> Vec<MergeCase> {
                 75.0,
             )],
         },
-        MergeCase {
+        ReplacementCase {
             label: "a new target value for a customized metric already tracked",
             in_force: vec![json!({
                 "ServiceNamespace": "rds",
@@ -654,7 +653,7 @@ fn merge_cases() -> Vec<MergeCase> {
                         "Statistic": "Sum",
                         "Dimensions": [{ "Name": "Queue", "Value": "orders" }]
                     },
-                    "TargetValue": 25.0
+                    "TargetValue": 60.0
                 }]
             })],
         },
@@ -662,8 +661,8 @@ fn merge_cases() -> Vec<MergeCase> {
 }
 
 #[tokio::test]
-async fn an_update_keeps_the_configuration_in_force_for_a_metric_already_tracked() {
-    for case in merge_cases() {
+async fn an_update_puts_the_configuration_it_carries_in_force() {
+    for case in replacement_cases() {
         let emulator = Emulator::new();
         let label = case.label;
         applied_plan(&emulator, "my-plan", case.in_force.clone()).await;

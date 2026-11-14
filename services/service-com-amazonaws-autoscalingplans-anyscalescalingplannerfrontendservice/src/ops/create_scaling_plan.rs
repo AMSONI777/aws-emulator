@@ -150,6 +150,9 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         ctx: &smithy_server_runtime::OperationContext<'_>,
     ) -> Result<Self::Output, Self::Error> {
         let _ = ctx;
+        // The region the plan's policies are installed in, read off this request's own
+        // credential scope before the store is touched.
+        let region = crate::state::application_auto_scaling::request_region(ctx.parts());
         // The name's own modelled `@pattern` is refused before anything is read or
         // stored, in the constraint-violation envelope the framework serializes the
         // constraints it enforces itself in — a plan AWS stops at the API boundary must
@@ -159,57 +162,78 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
             &input.scaling_plan_name,
         )
         .map_err(CreateScalingPlanError::validation)?;
-        let state = crate::state::service_state(&*self.engine).ok_or_else(internal)?;
         let now = ::std::time::SystemTime::now();
-        let mut state = state.lock();
-        // Clock-owed work first, so this call decides against the state the clock
-        // already made due (a plan whose deletion came due is gone, and its name is
-        // free again).
-        state.settle_due(now);
+        // Everything this call writes is written with the store held, and the store is
+        // RELEASED here, before the plan's policies are installed: the install calls go
+        // back into this emulator, so nothing may hold this service's lock across them.
+        let (scaling_plan_version, plan_name, installed) = {
+            let state = crate::state::service_state(&*self.engine).ok_or_else(internal)?;
+            let mut state = state.lock();
+            // Clock-owed work first, so this call decides against the state the clock
+            // already made due (a plan whose deletion came due is gone, and its name is
+            // free again).
+            state.settle_due(now);
 
-        // "A CloudFormation stack or a set of tags": the two are alternatives, so a
-        // source naming neither identifies no application and one naming both is
-        // contradictory.
-        let source_key = crate::state::validate_application_source(&input.application_source)
-            .map_err(validation)?;
+            // "A CloudFormation stack or a set of tags": the two are alternatives, so a
+            // source naming neither identifies no application and one naming both is
+            // contradictory.
+            let source_key = crate::state::validate_application_source(&input.application_source)
+                .map_err(validation)?;
 
-        // The scaling instructions have to hold together across their own members
-        // before anything is stored: a plan AWS refuses must not exist here either.
-        crate::state::validate_scaling_instructions(&input.scaling_instructions)
-            .map_err(validation)?;
+            // The scaling instructions have to hold together across their own members
+            // before anything is stored: a plan AWS refuses must not exist here either.
+            crate::state::validate_scaling_instructions(&input.scaling_instructions)
+                .map_err(validation)?;
 
-        if state.scaling_plans.contains_key(&input.scaling_plan_name) {
-            return Err(validation(format!(
-                "A scaling plan named '{}' already exists",
-                input.scaling_plan_name
-            )));
-        }
+            if state.scaling_plans.contains_key(&input.scaling_plan_name) {
+                return Err(validation(format!(
+                    "A scaling plan named '{}' already exists",
+                    input.scaling_plan_name
+                )));
+            }
 
-        // "You can create one scaling plan per application source." No plan exists yet
-        // under this name, so every stored plan is a competing claimant.
-        if let Some(existing) = state.plan_covering_source(&source_key, None) {
-            return Err(validation(
-                crate::state::application_source_covered_message(&existing.name),
-            ));
-        }
+            // "You can create one scaling plan per application source." No plan exists yet
+            // under this name, so every stored plan is a competing claimant.
+            if let Some(existing) = state.plan_covering_source(&source_key, None) {
+                return Err(validation(
+                    crate::state::application_source_covered_message(&existing.name),
+                ));
+            }
 
-        // The store this call grows is bounded: past the per-account quota a create
-        // is refused rather than allowed to consume memory without limit.
-        if state.scaling_plans.len() >= crate::state::MAX_SCALING_PLANS {
-            return Err(limit_exceeded(format!(
-                "The maximum number of scaling plans for this account ({}) has been reached",
-                crate::state::MAX_SCALING_PLANS
-            )));
-        }
+            // The store this call grows is bounded: past the per-account quota a create
+            // is refused rather than allowed to consume memory without limit.
+            if state.scaling_plans.len() >= crate::state::MAX_SCALING_PLANS {
+                return Err(limit_exceeded(format!(
+                    "The maximum number of scaling plans for this account ({}) has been reached",
+                    crate::state::MAX_SCALING_PLANS
+                )));
+            }
 
-        let record = crate::state::ScalingPlanRecord::creating(
-            input.scaling_plan_name.clone(),
-            input.application_source,
-            input.scaling_instructions,
-            now,
-        );
-        let scaling_plan_version = record.version;
-        state.scaling_plans.insert(input.scaling_plan_name, record);
+            let record = crate::state::ScalingPlanRecord::creating(
+                input.scaling_plan_name.clone(),
+                input.application_source,
+                input.scaling_instructions,
+                now,
+            );
+            let scaling_plan_version = record.version;
+            let plan_name = record.name.clone();
+            let installed = record.scaling_instructions.clone();
+            state.scaling_plans.insert(input.scaling_plan_name, record);
+            (scaling_plan_version, plan_name, installed)
+        };
+
+        // "AWS Auto Scaling creates target tracking scaling policies based on the scaling
+        // instructions": they are created in the service that OWNS them, so the policies
+        // this plan reports are that service's own records
+        // (`crate::state::application_auto_scaling`).
+        crate::state::application_auto_scaling::install(
+            ctx.callback(),
+            &region,
+            &plan_name,
+            &[],
+            &installed,
+        )
+        .await;
 
         Ok(CreateScalingPlanOutput {
             scaling_plan_version,

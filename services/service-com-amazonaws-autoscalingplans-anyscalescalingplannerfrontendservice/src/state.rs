@@ -12,6 +12,9 @@
 /// mutating operations carry them on.
 pub mod wire_refusals;
 
+/// The target tracking scaling policies a plan installs in the service that owns them.
+pub mod application_auto_scaling;
+
 use std::collections::{BTreeMap, BTreeSet};
 use std::time::{Duration, SystemTime};
 
@@ -127,6 +130,17 @@ const APPLIED_STATUS: ReportedStatus = ReportedStatus {
                                               policies because dynamic scaling is disabled.",
 };
 
+/// What a plan reports once an in-place UPDATE of it has been applied.
+///
+/// `UpdateScalingPlan` "Updates the specified scaling plan" in place: neither
+/// `ScalingPlanVersion` ("This value is always 1") nor `CreationTime` moves, so the
+/// narrative of the applied status is what says the update took — the one observable a
+/// caller polling the plan after an update can converge on. The status, the scaling
+/// status and both resource narratives are the applied ones
+/// ([`APPLIED_STATUS`]): what the update changed is the configuration in force, not what
+/// has reached the resources.
+const APPLIED_AFTER_UPDATE_MESSAGE: &str = "Scaling plan has been updated successfully.";
+
 /// What a plan reports in a status this emulator never sets.
 ///
 /// `ScalingPlanStatusCode` lists four more values, each of which says the configuration
@@ -190,6 +204,20 @@ const REPORTED_STATUS: &[(&str, ReportedStatus)] = &[
 /// instruction's target tracking configuration produces.
 pub const POLICY_TYPE_TARGET_TRACKING: &str = POLICY_TYPE_VALUES[0];
 
+/// Which mutation a plan's APPLIED status is the result of.
+///
+/// `ScalingPlan$StatusMessage` is "A simple message about the current status of the
+/// scaling plan", and a plan reaches the one applied status (`Active`) either by being
+/// created or by being updated in place — the version and the creation time do not move
+/// on an update, so this narrative is the only thing that tells the two apart.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AppliedMutation {
+    /// The plan was created, and its configuration applied to its resources.
+    Created,
+    /// The plan was updated in place, and the new configuration applied.
+    Updated,
+}
+
 /// What the clock owes a plan that is in a non-terminal status.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PendingOutcome {
@@ -226,6 +254,9 @@ pub struct ScalingPlanRecord {
     pub status_start_time: SystemTime,
     /// `CreationTime`.
     pub creation_time: SystemTime,
+    /// Which mutation the plan's applied status reports — the create it was minted by,
+    /// or the last in-place update applied to it.
+    pub applied_mutation: AppliedMutation,
     /// The clock-owed transition out of a non-terminal `status_code`, if any.
     pub pending: Option<PendingTransition>,
 }
@@ -247,6 +278,7 @@ impl ScalingPlanRecord {
             status_code: STATUS_CREATION_IN_PROGRESS.to_string(),
             status_start_time: now,
             creation_time: now,
+            applied_mutation: AppliedMutation::Created,
             pending: Some(PendingTransition {
                 due_at: now + SETTLE_AFTER,
                 outcome: PendingOutcome::Active,
@@ -264,6 +296,18 @@ impl ScalingPlanRecord {
         });
     }
 
+    /// Begin applying an in-place UPDATE of this plan.
+    ///
+    /// The members the request carried are already written; what this adds to
+    /// [`Self::begin`] is that the applied status the plan comes back to reports the
+    /// update ([`APPLIED_AFTER_UPDATE_MESSAGE`]) rather than the create, which — since an
+    /// update moves neither `ScalingPlanVersion` nor `CreationTime` — is what makes the
+    /// update observable to a caller reading the plan back.
+    pub fn begin_update(&mut self, now: SystemTime) {
+        self.applied_mutation = AppliedMutation::Updated;
+        self.begin(STATUS_UPDATE_IN_PROGRESS, PendingOutcome::Active, now);
+    }
+
     /// True while the plan is being created, updated or deleted — the state in which
     /// `UpdateScalingPlan` and `DeleteScalingPlan` answer `ConcurrentUpdateException`
     /// ("You cannot update a scaling plan if it is in the process of being created,
@@ -279,7 +323,14 @@ impl ScalingPlanRecord {
     }
 
     /// `StatusMessage`: the narrative of the status this plan reports.
+    ///
+    /// The applied status is reached by two different mutations, and the narrative says
+    /// which one it was applying ([`AppliedMutation`]); every other status names the
+    /// transition it is in the middle of, so one row per status answers it.
     pub fn status_message(&self) -> &'static str {
+        if self.status_code == STATUS_ACTIVE && self.applied_mutation == AppliedMutation::Updated {
+            return APPLIED_AFTER_UPDATE_MESSAGE;
+        }
         self.reported().status_message
     }
 
@@ -350,21 +401,16 @@ impl ScalingPlanRecord {
         {
             return Vec::new();
         }
-        let resource = resource_identity_key(instruction);
         instruction
             .target_tracking_configurations
             .iter()
             .enumerate()
             .map(|(position, configuration)| ScalingPolicy {
-                policy_name: policy_name(
+                policy_name: derived_policy_name(
                     &self.name,
-                    &resource,
-                    // A configuration naming neither a predefined nor a customized
-                    // metric identifies no metric at all, and both write paths refuse
-                    // one before it can be stored, so this fallback only keeps the
-                    // names apart for state this service cannot hold.
-                    &target_metric_identity(configuration)
-                        .unwrap_or_else(|| position.to_string()),
+                    instruction,
+                    configuration,
+                    position,
                 ),
                 policy_type: POLICY_TYPE_TARGET_TRACKING.to_string(),
                 target_tracking_configuration: Some(configuration.clone()),
@@ -372,99 +418,6 @@ impl ScalingPlanRecord {
             .collect()
     }
 
-    /// The scaling instructions in force after an update of this plan that asks for
-    /// `requested`.
-    ///
-    /// An update does not re-point a target tracking policy a resource already has: for
-    /// a resource the plan already covers, the TARGET VALUE an applied policy of that
-    /// resource tracks to is kept for the metric that policy tracks, because re-pointing
-    /// it is what the update would otherwise do. Which policies a resource has is
-    /// [`Self::applied_policies`], the one answer this crate gives that question, so a
-    /// metric no applied policy tracks has no tracked value to keep and takes the target
-    /// value the update supplies — a resource whose instruction in force turned dynamic
-    /// scaling off carries no policy at all, so every target value it reports afterwards
-    /// is the update's.
-    ///
-    /// Not even `ScalingInstruction$ScalingPolicyUpdateBehavior`
-    /// (`ReplaceExternalPolicies`, "any scaling policies that are external to AWS Auto
-    /// Scaling are deleted and new target tracking scaling policies created") re-points a
-    /// policy the plan applied: those policies are not external to AWS Auto Scaling, and
-    /// the recorded response to an update carrying that behaviour still reports the target
-    /// value established earlier in the plan's lifecycle.
-    ///
-    /// Everything else the update carries IS applied: an instruction for a resource the
-    /// plan did not cover, the disappearance of one it did, an instruction's capacity
-    /// bounds and predictive-scaling members, the rest of a tracked metric's configuration
-    /// (its cooldowns, its warmup, whether scale-in is disabled), and a whole
-    /// configuration for a metric no policy of the resource tracks — a metric being what
-    /// [`target_metric_identity`] renders, so a configuration re-pointed at another
-    /// resource tracks a metric no policy is in force for and takes the target value
-    /// requested.
-    pub fn merge_scaling_instructions(
-        &self,
-        requested: Vec<ScalingInstruction>,
-    ) -> Vec<ScalingInstruction> {
-        // The instructions in force are INDEXED by the resource each applies to before
-        // the merge, so the work is one lookup per requested instruction rather than a
-        // scan of everything in force per requested instruction — neither list's length
-        // is bounded by the model, so their product must not drive the work.
-        let in_force: BTreeMap<ResourceIdentity<'_>, &ScalingInstruction> = self
-            .scaling_instructions
-            .iter()
-            .map(|instruction| (resource_identity(instruction), instruction))
-            .collect();
-        requested
-            .into_iter()
-            .map(|instruction| {
-                match in_force.get(&resource_identity(&instruction)) {
-                    Some(in_force) => self.keep_policy_target_values(in_force, instruction),
-                    None => instruction,
-                }
-            })
-            .collect()
-    }
-
-    /// `requested` with the target value of every metric an applied policy of the
-    /// resource tracks taken from that policy, and every other member as `requested`
-    /// words it.
-    ///
-    /// The policies come from [`Self::applied_policies`] of the instruction `in_force`,
-    /// so the values kept here are exactly the ones a caller can read back off the
-    /// resource, and an instruction that applied no policy keeps nothing.
-    ///
-    /// Both configuration lists are bounded by [`MAX_TARGET_TRACKING_CONFIGURATIONS`],
-    /// the documented "(up to 10)" that [`validate_scaling_instructions`] enforces on the
-    /// way in, so this inner work is bounded whatever a caller sends.
-    fn keep_policy_target_values(
-        &self,
-        in_force: &ScalingInstruction,
-        mut requested: ScalingInstruction,
-    ) -> ScalingInstruction {
-        let tracked: BTreeMap<String, f64> = self
-            .applied_policies(in_force)
-            .into_iter()
-            .filter_map(|policy| {
-                let configuration = policy.target_tracking_configuration?;
-                Some((
-                    target_metric_identity(&configuration)?,
-                    configuration.target_value,
-                ))
-            })
-            .collect();
-        requested.target_tracking_configurations = requested
-            .target_tracking_configurations
-            .into_iter()
-            .map(|mut configuration| {
-                let tracked_value = target_metric_identity(&configuration)
-                    .and_then(|metric| tracked.get(&metric).copied());
-                if let Some(tracked_value) = tracked_value {
-                    configuration.target_value = tracked_value;
-                }
-                configuration
-            })
-            .collect();
-        requested
-    }
 }
 
 /// Which refusal the mutating-plan admission rule answers with.
@@ -484,17 +437,50 @@ pub enum PlanMutationRefusal {
     InProgress,
 }
 
+/// The name the plan `plan_name` derives for the policy one target tracking
+/// `configuration` of `instruction` is installed under.
+///
+/// The ONE answer this crate gives that question: the policies a resource REPORTS
+/// ([`ScalingPlanRecord::applied_policies`]) and the policies the plan installs in the
+/// service that owns them ([`application_auto_scaling`]) are named here, so a caller that
+/// reads a policy name off a plan's resource finds that policy where it lives.
+///
+/// `position` only keeps the names of one resource apart for a configuration that
+/// identifies no metric at all — one naming neither a predefined nor a customized metric,
+/// which both write paths refuse before it can be stored.
+pub fn derived_policy_name(
+    plan_name: &str,
+    instruction: &ScalingInstruction,
+    configuration: &TargetTrackingConfiguration,
+    position: usize,
+) -> String {
+    policy_name(
+        plan_name,
+        &resource_identity_key(instruction),
+        &target_metric_identity(configuration).unwrap_or_else(|| position.to_string()),
+    )
+}
+
+/// The literal prefix of the name AWS Auto Scaling gives a policy it mints for a
+/// scaling plan.
+const POLICY_NAME_PREFIX: &str = "AutoScaling-";
+
 /// The name AWS Auto Scaling gives the policy it mints from one target tracking
 /// configuration.
 ///
-/// The service generates this name; `ScalingPolicy$PolicyName` only requires a
-/// printable string of 1-256 characters. It is therefore derived from the state that
-/// identifies the policy — the plan that owns it, the resource the policy was applied
-/// to and the configuration within that resource's instruction it came from — so no two
-/// policies of one plan share a name, every name stays inside the modelled 256
-/// characters however long a resource id is, and the name a resource reports does not
-/// change between reads. A `ScalingPlanName` carries no `/`
-/// (`^[\p{Print}&&[^|:/]]+$`), so the segments cannot run together.
+/// The service generates the name, out of the plan it belongs to: it is
+/// [`POLICY_NAME_PREFIX`], then the `ScalingPlanName` verbatim, then `-` and an id the
+/// service generates for that policy. The plan name is what joins a policy back to the
+/// plan that installed it — `DescribeScalingPolicies`, `PutScalingPolicy` and the
+/// CloudWatch alarms of a target tracking policy are all keyed on the policy name — so a
+/// client can select a plan's policies by the derivation alone. `ScalingPolicy$PolicyName`
+/// only constrains the result: a printable string of 1-256 characters.
+///
+/// The generated id is derived from the state that identifies the policy inside its plan
+/// — the resource the policy was applied to and the configuration within that resource's
+/// instruction it came from — so no two policies of one plan share a name, and the name a
+/// resource reports does not change between reads or when an update rewrites the
+/// instruction list around it.
 ///
 /// `resource` is the [`resource_identity_key`] of the instruction the policy was minted
 /// from and `configuration` the [`target_metric_identity`] of the configuration inside
@@ -504,33 +490,37 @@ pub enum PlanMutationRefusal {
 ///
 /// Both identities are built out of caller-supplied text the model lets run long — a
 /// `ResourceId` alone reaches 1600 characters and a customized metric's namespace, name
-/// and dimensions are plain strings — while a `PolicyName` has 256. Each therefore
-/// enters the name as a fixed-width [`identity_digest`] of itself: the name stays a
-/// function of the identity, and of nothing else, at a length the plan name bounds.
+/// and dimensions are plain strings — while a `PolicyName` has 256. They therefore reach
+/// the name as the fixed-width [`identity_digest`] of the pair: the name stays a function
+/// of the identities, and of nothing else, at a length the plan name bounds.
 fn policy_name(plan_name: &str, resource: &str, configuration: &str) -> String {
     format!(
-        "{plan_name}/TargetTracking/{}/{}",
-        identity_digest(resource),
-        identity_digest(configuration)
+        "{POLICY_NAME_PREFIX}{plan_name}-{}",
+        identity_digest(resource, configuration)
     )
 }
 
 /// How many BYTES of an identity's SHA-256 digest a policy name carries.
 ///
 /// 16 bytes is 32 hex characters, so a `ScalingPlanName` at its modelled maximum of 128
-/// characters, plus the fixed `/TargetTracking/` segment, the separator and the two
-/// digests, occupies 209 of the 256 characters `ScalingPolicy$PolicyName` allows,
-/// whatever the identities are spelled with; 128 bits of digest per identity is why two
-/// identities of one plan do not render one name.
+/// characters, plus the fixed prefix, the separator and the digest, occupies 173 of the
+/// 256 characters `ScalingPolicy$PolicyName` allows, whatever the identities are spelled
+/// with; 128 bits of digest is why two identities of one plan do not render one name.
 const IDENTITY_DIGEST_BYTES: usize = 16;
 
-/// A fixed-width, printable rendering of one identity key.
+/// A fixed-width, printable rendering of the identity pair one policy is minted for.
 ///
-/// The digest is what lets an UNBOUNDED identity name a policy inside the bounded
-/// `PolicyName`: equal identities render equal, different identities render different,
-/// and the rendering is the same on every read because it reads nothing but `identity`.
-fn identity_digest(identity: &str) -> String {
-    let digest = Sha256::digest(identity.as_bytes());
+/// The digest is what lets UNBOUNDED identities name a policy inside the bounded
+/// `PolicyName`: equal pairs render equal, different pairs render different, and the
+/// rendering is the same on every read because it reads nothing but the pair. The
+/// resource's own length goes into the digest ahead of the two keys, so a character
+/// moved from the end of one key to the start of the other is a different pair.
+fn identity_digest(resource: &str, configuration: &str) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update((resource.len() as u64).to_be_bytes());
+    hasher.update(resource.as_bytes());
+    hasher.update(configuration.as_bytes());
+    let digest = hasher.finalize();
     hex::encode(&digest[..IDENTITY_DIGEST_BYTES])
 }
 
@@ -1128,7 +1118,8 @@ const INDEX_SEGMENT: &str = "/index/";
 /// "Each scaling instruction applies to one resource" (`ScalingInstruction` doc), and
 /// that resource is named by the `(ServiceNamespace, ResourceId, ScalableDimension)`
 /// triple — so this is the identity [`validate_scaling_instructions`] holds one
-/// instruction per, the one the update merge matches on, and the one the forecast read
+/// instruction per, the one a policy of that resource is named after, and the one the
+/// forecast read
 /// takes an instruction by.
 pub type ResourceIdentity<'a> = (&'a str, &'a str, &'a str);
 
@@ -1137,7 +1128,7 @@ pub type ResourceIdentity<'a> = (&'a str, &'a str, &'a str);
 /// A paged read of the resources a plan covers has to address one resource by something
 /// that stays with it while the plan's instruction list is rewritten, and this is that
 /// address: the same triple [`validate_scaling_instructions`] holds one instruction per
-/// and the update merge pairs instructions by, written out as a single comparable value
+/// and a policy of that resource is named after, written out as a single comparable value
 /// so it can both ORDER the resources a plan covers and travel in a `NextToken`.
 ///
 /// A `ResourceId` is caller-supplied text under no modelled pattern beyond
@@ -1235,16 +1226,43 @@ pub fn target_metric_identity(configuration: &TargetTrackingConfiguration) -> Op
 /// interpolates nothing from the request. `pub` so both write paths word it once.
 pub const EMPTY_SCALING_INSTRUCTIONS: &str = "Must provide at least 1 scaling instruction";
 
+/// What `ScalingInstructions` counts, as its own documentation names them ("The scaling
+/// instructions"), for the refusal that states the bound.
+pub const SCALING_INSTRUCTION_ENTRIES: &str = "scaling instructions";
+
+/// The most scaling instructions one plan may hold.
+///
+/// "Each scaling instruction applies to one resource", so this is also the number of
+/// scalable resources one plan covers, and — with the documented
+/// [`MAX_TARGET_TRACKING_CONFIGURATIONS`] per resource — what bounds everything one plan
+/// makes the service do: the policies it installs, the resources both describes page over,
+/// and the work of applying its configuration.
+///
+/// AWS enforces a per-plan quota here but does not publish its value in the model, so the
+/// NUMBER is chosen, as [`MAX_SCALING_PLANS`]'s is; what is modelled is that one plan is
+/// bounded, so a single request cannot make the plan — or the work of applying it — grow
+/// without limit.
+pub const MAX_SCALING_INSTRUCTIONS: usize = 40;
+
 /// Validate the `ScalingInstructions` a caller wrote.
 ///
 /// `CreateScalingPlan` and `UpdateScalingPlan` both take this list and both model
 /// `ValidationException`, so both refuse the same input the same way, before touching
 /// state. `Err` carries the message naming the offending member and the constraint it
 /// broke.
+///
+/// The LIST's own bounds come first — a list with no entry at all, and one past
+/// [`MAX_SCALING_INSTRUCTIONS`] — so neither the walk below nor anything a write path does
+/// with the list afterwards is driven by a count this service does not hold.
 pub fn validate_scaling_instructions(instructions: &[ScalingInstruction]) -> Result<(), String> {
     if instructions.is_empty() {
         return Err(EMPTY_SCALING_INSTRUCTIONS.to_string());
     }
+    check_entry_count(
+        SCALING_INSTRUCTION_ENTRIES,
+        instructions.len(),
+        MAX_SCALING_INSTRUCTIONS,
+    )?;
     // "Each scaling instruction applies to one resource" (`ScalingInstruction` doc), so
     // two instructions for one scalable resource contradict each other.
     let mut covered: BTreeSet<ResourceIdentity<'_>> = BTreeSet::new();
@@ -1491,8 +1509,7 @@ fn validate_target_tracking_configuration(
         )?,
     }
     // The identity of the metric this configuration tracks has ONE definition, shared
-    // with the update merge that keeps the configuration in force for a metric a
-    // resource already tracks.
+    // with the policy name a resource's configuration is reported under.
     target_metric_identity(configuration).ok_or_else(|| metric_specification_required(at))
 }
 
@@ -1602,7 +1619,12 @@ pub fn configures_predictive_scaling(instruction: &ScalingInstruction) -> bool {
 /// disabled… The default is enabled (`false`)", so dynamic scaling is configured unless
 /// the caller turned it off, and every member documented "Only valid when configuring
 /// dynamic scaling" is refused once it is off.
-fn configures_dynamic_scaling(instruction: &ScalingInstruction) -> bool {
+///
+/// Public because the one predicate also decides which resources of a plan carry target
+/// tracking scaling policies at all — the policies this crate reports
+/// ([`ScalingPlanRecord::applied_policies`]) and the ones it installs in the service that
+/// owns them ([`application_auto_scaling`]).
+pub fn configures_dynamic_scaling(instruction: &ScalingInstruction) -> bool {
     !instruction.disable_dynamic_scaling.unwrap_or(false)
 }
 

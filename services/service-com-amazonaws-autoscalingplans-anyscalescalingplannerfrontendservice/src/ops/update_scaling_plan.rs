@@ -4,23 +4,18 @@
 //! Mutates the stored plan in place: the members the request carries replace what is
 //! stored, the ones it omits are left intact.
 //!
-//! `ScalingInstructions` the request carries are MERGED with the ones in force rather
-//! than written straight over them: an update does not re-point a target tracking
-//! policy a resource already has, so the target value an APPLIED POLICY of the resource
-//! tracks to is kept for the metric that policy tracks, while the rest of the
-//! instruction — including the rest of that metric's configuration — is applied. A
-//! metric no applied policy tracks has nothing to keep and takes the update's target
-//! value. `crate::state::ScalingPlanRecord::merge_scaling_instructions` owns that rule.
+//! `ScalingInstructions` the request carries REPLACE the ones in force, entry for entry:
+//! "Updates the specified scaling plan", and the member is the plan's whole instruction
+//! set, so a resource the request no longer names is dropped, one it adds is covered, and
+//! every member of an instruction it re-sends — the target value a target tracking
+//! configuration tracks to included — is what the plan reports and what the target
+//! tracking policies derived from it track afterwards.
 //!
-//! That rule rests on the recorded behaviour of this operation, which is the only
-//! evidence there is: the model states no replacement semantics for
-//! `ScalingInstructions`. One alternative reading would put the kept target value down
-//! to a read taken before the new one had propagated, and would instead let the new
-//! value take effect when the owed transition completes; it is NOT what this emulator
-//! does, because the recorded read reports the plan `Active` with the applied status
-//! narrative and still carries the earlier target value. A recording that shows a
-//! settled plan reporting an updated target value overturns the rule here, in one
-//! place.
+//! Neither `ScalingPlanVersion` ("This value is always 1") nor `CreationTime` moves on an
+//! update, so the plan's status narrative is what tells a caller the update was applied:
+//! a successful update leaves the plan in `UpdateInProgress`, with the move back to
+//! `Active` already owed on the clock, and the applied status it comes back to reports the
+//! update rather than the create (`crate::state::ScalingPlanRecord::begin_update`).
 //!
 //! An `ApplicationSource` the request carries is held to the same rule a create is:
 //! "You can create one scaling plan per application source", so a source another
@@ -36,8 +31,6 @@
 //! updated, or deleted" — such a call is refused with `ConcurrentUpdateException`,
 //! answered as the client error it is (HTTP 400, `crate::state::wire_refusals`) rather
 //! than at the status the model classifies that shape with.
-//! A successful update leaves the plan in `UpdateInProgress`, with the move back to
-//! `Active` already owed on the clock.
 //!
 //! ## Shape of an operation
 //!
@@ -181,6 +174,9 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         ctx: &smithy_server_runtime::OperationContext<'_>,
     ) -> Result<Self::Output, Self::Error> {
         let _ = ctx;
+        // The region the plan's policies are installed in, read off this request's own
+        // credential scope before the store is touched.
+        let region = crate::state::application_auto_scaling::request_region(ctx.parts());
         // The name's own modelled `@pattern` is refused before any lookup, in the
         // constraint-violation envelope the framework serializes the constraints it
         // enforces itself in: the constraint belongs to the shape, so it holds on every
@@ -190,75 +186,93 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
             &input.scaling_plan_name,
         )
         .map_err(UpdateScalingPlanError::validation)?;
-        let state = crate::state::service_state(&*self.engine).ok_or_else(internal)?;
         let now = ::std::time::SystemTime::now();
-        let mut state = state.lock();
-        state.settle_due(now);
+        // Everything this call writes is written with the store held, and the store is
+        // RELEASED here, before the plan's policies are re-installed: the install calls
+        // go back into this emulator, so nothing may hold this service's lock across
+        // them.
+        let (replaced, installed) = {
+            let state = crate::state::service_state(&*self.engine).ok_or_else(internal)?;
+            let mut state = state.lock();
+            state.settle_due(now);
 
-        // An application source the request carries must still name exactly one
-        // application: a stack or a tag set, never neither and never both. Its identity
-        // key is what the single-plan-per-source rule below is decided on.
-        let source_key = input
-            .application_source
-            .as_ref()
-            .map(crate::state::validate_application_source)
-            .transpose()
-            .map_err(validation)?;
-        // Instructions the request carries are held to the same semantics
-        // `CreateScalingPlan` holds them to: an update cannot leave a plan in a shape
-        // a create could never have produced.
-        if let Some(instructions) = input.scaling_instructions.as_deref() {
-            crate::state::validate_scaling_instructions(instructions).map_err(validation)?;
-        }
+            // An application source the request carries must still name exactly one
+            // application: a stack or a tag set, never neither and never both. Its
+            // identity key is what the single-plan-per-source rule below is decided on.
+            let source_key = input
+                .application_source
+                .as_ref()
+                .map(crate::state::validate_application_source)
+                .transpose()
+                .map_err(validation)?;
+            // Instructions the request carries are held to the same semantics
+            // `CreateScalingPlan` holds them to: an update cannot leave a plan in a shape
+            // a create could never have produced.
+            if let Some(instructions) = input.scaling_instructions.as_deref() {
+                crate::state::validate_scaling_instructions(instructions).map_err(validation)?;
+            }
 
-        // "You can create one scaling plan per application source": an update may not
-        // claim a source another stored plan already covers, any more than a create
-        // may. The plan being updated is excluded, so re-sending its own source is a
-        // no-op rather than a conflict with itself. Only the claimant's NAME is kept, so
-        // the store is free for the one mutable lookup below; the refusal itself waits
-        // until the plan this request names has been resolved.
-        let covered_by = source_key.as_deref().and_then(|key| {
-            state
-                .plan_covering_source(key, Some(input.scaling_plan_name.as_str()))
-                .map(|existing| existing.name.clone())
-        });
+            // "You can create one scaling plan per application source": an update may not
+            // claim a source another stored plan already covers, any more than a create
+            // may. The plan being updated is excluded, so re-sending its own source is a
+            // no-op rather than a conflict with itself. Only the claimant's NAME is kept,
+            // so the store is free for the one mutable lookup below; the refusal itself
+            // waits until the plan this request names has been resolved.
+            let covered_by = source_key.as_deref().and_then(|key| {
+                state
+                    .plan_covering_source(key, Some(input.scaling_plan_name.as_str()))
+                    .map(|existing| existing.name.clone())
+            });
 
-        // The admission rule every mutating operation shares — resolve the plan this
-        // request names, then refuse one whose lifecycle transition is still in flight —
-        // lives in `crate::state::admit_plan_mutation`; this operation answers the
-        // not-found refusal in its own modelled shape, and the overlapping-mutation one
-        // through the service's own refusal, which every mutating operation answers it
-        // with. The source-covered refusal below ranks under both, as the module docs
-        // state.
-        let plan = state
-            .admit_plan_mutation(&input.scaling_plan_name, input.scaling_plan_version)
-            .map_err(|refusal| match refusal {
-                crate::state::PlanMutationRefusal::NotFound(message) => not_found(message),
-                crate::state::PlanMutationRefusal::InProgress => concurrent_update(),
-            })?;
+            // The admission rule every mutating operation shares — resolve the plan this
+            // request names, then refuse one whose lifecycle transition is still in flight
+            // — lives in `crate::state::admit_plan_mutation`; this operation answers the
+            // not-found refusal in its own modelled shape, and the overlapping-mutation
+            // one through the service's own refusal, which every mutating operation
+            // answers it with. The source-covered refusal below ranks under both, as the
+            // module docs state.
+            let plan = state
+                .admit_plan_mutation(&input.scaling_plan_name, input.scaling_plan_version)
+                .map_err(|refusal| match refusal {
+                    crate::state::PlanMutationRefusal::NotFound(message) => not_found(message),
+                    crate::state::PlanMutationRefusal::InProgress => concurrent_update(),
+                })?;
 
-        if let Some(existing) = covered_by {
-            return Err(validation(
-                crate::state::application_source_covered_message(&existing),
-            ));
-        }
+            if let Some(existing) = covered_by {
+                return Err(validation(
+                    crate::state::application_source_covered_message(&existing),
+                ));
+            }
 
-        // Replace only what the request carries; everything else stays as stored. The
-        // instructions it carries are MERGED with those in force, so an update does not
-        // re-point a target tracking policy a resource already has (see
-        // `crate::state::ScalingPlanRecord::merge_scaling_instructions`).
-        if let Some(source) = input.application_source {
-            plan.application_source = source;
-        }
-        if let Some(instructions) = input.scaling_instructions {
-            let merged = plan.merge_scaling_instructions(instructions);
-            plan.scaling_instructions = merged;
-        }
-        plan.begin(
-            crate::state::STATUS_UPDATE_IN_PROGRESS,
-            crate::state::PendingOutcome::Active,
-            now,
-        );
+            // Replace only what the request carries; everything else stays as stored. The
+            // instruction set it carries is the plan's whole instruction set, so it is
+            // written straight over the one in force.
+            if let Some(source) = input.application_source {
+                plan.application_source = source;
+            }
+            let replaced = plan.scaling_instructions.clone();
+            if let Some(instructions) = input.scaling_instructions {
+                plan.scaling_instructions = instructions;
+            }
+            // The plan goes back to the applied status reporting that an UPDATE was
+            // applied, which — the version and the creation time staying put — is what
+            // makes the update observable to a caller reading the plan back.
+            plan.begin_update(now);
+            (replaced, plan.scaling_instructions.clone())
+        };
+
+        // The target tracking scaling policies the plan has installed in the service that
+        // owns them follow the instruction set now in force: a policy the replaced set
+        // installed and this one does not ask for is deleted, and every policy this one
+        // asks for is put (`crate::state::application_auto_scaling`).
+        crate::state::application_auto_scaling::install(
+            ctx.callback(),
+            &region,
+            &input.scaling_plan_name,
+            &replaced,
+            &installed,
+        )
+        .await;
 
         Ok(UpdateScalingPlanOutput {})
     }

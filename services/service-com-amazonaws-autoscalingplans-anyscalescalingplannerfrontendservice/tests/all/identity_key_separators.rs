@@ -7,8 +7,9 @@
 //! source" (`CreateScalingPlanRequest$ApplicationSource`), which the
 //! `DescribeScalingPlans` `ApplicationSources` filter selects by as well, and "Each of
 //! these structures must specify a unique scaling metric"
-//! (`ScalingInstruction$TargetTrackingConfigurations`), which the update merge keeps a
-//! tracked metric's target value by. Both identities are built out of the caller's own
+//! (`ScalingInstruction$TargetTrackingConfigurations`), which the policy a resource's
+//! configuration is reported under is named for. Both identities are built out of the
+//! caller's own
 //! text, and the model lets that text hold every punctuation character:
 //! `smithy_query(query="shape",shape="TagFilter,TagValues")` constrains a tag key and a
 //! tag value only to `^[\u0020-\uD7FF\uE000-\uFFFD\uD800\uDC00-\uDBFF\uDFFF\r\n\t]*$`
@@ -26,6 +27,7 @@
 
 use serde_json::{json, Value};
 
+use crate::applied_policies_and_status_narratives::resources;
 use crate::scaling_plan_lifecycle::{
     error_code, error_message, simple_instructions, stack_source, Emulator,
 };
@@ -408,10 +410,10 @@ async fn two_metrics_that_only_look_alike_are_two_metrics() {
 }
 
 #[tokio::test]
-async fn an_update_keeps_the_target_value_of_the_metric_actually_in_force() {
-    // The merge keeps the target value in force for a metric the resource already
-    // tracks, so a metric that merely LOOKS like it must get the value the request
-    // asks for rather than the one in force.
+async fn a_metric_that_only_looks_like_the_one_in_force_is_another_metric() {
+    // The metric a configuration tracks is what the policy derived from it is named
+    // for, so a metric that merely LOOKS like the one in force is minted a policy of
+    // its own, while the one actually in force keeps the policy — and the name — it had.
     let emulator = Emulator::new();
     let in_force = customized_metric("a/b", "c", &[], 40.0);
     let look_alike = customized_metric("a", "b/c", &[], 80.0);
@@ -426,6 +428,12 @@ async fn an_update_keeps_the_target_value_of_the_metric_actually_in_force() {
         )
         .await;
     emulator.make_all_due();
+    let before = policy_names(&emulator, OWNER).await;
+    assert_eq!(
+        before.len(),
+        1,
+        "the created plan must report its one policy, got {before:?}"
+    );
 
     emulator
         .ok(
@@ -461,11 +469,60 @@ async fn an_update_keeps_the_target_value_of_the_metric_actually_in_force() {
     assert_eq!(
         targets,
         vec![
-            ("a/b".to_string(), "c".to_string(), 40.0),
+            ("a/b".to_string(), "c".to_string(), 70.0),
             ("a".to_string(), "b/c".to_string(), 80.0),
         ],
-        "case {:?}: the tracked metric keeps the target value in force and the \
-         look-alike takes the one requested, got {targets:?}",
+        "case {:?}: both configurations must be stored as the update words them, got \
+         {targets:?}",
         "a separator inside the namespace vs inside the metric name"
     );
+
+    // Two metrics, so two policies: the one still in force keeps its name and the
+    // look-alike is minted another.
+    let after = policy_names(&emulator, OWNER).await;
+    assert_eq!(
+        after.len(),
+        2,
+        "case {:?}: two metrics of one resource need two policies, got {after:?}",
+        "a separator inside the namespace vs inside the metric name"
+    );
+    assert_eq!(
+        after[0], before[0],
+        "case {:?}: the metric still in force keeps the policy it had, got {after:?} \
+         after {before:?}",
+        "a separator inside the namespace vs inside the metric name"
+    );
+    assert_ne!(
+        after[0], after[1],
+        "case {:?}: two metrics that only look alike need two policy names, got \
+         {after:?}",
+        "a separator inside the namespace vs inside the metric name"
+    );
+}
+
+/// The `PolicyName`s of every policy `name`'s resources report, in the order they are
+/// reported.
+///
+/// `pub(crate)` so a suite that re-spells one metric identity another way reads the
+/// names the same way rather than keeping a second reader beside this one.
+pub(crate) async fn policy_names(emulator: &Emulator, name: &str) -> Vec<String> {
+    resources(emulator, name)
+        .await
+        .iter()
+        .flat_map(|resource| {
+            resource
+                .get("ScalingPolicies")
+                .and_then(Value::as_array)
+                .cloned()
+                .unwrap_or_default()
+                .into_iter()
+                .map(|policy| {
+                    policy["PolicyName"]
+                        .as_str()
+                        .unwrap_or_default()
+                        .to_string()
+                })
+                .collect::<Vec<String>>()
+        })
+        .collect()
 }

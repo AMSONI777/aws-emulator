@@ -14,7 +14,7 @@
 //! (`smithy_query(query="shape",shape="CustomizedScalingMetricSpecification")`), and
 //! that identity decides "Each of these structures must specify a unique scaling metric
 //! and a target value for the metric" (`ScalingInstruction$TargetTrackingConfigurations`)
-//! and pairs a re-sent configuration with the one in force in the update merge.
+//! and names the policy the resource's configuration is reported under.
 //!
 //! None of those list shapes carries `@uniqueItems`
 //! (`smithy_query(query="shape",shape="TagValues,MetricDimensions")`), so a repeated
@@ -33,7 +33,7 @@ use serde_json::{json, Value};
 
 use crate::identity_key_separators::{
     covered_message, create_active_plan, customized_metric, describe_one, instruction_tracking,
-    names_covering,
+    names_covering, policy_names,
 };
 use crate::scaling_plan_lifecycle::{error_code, error_message, simple_instructions, Emulator};
 
@@ -316,11 +316,13 @@ async fn stored_target_values(emulator: &Emulator, name: &str) -> Vec<f64> {
 }
 
 #[tokio::test]
-async fn an_update_pairs_a_configuration_whose_dimension_set_is_respelled() {
-    // "The target value in force for a metric the resource already tracks is kept": a
-    // re-sent configuration naming the SAME dimension set with a repeated entry is that
-    // same metric, so its target value stays, while a configuration for a metric the
-    // resource does not track yet takes the value requested.
+async fn a_respelled_dimension_set_names_the_metric_whose_policy_is_in_force() {
+    // A re-sent configuration naming the SAME dimension set with a repeated entry is
+    // that same metric, so the policy derived from it is the policy already in force,
+    // under the name it already had; a set that names ANOTHER metric is minted another
+    // policy. The target value is the update's either way: an update puts the
+    // instruction set it carries in force
+    // ([`crate::update_replaces_the_instruction_set`]).
     const IN_FORCE_TARGET: f64 = 40.0;
     const REQUESTED_TARGET: f64 = 70.0;
     const NEW_METRIC_TARGET: f64 = 80.0;
@@ -345,6 +347,12 @@ async fn an_update_pairs_a_configuration_whose_dimension_set_is_respelled() {
             )
             .await;
         emulator.make_all_due();
+        let before = policy_names(&emulator, OWNER).await;
+        assert_eq!(
+            before.len(),
+            1,
+            "case {case:?}: the created plan must report its one policy, got {before:?}"
+        );
 
         emulator
             .ok(
@@ -361,17 +369,26 @@ async fn an_update_pairs_a_configuration_whose_dimension_set_is_respelled() {
             .await;
         emulator.make_all_due();
 
-        let expected_first = if same_metric {
-            IN_FORCE_TARGET
-        } else {
-            REQUESTED_TARGET
-        };
         let targets = stored_target_values(&emulator, OWNER).await;
         assert_eq!(
             targets,
-            vec![expected_first, NEW_METRIC_TARGET],
-            "case {case:?}: the metric already tracked keeps the target value in force \
-             and a metric not tracked yet takes the requested one, got {targets:?}"
+            vec![REQUESTED_TARGET, NEW_METRIC_TARGET],
+            "case {case:?}: every configuration the update carries takes the target \
+             value it asked for, got {targets:?}"
+        );
+
+        let after = policy_names(&emulator, OWNER).await;
+        assert_eq!(
+            after.len(),
+            2,
+            "case {case:?}: one policy per configuration in force, got {after:?}"
+        );
+        assert_eq!(
+            after[0] == before[0],
+            same_metric,
+            "case {case:?}: the re-spelled set names the metric in force only when it is \
+             the same set, so keeping the policy name must be {same_metric}: got \
+             {after:?} after {before:?}"
         );
     }
 }

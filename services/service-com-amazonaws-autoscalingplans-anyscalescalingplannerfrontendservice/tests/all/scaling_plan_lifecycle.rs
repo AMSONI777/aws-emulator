@@ -708,39 +708,30 @@ async fn an_update_replaces_only_what_the_request_carries() {
         "ASGAverageCPUUtilization",
         75.0,
     );
-    // What the update above leaves in force. An update does not re-point the target
-    // tracking policy a resource already has, so the new capacity bounds apply while
-    // the target value of the metric already tracked is kept; the whole rule is
-    // tabulated in [`crate::applied_policies_and_status_narratives`].
-    let updated_in_force = instruction(
-        "autoscaling",
-        "autoScalingGroup/my-asg",
-        "autoscaling:autoScalingGroup:DesiredCapacity",
-        3,
-        30,
-        "ASGAverageCPUUtilization",
-        40.0,
-    );
+    // What the update above leaves in force: an update puts the instruction set it
+    // carries in force, entry for entry, so the new capacity bounds and the new target
+    // value both apply; the whole rule is tabulated in
+    // [`crate::update_replaces_the_instruction_set`].
 
     // Rows: which members the update carries, and what each one leaves behind.
     for (label, request_extras, expect_source, expect_instructions) in [
         (
             "instructions only",
-            json!({ "ScalingInstructions": [updated] }),
+            json!({ "ScalingInstructions": [updated.clone()] }),
             source.clone(),
-            json!([updated_in_force]),
+            json!([updated.clone()]),
         ),
         (
             "application source only",
             json!({ "ApplicationSource": other_source }),
             other_source.clone(),
-            json!([updated_in_force]),
+            json!([updated.clone()]),
         ),
         (
             "neither member",
             json!({}),
             other_source.clone(),
-            json!([updated_in_force]),
+            json!([updated.clone()]),
         ),
         (
             "both members",

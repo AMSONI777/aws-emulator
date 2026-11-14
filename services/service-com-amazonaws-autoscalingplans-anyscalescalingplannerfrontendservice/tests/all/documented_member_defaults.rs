@@ -215,9 +215,12 @@ async fn resources(emulator: &Emulator, plan: &str) -> Value {
                     .into_iter()
                     .flatten()
                 {
+                    // A derived policy is named after the plan it belongs to
+                    // ([`crate::update_replaces_the_instruction_set`]), so the plan's own
+                    // segment comes off before the two plans are compared.
                     let named = policy["PolicyName"].as_str().unwrap_or_default().to_string();
                     let own = named
-                        .strip_prefix(&format!("{plan}/"))
+                        .strip_prefix(&format!("AutoScaling-{plan}-"))
                         .unwrap_or(&named)
                         .to_string();
                     policy["PolicyName"] = json!(own);

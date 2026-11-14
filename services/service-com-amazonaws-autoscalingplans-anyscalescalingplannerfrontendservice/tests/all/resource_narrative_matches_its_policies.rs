@@ -68,6 +68,11 @@ struct Reported {
 }
 
 /// Every status this service puts a plan in, in the order one plan passes through them.
+///
+/// The applied status appears twice: the narrative of a plan says which mutation it
+/// applied, so a created-and-applied plan and an updated-and-applied plan report two
+/// different sentences while everything else about them agrees
+/// ([`crate::update_replaces_the_instruction_set`] spans that rule).
 fn reported_statuses() -> Vec<Reported> {
     vec![
         Reported {
@@ -101,6 +106,15 @@ fn reported_statuses() -> Vec<Reported> {
             scaling_status_code: "PartiallyActive",
             with_policies: "Target tracking scaling policies are being removed from the resource.",
             without_policies: "The scaling configuration is being removed from the resource.",
+        },
+        Reported {
+            status_code: "Active",
+            status_message: "Scaling plan has been updated successfully.",
+            scaling_status_code: "Active",
+            with_policies: "Target tracking scaling policies have been applied to the resource.",
+            without_policies: "The scaling configuration has been applied to the resource, which \
+                               has no target tracking scaling policies because dynamic scaling \
+                               is disabled.",
         },
     ]
 }
@@ -338,7 +352,8 @@ async fn a_resource_narrative_never_claims_a_policy_the_same_read_denies() {
         assert_report(&emulator, name, &case, &statuses[2]).await;
 
         emulator.make_all_due();
-        assert_report(&emulator, name, &case, &statuses[1]).await;
+        // The applied status again, now reporting the update that was applied.
+        assert_report(&emulator, name, &case, &statuses[4]).await;
 
         emulator.ok("DeleteScalingPlan", version.clone()).await;
         emulator.hold_pending(name);

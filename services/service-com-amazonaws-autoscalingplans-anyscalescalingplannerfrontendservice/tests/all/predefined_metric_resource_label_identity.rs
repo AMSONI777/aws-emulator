@@ -17,9 +17,9 @@
 //!   for the metric" (`smithy_query(query="shape",shape="ScalingInstruction")`), which
 //!   both write paths enforce — so two labels in one instruction are accepted and stored,
 //!   while the same label twice is refused;
-//! * the pairing `UpdateScalingPlan` keeps a tracked metric's target value by — so a
-//!   configuration re-pointed at another label is a metric no policy is in force for and
-//!   takes the target value the request asks for;
+//! * the pairing the derived `PolicyName` identifies a policy by — so a configuration
+//!   re-pointed at another label is another metric, and the policy minted for it is
+//!   another policy;
 //! * the `PolicyName` a `ScalingPlanResource` reports, which is a function of the plan,
 //!   the resource and the metric — so two labels get two names, and re-pointing a label
 //!   renames the policy.
@@ -281,11 +281,11 @@ async fn two_predefined_configurations_are_one_metric_only_when_their_labels_mat
 }
 
 #[tokio::test]
-async fn an_update_keeps_the_target_value_only_of_the_metric_actually_in_force() {
-    // "The target value in force for a scaling metric the resource already tracks is
-    // kept": a re-sent configuration naming the same metric keeps it, while a
-    // configuration re-pointed at another resource label tracks a metric no policy is in
-    // force for and takes the value requested.
+async fn an_update_puts_the_target_value_of_every_configuration_it_carries_in_force() {
+    // An update puts the instruction set it carries in force, so every configuration it
+    // sends reports the target value it asked for — whether the metric it names is the
+    // one already tracked or another one. What the label decides is the metric's
+    // IDENTITY, which the derived policy is named for, not which value survives.
     const IN_FORCE_TARGET: f64 = 1_000.0;
     const REQUESTED_TARGET: f64 = 500.0;
     const UNTRACKED_TARGET: f64 = 12.5;
@@ -308,8 +308,8 @@ async fn an_update_keeps_the_target_value_only_of_the_metric_actually_in_force()
                     "ScalingPlanVersion": 1,
                     "ScalingInstructions": [instruction_tracking(vec![
                         pair.second.configuration(REQUESTED_TARGET),
-                        // A metric the resource does not track yet, which must take the
-                        // target value the request asks for whatever the labels do.
+                        // A metric the resource does not track yet, which takes the
+                        // target value the request asks for just as the other does.
                         customized_metric("MyApp", "backlog", &[("Fleet", "orders")],
                             UNTRACKED_TARGET),
                     ])],
@@ -318,18 +318,12 @@ async fn an_update_keeps_the_target_value_only_of_the_metric_actually_in_force()
             .await;
         emulator.make_all_due();
 
-        let expected = if pair.same_metric {
-            IN_FORCE_TARGET
-        } else {
-            REQUESTED_TARGET
-        };
         let stored = stored_metrics(&emulator).await;
         assert_eq!(
             stored,
-            vec![(pair.second.resource_label.clone(), expected)],
-            "case {case:?}: the stored configuration must carry the requested label, and \
-             the target value in force only for the metric actually in force, got \
-             {stored:?}"
+            vec![(pair.second.resource_label.clone(), REQUESTED_TARGET)],
+            "case {case:?}: the stored configuration must carry the requested label and \
+             the requested target value, got {stored:?}"
         );
     }
 }
