@@ -19,6 +19,8 @@ mod canary_dry_runs;
 mod canary_lifecycle;
 #[path = "all/canary_run_outcomes.rs"]
 mod canary_run_outcomes;
+#[path = "all/canary_schedule_running_bound.rs"]
+mod canary_schedule_running_bound;
 #[path = "all/client_error_message_wording.rs"]
 mod client_error_message_wording;
 #[path = "all/group_deletion.rs"]
