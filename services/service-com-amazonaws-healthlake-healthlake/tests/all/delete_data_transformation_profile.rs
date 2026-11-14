@@ -35,7 +35,10 @@ use crate::data_transformation_profile::{
 use crate::fhir_datastore_lifecycle::string_at;
 
 /// A `ProfileMapping` request member from stored content.
-fn request_mapping(content: &BTreeMap<String, String>) -> Value {
+///
+/// `pub(crate)` so the sibling post-delete wording suite writes one through the same
+/// helper rather than keeping a second copy of it.
+pub(crate) fn request_mapping(content: &BTreeMap<String, String>) -> Value {
     let entries: Map<String, Value> = content
         .iter()
         .map(|(path, entry)| (path.clone(), Value::String(entry.clone())))
@@ -52,20 +55,24 @@ fn timestamp_at(case: &str, body: &Value, member: &str) -> f64 {
 
 /// One deletion row: the profile to build, how many versions to publish from it,
 /// and the tags it carries.
-struct Deletion {
-    case: &'static str,
-    source_format: &'static str,
-    profile_name: String,
-    initial: BTreeMap<String, String>,
-    publishes: usize,
-    tags: Option<BTreeMap<String, String>>,
+///
+/// `pub(crate)` with [`deletion_cases`] and [`build_profile`], so the sibling suite
+/// that asserts how the post-delete refusals are WORDED drives the same rows through
+/// the same builder instead of restating the table and the create-publish-delete walk.
+pub(crate) struct Deletion {
+    pub(crate) case: &'static str,
+    pub(crate) source_format: &'static str,
+    pub(crate) profile_name: String,
+    pub(crate) initial: BTreeMap<String, String>,
+    pub(crate) publishes: usize,
+    pub(crate) tags: Option<BTreeMap<String, String>>,
 }
 
 /// The deletion table. The modelled bounds the rows sit on come from the operation's
 /// own shapes: `ProfileNameString` is len 1..256, `ProfileMapping` holds 1..500
 /// entries with keys 1..500 characters and values 0..102400, and `ProfileVersion`
 /// runs 0..99, so a profile with several published versions is well inside it.
-fn deletion_cases() -> Vec<Deletion> {
+pub(crate) fn deletion_cases() -> Vec<Deletion> {
     let longest_name = "n".repeat(256);
     let long_key = "d".repeat(500);
     vec![
@@ -141,7 +148,7 @@ fn create_request(row: &Deletion) -> Value {
 
 /// Build one row's profile and return `(ProfileId, the versions it holds)`: version
 /// 0, the DRAFT, plus one per publish.
-async fn build_profile(healthlake: &Profiles, row: &Deletion) -> (String, Vec<i64>) {
+pub(crate) async fn build_profile(healthlake: &Profiles, row: &Deletion) -> (String, Vec<i64>) {
     let case = row.case;
     let created = healthlake
         .ok(case, "CreateDataTransformationProfile", &create_request(row))

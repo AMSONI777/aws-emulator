@@ -3902,3 +3902,22 @@ mod cloudformation_provisions_redshift_snapshot_copy_grants;
 // suite left at the top level of `tests/` fails the build. (An ordinary comment, for the
 // reason the lines above record: a `//!` line past the first item of this crate root is
 // `E0753` and compiles no suite in this target.)
+// Declared here, in this same head region, each for the reason the entry above records — a
+// flat-rate subscription's eligibility is decided by the web ACL association CloudFront holds
+// and by a web ACL only WAFv2 mints; the alarm on a distribution's edge 4xx share is evaluated
+// by CloudWatch over what CloudFront publishes; and a configuration set's EventBridge event
+// destination lands a message's events on the bus rule's own target — so no single service
+// crate's test target can mount both sides of any of them. They stand in this head region
+// because the appended tail is where concurrent landings collide, which is how their
+// declarations came to be lost while their suites stayed on disk.
+// (`sfn_relayed_dynamodb_request_id` is declared ONCE, on the line above: two landings in the
+// same window each appended a declaration of it here, and a module declared twice loads the
+// same file twice and compiles neither.)
+// (`cloudformation_provisions_cloudfront_resources` is declared ONCE, in the sorted span above:
+// (`cloudformation_eventbridge_fan_out_to_lambda_and_sfn` is declared ONCE, in the head region
+// above: two branches landing in the same window appended a second declaration of it here, and
+// a module declared twice loads the same file twice and compiles neither.)
+// (The five lines below are a copy of the module doc at the HEAD of this file, where that
+// rule now stands: concurrently landing branches appended this copy here, and an inner doc
+// comment is legal only before the first item, so as `//!` in this tail it was `E0753` and
+// compiled no suite of this target.)
