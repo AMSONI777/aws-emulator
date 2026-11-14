@@ -1,15 +1,30 @@
 // SPDX-License-Identifier: CC0-1.0
 
 //! @op StartAssociationsOnce
-//! SCAFFOLDED, NOT IMPLEMENTED: this operation answers HTTP 501 `NotImplemented` and
-//! asserts NOTHING about `StartAssociationsOnce`'s real behaviour. Implement it here — this is
-//! the ONLY file to touch for this operation.
+//! Run the associations the request names immediately and only one time: State Manager
+//! dispatches each of them to the managed nodes its targets select, and the run finishes on
+//! the clock rather than on this call. This is the ONLY file to touch for this operation.
 //!
-//! A 501 from this operation means "nobody has written it yet", never "the emulator is
-//! broken". Replace the `Err(..)` in [`StartAssociationsOnce::handle`] with real behaviour and
-//! delete the SCAFFOLDED marker line above; that line is the machine-readable record of
-//! which operations are still stubs (`grep -rl '^//! SCAFFOLDED, NOT IMPLEMENTED:' */src/ops/`),
-//! so leaving it on an implemented operation under-reports progress.
+//! The associations are the ones [`crate::state::associations`] holds for the Region the
+//! request was signed for — "the association IDs that you want to run immediately and only
+//! one time" — so an id that Region holds no association under is
+//! `AssociationDoesNotExist`, and NOTHING is dispatched for a request naming one: a run
+//! starts for every association the request names or for none, so a caller that mistyped
+//! one id does not have the others run behind the refusal.
+//!
+//! What a run IS lives with the association
+//! ([`crate::state::associations::AssociationRunRecord`]): the instant it was dispatched
+//! and the nodes it was dispatched to, resolved here from the node store. Its result is
+//! derived from that instant ([`crate::state::associations::ASSOCIATION_EXECUTION_DELAY`]),
+//! so a caller that reads the association straight after this call sees the run still in
+//! progress and `DescribeAssociation` reports it `Success` once the clock makes it due —
+//! whether or not anybody calls again. An association whose targets select no registered
+//! node is dispatched to none, so it reports no execution: this operation starts a run, it
+//! does not report a result for work no node ran.
+//!
+//! The registrations the clock already owed are materialised before the nodes are resolved
+//! ([`crate::state::node_registration::settle_registrations`]), so an instance that had
+//! become a managed node by now is one this run reaches.
 //!
 //! ## Shape of an operation
 //!
@@ -134,18 +149,55 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         input: Self::Input,
         ctx: &smithy_server_runtime::OperationContext<'_>,
     ) -> Result<Self::Output, Self::Error> {
-        // The engine is reachable from `&self` (constructor-injected); `ctx` carries
-        // request metadata. Both are bound here so an implementer has them in scope.
-        let _ = (&input, ctx, &self.engine);
-        // Implement `StartAssociationsOnce` here, then delete the SCAFFOLDED marker at the top of
-        // this file. Return modeled failures as
-        // `Err(StartAssociationsOnceErrorModeled::Variant(..).into())` — the `From` impl above lifts it.
-        //
-        // To refuse a bad request this operation models no error for, return
-        // `Err(crate::scaffolded::Scaffolded::validation("..."))` — a 400
-        // `ValidationException`. Do NOT answer 501 for it: 501 means "not written yet",
-        // not "bad request". Modeled constraints are already refused BEFORE this
-        // handler runs, so reaching here means the input satisfies every one of them.
-        Err(crate::scaffolded::Scaffolded::not_implemented("StartAssociationsOnce"))
+        // `AssociationIds`' presence, its length (1..10) and each id's pattern are MODELLED
+        // constraints the centralized walk has already refused anything outside of. What is
+        // read here is which associations those ids resolve to, and which nodes each of
+        // them is dispatched to.
+        let Some(state) = crate::state::service_state(&*self.engine) else {
+            return Err(crate::scaffolded::Scaffolded::validation(
+                "this service is mounted on an engine that holds no state",
+            ));
+        };
+
+        let region = crate::state::request_region(ctx.parts());
+        let now = ::std::time::SystemTime::now();
+        // A run is dispatched to the nodes that are registered NOW, so the registrations the
+        // clock already owed are materialised first — with no guard of the store held.
+        crate::state::node_registration::settle_registrations(&*self.engine, &region);
+        let mut store = state.lock();
+
+        // Every id has to name an association of this Region before anything is dispatched:
+        // "The specified association doesn't exist" (`AssociationDoesNotExist`).
+        for association_id in &input.association_ids {
+            if store.association(&region, association_id).is_none() {
+                return Err(StartAssociationsOnceErrorModeled::AssociationDoesNotExist(
+                    AssociationDoesNotExist {
+                        message: Some(
+                            crate::state::associations::ASSOCIATION_DOES_NOT_EXIST.to_string(),
+                        ),
+                    },
+                )
+                .into());
+            }
+        }
+
+        // The nodes each association is dispatched to are resolved against the node store
+        // before any run is written, so one association's run cannot change which nodes the
+        // next one reaches.
+        let dispatched: Vec<(String, Vec<String>)> = input
+            .association_ids
+            .iter()
+            .filter_map(|association_id| {
+                let held = store.association(&region, association_id)?;
+                Some((association_id.clone(), store.association_run_nodes(held)))
+            })
+            .collect();
+        for (association_id, nodes) in dispatched {
+            if let Some(held) = store.association_mut(&region, &association_id) {
+                held.start_run(nodes, now);
+            }
+        }
+
+        Ok(StartAssociationsOnceOutput {})
     }
 }

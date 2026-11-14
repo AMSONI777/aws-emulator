@@ -127,6 +127,28 @@ fn catalogue_rows() -> Vec<Published<'static>> {
             parameters: &["version", "allowDowngrade"],
             platforms: PLATFORM_TYPES,
         },
+        Published {
+            // A `Policy` document: it tells the agent WHAT to collect rather than what to
+            // run, and it is applied by creating an association rather than by a send.
+            case: "the inventory policy document",
+            name: "AWS-GatherSoftwareInventory",
+            document_type: "Policy",
+            schema_version: "2.0",
+            parameters: &[
+                "applications",
+                "awsComponents",
+                "networkConfig",
+                "instanceDetailedInformation",
+                "services",
+                "windowsRoles",
+                "windowsUpdates",
+                "files",
+                "windowsRegistry",
+                "customInventory",
+                "billingInfo",
+            ],
+            platforms: PLATFORM_TYPES,
+        },
     ]
 }
 

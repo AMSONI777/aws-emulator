@@ -332,6 +332,10 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
 
         let region = crate::state::request_region(ctx.parts());
         let now = ::std::time::SystemTime::now();
+        // State Manager applies an association to its targets as soon as it is created, so
+        // the nodes it is dispatched to are resolved below — which means the registrations
+        // the clock already owed are materialised first, with no guard of the store held.
+        crate::state::node_registration::settle_registrations(&*self.engine, &region);
         let mut store = state.lock();
 
         // "You can specify Amazon Web Services-predefined documents, documents you
@@ -482,7 +486,7 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
             alarm_configuration: input.alarm_configuration.clone(),
             association_dispatch_assume_role: input.association_dispatch_assume_role.clone(),
         };
-        let record = crate::state::associations::AssociationRecord::new(
+        let mut record = crate::state::associations::AssociationRecord::new(
             crate::state::new_uuid(),
             region,
             // `AssociationDescription$Name` is "the name of the SSM document", so the name
@@ -493,6 +497,14 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
             first,
             crate::state::to_btree_map(input.tags),
         );
+        // "State Manager … applies the configuration when the association is created": the
+        // association is dispatched to the managed nodes its targets select right away, and
+        // its run finishes on the clock
+        // (`crate::state::associations::ASSOCIATION_EXECUTION_DELAY`) rather than on this
+        // call. An association that selects no registered node reaches none, which is why
+        // the nodes are resolved here rather than assumed.
+        let nodes = store.association_run_nodes(&record);
+        record.start_run(nodes, now);
         let description = record.latest_description(now);
         store.insert_association(record);
 

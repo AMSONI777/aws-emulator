@@ -101,6 +101,115 @@ pub const ATTRIBUTE_AGENT_TYPE: &str = "AgentType";
 pub const INSTANCE_INFORMATION_AGGREGATABLE_ATTRIBUTES: &[&str] =
     &["PlatformName", "PlatformType", "PlatformVersion"];
 
+/// The name of the inventory policy document Systems Manager publishes: the document a
+/// client associates with its nodes to have inventory collected from them (AWS Systems
+/// Manager User Guide, "Configuring inventory collection", which associates
+/// `AWS-GatherSoftwareInventory` with the nodes to inventory).
+///
+/// It is a `Policy` document ([`super::DOCUMENT_TYPE_POLICY`]) rather than a command: it
+/// tells the agent on each target node WHAT to collect, which is why it is applied by
+/// creating an association rather than by sending a command.
+pub const GATHER_SOFTWARE_INVENTORY_DOCUMENT: &str = "AWS-GatherSoftwareInventory";
+
+/// The body of [`GATHER_SOFTWARE_INVENTORY_DOCUMENT`]: the one `aws:softwareInventory`
+/// step, and a parameter per inventory type the agent can be asked for.
+///
+/// Every parameter declares a DEFAULT, which is what lets an association be created for
+/// this document without supplying any: "all of these parameters are optional"
+/// (same user guide section) — the types collected by default are enabled and the ones a
+/// client has to name the paths or the keys of are off.
+pub const GATHER_SOFTWARE_INVENTORY: &str = r#"{
+  "schemaVersion": "2.0",
+  "description": "Software Inventory Policy Document.",
+  "parameters": {
+    "applications": {
+      "type": "String",
+      "description": "(Optional) Collect data for installed applications.",
+      "default": "Enabled",
+      "allowedValues": ["Enabled", "Disabled"]
+    },
+    "awsComponents": {
+      "type": "String",
+      "description": "(Optional) Collect data for AWS Components like amazon-ssm-agent.",
+      "default": "Enabled",
+      "allowedValues": ["Enabled", "Disabled"]
+    },
+    "networkConfig": {
+      "type": "String",
+      "description": "(Optional) Collect data for Network configurations.",
+      "default": "Enabled",
+      "allowedValues": ["Enabled", "Disabled"]
+    },
+    "instanceDetailedInformation": {
+      "type": "String",
+      "description": "(Optional) Collect additional information about the instance, including the CPU model, speed, and the number of cores, to name a few.",
+      "default": "Enabled",
+      "allowedValues": ["Enabled", "Disabled"]
+    },
+    "services": {
+      "type": "String",
+      "description": "(Optional, Windows OS only) Collect data for service configurations.",
+      "default": "Enabled",
+      "allowedValues": ["Enabled", "Disabled"]
+    },
+    "windowsRoles": {
+      "type": "String",
+      "description": "(Optional, Windows OS only) Collect data for Microsoft Windows role configurations.",
+      "default": "Enabled",
+      "allowedValues": ["Enabled", "Disabled"]
+    },
+    "windowsUpdates": {
+      "type": "String",
+      "description": "(Optional, Windows OS only) Collect data for all Windows Updates.",
+      "default": "Enabled",
+      "allowedValues": ["Enabled", "Disabled"]
+    },
+    "files": {
+      "type": "String",
+      "description": "(Optional, requires SSMAgent version 2.2.64.0 and above) Collect data for files, provided as a list of JSON objects.",
+      "default": "",
+      "displayType": "textarea"
+    },
+    "windowsRegistry": {
+      "type": "String",
+      "description": "(Optional, requires SSMAgent version 2.2.64.0 and above) Collect data for Microsoft Windows registry keys and values, provided as a list of JSON objects.",
+      "default": "",
+      "displayType": "textarea"
+    },
+    "customInventory": {
+      "type": "String",
+      "description": "(Optional) Collect data for custom inventory.",
+      "default": "Enabled",
+      "allowedValues": ["Enabled", "Disabled"]
+    },
+    "billingInfo": {
+      "type": "String",
+      "description": "(Optional) Collect billing info for license includes AMIs.",
+      "default": "Enabled",
+      "allowedValues": ["Enabled", "Disabled"]
+    }
+  },
+  "mainSteps": [
+    {
+      "action": "aws:softwareInventory",
+      "name": "collectSoftwareInventoryItems",
+      "inputs": {
+        "applications": "{{ applications }}",
+        "awsComponents": "{{ awsComponents }}",
+        "networkConfig": "{{ networkConfig }}",
+        "files": "{{ files }}",
+        "services": "{{ services }}",
+        "windowsRoles": "{{ windowsRoles }}",
+        "windowsRegistry": "{{ windowsRegistry }}",
+        "windowsUpdates": "{{ windowsUpdates }}",
+        "instanceDetailedInformation": "{{ instanceDetailedInformation }}",
+        "customInventory": "{{ customInventory }}",
+        "billingInfo": "{{ billingInfo }}"
+      }
+    }
+  ]
+}"#;
+
 /// The inventory query operator that asks whether the attribute is reported at all, rather
 /// than comparing its value (the modelled `InventoryQueryOperatorType` value `Exists`, the
 /// one operator the node describes' `InstancePropertyFilterOperator` does not carry).

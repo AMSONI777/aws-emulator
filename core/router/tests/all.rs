@@ -3062,3 +3062,7 @@ mod cloudformation_grants_acmpca_permissions;
 // plain comment: as `//!` it was `E0753` and compiled nothing in this target.) Declare each
 // suite exactly ONCE: this is one crate root, so a second `mod` for the same name is
 // `E0428` and fails every suite in this target. `all/all_rs_declares_each_suite_once.rs`
+// (The paragraph that belongs with the module header above landed here while two branches
+// were landing at once; it is an INNER doc comment, which annotates nothing in the middle
+// of a crate root (`E0753`), so it has been returned to the header where it says the same
+// thing.)

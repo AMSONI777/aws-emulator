@@ -69,6 +69,10 @@ const PUBLISHED_COMMANDS: &[&str] = &[
     "AWS-UpdateSSMAgent",
 ];
 
+/// The published `Policy` documents, in name order: the inventory policy document a client
+/// associates with the nodes it inventories.
+const PUBLISHED_POLICIES: &[&str] = &["AWS-GatherSoftwareInventory"];
+
 /// A JSON `Command` document whose step precondition restricts it to Linux.
 const COMMAND_LINUX_JSON: &str = r#"{
   "schemaVersion": "2.2",
@@ -641,13 +645,15 @@ async fn filters_narrow_the_listing_by_one_attribute() {
     // cannot silently fall out of the expectations.
     for entry in CATALOGUE {
         assert!(
-            PUBLISHED_AUTOMATIONS.contains(&entry.name) || PUBLISHED_COMMANDS.contains(&entry.name),
+            PUBLISHED_AUTOMATIONS.contains(&entry.name)
+                || PUBLISHED_COMMANDS.contains(&entry.name)
+                || PUBLISHED_POLICIES.contains(&entry.name),
             "the expectations must carry published document {}",
             entry.name
         );
     }
     assert_eq!(
-        PUBLISHED_AUTOMATIONS.len() + PUBLISHED_COMMANDS.len(),
+        PUBLISHED_AUTOMATIONS.len() + PUBLISHED_COMMANDS.len() + PUBLISHED_POLICIES.len(),
         CATALOGUE.len(),
         "the expectations must name only documents the service publishes"
     );
@@ -671,6 +677,7 @@ async fn filters_narrow_the_listing_by_one_attribute() {
     let windows: Vec<&str> = PUBLISHED_AUTOMATIONS
         .iter()
         .copied()
+        .chain(PUBLISHED_POLICIES.iter().copied())
         .chain([
             "AWS-RunPowerShellScript",
             "AWS-UpdateSSMAgent",

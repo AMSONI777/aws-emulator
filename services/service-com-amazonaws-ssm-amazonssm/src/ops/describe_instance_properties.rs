@@ -368,6 +368,11 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         };
 
         let region = crate::state::request_region(ctx.parts());
+        // The registration an instance of this Region had already made by now was owed at
+        // the same instant whether or not anybody called, so it is materialised before the
+        // store is read — with no guard of it held
+        // ([`crate::state::node_registration::settle_registrations`]).
+        crate::state::node_registration::settle_registrations(&*self.engine, &region);
         let store = state.lock();
         let mut instance_properties = Vec::new();
         let mut next_token = None;

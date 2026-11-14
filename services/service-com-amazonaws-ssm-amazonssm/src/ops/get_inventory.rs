@@ -9,7 +9,11 @@
 //! node store itself: a node's `AWS:InstanceInformation` item is the projection of the
 //! record it registered with ([`crate::state::inventory::instance_information_content`]),
 //! so an account that has registered no node holds no inventory and nothing here invents
-//! an item. Nothing here writes either: a query must not change what a later caller sees.
+//! an item. The one write it makes is materialising the registrations the clock already
+//! owed ([`crate::state::node_registration::settle_registrations`]): an EC2 instance that
+//! has been running long enough with a profile that lets its agent register was a managed
+//! node at that instant whether or not anybody called, and its own information is the
+//! inventory it has collected.
 //!
 //! ## Which requests are refused, and with which modelled error
 //!
@@ -282,6 +286,11 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         // before anything is counted: an aggregation walks the selected nodes once per
         // aggregation it was asked for, and it must not hold the one store while it does.
         let region = request_region(ctx.parts());
+        // The registration an instance of this Region had already made by now was owed at
+        // the same instant whether or not anybody called, so it is materialised before the
+        // store is read — with no guard of it held
+        // ([`crate::state::node_registration::settle_registrations`]).
+        crate::state::node_registration::settle_registrations(&*self.engine, &region);
         let snapshot: Vec<(String, crate::state::ManagedNodeRecord)> = {
             let store = state.lock();
             store

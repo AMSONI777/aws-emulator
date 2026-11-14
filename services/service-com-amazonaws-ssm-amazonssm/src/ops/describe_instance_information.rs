@@ -10,8 +10,11 @@
 //! registering: an EC2 instance whose SSM Agent registers, or a hybrid node installed
 //! with an activation code. Nothing here invents a node, so an account that has
 //! registered none is reported as holding none — the same answer AWS gives for an
-//! instance that never came under Systems Manager management. Nothing here writes
-//! either: a report must not change what a later caller sees.
+//! instance that never came under Systems Manager management. The one write it makes is
+//! materialising the registrations the clock already owed
+//! ([`crate::state::node_registration::settle_registrations`]): an instance that has been
+//! running long enough with a profile that lets its agent register was a managed node at
+//! that instant whether or not anybody called.
 //!
 //! ## Which requests are refused, and with which modelled error
 //!
@@ -61,13 +64,10 @@
 //! ## Nodes this report leaves out
 //!
 //! "This operation does not return information for nodes that are either Stopped or
-//! Terminated" — an instance lifecycle state the inventory does not model, because the
-//! inventory records REGISTRATIONS rather than instances and no operation of this
-//! emulator registers or deregisters one yet (`DeregisterManagedInstance` is still a
-//! scaffold, as is every other node API). So no node is dropped for its state here;
-//! whatever registered is what is reported. The exclusion becomes implementable with the
-//! registration path, which is that operation's own issue — inventing a lifecycle state
-//! for a node nothing registered would be inventing the node.
+//! Terminated": an EC2 instance Amazon EC2 no longer holds in `running` registers no node
+//! here, and the registration a running one made is withdrawn with it
+//! ([`crate::state::node_registration`]). A node registered through a hybrid activation
+//! carries no such instance state, so nothing drops it.
 //!
 //! ## Shape of an operation
 //!
@@ -323,6 +323,10 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         // inventory yields that Region's nodes in ascending node-id order, which is what
         // makes the resume cursor total.
         let region = request_region(ctx.parts());
+        // The registration an instance of this Region had already made by now was owed at
+        // the same instant whether or not anybody called, so it is materialised before the
+        // store is read — with no guard of it held.
+        crate::state::node_registration::settle_registrations(&*self.engine, &region);
         let store = state.lock();
         let mut instance_information_list = Vec::new();
         let mut next_token = None;

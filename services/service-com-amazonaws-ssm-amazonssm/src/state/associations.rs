@@ -18,15 +18,19 @@
 //! The association itself holds only what identifies it for its whole life — its id, its
 //! Region, the document it associates, the node it was created for and its tag set.
 //!
-//! Nothing here runs an association: dispatching one is the SSM Agent's own poll from a
-//! managed node, and no node is registered in this emulator, so no execution exists for an
-//! association and nothing reports a last-execution date, an aggregated status count or a
-//! triggered alarm for work nothing ran. What a read does report is the association's own
-//! progress: a create is owed its move off `Creating` ([`ASSOCIATION_CREATION_DELAY`]),
-//! which is derived from the stored creation instant rather than written by a read, so two
-//! callers see the same thing whether or not either of them called.
+//! An association RUNS against the managed nodes its targets select: State Manager applies
+//! it as soon as it is created, and `StartAssociationsOnce` applies it again on demand.
+//! What a run is here is [`AssociationRunRecord`] — the instant it started and the nodes it
+//! was dispatched to, resolved from the node store at that instant — and its result is
+//! derived from that stored instant ([`ASSOCIATION_EXECUTION_DELAY`]) rather than written
+//! by a read, so two callers see the same thing whether or not either of them called. An
+//! association whose targets select NO registered node has nothing to dispatch to, so it
+//! reports no execution at all and stays `Pending`, which is what an association targeting
+//! an instance that never became a managed node reports in the real service too.
+//!
+//! A create is owed its move off `Creating` ([`ASSOCIATION_CREATION_DELAY`]) the same way.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::time::{Duration, SystemTime};
 
 use crate::ops::types::{
@@ -55,6 +59,31 @@ pub const ASSOCIATION_STATUS_PENDING: &str = "Pending";
 /// settled yet: the association is being created, which is the detail a create reports
 /// before anything else is true of it.
 pub const ASSOCIATION_DETAILED_STATUS_CREATING: &str = "Creating";
+
+/// The `AssociationOverview$Status` of an association whose run has finished on every node
+/// it was dispatched to: "Status can be: Pending, Success, or Failed", and the modelled
+/// `AssociationStatusName` enum spells it `Success`
+/// (`crate::ops::types::ASSOCIATION_STATUS_NAME_VALUES`).
+pub const ASSOCIATION_STATUS_SUCCESS: &str = "Success";
+
+/// The `AssociationOverview$DetailedStatus` of that same association: the detail of a run
+/// that finished is the result it finished with.
+pub const ASSOCIATION_DETAILED_STATUS_SUCCESS: &str = ASSOCIATION_STATUS_SUCCESS;
+
+/// The `AssociationOverview$DetailedStatus` of an association whose run has been dispatched
+/// and has not finished yet — the detail Systems Manager reports while the nodes are still
+/// working through it, where the status itself is still `Pending`.
+pub const ASSOCIATION_DETAILED_STATUS_IN_PROGRESS: &str = "InProgress";
+
+/// How long a run of an association takes to finish on the nodes it was dispatched to.
+///
+/// AWS publishes no span for it — it is however long the agent on each node takes to poll,
+/// apply the document and report back — so this is the emulator's CHOSEN transient window:
+/// three seconds, the span this emulator gives a transition nobody documents (see
+/// [`super::DOCUMENT_TRANSITION_DELAY`]). It is deliberately never zero: a caller that reads
+/// the association straight after starting it sees the run still in progress, the way it
+/// would against the real service.
+pub const ASSOCIATION_EXECUTION_DELAY: Duration = Duration::from_secs(3);
 
 /// How long an association reports [`ASSOCIATION_DETAILED_STATUS_CREATING`] for. A create
 /// answers before the association is in place, so a caller reading straight after it sees
@@ -324,6 +353,38 @@ pub struct AssociationRecord {
     /// The tag set the association carries, written by its create and by the tag
     /// operations (`super::tagging`).
     pub tags: BTreeMap<String, String>,
+    /// The most recent run of this association, or `None` for one that has never been
+    /// dispatched to a node — see [`AssociationRunRecord`].
+    pub last_run: Option<AssociationRunRecord>,
+}
+
+/// One run of an association: when State Manager dispatched it, and to which managed nodes.
+///
+/// The nodes are resolved from the node store at the instant the run STARTS, because that
+/// is when the association's targets are evaluated — a node registered afterwards was not
+/// one this run was dispatched to. The run's result is derived from `started_at` rather than
+/// written by anything: it has finished once [`ASSOCIATION_EXECUTION_DELAY`] has passed.
+#[derive(Debug, Clone)]
+pub struct AssociationRunRecord {
+    /// When the run was dispatched.
+    pub started_at: SystemTime,
+    /// The ids of the managed nodes it was dispatched to, in ascending node-id order. EMPTY
+    /// for a run whose targets selected no registered node, which is a run that reached no
+    /// node and therefore reports no result.
+    pub nodes: Vec<String>,
+}
+
+impl AssociationRunRecord {
+    /// When this run is owed to have finished.
+    pub fn finished_at(&self) -> SystemTime {
+        self.started_at + ASSOCIATION_EXECUTION_DELAY
+    }
+
+    /// Whether it has, as of `now` — and whether it reached any node at all, since a run
+    /// dispatched to none has no node to report a result.
+    pub fn has_finished(&self, now: SystemTime) -> bool {
+        !self.nodes.is_empty() && now >= self.finished_at()
+    }
 }
 
 impl AssociationRecord {
@@ -346,7 +407,27 @@ impl AssociationRecord {
             created_at,
             versions: vec![version],
             tags,
+            last_run: None,
         }
+    }
+
+    /// Record that State Manager has dispatched this association to `nodes` at `now`, which
+    /// is what a create and a `StartAssociationsOnce` do: "Runs an association immediately
+    /// and only one time" (`StartAssociationsOnce`).
+    ///
+    /// The run REPLACES whatever this association last ran: an association reports its most
+    /// recent execution, so starting one again is what makes the next report that run's.
+    pub fn start_run(&mut self, nodes: Vec<String>, now: SystemTime) {
+        self.last_run = Some(AssociationRunRecord {
+            started_at: now,
+            nodes,
+        });
+    }
+
+    /// The run of this association that had finished by `now`, or `None` when it has never
+    /// been dispatched to a node or its latest run is still in progress.
+    pub fn finished_run(&self, now: SystemTime) -> Option<&AssociationRunRecord> {
+        self.last_run.as_ref().filter(|run| run.has_finished(now))
     }
 
     /// The version this association holds last, which is what a read that names none
@@ -394,19 +475,52 @@ impl AssociationRecord {
         self.versions.push(version);
     }
 
-    /// "Information about the association" as of `now`: its own progress, which is all
-    /// that is true of an association nothing has run.
+    /// "Information about the association" as of `now`: how far its progress and its latest
+    /// run have got.
     ///
-    /// The status is `Pending` — no execution has reported a result — and the detailed
-    /// status is `Creating` for as long as the create is still settling
-    /// ([`ASSOCIATION_CREATION_DELAY`]), after which there is no further detail to report
-    /// and the aggregated count stays empty, because a count of targets by status is a
-    /// count over executions and there are none.
+    /// A run that has FINISHED ([`AssociationRunRecord`]) is the association's result:
+    /// `Success`, over the count of nodes it was dispatched to. Until then the status is
+    /// `Pending` — no execution has reported a result — and the detail is `Creating` for as
+    /// long as the create is still settling ([`ASSOCIATION_CREATION_DELAY`]), `InProgress`
+    /// while a dispatched run is still being worked through, and nothing at all for an
+    /// association that reached no node, whose aggregated count stays empty because a count
+    /// of targets by status is a count over executions and there are none.
     pub fn overview(&self, now: SystemTime) -> AssociationOverview {
+        // A run that has finished is what the association reports: every node it was
+        // dispatched to applied the document, which is the count of targets by status
+        // `AssociationStatusAggregatedCount` carries.
+        if let Some(run) = self.finished_run(now) {
+            return AssociationOverview {
+                status: Some(ASSOCIATION_STATUS_SUCCESS.to_string()),
+                detailed_status: Some(ASSOCIATION_DETAILED_STATUS_SUCCESS.to_string()),
+                association_status_aggregated_count: Some(
+                    [(
+                        ASSOCIATION_STATUS_SUCCESS.to_string(),
+                        i32::try_from(run.nodes.len()).unwrap_or(i32::MAX),
+                    )]
+                    .into_iter()
+                    .collect(),
+                ),
+            };
+        }
         let creating = now < self.created_at + ASSOCIATION_CREATION_DELAY;
+        let dispatched = self
+            .last_run
+            .as_ref()
+            .is_some_and(|run| !run.nodes.is_empty());
+        let detailed_status = if creating {
+            Some(ASSOCIATION_DETAILED_STATUS_CREATING.to_string())
+        } else if dispatched {
+            Some(ASSOCIATION_DETAILED_STATUS_IN_PROGRESS.to_string())
+        } else {
+            // Neither being created nor working through a run: there is no further detail
+            // to report, and the aggregated count stays empty because a count of targets by
+            // status is a count over executions and there are none.
+            None
+        };
         AssociationOverview {
             status: Some(ASSOCIATION_STATUS_PENDING.to_string()),
-            detailed_status: creating.then(|| ASSOCIATION_DETAILED_STATUS_CREATING.to_string()),
+            detailed_status,
             association_status_aggregated_count: None,
         }
     }
@@ -416,9 +530,10 @@ impl AssociationRecord {
     ///
     /// Every member is what the create or the update that wrote `version` supplied, the id
     /// and the version number this store minted, or the overview above. A member no call
-    /// set is left unset rather than invented, and the members that describe an execution —
-    /// the last and last successful execution dates, the per-node status and the alarms an
-    /// execution invoked — are unset because nothing has run this association.
+    /// set is left unset rather than invented; the execution dates are those of the run
+    /// that had finished by `now` ([`AssociationRunRecord`]), and the members only a NODE
+    /// reports — the per-node status it sent through `UpdateAssociationStatus` and the
+    /// alarms an execution invoked — are unset, because no node has reported one.
     pub fn to_association_description(
         &self,
         version: &AssociationVersionRecord,
@@ -449,8 +564,12 @@ impl AssociationRecord {
             targets: (!version.targets.is_empty()).then(|| version.targets.clone()),
             schedule_expression: version.schedule_expression.clone(),
             output_location: version.output_location.clone(),
-            last_execution_date: None,
-            last_successful_execution_date: None,
+            last_execution_date: self
+                .finished_run(now)
+                .map(|run| ::aws_smithy_types::DateTime::from(run.finished_at())),
+            last_successful_execution_date: self
+                .finished_run(now)
+                .map(|run| ::aws_smithy_types::DateTime::from(run.finished_at())),
             association_name: version.association_name.clone(),
             max_errors: version.max_errors.clone(),
             max_concurrency: version.max_concurrency.clone(),
@@ -479,7 +598,7 @@ impl AssociationRecord {
     /// `AssociationVersion` is the version in force, and the members a version holds
     /// (`DocumentVersion`, the targets, the schedule, the association name, the schedule
     /// offset, the duration and the target maps) are that version's. `LastExecutionDate` is
-    /// unset because nothing has run this association.
+    /// the instant the run that had finished by `now` finished at.
     pub fn to_association(&self, now: SystemTime) -> Association {
         let version = self.latest();
         Association {
@@ -491,7 +610,9 @@ impl AssociationRecord {
             targets: version
                 .map(|version| version.targets.clone())
                 .filter(|targets| !targets.is_empty()),
-            last_execution_date: None,
+            last_execution_date: self
+                .finished_run(now)
+                .map(|run| ::aws_smithy_types::DateTime::from(run.finished_at())),
             overview: Some(self.overview(now)),
             schedule_expression: version.and_then(|version| version.schedule_expression.clone()),
             association_name: version.and_then(|version| version.association_name.clone()),
@@ -661,6 +782,36 @@ impl ComAmazonawsSsmAmazonssmState {
     /// guard ([`MAX_ASSOCIATIONS_TOTAL`]), measured across EVERY Region.
     pub fn can_hold_another_association(&self) -> bool {
         self.associations.len() < MAX_ASSOCIATIONS_TOTAL
+    }
+
+    /// The managed nodes of `region` that one run of an association is dispatched to: the
+    /// nodes its latest version's targets select, together with the node it names through
+    /// the deprecated `InstanceId` member.
+    ///
+    /// A target is CRITERIA rather than an identity, and matching nodes against one is the
+    /// matcher Run Command already uses ([`super::commands::nodes_matching_target`]), so an
+    /// association and a command select the same nodes for the same target. A target whose
+    /// key names nothing a node is selected by selects none — the create already refused a
+    /// target it could not serve — and a node named through `InstanceId` that is not
+    /// registered is no node to dispatch to either.
+    ///
+    /// Ascending node-id order, without repeats: two targets may select one node, and a run
+    /// reaches each node once.
+    pub fn association_run_nodes(&self, record: &AssociationRecord) -> Vec<String> {
+        let region = record.region.as_str();
+        let mut nodes: BTreeSet<String> = BTreeSet::new();
+        if let Some(instance_id) = record.instance_id.as_deref() {
+            if self.managed_node(region, instance_id).is_some() {
+                nodes.insert(instance_id.to_string());
+            }
+        }
+        for target in record.latest().map(|version| version.targets.as_slice()).unwrap_or_default() {
+            let Ok(selected) = super::commands::nodes_matching_target(self, region, target) else {
+                continue;
+            };
+            nodes.extend(selected.into_iter().map(str::to_string));
+        }
+        nodes.into_iter().collect()
     }
 }
 

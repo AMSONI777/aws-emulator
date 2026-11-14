@@ -248,6 +248,10 @@ pub mod patch_properties;
 /// aggregates it.
 pub mod inventory;
 
+/// Which of the account's Amazon EC2 instances are registered with Systems Manager as
+/// managed nodes, and the node record that registration writes.
+pub mod node_registration;
+
 /// The resource data sync configurations this service holds: the record a create
 /// persists, the configuration rules it is held to, and how a listing, an update and a
 /// delete address one.
@@ -2818,7 +2822,18 @@ pub const PUBLISHED_DOCUMENTS: &[PublishedDocument] = &[
         document_type: "Command",
         content: UPDATE_SSM_AGENT,
     },
+    PublishedDocument {
+        name: inventory::GATHER_SOFTWARE_INVENTORY_DOCUMENT,
+        document_type: DOCUMENT_TYPE_POLICY,
+        content: inventory::GATHER_SOFTWARE_INVENTORY,
+    },
 ];
+
+/// The `DocumentType` of a document that tells the agent on a managed node WHAT TO COLLECT
+/// rather than what to run (from the modelled enum,
+/// `crate::ops::types::DOCUMENT_TYPE_VALUES`): the type of the inventory policy document
+/// Systems Manager publishes ([`inventory::GATHER_SOFTWARE_INVENTORY_DOCUMENT`]).
+pub const DOCUMENT_TYPE_POLICY: &str = "Policy";
 
 /// The published document `name` names, or `None` when the catalogue holds none.
 ///
@@ -3362,11 +3377,13 @@ pub struct ComAmazonawsSsmAmazonssmState {
     /// within one Region, whatever order its nodes registered in — and can resume a page
     /// from the id it stopped at rather than from an offset.
     ///
-    /// Nothing registers a node yet: registration is the SSM Agent's own call, which
-    /// this service's model does not expose — `CreateActivation` mints the activation an
-    /// agent registers WITH, not the node — and the operation that would admit one
-    /// another way (`PutInventory`) is still a scaffold. A describe therefore reports the
-    /// empty set for a fresh emulator — what the store holds — rather than nodes nobody
+    /// No CALL of this service registers a node: registration is the SSM Agent's own call,
+    /// which this service's model does not expose — `CreateActivation` mints the activation
+    /// an agent registers WITH, not the node. What does register one is an Amazon EC2
+    /// instance of this account whose instance profile lets its agent register, which
+    /// [`node_registration::settle_registrations`] materialises here once the clock makes
+    /// that registration due. A describe therefore reports the empty set for an account
+    /// holding no such instance — what the store holds — rather than nodes nobody
     /// registered. An association names the nodes it targets without registering any of
     /// them, so creating one adds no node here either.
     pub managed_nodes: BTreeMap<(String, String), ManagedNodeRecord>,
@@ -4291,6 +4308,15 @@ pub struct ManagedNodeRecord {
     /// (`InstanceInformation$IsLatestVersion`). `None` for a node that has reported no
     /// agent version, rather than a guess either way.
     pub is_latest_version: Option<bool>,
+    /// Whether this node's registration is the one an Amazon EC2 instance of this account
+    /// makes by running with an instance profile that lets its agent register
+    /// ([`node_registration`]).
+    ///
+    /// Such a registration is DERIVED from the instance, so it is also withdrawn with it:
+    /// it is the one kind of node [`node_registration::settle_registrations`] may drop
+    /// when the instance behind it stops being a managed node. A node registered any other
+    /// way — a hybrid activation's — carries `false` and is never dropped by that walk.
+    pub registered_from_instance: bool,
 }
 
 impl ManagedNodeRecord {
@@ -4322,10 +4348,11 @@ impl ManagedNodeRecord {
             "SourceIds" => one(&self.properties.source_id),
             "SourceTypes" => one(&self.properties.source_type),
             // `DocumentName` selects the nodes an association of that SSM document
-            // targets. Associations are a separate resource of this service and no
-            // operation that creates one is implemented yet, so no node in this store
-            // is the target of any document and a filter on it selects nothing — which
-            // is the store's answer, not a refusal.
+            // targets. Which documents a node is associated with is not a fact of the
+            // node record — the associations are a separate store, resolved against the
+            // nodes when a run is dispatched
+            // ([`ComAmazonawsSsmAmazonssmState::association_run_nodes`]) — so a filter on
+            // it selects nothing here, which is the record's answer, not a refusal.
             "DocumentName" => Some(Vec::new()),
             TAG_KEY_FILTER_KEY => Some(self.tags.keys().map(String::as_str).collect()),
             _ => match key.strip_prefix(TAG_FILTER_KEY_PREFIX) {
@@ -4373,6 +4400,9 @@ impl ManagedNodeRecord {
             },
             tags: BTreeMap::new(),
             is_latest_version: None,
+            // Whatever registers the node says how: an instance's own registration sets
+            // this ([`node_registration`]), and every other registration leaves it.
+            registered_from_instance: false,
         }
     }
 
