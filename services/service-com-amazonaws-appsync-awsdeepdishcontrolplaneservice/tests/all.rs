@@ -125,6 +125,8 @@ mod introspection_schema;
 mod list_apis;
 #[path = "all/list_types_sdl_layout.rs"]
 mod list_types_sdl_layout;
+#[path = "all/map_length_refusal_entry_order.rs"]
+mod map_length_refusal_entry_order;
 #[path = "all/merged_api_association_topology.rs"]
 mod merged_api_association_topology;
 #[path = "all/merged_api_disassociation.rs"]

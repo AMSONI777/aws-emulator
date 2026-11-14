@@ -608,20 +608,46 @@ impl<Op: Operation, Eng: Send + Sync + 'static> ErasedOperation for Gated<Op, En
 /// The violations are the framework's own — the same collecting walk the operation's own
 /// sequence runs ([`::service_common::validation`]) — with one thing restored: the
 /// validating walk has only the SIZE of a composite value to report (`<n> entries` for a
-/// map), where AWS's clause quotes the value itself, so a rendering of the submitted map is
-/// put back in its place ([`::service_common::validation::refusing_violations_with_mapped_echoes`],
-/// which states the entries in key order). A value that walk cannot render keeps the
-/// framework's own text, which for every scalar member IS the submitted value.
+/// map), where AWS's clause quotes the value itself, so a rendering of the submitted value
+/// is put back in its place. A value that walk cannot render keeps the framework's own
+/// text, which for every scalar member IS the submitted value.
+///
+/// A MAP is quoted in the order the REQUEST wrote its entries
+/// ([`::service_common::submitted_collections::quoting_submitted_maps`] over
+/// [`::service_common::submitted_collections::in_submitted_order`], which reads the body
+/// this layer still holds): the shared walk reads the BUILT input, where a string map has
+/// arrived unordered, so the only order it can state one in is key order — an order the
+/// request did not carry unless its keys happened to be written that way. Every other
+/// clause takes the walk's own rendering
+/// ([`::service_common::validation::refusing_violations_with_mapped_echoes`]), and so does
+/// a map clause that restating declines (see that module for each guard).
 fn submitted_violations<Op: Operation>(
     protocol: &dyn ServerHttpProtocol,
     req: &RtRequest,
 ) -> Vec<Violation> {
     let (refused, _lists) =
         ::service_common::validation::refusing_violations_with_mapped_echoes::<Op>(protocol, req);
-    refused
+    let (walked, echoes): (Vec<Violation>, Vec<SubmittedEcho>) = refused
         .into_iter()
         .take(::service_common::validation::MAX_VIOLATIONS)
-        .map(|(mut violation, echo)| {
+        .unzip();
+    let stated = ::service_common::submitted_collections::quoting_submitted_maps(
+        walked.clone(),
+        req,
+        ::service_common::submitted_collections::in_submitted_order,
+    );
+    stated
+        .into_iter()
+        .zip(walked)
+        .zip(echoes)
+        .map(|((stated, walked), echo)| {
+            // The map read back from the request stands as that layer rendered it, bounds
+            // included; nothing else is touched there, so a clause it left alone is the
+            // walk's own and still carries the walk's summary of the value.
+            if stated.value != walked.value {
+                return stated;
+            }
+            let mut violation = stated;
             // Only a value the walk RENDERED is put back, and only where the framework
             // recorded one: an absent member has no value to quote, and a value the walk
             // could not render leaves the framework's text alone.

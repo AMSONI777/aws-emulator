@@ -3330,3 +3330,6 @@ mod cloudformation_s3tables_table_bucket_maintenance;
 // comment is only accepted before the first item of a module, and the paragraph itself is
 // stated once in this file's own module documentation at the head.)
 // suite left at the top level of `tests/` fails the build.
+// first item of a crate root, so a `//!` line in this appended tail is `E0753`.)
+// this file and for every service crate's `tests/all.rs`. (An ordinary comment for the
+// reason the lines above it record: `//!` in this tail is `E0753`.)
