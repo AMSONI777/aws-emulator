@@ -227,6 +227,8 @@ mod integration_table_properties;
 mod job_bookmarks;
 #[path = "all/job_capacity_refusal.rs"]
 mod job_capacity_refusal;
+#[path = "all/job_command_defaults.rs"]
+mod job_command_defaults;
 #[path = "all/job_definition_listing.rs"]
 mod job_definition_listing;
 #[path = "all/job_deletion.rs"]

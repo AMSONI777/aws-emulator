@@ -2338,11 +2338,20 @@ impl Pipeline {
     /// `UpdatePipeline` documents "Use a JSON file with the pipeline structure and
     /// UpdatePipeline to provide the full structure of the pipeline. Updating the
     /// pipeline increases the version number of the pipeline by 1" — so the stored
-    /// declaration is REPLACED rather than merged, the version is the previous one
-    /// plus 1 (whatever `version` the caller's declaration carried, which may be a
-    /// stale one read back from `GetPipeline`), and the new declaration is kept
+    /// declaration is REPLACED rather than merged, and the new declaration is kept
     /// beside the earlier versions so a `GetPipeline` naming one of them still reads
     /// it. `created` is untouched and `updated` moves to `now`.
+    ///
+    /// The version advances only when the submitted structure really DIFFERS from the
+    /// stored one ([`declarations_match`]): `PipelineDeclaration$version` is "the
+    /// version number of the pipeline … incremented when a pipeline is updated", so
+    /// what the number counts is changes to the pipeline, not calls. A write that
+    /// submits the structure the pipeline already has — what re-applying a definition
+    /// read back through `GetPipeline` sends — has updated nothing, so it is accepted
+    /// and leaves the stored pipeline, its version and its last-updated instant
+    /// exactly as they were, and a client that compares the number before and after
+    /// learns whether its edit landed. Whatever `version` the submitted declaration
+    /// carried is ignored either way: the number is the service's.
     ///
     /// A stage the replacement structure no longer declares also takes its persisted
     /// `transitions` record with it: a transition belongs to a declared stage, so a
@@ -2361,14 +2370,22 @@ impl Pipeline {
     ) -> PipelineDeclaration {
         let pipeline_type = resolved_pipeline_type(&declaration);
         let execution_mode = resolved_execution_mode(&declaration);
+        let mut declaration = declaration;
+        declaration.pipeline_type = Some(pipeline_type);
+        declaration.execution_mode = Some(execution_mode);
+
+        // Nothing about the pipeline changed, so nothing about it moves — not its
+        // version, not the structure stored under the versions already read, not the
+        // instant it was last updated at.
+        if declarations_match(&self.declaration, &declaration) {
+            return self.declaration.clone();
+        }
+
         // A saturating step keeps `version` inside `PipelineVersion`'s modelled
         // range instead of wrapping; reaching `i32::MAX` updates is not a path a
         // caller can walk, so the saturation is a safety net, not a behaviour.
         let version = self.version.saturating_add(1);
-        let mut declaration = declaration;
         declaration.version = Some(version);
-        declaration.pipeline_type = Some(pipeline_type);
-        declaration.execution_mode = Some(execution_mode);
 
         self.versions.insert(version, declaration.clone());
         // Oldest first: `versions` is keyed by the ascending version number.

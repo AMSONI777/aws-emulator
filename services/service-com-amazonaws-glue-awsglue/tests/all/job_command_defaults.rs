@@ -1,0 +1,344 @@
+// SPDX-License-Identifier: CC0-1.0
+
+//! End-to-end tests for the defaults a Glue job definition is STORED with, including the
+//! ones nested inside the structure the caller sent.
+//!
+//! Every call goes over the wire through the shared [`crate::wire`] harness, so what is
+//! asserted is HTTP behaviour and not a direct call into a handler.
+//!
+//! The rule under test: a write of a job definition stores it with every member the SERVICE
+//! supplies a documented value for filled in — a nested member of a structure the caller
+//! supplied included — while a member the request declared nothing for and the service
+//! documents no value for stays ABSENT. `JobCommand$PythonVersion` ("The Python version
+//! being used to run a Python shell job. Allowed values are 2 or 3") is such a nested
+//! member: a command that named no version is stored with the service's own, written inside
+//! the structure the caller sent, and a command that named one keeps it.
+//!
+//! Each suite is a TABLE whose rows differ along what the rule generalises over: the job
+//! command, the Python version the request named (each value the member's `@pattern`
+//! admits), the write that submitted the definition (`CreateJob` or the `UpdateJob` that
+//! overwrites it), and the capacity form the definition expresses.
+
+use serde_json::{json, Value};
+use service_com_amazonaws_glue_awsglue::state::{
+    DEFAULT_JOB_MODE, DEFAULT_MAX_CONCURRENT_RUNS, DEFAULT_PYTHON_VERSION,
+    DEFAULT_TIMEOUT_MINUTES_THROUGH_GLUE_4,
+};
+use smithy_server_runtime::MultiServiceRouter;
+
+use crate::wire::{emulator, ok};
+
+/// The IAM role every job of these suites runs as.
+const ROLE_ARN: &str = "arn:aws:iam::000000000000:role/service-role/GlueJobRole";
+
+/// The script every command of these suites points at.
+const SCRIPT_LOCATION: &str = "s3://etl-scripts/etl.py";
+
+/// The `Job` `GetJob` reports for `name`.
+async fn get_job(router: &MultiServiceRouter, name: &str) -> Value {
+    let body = ok(router, "GetJob", &json!({ "JobName": name })).await;
+    body.get("Job")
+        .cloned()
+        .unwrap_or_else(|| panic!("GetJob must report a Job, got {body}"))
+}
+
+/// The `Command` that read reports for `name`.
+async fn command_of(router: &MultiServiceRouter, name: &str) -> Value {
+    let job = get_job(router, name).await;
+    job.get("Command")
+        .cloned()
+        .unwrap_or_else(|| panic!("a read of a job must report its Command, got {job}"))
+}
+
+// ---------------------------------------------------------------------------
+// The Python version a stored command carries
+// ---------------------------------------------------------------------------
+
+/// A create whose `Command` named no `PythonVersion` is stored with the service's own
+/// version INSIDE that structure, whichever command the definition runs — and the members
+/// the caller did send are kept beside it.
+///
+/// The rows differ along the job command: the two Spark commands and the Python shell one
+/// (`JobCommand$Name`: "For an Apache Spark ETL job, this must be `glueetl` … for a Python
+/// shell job, it must be `pythonshell` … for an Apache Spark streaming ETL job, this must be
+/// `gluestreaming`").
+#[tokio::test]
+async fn a_command_that_named_no_python_version_is_stored_with_the_services_own() {
+    let router = emulator();
+
+    // The commands whose Python version this member states, from `JobCommand$Name`'s own
+    // list; the Ray command is the row of the suite below, its versions being its
+    // `Runtime`'s to state.
+    for command_name in ["glueetl", "gluestreaming", "pythonshell"] {
+        let job = format!("defaults-{command_name}");
+        ok(
+            &router,
+            "CreateJob",
+            &json!({
+                "Name": job,
+                "Role": ROLE_ARN,
+                "Command": { "Name": command_name, "ScriptLocation": SCRIPT_LOCATION },
+            }),
+        )
+        .await;
+
+        let command = command_of(&router, &job).await;
+        assert_eq!(
+            command.get("PythonVersion").and_then(Value::as_str),
+            Some(DEFAULT_PYTHON_VERSION),
+            "case {command_name}: a command that named no PythonVersion must be stored with \
+             the service's own, expected {DEFAULT_PYTHON_VERSION:?}, got {command}"
+        );
+        assert_eq!(
+            command.get("Name").and_then(Value::as_str),
+            Some(command_name),
+            "case {command_name}: the command name the create sent must round-trip, got {command}"
+        );
+        assert_eq!(
+            command.get("ScriptLocation").and_then(Value::as_str),
+            Some(SCRIPT_LOCATION),
+            "case {command_name}: the script location the create sent must round-trip, got \
+             {command}"
+        );
+    }
+}
+
+/// A create whose `Command` DID name a `PythonVersion` keeps the one it named, whichever
+/// value it is.
+///
+/// The rows are the values `JobCommand$PythonVersion`'s `@pattern ^([2-3]|3[.]9)$` admits —
+/// `2`, `3` and `3.9` — the first and the last of which no recorded create sent.
+#[tokio::test]
+async fn a_command_that_named_a_python_version_keeps_it() {
+    let router = emulator();
+
+    for python_version in ["2", "3", "3.9"] {
+        let job = format!("declared-python-{python_version}");
+        ok(
+            &router,
+            "CreateJob",
+            &json!({
+                "Name": job,
+                "Role": ROLE_ARN,
+                "Command": {
+                    "Name": "pythonshell",
+                    "ScriptLocation": SCRIPT_LOCATION,
+                    "PythonVersion": python_version,
+                },
+            }),
+        )
+        .await;
+
+        let command = command_of(&router, &job).await;
+        assert_eq!(
+            command.get("PythonVersion").and_then(Value::as_str),
+            Some(python_version),
+            "case {python_version}: a command that named a PythonVersion must keep it, got \
+             {command}"
+        );
+    }
+}
+
+/// A Ray job's command is stored with the `Runtime` it named and no Python version filled
+/// in: "In Ray jobs, `Runtime` is used to specify the versions of Ray, Python and additional
+/// libraries available in your environment" (`JobCommand$Runtime`), so that structure's
+/// versions are not this member's to supply.
+#[tokio::test]
+async fn a_ray_command_is_stored_with_its_runtime_and_no_python_version() {
+    let router = emulator();
+    let job = "ray-runtime";
+    ok(
+        &router,
+        "CreateJob",
+        &json!({
+            "Name": job,
+            "Role": ROLE_ARN,
+            "Command": {
+                "Name": "glueray",
+                "ScriptLocation": SCRIPT_LOCATION,
+                "Runtime": "Ray2.4",
+            },
+        }),
+    )
+    .await;
+
+    let command = command_of(&router, job).await;
+    assert_eq!(
+        command.get("PythonVersion"),
+        None,
+        "a Ray command states its versions in its Runtime, so no PythonVersion is filled \
+         in, got {command}"
+    );
+    assert_eq!(
+        command.get("Runtime").and_then(Value::as_str),
+        Some("Ray2.4"),
+        "the runtime the create sent must round-trip, got {command}"
+    );
+}
+
+/// The same rule on the write that OVERWRITES a definition: "the previous job definition is
+/// completely overwritten by this information" (`UpdateJob`), so the command the update
+/// submits is stored with the same service-supplied version a create's is — and an update
+/// that names one keeps it.
+///
+/// The rows differ along the version the submitted command named: none, and each value the
+/// member admits.
+#[tokio::test]
+async fn an_update_stores_its_command_with_the_same_python_version_rule() {
+    let router = emulator();
+    let job = "updated-command";
+    ok(
+        &router,
+        "CreateJob",
+        &json!({
+            "Name": job,
+            "Role": ROLE_ARN,
+            "Command": {
+                "Name": "glueetl",
+                "ScriptLocation": SCRIPT_LOCATION,
+                "PythonVersion": "2",
+            },
+        }),
+    )
+    .await;
+
+    // (case, what the update's command names for the version, the version the stored
+    // definition must then report).
+    let rows: Vec<(&str, Option<&str>, &str)> = vec![
+        ("an update naming no version", None, DEFAULT_PYTHON_VERSION),
+        ("an update naming 2", Some("2"), "2"),
+        ("an update naming 3", Some("3"), "3"),
+        ("an update naming 3.9", Some("3.9"), "3.9"),
+    ];
+    for (case, named, expected) in rows {
+        let mut command = json!({ "Name": "glueetl", "ScriptLocation": SCRIPT_LOCATION });
+        if let Some(named) = named {
+            command["PythonVersion"] = json!(named);
+        }
+        ok(
+            &router,
+            "UpdateJob",
+            &json!({
+                "JobName": job,
+                "JobUpdate": { "Role": ROLE_ARN, "Command": command },
+            }),
+        )
+        .await;
+
+        let stored = command_of(&router, job).await;
+        assert_eq!(
+            stored.get("PythonVersion").and_then(Value::as_str),
+            Some(expected),
+            "case {case:?}: the overwritten definition must report {expected:?}, got {stored}"
+        );
+    }
+}
+
+// ---------------------------------------------------------------------------
+// The whole set of defaults a create applies, and the omissions it leaves
+// ---------------------------------------------------------------------------
+
+/// Every documented default a create applies is reported by the read, and every member the
+/// request declared nothing for — and the service documents no value for — stays ABSENT
+/// rather than becoming an empty value.
+///
+/// The definition sent is the smallest one that expresses a capacity as a worker
+/// configuration, so the derived capacity members are under test beside the nested Python
+/// version: `MaxCapacity` is the DPUs that configuration maps to ("for the `G.1X` worker
+/// type, each worker maps to 1 DPU" — `CreateJob$WorkerType`) and `AllocatedCapacity` is the
+/// same quantity ("this field is deprecated. Use MaxCapacity instead").
+#[tokio::test]
+async fn a_create_reports_every_default_it_applied_and_omits_what_it_was_not_sent() {
+    let router = emulator();
+    let job = "defaults-round-trip";
+    ok(
+        &router,
+        "CreateJob",
+        &json!({
+            "Name": job,
+            "Role": ROLE_ARN,
+            "Command": { "Name": "glueetl", "ScriptLocation": SCRIPT_LOCATION },
+            "GlueVersion": "4.0",
+            "NumberOfWorkers": 2,
+            "WorkerType": "G.1X",
+        }),
+    )
+    .await;
+
+    let stored = get_job(&router, job).await;
+
+    assert_eq!(
+        stored["Command"].get("PythonVersion").and_then(Value::as_str),
+        Some(DEFAULT_PYTHON_VERSION),
+        "the nested Python version must be filled in, got {stored}"
+    );
+    assert_eq!(
+        stored.get("MaxRetries").and_then(Value::as_i64),
+        Some(0),
+        "a definition that named no MaxRetries reports the member's own default of 0, got \
+         {stored}"
+    );
+    assert_eq!(
+        stored.get("Timeout").and_then(Value::as_i64),
+        Some(i64::from(DEFAULT_TIMEOUT_MINUTES_THROUGH_GLUE_4)),
+        "a Glue 4.0 definition that named no Timeout reports the documented default, got \
+         {stored}"
+    );
+    assert_eq!(
+        stored["ExecutionProperty"]
+            .get("MaxConcurrentRuns")
+            .and_then(Value::as_i64),
+        Some(i64::from(DEFAULT_MAX_CONCURRENT_RUNS)),
+        "a definition that named no ExecutionProperty reports the documented concurrency, \
+         got {stored}"
+    );
+    assert_eq!(
+        stored.get("JobMode").and_then(Value::as_str),
+        Some(DEFAULT_JOB_MODE),
+        "a definition that named no JobMode reports the documented default, got {stored}"
+    );
+    assert_eq!(
+        stored.get("JobRunQueuingEnabled").and_then(Value::as_bool),
+        Some(false),
+        "a definition that named no queuing flag reports the applied one, got {stored}"
+    );
+    assert_eq!(
+        stored.get("MaxCapacity").and_then(Value::as_f64),
+        Some(2.0),
+        "two G.1X workers are two DPUs, got {stored}"
+    );
+    assert_eq!(
+        stored.get("AllocatedCapacity").and_then(Value::as_i64),
+        Some(2),
+        "the deprecated capacity member reports the same quantity, got {stored}"
+    );
+    assert_eq!(
+        stored.get("GlueVersion").and_then(Value::as_str),
+        Some("4.0"),
+        "the Glue version the create sent must round-trip as sent, got {stored}"
+    );
+    for instant in ["CreatedOn", "LastModifiedOn"] {
+        assert!(
+            stored.get(instant).is_some(),
+            "case {instant}: a read of a job must report the instant the service set, got \
+             {stored}"
+        );
+    }
+
+    // The members nothing was sent for, and the service documents no value for, stay out of
+    // the stored definition rather than becoming empty values.
+    for absent in [
+        "DefaultArguments",
+        "Description",
+        "Connections",
+        "SecurityConfiguration",
+        "NonOverridableArguments",
+    ] {
+        assert_eq!(
+            stored.get(absent),
+            None,
+            "case {absent}: a member the create declared nothing for must stay absent, got \
+             {stored}"
+        );
+    }
+}

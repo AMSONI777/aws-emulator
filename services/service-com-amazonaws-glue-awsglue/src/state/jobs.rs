@@ -15,6 +15,22 @@ pub const JOB_COMMAND_NAMES: [&str; 4] = ["glueetl", "pythonshell", "gluestreami
 /// missing or null, SCRIPT is assigned as the default value" (`CreateJob$JobMode`).
 pub const DEFAULT_JOB_MODE: &str = "SCRIPT";
 
+/// The `JobCommand$PythonVersion` a stored job definition whose submitted command named
+/// none carries: "The Python version being used to run a Python shell job. Allowed values
+/// are 2 or 3."
+///
+/// RECORDED: a definition that sent a command without a Python version reads back with one
+/// INSIDE the command structure it sent, at the current major version of the language — the
+/// Python 2 of the other allowed value is end-of-life, so a job the service is to run is
+/// given the version it actually runs under.
+pub const DEFAULT_PYTHON_VERSION: &str = "3";
+
+/// The `JobCommand$Name` of a Ray job, the one command whose Python version is not this
+/// member's to state: "In Ray jobs, `Runtime` is used to specify the versions of Ray, Python
+/// and additional libraries available in your environment" (`JobCommand$Runtime`), so such a
+/// command is stored with the runtime it named and no Python version filled in.
+pub const RAY_COMMAND: &str = "glueray";
+
 /// The `GlueVersion` stored for a create that named none, which is the version the service
 /// runs such a job on and reports from every read of it.
 ///
@@ -119,6 +135,26 @@ pub fn admits_flex_execution_class(command: &JobCommand, glue_version: &str) -> 
 
 /// The first Glue major version that takes [`DEFAULT_TIMEOUT_MINUTES_FROM_GLUE_5`].
 pub(super) const FIRST_GLUE_MAJOR_VERSION_WITH_SHORT_DEFAULT_TIMEOUT: u32 = 5;
+
+/// The `JobCommand` a submitted job definition is STORED with: the one submitted, with the
+/// members the SERVICE fills in present on it.
+///
+/// A nested structure is no exception to the defaults a create applies: the Python version a
+/// job runs under is the service's to decide when the command named none
+/// ([`DEFAULT_PYTHON_VERSION`]), so it is written INSIDE the structure the caller supplied
+/// rather than left for a client to guess — and a command that named one keeps it, whichever
+/// of the allowed values it is. The exception is a Ray job, whose versions its `Runtime`
+/// states (see [`RAY_COMMAND`]).
+///
+/// `CreateJob` and `UpdateJob` submit the same structure under the same documentation, so
+/// both store it through here.
+pub(super) fn stored_command(command: &JobCommand) -> JobCommand {
+    let mut stored = command.clone();
+    if stored.python_version.is_none() && command.name.as_deref() != Some(RAY_COMMAND) {
+        stored.python_version = Some(DEFAULT_PYTHON_VERSION.to_string());
+    }
+    stored
+}
 
 /// The capacity, in DPUs, a Spark job whose definition names none runs with: "When you
 /// specify an Apache Spark ETL job (`JobCommand.Name`="glueetl") or Apache Spark
@@ -482,7 +518,7 @@ impl JobEntry {
             execution_property: ExecutionProperty {
                 max_concurrent_runs,
             },
-            command: input.command.clone(),
+            command: stored_command(&input.command),
             default_arguments: input.default_arguments.clone(),
             non_overridable_arguments: input.non_overridable_arguments.clone(),
             connections: input.connections.clone(),
@@ -531,7 +567,7 @@ impl JobEntry {
             .clone()
             .unwrap_or_else(|| self.glue_version.clone());
         let max_concurrent_runs = max_concurrent_runs_of(update.execution_property.as_ref());
-        let command = update.command.clone().unwrap_or_default();
+        let command = stored_command(&update.command.clone().unwrap_or_default());
         let (worker_type, number_of_workers, max_capacity) = capacity_members(
             update.max_capacity,
             update.allocated_capacity,

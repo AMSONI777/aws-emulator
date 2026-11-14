@@ -17,8 +17,9 @@
 //!   the service fills in for a create that named none, which every read reports),
 //!   `Timeout` ("the
 //!   timeout is defaulted to 2,880 minutes for Glue version 4.0 and earlier, or 480
-//!   minutes for Glue version 5.0 and later") and
-//!   `ExecutionProperty$MaxConcurrentRuns` ("The default is 1").
+//!   minutes for Glue version 5.0 and later"),
+//!   `ExecutionProperty$MaxConcurrentRuns` ("The default is 1") and the `PythonVersion`
+//!   nested in the command it sent (`tests/all/job_command_defaults.rs` owns that rule).
 //! * A job name is unique per account ("It must be unique in your account") and is the
 //!   create's idempotency identifier, so a repeat carrying ANOTHER definition is
 //!   `IdempotentParameterMismatchException`; a request contradicting a documented rule is
@@ -38,7 +39,7 @@
 //! and the recorded `glueetl`/`s3://…` case from the issue is one row among them.
 
 use serde_json::{json, Value};
-use service_com_amazonaws_glue_awsglue::state::DEFAULT_GLUE_VERSION;
+use service_com_amazonaws_glue_awsglue::state::{DEFAULT_GLUE_VERSION, DEFAULT_PYTHON_VERSION};
 
 use crate::wire::{call, emulator, error_code, ok};
 /// This emulator's account id, which is also the default `CatalogId`.
@@ -203,6 +204,12 @@ async fn a_created_job_definition_reads_back_with_what_it_was_given_and_the_docu
             if member == "ExecutionProperty" || member == "Timeout" {
                 continue;
             }
+            // `Command` is asserted below too: the service fills a member in INSIDE the
+            // structure the request sent (`tests/all/job_command_defaults.rs`), so what
+            // round-trips is every member the request's own command carried.
+            if member == "Command" {
+                continue;
+            }
             assert_eq!(
                 job.get(&member),
                 Some(&value),
@@ -211,6 +218,34 @@ async fn a_created_job_definition_reads_back_with_what_it_was_given_and_the_docu
                 job.get(&member)
             );
         }
+
+        // Every member the request's `Command` carried round-trips inside the stored one,
+        // which also carries the Python version the service supplies for a command that
+        // named none — except a Ray job's, whose versions its `Runtime` states.
+        let sent_command = row.request["Command"].clone();
+        let stored_command = job
+            .get("Command")
+            .unwrap_or_else(|| panic!("case {:?}: a job reports its Command, got {job}", row.case));
+        for (member, value) in sent_command.as_object().expect("a command is a structure") {
+            assert_eq!(
+                stored_command.get(member),
+                Some(value),
+                "case {:?}: the command's {member} must round-trip, got {stored_command}",
+                row.case
+            );
+        }
+        let expected_python_version = if sent_command["Name"] == json!("glueray") {
+            None
+        } else {
+            Some(DEFAULT_PYTHON_VERSION)
+        };
+        assert_eq!(
+            stored_command.get("PythonVersion").and_then(Value::as_str),
+            expected_python_version,
+            "case {:?}: expected PythonVersion {expected_python_version:?} inside the stored \
+             command, got {stored_command}",
+            row.case
+        );
 
         // The four server-filled members.
         assert_eq!(

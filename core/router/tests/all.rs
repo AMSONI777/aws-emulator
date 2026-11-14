@@ -3843,3 +3843,5 @@ mod cloudformation_provisions_redshift_snapshot_copy_grants;
 // (Another fragment of that header, as an ordinary comment for the same reason: a `//!`
 // line past the first item is `E0753`.) `all/all_rs_declares_each_suite_once.rs` checks
 // this file and every service crate's `tests/all.rs`.
+// doc comment is legal only before the first item of this crate root, so a `//!` line in
+// this tail is `E0753` and compiles no suite of this target.)

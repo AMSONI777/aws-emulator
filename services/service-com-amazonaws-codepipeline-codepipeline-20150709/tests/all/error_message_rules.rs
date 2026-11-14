@@ -114,8 +114,11 @@ async fn a_missing_pipeline_version_names_the_account_the_name_and_the_version()
             .await;
         for update in 0..updates {
             let mut declaration = two_stage_declaration(&name);
+            // A DIFFERENT value on every update, and on the create's own structure, so
+            // each call really changes the pipeline and stores a version of its own
+            // (`tests/all/pipeline_version_changes.rs`).
             declaration["stages"][1]["actions"][0]["configuration"]["ProjectName"] =
-                json!(format!("project-{update}"));
+                json!(format!("project-update-{update}"));
             emulator
                 .ok("UpdatePipeline", &json!({"pipeline": declaration}))
                 .await;

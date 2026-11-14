@@ -5,7 +5,8 @@
 //! Creates a job definition and persists it in [`crate::state`] under its name, which
 //! `CreateJob$Name` documents as unique in the account; a later `GetJob` reads back
 //! what this stored. The members the SERVICE fills (the documented defaults for an
-//! absent `JobMode`, `GlueVersion`, `ExecutionProperty` and `Timeout`, the capacity the
+//! absent `JobMode`, `GlueVersion`, `ExecutionProperty`, `Timeout` and the `PythonVersion`
+//! nested in the submitted `Command`, the capacity the
 //! worker configuration maps to, and the create instant) are filled by
 //! [`crate::state::JobEntry::from_create_input`], so every read reports the same
 //! projection.

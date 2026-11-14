@@ -84,3 +84,62 @@ pub fn reported_declaration(declaration: &PipelineDeclaration) -> PipelineDeclar
     }
     reported
 }
+
+/// Whether two pipeline structures describe the SAME pipeline, member for member.
+///
+/// Both are read through [`reported_declaration`] first, so a structure that states a member
+/// the service resolves and one that leaves it to the service describe the same pipeline:
+/// re-submitting what `GetPipeline` answered — the normal shape of an idempotent re-apply —
+/// states exactly the values this service filled in, and that is no difference from what is
+/// stored. The `version` member is not part of the comparison: it is the SERVICE's own
+/// number, so what a submitted declaration carries for it (a stale one read back, say) says
+/// nothing about whether the structure differs.
+///
+/// The comparison is made on the modelled shape rendered by this service's own JSON codec
+/// rather than member by member: the modelled structures derive no equality, and a
+/// declaration holds `HashMap` members (an action's `configuration`, the `artifactStores`
+/// map) whose iteration order comes from a per-process hash seed, so neither `Debug` nor the
+/// rendered bytes of two equal declarations match, while `serde_json::Value`'s own equality
+/// compares objects member by member whichever map backs them and keeps the order of the
+/// modelled sequences.
+///
+/// A declaration the codec cannot render is not shown to be the stored one, so a write
+/// carrying it is applied as the change it cannot be told apart from.
+pub fn declarations_match(stored: &PipelineDeclaration, submitted: &PipelineDeclaration) -> bool {
+    let mut stored = reported_declaration(stored);
+    let mut submitted = reported_declaration(submitted);
+    stored.version = None;
+    submitted.version = None;
+    match (rendered_declaration(&stored), rendered_declaration(&submitted)) {
+        (Some(stored), Some(submitted)) => stored == submitted,
+        _ => false,
+    }
+}
+
+/// One pipeline structure as the JSON value this service's own codec renders for it, which
+/// is what makes two of them comparable at all (see [`declarations_match`]).
+///
+/// A structure the codec cannot render answers `None`, so the comparison is impossible
+/// rather than false and the caller decides what to do with that.
+fn rendered_declaration(declaration: &PipelineDeclaration) -> Option<::serde_json::Value> {
+    use ::aws_smithy_schema::serde::ShapeSerializer;
+
+    let mut serializer = ::aws_smithy_schema_server::json::JsonShapeSerializer::new();
+    if let Err(error) = serializer.write_struct(&PipelineDeclaration::SCHEMA, declaration) {
+        ::tracing::warn!(
+            %error,
+            "the JSON codec could not render a pipeline structure, so two of them cannot be compared"
+        );
+        return None;
+    }
+    match ::serde_json::from_str::<::serde_json::Value>(&serializer.into_string()) {
+        Ok(parsed) => Some(parsed),
+        Err(error) => {
+            ::tracing::warn!(
+                %error,
+                "the JSON this service renders for a pipeline structure did not parse back"
+            );
+            None
+        }
+    }
+}

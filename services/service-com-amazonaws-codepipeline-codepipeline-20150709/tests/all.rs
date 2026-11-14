@@ -85,6 +85,8 @@ mod pipeline_lifecycle;
 mod pipeline_not_found_wording;
 #[path = "all/pipeline_state.rs"]
 mod pipeline_state;
+#[path = "all/pipeline_version_changes.rs"]
+mod pipeline_version_changes;
 #[path = "all/probe.rs"]
 mod probe;
 #[path = "all/refusal_statements.rs"]

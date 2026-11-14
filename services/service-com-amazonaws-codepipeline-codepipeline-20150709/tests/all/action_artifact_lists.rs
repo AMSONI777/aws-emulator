@@ -302,8 +302,10 @@ async fn every_reported_action_declaration_carries_both_artifact_lists() {
             .await;
         assert_artifact_lists(case, "UpdatePipeline", &updated["pipeline"], &stages);
         assert_eq!(
-            updated["pipeline"]["version"], 2,
-            "case {case:?}: an update stores the next version, got {updated}"
+            updated["pipeline"]["version"], 1,
+            "case {case:?}: the read-back structure is the stored one, so the write changed \
+             nothing and the version stays where it was \
+             (`tests/all/pipeline_version_changes.rs`), got {updated}"
         );
 
         let refetched = emulator.ok("GetPipeline", &json!({"name": name})).await;

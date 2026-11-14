@@ -3,10 +3,13 @@
 //! `UpdatePipeline`, end to end over the wire the service speaks (`awsJson1_1`).
 //!
 //! The rule under test: an accepted `UpdatePipeline` REPLACES the stored
-//! `PipelineDeclaration` with the full structure the caller sent, stores it at the
-//! stored version plus 1 (whatever `version` the sent declaration carried), keeps the
+//! `PipelineDeclaration` with the full structure the caller sent, stores a structure
+//! that DIFFERS from the stored one at the stored version plus 1 (whatever `version`
+//! the sent declaration carried), keeps the
 //! earlier versions readable, leaves the pipeline's identity — its name, ARN and
-//! creation instant — alone, and answers with the declaration as stored.
+//! creation instant — alone, and answers with the declaration as stored. What a write
+//! that submits the structure the pipeline already has does is
+//! `tests/all/pipeline_version_changes.rs`.
 //!
 //! Every case is driven through the router and read back through `GetPipeline`,
 //! `ListPipelines` and the execution plane, so nothing here can pass on an echoed
@@ -135,12 +138,15 @@ async fn an_update_replaces_the_stored_structure_at_the_next_version() {
             "SUPERSEDED",
         ),
         (
-            "the declaration read back from GetPipeline, carrying its stale version",
+            // The declaration read back from GetPipeline, EDITED, and still carrying the
+            // version that read reported: the service owns that member, so the update
+            // neither takes the version from the request nor reads a change out of it.
+            "the declaration read back from GetPipeline, edited, carrying its stale version",
             json!({
                 "name": "demo",
                 "roleArn": ROLE_ARN,
                 "artifactStore": {"type": "S3", "location": "my-bucket"},
-                "stages": [source_stage("Source"), build_stage("Build", 1)],
+                "stages": [source_stage("Source"), build_stage("Build", 2)],
                 // The version the pipeline had when it was read: the service owns
                 // this member, so the update does not take it from the request.
                 "version": 1,
