@@ -41,6 +41,8 @@ mod catalog_identity;
 mod catalog_pagination;
 #[path = "all/cognito_user_pool_default_quotas.rs"]
 mod cognito_user_pool_default_quotas;
+#[path = "all/concurrent_open_request_dedup.rs"]
+mod concurrent_open_request_dedup;
 #[path = "all/context_id_domain.rs"]
 mod context_id_domain;
 #[path = "all/cross_region_settlement.rs"]
