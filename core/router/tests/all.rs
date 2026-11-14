@@ -2732,3 +2732,11 @@ mod iam_session_tag_authorization;
 // (`ses_event_destination_reaches_an_eventbridge_rule_target` is declared ONCE, further up
 // this file: two branches landing at once appended a second declaration of it here, and a
 // module declared twice compiles neither.)
+// branches landing in the same window appended a second declaration of each here, which is a
+// redefinition that compiled neither, so the duplicates are removed and the first
+// declarations stand.)
+// branches landing in the same window appended a second declaration of it here, which is a
+// (`apigatewaymanagementapi_manage_connections_authorization` is declared ONCE, in the span
+// above: two branches landing in the same window appended a second declaration of it here,
+// which is a redefinition that compiled neither, so the duplicate is removed and the first
+// declaration stands.)

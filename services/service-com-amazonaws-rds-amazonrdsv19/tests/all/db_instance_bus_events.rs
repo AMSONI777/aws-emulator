@@ -44,7 +44,10 @@ use tokio::time::sleep;
 use crate::db_instances::{call, expect_ok, subtrees, text, REGION};
 
 /// The canonical account id every generated emulator presents.
-const ACCOUNT: &str = "000000000000";
+///
+/// `pub(crate)` so the sibling suite over the PRECISION of a rule's pattern names the same
+/// account in the ARNs its patterns pin.
+pub(crate) const ACCOUNT: &str = "000000000000";
 
 /// How long the suite waits for a delivery before calling it absent.
 ///
@@ -78,15 +81,15 @@ const TRANSFORMED_QUEUE: &str = "emu-bus-transformed";
 const RESTART_ONLY_QUEUE: &str = "emu-bus-restart-only";
 
 /// The `source` every event Amazon RDS publishes carries.
-const EVENT_SOURCE: &str = "aws.rds";
+pub(crate) const EVENT_SOURCE: &str = "aws.rds";
 
 /// The `detail-type` of a DB INSTANCE event, and of the two sibling source types this suite
 /// also drives a change to.
 ///
 /// Source: Amazon RDS publishes one detail-type per event source type, spelled
 /// `RDS <the source type, in words> Event`.
-const DB_INSTANCE_EVENT: &str = "RDS DB Instance Event";
-const DB_SNAPSHOT_EVENT: &str = "RDS DB Snapshot Event";
+pub(crate) const DB_INSTANCE_EVENT: &str = "RDS DB Instance Event";
+pub(crate) const DB_SNAPSHOT_EVENT: &str = "RDS DB Snapshot Event";
 const DB_CLUSTER_EVENT: &str = "RDS DB Cluster Event";
 
 /// One expected publication: the change, and the envelope it must be published as.
@@ -209,7 +212,7 @@ fn the_restart() -> &'static Published {
 /// A router carrying this service beside the two a published event travels through —
 /// EventBridge (the default bus and its rules) and Amazon SQS (the targets) — all over ONE
 /// shared engine, exactly as the assembled router mounts them.
-fn emulator() -> MultiServiceRouter {
+pub(crate) fn emulator() -> MultiServiceRouter {
     let engine: Arc<engine::InMemoryEngine> = Arc::new(engine::InMemoryEngine::new());
     let mut router = MultiServiceRouter::new();
     // Verifying signatures is the emulator's concern, not this service's; these tests sign
@@ -265,17 +268,17 @@ async fn rpc(
 }
 
 /// An EventBridge call (`awsJson1_1`).
-async fn events(router: &MultiServiceRouter, operation: &str, body: &Value) -> Value {
+pub(crate) async fn events(router: &MultiServiceRouter, operation: &str, body: &Value) -> Value {
     rpc(router, "events", "AWSEvents", "1.1", operation, body).await
 }
 
 /// An Amazon SQS call (`awsJson1_0`).
-async fn sqs(router: &MultiServiceRouter, operation: &str, body: &Value) -> Value {
+pub(crate) async fn sqs(router: &MultiServiceRouter, operation: &str, body: &Value) -> Value {
     rpc(router, "sqs", "AmazonSQS", "1.0", operation, body).await
 }
 
 /// The ARN of the queue named `name` in this account.
-fn queue_arn(name: &str) -> String {
+pub(crate) fn queue_arn(name: &str) -> String {
     format!("arn:aws:sqs:{REGION}:{ACCOUNT}:{name}")
 }
 
@@ -308,7 +311,7 @@ async fn create_queue(router: &MultiServiceRouter, name: &str) -> String {
 }
 
 /// Every message on the queue right now, as the raw body text each carries.
-async fn drain(router: &MultiServiceRouter, queue_url: &str) -> Vec<String> {
+pub(crate) async fn drain(router: &MultiServiceRouter, queue_url: &str) -> Vec<String> {
     let received = sqs(
         router,
         "ReceiveMessage",
@@ -328,7 +331,11 @@ async fn drain(router: &MultiServiceRouter, queue_url: &str) -> Vec<String> {
 ///
 /// A poll loop rather than a wait: the condition is how many messages have arrived, and the
 /// deadline is only there so a missing delivery fails instead of hanging.
-async fn collect(router: &MultiServiceRouter, queue_url: &str, wanted: usize) -> Vec<String> {
+pub(crate) async fn collect(
+    router: &MultiServiceRouter,
+    queue_url: &str,
+    wanted: usize,
+) -> Vec<String> {
     let deadline = Instant::now() + DELIVERY_BUDGET;
     let mut bodies: Vec<String> = Vec::new();
     loop {
@@ -341,7 +348,7 @@ async fn collect(router: &MultiServiceRouter, queue_url: &str, wanted: usize) ->
 }
 
 /// Poll `DescribeDBInstances` until the instance reports `status`.
-async fn wait_for_status(router: &MultiServiceRouter, identifier: &str, status: &str) {
+pub(crate) async fn wait_for_status(router: &MultiServiceRouter, identifier: &str, status: &str) {
     let deadline = Instant::now() + POLL_BUDGET;
     loop {
         let body = expect_ok(

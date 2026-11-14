@@ -85,6 +85,8 @@ mod db_instance_deletion;
 mod db_instance_engine_endpoint;
 #[path = "all/db_instance_envelope.rs"]
 mod db_instance_envelope;
+#[path = "all/db_instance_event_pattern_precision.rs"]
+mod db_instance_event_pattern_precision;
 #[path = "all/db_instance_read_replica_promotion.rs"]
 mod db_instance_read_replica_promotion;
 #[path = "all/db_instance_read_replicas.rs"]
