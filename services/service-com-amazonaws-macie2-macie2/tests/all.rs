@@ -29,5 +29,7 @@ mod macie_session_and_custom_data_identifiers;
 mod member_relationship_status_filter;
 #[path = "all/members.rs"]
 mod members;
+#[path = "all/sample_findings.rs"]
+mod sample_findings;
 #[path = "all/state_roundtrip.rs"]
 mod state_roundtrip;

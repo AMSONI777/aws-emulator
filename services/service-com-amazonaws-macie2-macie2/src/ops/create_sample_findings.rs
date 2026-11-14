@@ -1,15 +1,17 @@
 // SPDX-License-Identifier: CC0-1.0
 
 //! @op CreateSampleFindings
-//! SCAFFOLDED, NOT IMPLEMENTED: this operation answers HTTP 501 `NotImplemented` and
-//! asserts NOTHING about `CreateSampleFindings`'s real behaviour. Implement it here — this is
-//! the ONLY file to touch for this operation.
+//! Implemented: creates one sample finding for each finding type the request
+//! names — or one of every type the service supports when it names none — and
+//! persists them in `crate::state`, where `ListFindings` and `GetFindings` read
+//! them back.
 //!
-//! A 501 from this operation means "nobody has written it yet", never "the emulator is
-//! broken". Replace the `Err(..)` in [`CreateSampleFindings::handle`] with real behaviour and
-//! delete the SCAFFOLDED marker line above; that line is the machine-readable record of
-//! which operations are still stubs (`grep -rl '^//! SCAFFOLDED, NOT IMPLEMENTED:' */src/ops/`),
-//! so leaving it on an implemented operation under-reports progress.
+//! A sample finding is, as `Finding$sample` documents, "a finding that uses
+//! example data to demonstrate what a finding might contain": the example data
+//! is what this operation's templates below carry. Everything about a stored
+//! finding that is NOT example data — its id, the account, the partition, the
+//! region, the category, the severity score, the instants — is computed here
+//! from the request and the store rather than written out per type.
 //!
 //! ## Shape of an operation
 //!
@@ -151,18 +153,728 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         input: Self::Input,
         ctx: &smithy_server_runtime::OperationContext<'_>,
     ) -> Result<Self::Output, Self::Error> {
-        // The engine is reachable from `&self` (constructor-injected); `ctx` carries
-        // request metadata. Both are bound here so an implementer has them in scope.
-        let _ = (&input, ctx, &self.engine);
-        // Implement `CreateSampleFindings` here, then delete the SCAFFOLDED marker at the top of
-        // this file. Return modeled failures as
-        // `Err(CreateSampleFindingsErrorModeled::Variant(..).into())` — the `From` impl above lifts it.
-        //
-        // To refuse a bad request this operation models no error for, return
-        // `Err(crate::scaffolded::Scaffolded::validation("..."))` — a 400
-        // `ValidationException`. Do NOT answer 501 for it: 501 means "not written yet",
-        // not "bad request". Modeled constraints are already refused BEFORE this
-        // handler runs, so reaching here means the input satisfies every one of them.
-        Err(crate::scaffolded::Scaffolded::not_implemented("CreateSampleFindings"))
+        let Some(store) = crate::state::service_state(&*self.engine) else {
+            return Err(CreateSampleFindingsErrorModeled::InternalServerException(
+                InternalServerException {
+                    message: Some("the findings store is unavailable on this engine".to_string()),
+                },
+            )
+            .into());
+        };
+        // A finding belongs to one region: the region the call that created it
+        // addressed, which is also the region the finding reports.
+        let region = crate::state::request_region(ctx);
+        let now = ::std::time::SystemTime::now();
+
+        // `findingTypes` is "an array of finding types, one for each type of
+        // sample finding to create. To create a sample of every type of finding
+        // that Amazon Macie supports, don't include this array in your
+        // request." — so a request naming none samples every type the model
+        // declares, and the array names a SET of types: a type named twice is
+        // one sample finding. Deduplicated through a hash set, so the work is
+        // linear in the request.
+        let named: Vec<String> = match input.finding_types.as_ref() {
+            Some(types) if !types.is_empty() => types.clone(),
+            _ => FINDING_TYPE_VALUES
+                .iter()
+                .map(|finding_type| (*finding_type).to_string())
+                .collect(),
+        };
+        let mut seen: ::std::collections::HashSet<String> = ::std::collections::HashSet::new();
+        let requested: Vec<String> = named
+            .into_iter()
+            .filter(|finding_type| seen.insert(finding_type.clone()))
+            .collect();
+
+        // A value the model does not declare names no finding to sample. Refused
+        // BEFORE the store is touched, so a refused request leaves nothing
+        // behind.
+        if let Some(unknown) = requested
+            .iter()
+            .find(|finding_type| sample_template(finding_type).is_none())
+        {
+            return Err(CreateSampleFindingsErrorModeled::ValidationException(
+                ValidationException {
+                    message: Some(unknown_finding_type_message(unknown)),
+                },
+            )
+            .into());
+        }
+
+        let mut state = store.lock();
+
+        if state.session(&region).is_none() {
+            return Err(CreateSampleFindingsErrorModeled::AccessDeniedException(
+                AccessDeniedException {
+                    message: Some(crate::state::MACIE_NOT_ENABLED_MESSAGE.to_string()),
+                },
+            )
+            .into());
+        }
+
+        // The EMULATOR's own bound on the store, reported through the quota
+        // error this operation models: without it a caller could grow one
+        // process's heap without limit.
+        if state.findings.len().saturating_add(requested.len()) > crate::state::MAX_FINDINGS {
+            return Err(
+                CreateSampleFindingsErrorModeled::ServiceQuotaExceededException(
+                    ServiceQuotaExceededException {
+                        message: Some(format!(
+                            "This emulator holds the maximum of {} findings. Disable Macie for \
+                             the account before creating more sample findings.",
+                            crate::state::MAX_FINDINGS
+                        )),
+                    },
+                )
+                .into(),
+            );
+        }
+
+        for finding_type in &requested {
+            let Some(template) = sample_template(finding_type) else {
+                continue;
+            };
+            let id = crate::state::new_finding_id(state.next_id_seed(), now);
+            let finding = template.sample_finding(&id, &region, now);
+            state.findings.insert(
+                id,
+                crate::state::StoredFinding {
+                    region: region.clone(),
+                    created_at: now,
+                    finding,
+                },
+            );
+        }
+
+        Ok(CreateSampleFindingsOutput {})
+    }
+}
+
+/// How the service refuses a `findingTypes` entry that is not a finding type it
+/// supports. The fixed text is the service's; the only variable part is the
+/// value the request named.
+fn unknown_finding_type_message(finding_type: &str) -> String {
+    format!("The findingTypes array names a value that is not a supported finding type: {finding_type}")
+}
+
+/// The version of the schema a finding's data structures are defined by, which
+/// `Finding$schemaVersion` reports. The findings Amazon Macie publishes are
+/// defined by version 1.0 of that schema.
+const FINDING_SCHEMA_VERSION: &str = "1.0";
+
+/// The `count` a sample finding reports: "the total number of occurrences of the
+/// finding. For sensitive data findings, this value is always 1. All sensitive
+/// data findings are considered unique." — and one sample policy finding is one
+/// occurrence of the API call it reports.
+const SAMPLE_FINDING_OCCURRENCES: i64 = 1;
+
+/// The severity a sample SENSITIVE DATA finding carries, as
+/// `SeverityDescription` words it. Macie assigns the medium severity to the
+/// findings its detection criteria produce by default — the `severityLevels`
+/// member doc that [`crate::state::DEFAULT_SEVERITY`] also comes from.
+const SAMPLE_CLASSIFICATION_SEVERITY: &str = "Medium";
+
+/// The severity a sample POLICY finding carries: a policy finding reports that
+/// the security or privacy of an S3 bucket was reduced, the most severe of the
+/// three levels `SeverityDescription` declares.
+const SAMPLE_POLICY_SEVERITY: &str = "High";
+
+/// The bucket the example data of every sample finding names. `amzn-s3-demo-`
+/// is the prefix AWS's own documentation uses for an example bucket, so this
+/// name cannot be mistaken for a bucket an account really holds.
+const SAMPLE_BUCKET_NAME: &str = "amzn-s3-demo-bucket";
+
+/// The size of the example object, in bytes, which is also the number of bytes
+/// the classification result reports as classified.
+const SAMPLE_OBJECT_SIZE_BYTES: i64 = 1_024;
+
+/// The storage class the example object is stored under: an entry of
+/// [`STORAGE_CLASS_VALUES`], the class an object takes unless something moves
+/// it.
+const SAMPLE_STORAGE_CLASS: &str = "STANDARD";
+
+/// The server-side encryption the example bucket and object carry: an entry of
+/// [`ENCRYPTION_TYPE_VALUES`], the algorithm Amazon S3 applies by default.
+const SAMPLE_ENCRYPTION_TYPE: &str = "AES256";
+
+/// Whether the example bucket's policy allows unencrypted object uploads: an
+/// entry of [`ALLOWS_UNENCRYPTED_OBJECT_UPLOADS_VALUES`].
+const SAMPLE_ALLOWS_UNENCRYPTED_UPLOADS: &str = "FALSE";
+
+/// The `EffectivePermission` the example bucket carries in a finding that does
+/// not report it as publicly accessible: an entry of
+/// [`EFFECTIVE_PERMISSION_VALUES`], documented as "NOT_PUBLIC - The bucket isn't
+/// publicly accessible".
+const NOT_PUBLIC_PERMISSION: &str = "NOT_PUBLIC";
+
+/// The one it carries in a finding that reports it as publicly accessible.
+const PUBLIC_PERMISSION: &str = "PUBLIC";
+
+/// How Macie found the sensitive data a sample finding reports: an entry of
+/// [`ORIGIN_TYPE_VALUES`]. No classification job produced a sample finding, and
+/// `jobArn`/`jobId` are documented as "null if the origin of the finding
+/// (originType) is AUTOMATED_SENSITIVE_DATA_DISCOVERY" — so this is the origin a
+/// finding carrying neither of them reports.
+const SAMPLE_ORIGIN_TYPE: &str = "AUTOMATED_SENSITIVE_DATA_DISCOVERY";
+
+/// The status of a sample sensitive data finding's analysis: "COMPLETE - Amazon
+/// Macie successfully completed its analysis of the S3 object that the finding
+/// applies to."
+const CLASSIFICATION_COMPLETE_CODE: &str = "COMPLETE";
+
+/// The action that produced a policy finding: the only entry of
+/// [`FINDING_ACTION_TYPE_VALUES`].
+const SAMPLE_ACTION_TYPE: &str = "AWS_API_CALL";
+
+/// The service whose API call a sample policy finding reports — Amazon S3, whose
+/// buckets Macie reports policy findings for.
+const S3_API_SERVICE_NAME: &str = "s3.amazonaws.com";
+
+/// The entity that performed the action a sample policy finding reports: an
+/// entry of [`USER_IDENTITY_TYPE_VALUES`], and the member of `UserIdentity` this
+/// finding fills in.
+const SAMPLE_USER_IDENTITY_TYPE: &str = "AWSAccount";
+
+/// What a sample finding reports beside its title and description, which follows
+/// from its category: a sensitive data finding reports the object sensitive data
+/// was detected in, a policy finding the API call that changed the bucket.
+#[derive(Debug, Clone, Copy)]
+enum SampleDetails {
+    /// A sensitive data finding (`CLASSIFICATION`).
+    SensitiveData {
+        /// The key of the example object inside [`SAMPLE_BUCKET_NAME`].
+        object_key: &'static str,
+        /// The media type the classification result reports for it.
+        mime_type: &'static str,
+        /// The categories of sensitive data detected in it — entries of
+        /// [`SENSITIVE_DATA_ITEM_CATEGORY_VALUES`] — each paired with the
+        /// managed data identifier whose detections the finding reports for it.
+        detected: &'static [(&'static str, &'static str)],
+        /// The custom data identifier whose detections the finding reports,
+        /// which only the finding type for a custom identifier carries.
+        custom_detection: Option<&'static str>,
+    },
+    /// A policy finding (`POLICY`).
+    Policy {
+        /// The Amazon S3 API call that produced the finding.
+        api: &'static str,
+        /// Whether the bucket the finding reports on is publicly accessible,
+        /// which is what the finding's type says about it.
+        public: bool,
+    },
+}
+
+/// The example data one sample finding carries beside everything this operation
+/// computes for it.
+///
+/// One entry per `FindingType` the model declares: the catalog is keyed by
+/// [`FINDING_TYPE_VALUES`] and [`sample_template`] is what a request's
+/// `findingTypes` is resolved through, so a type the model declares and this
+/// catalog does not would be refused rather than silently sampled — which the
+/// unit test below is there to prevent.
+#[derive(Debug, Clone, Copy)]
+struct SampleTemplate {
+    /// The modelled `FindingType` this sample finding demonstrates.
+    finding_type: &'static str,
+    /// `Finding$title` — "the brief description of the finding".
+    title: &'static str,
+    /// `Finding$description` — "the description of the finding".
+    description: &'static str,
+    /// What else it reports.
+    details: SampleDetails,
+}
+
+/// The sample finding of each finding type the model declares.
+static SAMPLE_TEMPLATES: &[SampleTemplate] = &[
+    SampleTemplate {
+        finding_type: "SensitiveData:S3Object/Multiple",
+        title: "The S3 object contains multiple categories of sensitive data",
+        description: "The object contains data that matches more than one category of \
+                      sensitive data.",
+        details: SampleDetails::SensitiveData {
+            object_key: "sample-data/customer-records.csv",
+            mime_type: "text/csv",
+            detected: &[
+                ("FINANCIAL_INFORMATION", "CREDIT_CARD_NUMBER"),
+                ("PERSONAL_INFORMATION", "USA_SOCIAL_SECURITY_NUMBER"),
+            ],
+            custom_detection: None,
+        },
+    },
+    SampleTemplate {
+        finding_type: "SensitiveData:S3Object/Financial",
+        title: "The S3 object contains financial information",
+        description: "The object contains financial data, such as credit card numbers.",
+        details: SampleDetails::SensitiveData {
+            object_key: "sample-data/transactions.csv",
+            mime_type: "text/csv",
+            detected: &[("FINANCIAL_INFORMATION", "CREDIT_CARD_NUMBER")],
+            custom_detection: None,
+        },
+    },
+    SampleTemplate {
+        finding_type: "SensitiveData:S3Object/Personal",
+        title: "The S3 object contains personal information",
+        description: "The object contains personal information, such as government \
+                      identification numbers.",
+        details: SampleDetails::SensitiveData {
+            object_key: "sample-data/employee-records.csv",
+            mime_type: "text/csv",
+            detected: &[("PERSONAL_INFORMATION", "USA_SOCIAL_SECURITY_NUMBER")],
+            custom_detection: None,
+        },
+    },
+    SampleTemplate {
+        finding_type: "SensitiveData:S3Object/Credentials",
+        title: "The S3 object contains credentials",
+        description: "The object contains credentials, such as private keys or secret \
+                      access keys.",
+        details: SampleDetails::SensitiveData {
+            object_key: "sample-data/connection-settings.json",
+            mime_type: "application/json",
+            detected: &[("CREDENTIALS", "AWS_CREDENTIALS")],
+            custom_detection: None,
+        },
+    },
+    SampleTemplate {
+        finding_type: "SensitiveData:S3Object/CustomIdentifier",
+        title: "The S3 object contains data that matches a custom data identifier",
+        description: "The object contains text that matches the detection criteria of a \
+                      custom data identifier.",
+        details: SampleDetails::SensitiveData {
+            object_key: "sample-data/support-tickets.txt",
+            mime_type: "text/plain",
+            detected: &[],
+            custom_detection: Some("sample-custom-data-identifier"),
+        },
+    },
+    SampleTemplate {
+        finding_type: "Policy:IAMUser/S3BucketPublic",
+        title: "The S3 bucket is publicly accessible",
+        description: "The bucket's permissions settings were changed to allow anyone to \
+                      access the bucket.",
+        details: SampleDetails::Policy {
+            api: "PutBucketAcl",
+            public: true,
+        },
+    },
+    SampleTemplate {
+        finding_type: "Policy:IAMUser/S3BlockPublicAccessDisabled",
+        title: "Block Public Access settings were disabled for the S3 bucket",
+        description: "All the Amazon S3 block public access settings were disabled for \
+                      the bucket.",
+        details: SampleDetails::Policy {
+            api: "PutBucketPublicAccessBlock",
+            public: true,
+        },
+    },
+    SampleTemplate {
+        finding_type: "Policy:IAMUser/S3BucketSharedExternally",
+        title: "The S3 bucket is shared with an external account",
+        description: "The bucket's policy allows an account outside the organization to \
+                      access the bucket.",
+        details: SampleDetails::Policy {
+            api: "PutBucketPolicy",
+            public: false,
+        },
+    },
+    SampleTemplate {
+        finding_type: "Policy:IAMUser/S3BucketSharedWithCloudFront",
+        title: "The S3 bucket is shared with an Amazon CloudFront distribution",
+        description: "The bucket's policy allows a CloudFront origin access identity to \
+                      access the bucket.",
+        details: SampleDetails::Policy {
+            api: "PutBucketPolicy",
+            public: false,
+        },
+    },
+    SampleTemplate {
+        finding_type: "Policy:IAMUser/S3BucketReplicatedExternally",
+        title: "The S3 bucket replicates objects to an external account",
+        description: "The bucket's replication configuration replicates objects to an \
+                      account outside the organization.",
+        details: SampleDetails::Policy {
+            api: "PutBucketReplication",
+            public: false,
+        },
+    },
+    SampleTemplate {
+        finding_type: "Policy:IAMUser/S3BucketEncryptionDisabled",
+        title: "Default encryption was disabled for the S3 bucket",
+        description: "The bucket's default server-side encryption settings were \
+                      disabled.",
+        details: SampleDetails::Policy {
+            api: "DeleteBucketEncryption",
+            public: false,
+        },
+    },
+];
+
+/// The sample finding template of `finding_type`, or `None` when that is not a
+/// finding type this service samples.
+fn sample_template(finding_type: &str) -> Option<&'static SampleTemplate> {
+    SAMPLE_TEMPLATES
+        .iter()
+        .find(|template| template.finding_type == finding_type)
+}
+
+impl SampleTemplate {
+    /// The severity this sample finding carries, as `SeverityDescription` words
+    /// it: the one the category of the finding takes.
+    fn severity_description(&self) -> &'static str {
+        match self.details {
+            SampleDetails::SensitiveData { .. } => SAMPLE_CLASSIFICATION_SEVERITY,
+            SampleDetails::Policy { .. } => SAMPLE_POLICY_SEVERITY,
+        }
+    }
+
+    /// The `EffectivePermission` the bucket this finding applies to carries.
+    fn effective_permission(&self) -> &'static str {
+        match self.details {
+            SampleDetails::Policy { public: true, .. } => PUBLIC_PERMISSION,
+            SampleDetails::Policy { public: false, .. } | SampleDetails::SensitiveData { .. } => {
+                NOT_PUBLIC_PERMISSION
+            }
+        }
+    }
+
+    /// The finding this template demonstrates, as a read reports it: every
+    /// member of the modelled `Finding` that applies to its category.
+    fn sample_finding(&self, id: &str, region: &str, now: ::std::time::SystemTime) -> Finding {
+        let account = ::engine::emulator_account_id().to_string();
+        let severity = self.severity_description();
+        Finding {
+            account_id: Some(account.clone()),
+            // Nothing has suppressed a finding the moment it is created.
+            archived: Some(false),
+            // The category follows from the type, not from this catalog.
+            category: crate::state::finding_category(self.finding_type).map(str::to_string),
+            classification_details: self.classification_details(),
+            count: Some(SAMPLE_FINDING_OCCURRENCES),
+            created_at: Some(crate::state::to_date_time(now)),
+            description: Some(self.description.to_string()),
+            id: Some(id.to_string()),
+            partition: Some(crate::state::emulator_partition()),
+            policy_details: self.policy_details(&account, now),
+            region: Some(region.to_string()),
+            resources_affected: Some(ResourcesAffected {
+                s3_bucket: Some(self.affected_bucket()),
+                s3_object: self.affected_object(),
+            }),
+            sample: Some(true),
+            schema_version: Some(FINDING_SCHEMA_VERSION.to_string()),
+            severity: Some(Severity {
+                description: Some(severity.to_string()),
+                score: crate::state::severity_score(severity),
+            }),
+            title: Some(self.title.to_string()),
+            r#type: Some(self.finding_type.to_string()),
+            // "For sensitive data findings, this value is the same as the value
+            // for the createdAt property", and nothing has updated a finding
+            // the moment it is created.
+            updated_at: Some(crate::state::to_date_time(now)),
+        }
+    }
+
+    /// The example bucket the finding applies to. Every sample finding applies
+    /// to a bucket: a policy finding reports a change to the bucket itself, and
+    /// a sensitive data finding reports an object inside it.
+    ///
+    /// `createdAt` is deliberately absent: the bucket a sample finding names is
+    /// example data rather than a bucket an account holds, so there is no
+    /// instant at which it was created.
+    fn affected_bucket(&self) -> S3Bucket {
+        S3Bucket {
+            allows_unencrypted_object_uploads: Some(
+                SAMPLE_ALLOWS_UNENCRYPTED_UPLOADS.to_string(),
+            ),
+            arn: Some(crate::state::s3_bucket_arn(SAMPLE_BUCKET_NAME)),
+            created_at: None,
+            default_server_side_encryption: Some(ServerSideEncryption {
+                encryption_type: Some(SAMPLE_ENCRYPTION_TYPE.to_string()),
+                kms_master_key_id: None,
+            }),
+            name: Some(SAMPLE_BUCKET_NAME.to_string()),
+            owner: Some(S3BucketOwner {
+                display_name: Some(::engine::emulator_account_id().to_string()),
+                id: None,
+            }),
+            public_access: Some(BucketPublicAccess {
+                effective_permission: Some(self.effective_permission().to_string()),
+                permission_configuration: None,
+            }),
+            tags: None,
+        }
+    }
+
+    /// The example object the finding applies to, which only a sensitive data
+    /// finding has: a policy finding applies to the bucket itself.
+    ///
+    /// `lastModified` is absent for the same reason the bucket's `createdAt` is,
+    /// and `eTag` because an entity tag is a digest of content that no object
+    /// holds here.
+    fn affected_object(&self) -> Option<S3Object> {
+        let SampleDetails::SensitiveData { object_key, .. } = self.details else {
+            return None;
+        };
+        Some(S3Object {
+            bucket_arn: Some(crate::state::s3_bucket_arn(SAMPLE_BUCKET_NAME)),
+            e_tag: None,
+            extension: object_key
+                .rsplit_once('.')
+                .map(|(_, extension)| extension.to_string()),
+            key: Some(object_key.to_string()),
+            last_modified: None,
+            path: Some(format!("{SAMPLE_BUCKET_NAME}/{object_key}")),
+            public_access: Some(false),
+            server_side_encryption: Some(ServerSideEncryption {
+                encryption_type: Some(SAMPLE_ENCRYPTION_TYPE.to_string()),
+                kms_master_key_id: None,
+            }),
+            size: Some(SAMPLE_OBJECT_SIZE_BYTES),
+            storage_class: Some(SAMPLE_STORAGE_CLASS.to_string()),
+            tags: None,
+            version_id: None,
+        })
+    }
+
+    /// The sensitive data details, which `Finding$classificationDetails`
+    /// documents as "null for a policy finding".
+    fn classification_details(&self) -> Option<ClassificationDetails> {
+        let SampleDetails::SensitiveData {
+            mime_type,
+            detected,
+            custom_detection,
+            ..
+        } = self.details
+        else {
+            return None;
+        };
+        let sensitive_data: Vec<SensitiveDataItem> = detected
+            .iter()
+            .map(|(category, detection)| SensitiveDataItem {
+                category: Some((*category).to_string()),
+                detections: Some(vec![DefaultDetection {
+                    count: Some(SAMPLE_FINDING_OCCURRENCES),
+                    occurrences: None,
+                    r#type: Some((*detection).to_string()),
+                }]),
+                total_count: Some(SAMPLE_FINDING_OCCURRENCES),
+            })
+            .collect();
+        Some(ClassificationDetails {
+            detailed_results_location: None,
+            job_arn: None,
+            job_id: None,
+            origin_type: Some(SAMPLE_ORIGIN_TYPE.to_string()),
+            result: Some(ClassificationResult {
+                additional_occurrences: Some(false),
+                custom_data_identifiers: custom_detection.map(|name| CustomDataIdentifiers {
+                    detections: Some(vec![CustomDetection {
+                        arn: None,
+                        count: Some(SAMPLE_FINDING_OCCURRENCES),
+                        name: Some(name.to_string()),
+                        occurrences: None,
+                    }]),
+                    total_count: Some(SAMPLE_FINDING_OCCURRENCES),
+                }),
+                mime_type: Some(mime_type.to_string()),
+                sensitive_data: (!sensitive_data.is_empty()).then_some(sensitive_data),
+                size_classified: Some(SAMPLE_OBJECT_SIZE_BYTES),
+                status: Some(ClassificationResultStatus {
+                    code: Some(CLASSIFICATION_COMPLETE_CODE.to_string()),
+                    // "This value is null if the status (code) of the finding
+                    // is COMPLETE."
+                    reason: None,
+                }),
+            }),
+        })
+    }
+
+    /// The policy details, which `Finding$policyDetails` documents as "null for
+    /// a sensitive data finding". The API call that produced the finding was
+    /// seen when the finding was created, so both instants are that one.
+    fn policy_details(&self, account: &str, now: ::std::time::SystemTime) -> Option<PolicyDetails> {
+        let SampleDetails::Policy { api, .. } = self.details else {
+            return None;
+        };
+        Some(PolicyDetails {
+            action: Some(FindingAction {
+                action_type: Some(SAMPLE_ACTION_TYPE.to_string()),
+                api_call_details: Some(ApiCallDetails {
+                    api: Some(api.to_string()),
+                    api_service_name: Some(S3_API_SERVICE_NAME.to_string()),
+                    first_seen: Some(crate::state::to_date_time(now)),
+                    last_seen: Some(crate::state::to_date_time(now)),
+                }),
+            }),
+            actor: Some(FindingActor {
+                domain_details: None,
+                ip_address_details: None,
+                user_identity: Some(UserIdentity {
+                    assumed_role: None,
+                    aws_account: Some(AwsAccount {
+                        account_id: Some(account.to_string()),
+                        principal_id: None,
+                    }),
+                    aws_service: None,
+                    federated_user: None,
+                    iam_user: None,
+                    root: None,
+                    r#type: Some(SAMPLE_USER_IDENTITY_TYPE.to_string()),
+                }),
+            }),
+        })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{
+        sample_template, SampleDetails, SAMPLE_ACTION_TYPE, SAMPLE_ALLOWS_UNENCRYPTED_UPLOADS,
+        SAMPLE_CLASSIFICATION_SEVERITY, SAMPLE_ENCRYPTION_TYPE, SAMPLE_ORIGIN_TYPE,
+        SAMPLE_POLICY_SEVERITY, SAMPLE_STORAGE_CLASS, SAMPLE_TEMPLATES, SAMPLE_USER_IDENTITY_TYPE,
+    };
+    use crate::ops::types::{
+        ALLOWS_UNENCRYPTED_OBJECT_UPLOADS_VALUES, ENCRYPTION_TYPE_VALUES, FINDING_ACTION_TYPE_VALUES,
+        FINDING_TYPE_VALUES, ORIGIN_TYPE_VALUES, SENSITIVE_DATA_ITEM_CATEGORY_VALUES,
+        SEVERITY_DESCRIPTION_VALUES, STORAGE_CLASS_VALUES, USER_IDENTITY_TYPE_VALUES,
+    };
+
+    /// Every finding type the model declares is sampled, exactly once, and
+    /// nothing else is: a request naming any modelled type must be served, and
+    /// the catalog cannot drift from the model.
+    #[test]
+    fn every_modelled_finding_type_is_sampled_once() {
+        for finding_type in FINDING_TYPE_VALUES {
+            assert!(
+                sample_template(finding_type).is_some(),
+                "case {finding_type:?}: every modelled FindingType must have a sample"
+            );
+        }
+        assert_eq!(
+            SAMPLE_TEMPLATES.len(),
+            FINDING_TYPE_VALUES.len(),
+            "the catalog must carry one template per modelled FindingType, got {}",
+            SAMPLE_TEMPLATES.len()
+        );
+        assert!(
+            sample_template("SensitiveData:S3Object/NotAType").is_none(),
+            "a value the model does not declare is not sampled"
+        );
+    }
+
+    /// What each template reports agrees with the category its type puts it in,
+    /// and every enum value it carries is one the model declares.
+    #[test]
+    fn every_template_agrees_with_its_category_and_the_model() {
+        for template in SAMPLE_TEMPLATES {
+            let case = template.finding_type;
+            let category = crate::state::finding_category(case);
+            match template.details {
+                SampleDetails::SensitiveData {
+                    detected,
+                    custom_detection,
+                    object_key,
+                    ..
+                } => {
+                    assert_eq!(
+                        category,
+                        Some(crate::state::CLASSIFICATION_CATEGORY),
+                        "case {case:?}: sensitive data details belong to a classification finding"
+                    );
+                    assert!(
+                        !detected.is_empty() || custom_detection.is_some(),
+                        "case {case:?}: a sensitive data finding must report what was detected"
+                    );
+                    for (detected_category, _) in detected {
+                        assert!(
+                            SENSITIVE_DATA_ITEM_CATEGORY_VALUES.contains(detected_category),
+                            "case {case:?}: {detected_category:?} must be a modelled \
+                             SensitiveDataItemCategory"
+                        );
+                    }
+                    assert!(
+                        object_key.contains('.'),
+                        "case {case:?}: the example object must carry an extension, got \
+                         {object_key:?}"
+                    );
+                }
+                SampleDetails::Policy { api, .. } => {
+                    assert_eq!(
+                        category,
+                        Some(crate::state::POLICY_CATEGORY),
+                        "case {case:?}: policy details belong to a policy finding"
+                    );
+                    assert!(
+                        !api.is_empty(),
+                        "case {case:?}: a policy finding must name the API call that produced it"
+                    );
+                }
+            }
+            assert!(
+                !template.title.is_empty() && !template.description.is_empty(),
+                "case {case:?}: a sample finding carries a title and a description"
+            );
+            let severity = template.severity_description();
+            assert!(
+                SEVERITY_DESCRIPTION_VALUES.contains(&severity),
+                "case {case:?}: {severity:?} must be a modelled SeverityDescription"
+            );
+            assert!(
+                crate::state::severity_score(severity).is_some(),
+                "case {case:?}: {severity:?} must carry the score of its rank"
+            );
+        }
+    }
+
+    /// Every enum value the sample data is built from is one the model declares,
+    /// and the severity a sensitive data sample finding carries is the one the
+    /// service's own default severity names.
+    #[test]
+    fn every_sample_constant_is_a_modelled_value() {
+        assert!(
+            SEVERITY_DESCRIPTION_VALUES.contains(&SAMPLE_CLASSIFICATION_SEVERITY)
+                && SEVERITY_DESCRIPTION_VALUES.contains(&SAMPLE_POLICY_SEVERITY),
+            "both sample severities must be modelled SeverityDescription values"
+        );
+        assert_eq!(
+            SAMPLE_CLASSIFICATION_SEVERITY.to_uppercase(),
+            crate::state::DEFAULT_SEVERITY,
+            "a sample sensitive data finding carries the severity Macie assigns by default"
+        );
+        for (case, value, values) in [
+            (
+                "storage class",
+                SAMPLE_STORAGE_CLASS,
+                STORAGE_CLASS_VALUES,
+            ),
+            (
+                "encryption type",
+                SAMPLE_ENCRYPTION_TYPE,
+                ENCRYPTION_TYPE_VALUES,
+            ),
+            (
+                "unencrypted uploads",
+                SAMPLE_ALLOWS_UNENCRYPTED_UPLOADS,
+                ALLOWS_UNENCRYPTED_OBJECT_UPLOADS_VALUES,
+            ),
+            ("origin type", SAMPLE_ORIGIN_TYPE, ORIGIN_TYPE_VALUES),
+            (
+                "action type",
+                SAMPLE_ACTION_TYPE,
+                FINDING_ACTION_TYPE_VALUES,
+            ),
+            (
+                "user identity type",
+                SAMPLE_USER_IDENTITY_TYPE,
+                USER_IDENTITY_TYPE_VALUES,
+            ),
+        ] {
+            assert!(
+                values.contains(&value),
+                "case {case:?}: {value:?} must be one of {values:?}"
+            );
+        }
     }
 }

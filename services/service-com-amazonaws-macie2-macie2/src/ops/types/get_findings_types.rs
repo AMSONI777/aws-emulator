@@ -24,7 +24,13 @@ pub struct GetFindingsOutput {
     pub findings: Option<Vec<Finding>>,
 }
 
-#[smithy_macros::smithy(shape = "com.amazonaws.macie2#Finding")]
+// `Finding`'s schema and codec are written out by hand rather than derived with
+// `#[smithy_macros::smithy(shape = ...)]`, because `createdAt` and `updatedAt`
+// target `__timestampIso8601` and the derive drops that shape's
+// `@timestampFormat("date-time")`. See `super::date_time_wire` for the whole
+// reason and for when to delete this block; everything else below mirrors the
+// derive exactly, including the `SCHEMA` associated constant that the derived
+// `GetFindingsOutput` writes each element of `findings` against.
 #[derive(Debug, Clone, Default)]
 pub struct Finding {
     pub account_id: Option<String>,
@@ -45,6 +51,258 @@ pub struct Finding {
     pub title: Option<String>,
     pub r#type: Option<String>,
     pub updated_at: Option<::aws_smithy_types::DateTime>,
+}
+
+impl Finding {
+    pub const M_ACCOUNT_ID: ::aws_smithy_schema::Schema = super::date_time_wire::member(
+        "com.amazonaws.macie2#Finding$accountId",
+        "accountId",
+        ::aws_smithy_schema::ShapeType::String,
+        0,
+    );
+    pub const M_ARCHIVED: ::aws_smithy_schema::Schema = super::date_time_wire::member(
+        "com.amazonaws.macie2#Finding$archived",
+        "archived",
+        ::aws_smithy_schema::ShapeType::Boolean,
+        1,
+    );
+    pub const M_CATEGORY: ::aws_smithy_schema::Schema = super::date_time_wire::member(
+        "com.amazonaws.macie2#Finding$category",
+        "category",
+        ::aws_smithy_schema::ShapeType::String,
+        2,
+    );
+    pub const M_CLASSIFICATION_DETAILS: ::aws_smithy_schema::Schema =
+        super::date_time_wire::member(
+            "com.amazonaws.macie2#Finding$classificationDetails",
+            "classificationDetails",
+            ::aws_smithy_schema::ShapeType::Structure,
+            3,
+        );
+    pub const M_COUNT: ::aws_smithy_schema::Schema = super::date_time_wire::member(
+        "com.amazonaws.macie2#Finding$count",
+        "count",
+        ::aws_smithy_schema::ShapeType::Long,
+        4,
+    );
+    /// `@timestampFormat("date-time")`, from the `__timestampIso8601` shape it
+    /// targets. THE reason this schema is hand-written.
+    pub const M_CREATED_AT: ::aws_smithy_schema::Schema = super::date_time_wire::date_time_member(
+        "com.amazonaws.macie2#Finding$createdAt",
+        "createdAt",
+        5,
+    );
+    pub const M_DESCRIPTION: ::aws_smithy_schema::Schema = super::date_time_wire::member(
+        "com.amazonaws.macie2#Finding$description",
+        "description",
+        ::aws_smithy_schema::ShapeType::String,
+        6,
+    );
+    pub const M_ID: ::aws_smithy_schema::Schema = super::date_time_wire::member(
+        "com.amazonaws.macie2#Finding$id",
+        "id",
+        ::aws_smithy_schema::ShapeType::String,
+        7,
+    );
+    pub const M_PARTITION: ::aws_smithy_schema::Schema = super::date_time_wire::member(
+        "com.amazonaws.macie2#Finding$partition",
+        "partition",
+        ::aws_smithy_schema::ShapeType::String,
+        8,
+    );
+    pub const M_POLICY_DETAILS: ::aws_smithy_schema::Schema = super::date_time_wire::member(
+        "com.amazonaws.macie2#Finding$policyDetails",
+        "policyDetails",
+        ::aws_smithy_schema::ShapeType::Structure,
+        9,
+    );
+    pub const M_REGION: ::aws_smithy_schema::Schema = super::date_time_wire::member(
+        "com.amazonaws.macie2#Finding$region",
+        "region",
+        ::aws_smithy_schema::ShapeType::String,
+        10,
+    );
+    pub const M_RESOURCES_AFFECTED: ::aws_smithy_schema::Schema = super::date_time_wire::member(
+        "com.amazonaws.macie2#Finding$resourcesAffected",
+        "resourcesAffected",
+        ::aws_smithy_schema::ShapeType::Structure,
+        11,
+    );
+    pub const M_SAMPLE: ::aws_smithy_schema::Schema = super::date_time_wire::member(
+        "com.amazonaws.macie2#Finding$sample",
+        "sample",
+        ::aws_smithy_schema::ShapeType::Boolean,
+        12,
+    );
+    pub const M_SCHEMA_VERSION: ::aws_smithy_schema::Schema = super::date_time_wire::member(
+        "com.amazonaws.macie2#Finding$schemaVersion",
+        "schemaVersion",
+        ::aws_smithy_schema::ShapeType::String,
+        13,
+    );
+    pub const M_SEVERITY: ::aws_smithy_schema::Schema = super::date_time_wire::member(
+        "com.amazonaws.macie2#Finding$severity",
+        "severity",
+        ::aws_smithy_schema::ShapeType::Structure,
+        14,
+    );
+    pub const M_TITLE: ::aws_smithy_schema::Schema = super::date_time_wire::member(
+        "com.amazonaws.macie2#Finding$title",
+        "title",
+        ::aws_smithy_schema::ShapeType::String,
+        15,
+    );
+    pub const M_TYPE: ::aws_smithy_schema::Schema = super::date_time_wire::member(
+        "com.amazonaws.macie2#Finding$type",
+        "type",
+        ::aws_smithy_schema::ShapeType::String,
+        16,
+    );
+    /// `@timestampFormat("date-time")`, like [`Self::M_CREATED_AT`].
+    pub const M_UPDATED_AT: ::aws_smithy_schema::Schema = super::date_time_wire::date_time_member(
+        "com.amazonaws.macie2#Finding$updatedAt",
+        "updatedAt",
+        17,
+    );
+
+    pub const SCHEMA: ::aws_smithy_schema::Schema = ::aws_smithy_schema::Schema::new_struct(
+        ::aws_smithy_schema::ShapeId::from_static(
+            "com.amazonaws.macie2#Finding",
+            "com.amazonaws.macie2",
+            "Finding",
+        ),
+        ::aws_smithy_schema::ShapeType::Structure,
+        &[
+            &Self::M_ACCOUNT_ID,
+            &Self::M_ARCHIVED,
+            &Self::M_CATEGORY,
+            &Self::M_CLASSIFICATION_DETAILS,
+            &Self::M_COUNT,
+            &Self::M_CREATED_AT,
+            &Self::M_DESCRIPTION,
+            &Self::M_ID,
+            &Self::M_PARTITION,
+            &Self::M_POLICY_DETAILS,
+            &Self::M_REGION,
+            &Self::M_RESOURCES_AFFECTED,
+            &Self::M_SAMPLE,
+            &Self::M_SCHEMA_VERSION,
+            &Self::M_SEVERITY,
+            &Self::M_TITLE,
+            &Self::M_TYPE,
+            &Self::M_UPDATED_AT,
+        ],
+    );
+}
+
+pub static FINDING_SCHEMA: &::aws_smithy_schema::Schema = &Finding::SCHEMA;
+
+impl ::aws_smithy_schema::serde::SerializableStruct for Finding {
+    fn serialize_members(
+        &self,
+        s: &mut dyn ::aws_smithy_schema::serde::ShapeSerializer,
+    ) -> ::std::result::Result<(), ::aws_smithy_schema::serde::SerdeError> {
+        if let Some(value) = self.account_id.as_ref() {
+            s.write_string(&Self::M_ACCOUNT_ID, value.as_str())?;
+        }
+        if let Some(value) = self.archived.as_ref() {
+            s.write_boolean(&Self::M_ARCHIVED, *value)?;
+        }
+        if let Some(value) = self.category.as_ref() {
+            s.write_string(&Self::M_CATEGORY, value.as_str())?;
+        }
+        if let Some(value) = self.classification_details.as_ref() {
+            s.write_struct(&Self::M_CLASSIFICATION_DETAILS, value)?;
+        }
+        if let Some(value) = self.count.as_ref() {
+            s.write_long(&Self::M_COUNT, *value)?;
+        }
+        if let Some(value) = self.created_at.as_ref() {
+            s.write_timestamp(&Self::M_CREATED_AT, value)?;
+        }
+        if let Some(value) = self.description.as_ref() {
+            s.write_string(&Self::M_DESCRIPTION, value.as_str())?;
+        }
+        if let Some(value) = self.id.as_ref() {
+            s.write_string(&Self::M_ID, value.as_str())?;
+        }
+        if let Some(value) = self.partition.as_ref() {
+            s.write_string(&Self::M_PARTITION, value.as_str())?;
+        }
+        if let Some(value) = self.policy_details.as_ref() {
+            s.write_struct(&Self::M_POLICY_DETAILS, value)?;
+        }
+        if let Some(value) = self.region.as_ref() {
+            s.write_string(&Self::M_REGION, value.as_str())?;
+        }
+        if let Some(value) = self.resources_affected.as_ref() {
+            s.write_struct(&Self::M_RESOURCES_AFFECTED, value)?;
+        }
+        if let Some(value) = self.sample.as_ref() {
+            s.write_boolean(&Self::M_SAMPLE, *value)?;
+        }
+        if let Some(value) = self.schema_version.as_ref() {
+            s.write_string(&Self::M_SCHEMA_VERSION, value.as_str())?;
+        }
+        if let Some(value) = self.severity.as_ref() {
+            s.write_struct(&Self::M_SEVERITY, value)?;
+        }
+        if let Some(value) = self.title.as_ref() {
+            s.write_string(&Self::M_TITLE, value.as_str())?;
+        }
+        if let Some(value) = self.r#type.as_ref() {
+            s.write_string(&Self::M_TYPE, value.as_str())?;
+        }
+        if let Some(value) = self.updated_at.as_ref() {
+            s.write_timestamp(&Self::M_UPDATED_AT, value)?;
+        }
+        Ok(())
+    }
+}
+
+impl ::aws_smithy_schema_server::DeserializableStruct for Finding {
+    fn deserialize(
+        d: &mut dyn ::aws_smithy_schema::serde::ShapeDeserializer,
+    ) -> ::std::result::Result<Self, ::aws_smithy_schema::serde::SerdeError> {
+        let mut out = Self::default();
+        d.read_struct(&Self::SCHEMA, &mut |member, d| {
+            match member.member_index() {
+                Some(0) => out.account_id = Some(d.read_string(&Self::M_ACCOUNT_ID)?),
+                Some(1) => out.archived = Some(d.read_boolean(&Self::M_ARCHIVED)?),
+                Some(2) => out.category = Some(d.read_string(&Self::M_CATEGORY)?),
+                Some(3) => {
+                    out.classification_details = Some(<ClassificationDetails as
+                        ::aws_smithy_schema_server::DeserializableStruct>::deserialize(d)?);
+                }
+                Some(4) => out.count = Some(d.read_long(&Self::M_COUNT)?),
+                Some(5) => out.created_at = Some(d.read_timestamp(&Self::M_CREATED_AT)?),
+                Some(6) => out.description = Some(d.read_string(&Self::M_DESCRIPTION)?),
+                Some(7) => out.id = Some(d.read_string(&Self::M_ID)?),
+                Some(8) => out.partition = Some(d.read_string(&Self::M_PARTITION)?),
+                Some(9) => {
+                    out.policy_details = Some(<PolicyDetails as
+                        ::aws_smithy_schema_server::DeserializableStruct>::deserialize(d)?);
+                }
+                Some(10) => out.region = Some(d.read_string(&Self::M_REGION)?),
+                Some(11) => {
+                    out.resources_affected = Some(<ResourcesAffected as
+                        ::aws_smithy_schema_server::DeserializableStruct>::deserialize(d)?);
+                }
+                Some(12) => out.sample = Some(d.read_boolean(&Self::M_SAMPLE)?),
+                Some(13) => out.schema_version = Some(d.read_string(&Self::M_SCHEMA_VERSION)?),
+                Some(14) => {
+                    out.severity = Some(<Severity as
+                        ::aws_smithy_schema_server::DeserializableStruct>::deserialize(d)?);
+                }
+                Some(15) => out.title = Some(d.read_string(&Self::M_TITLE)?),
+                Some(16) => out.r#type = Some(d.read_string(&Self::M_TYPE)?),
+                Some(17) => out.updated_at = Some(d.read_timestamp(&Self::M_UPDATED_AT)?),
+                _ => {}
+            }
+            Ok(())
+        })?;
+        Ok(out)
+    }
 }
 
 #[smithy_macros::smithy(shape = "com.amazonaws.macie2#ClassificationDetails")]
@@ -163,13 +421,102 @@ pub struct FindingAction {
     pub api_call_details: Option<ApiCallDetails>,
 }
 
-#[smithy_macros::smithy(shape = "com.amazonaws.macie2#ApiCallDetails")]
+// `ApiCallDetails`'s schema and codec are hand-written for the same reason
+// `Finding`'s are: `firstSeen` and `lastSeen` target `__timestampIso8601`, whose
+// `@timestampFormat("date-time")` the derive drops. See `super::date_time_wire`.
 #[derive(Debug, Clone, Default)]
 pub struct ApiCallDetails {
     pub api: Option<String>,
     pub api_service_name: Option<String>,
     pub first_seen: Option<::aws_smithy_types::DateTime>,
     pub last_seen: Option<::aws_smithy_types::DateTime>,
+}
+
+impl ApiCallDetails {
+    pub const M_API: ::aws_smithy_schema::Schema = super::date_time_wire::member(
+        "com.amazonaws.macie2#ApiCallDetails$api",
+        "api",
+        ::aws_smithy_schema::ShapeType::String,
+        0,
+    );
+    pub const M_API_SERVICE_NAME: ::aws_smithy_schema::Schema = super::date_time_wire::member(
+        "com.amazonaws.macie2#ApiCallDetails$apiServiceName",
+        "apiServiceName",
+        ::aws_smithy_schema::ShapeType::String,
+        1,
+    );
+    /// `@timestampFormat("date-time")`, from the `__timestampIso8601` shape it
+    /// targets. THE reason this schema is hand-written.
+    pub const M_FIRST_SEEN: ::aws_smithy_schema::Schema = super::date_time_wire::date_time_member(
+        "com.amazonaws.macie2#ApiCallDetails$firstSeen",
+        "firstSeen",
+        2,
+    );
+    /// The same, for the other instant.
+    pub const M_LAST_SEEN: ::aws_smithy_schema::Schema = super::date_time_wire::date_time_member(
+        "com.amazonaws.macie2#ApiCallDetails$lastSeen",
+        "lastSeen",
+        3,
+    );
+
+    pub const SCHEMA: ::aws_smithy_schema::Schema = ::aws_smithy_schema::Schema::new_struct(
+        ::aws_smithy_schema::ShapeId::from_static(
+            "com.amazonaws.macie2#ApiCallDetails",
+            "com.amazonaws.macie2",
+            "ApiCallDetails",
+        ),
+        ::aws_smithy_schema::ShapeType::Structure,
+        &[
+            &Self::M_API,
+            &Self::M_API_SERVICE_NAME,
+            &Self::M_FIRST_SEEN,
+            &Self::M_LAST_SEEN,
+        ],
+    );
+}
+
+pub static API_CALL_DETAILS_SCHEMA: &::aws_smithy_schema::Schema = &ApiCallDetails::SCHEMA;
+
+impl ::aws_smithy_schema::serde::SerializableStruct for ApiCallDetails {
+    fn serialize_members(
+        &self,
+        s: &mut dyn ::aws_smithy_schema::serde::ShapeSerializer,
+    ) -> ::std::result::Result<(), ::aws_smithy_schema::serde::SerdeError> {
+        if let Some(value) = self.api.as_ref() {
+            s.write_string(&Self::M_API, value.as_str())?;
+        }
+        if let Some(value) = self.api_service_name.as_ref() {
+            s.write_string(&Self::M_API_SERVICE_NAME, value.as_str())?;
+        }
+        if let Some(value) = self.first_seen.as_ref() {
+            s.write_timestamp(&Self::M_FIRST_SEEN, value)?;
+        }
+        if let Some(value) = self.last_seen.as_ref() {
+            s.write_timestamp(&Self::M_LAST_SEEN, value)?;
+        }
+        Ok(())
+    }
+}
+
+impl ::aws_smithy_schema_server::DeserializableStruct for ApiCallDetails {
+    fn deserialize(
+        d: &mut dyn ::aws_smithy_schema::serde::ShapeDeserializer,
+    ) -> ::std::result::Result<Self, ::aws_smithy_schema::serde::SerdeError> {
+        let mut out = Self::default();
+        d.read_struct(&Self::SCHEMA, &mut |member, d| {
+            match member.member_index() {
+                Some(0) => out.api = Some(d.read_string(&Self::M_API)?),
+                Some(1) => {
+                    out.api_service_name = Some(d.read_string(&Self::M_API_SERVICE_NAME)?);
+                }
+                Some(2) => out.first_seen = Some(d.read_timestamp(&Self::M_FIRST_SEEN)?),
+                Some(3) => out.last_seen = Some(d.read_timestamp(&Self::M_LAST_SEEN)?),
+                _ => {}
+            }
+            Ok(())
+        })?;
+        Ok(out)
+    }
 }
 
 #[smithy_macros::smithy(shape = "com.amazonaws.macie2#FindingActor")]

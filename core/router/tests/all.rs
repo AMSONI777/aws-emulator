@@ -3412,3 +3412,5 @@ mod eks_kubernetes_api_rbac_audit;
 // duplicates are removed and the first declaration of each stands.)
 // branches were landing at once, which is a redefinition that compiled neither, so the
 // duplicate is removed and the first declaration stands.)
+// leaving a note here. (A LINE comment: an inner doc comment is only legal before the
+// first item of a module, so one landing here fails every suite in this target.)

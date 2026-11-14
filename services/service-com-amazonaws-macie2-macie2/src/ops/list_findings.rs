@@ -1,15 +1,9 @@
 // SPDX-License-Identifier: CC0-1.0
 
 //! @op ListFindings
-//! SCAFFOLDED, NOT IMPLEMENTED: this operation answers HTTP 501 `NotImplemented` and
-//! asserts NOTHING about `ListFindings`'s real behaviour. Implement it here — this is
-//! the ONLY file to touch for this operation.
-//!
-//! A 501 from this operation means "nobody has written it yet", never "the emulator is
-//! broken". Replace the `Err(..)` in [`ListFindings::handle`] with real behaviour and
-//! delete the SCAFFOLDED marker line above; that line is the machine-readable record of
-//! which operations are still stubs (`grep -rl '^//! SCAFFOLDED, NOT IMPLEMENTED:' */src/ops/`),
-//! so leaving it on an implemented operation under-reports progress.
+//! Implemented: enumerates the ids of the findings `crate::state` holds that a
+//! request's `findingCriteria` select, in the order its `sortCriteria` asks for,
+//! one page at a time.
 //!
 //! ## Shape of an operation
 //!
@@ -161,18 +155,142 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         input: Self::Input,
         ctx: &smithy_server_runtime::OperationContext<'_>,
     ) -> Result<Self::Output, Self::Error> {
-        // The engine is reachable from `&self` (constructor-injected); `ctx` carries
-        // request metadata. Both are bound here so an implementer has them in scope.
-        let _ = (&input, ctx, &self.engine);
-        // Implement `ListFindings` here, then delete the SCAFFOLDED marker at the top of
-        // this file. Return modeled failures as
-        // `Err(ListFindingsErrorModeled::Variant(..).into())` — the `From` impl above lifts it.
-        //
-        // To refuse a bad request this operation models no error for, return
-        // `Err(crate::scaffolded::Scaffolded::validation("..."))` — a 400
-        // `ValidationException`. Do NOT answer 501 for it: 501 means "not written yet",
-        // not "bad request". Modeled constraints are already refused BEFORE this
-        // handler runs, so reaching here means the input satisfies every one of them.
-        Err(crate::scaffolded::Scaffolded::not_implemented("ListFindings"))
+        let Some(store) = crate::state::service_state(&*self.engine) else {
+            return Err(ListFindingsErrorModeled::InternalServerException(
+                InternalServerException {
+                    message: Some("the findings store is unavailable on this engine".to_string()),
+                },
+            )
+            .into());
+        };
+        let region = crate::state::request_region(ctx);
+
+        // The criteria "to use to filter the results": every condition the
+        // request names has to hold for a finding to be listed. The criterion is
+        // checked once, HERE, before the store is even locked: that refuses a
+        // property findings cannot be filtered on whether or not the region
+        // holds a finding to test it against, and caps the work the scan below
+        // does at `MAX_CONDITIONS_PER_CRITERION * MAX_VALUES_PER_CONDITION *
+        // MAX_FINDINGS` comparisons.
+        let criterion = input
+            .finding_criteria
+            .as_ref()
+            .and_then(|criteria| criteria.criterion.as_ref());
+        if let Some(criterion) = criterion {
+            if let Err(message) = crate::state::validate_criterion(criterion) {
+                return Err(ListFindingsErrorModeled::ValidationException(
+                    ValidationException {
+                        message: Some(message),
+                    },
+                )
+                .into());
+            }
+        }
+        // The order the enumeration is served in is checked here too, before the
+        // store is locked.
+        if let Err(message) = crate::state::validate_sort_criteria(input.sort_criteria.as_ref()) {
+            return Err(ListFindingsErrorModeled::ValidationException(
+                ValidationException {
+                    message: Some(message),
+                },
+            )
+            .into());
+        }
+
+        let state = store.lock();
+        if state.session(&region).is_none() {
+            return Err(ListFindingsErrorModeled::AccessDeniedException(
+                AccessDeniedException {
+                    message: Some(crate::state::MACIE_NOT_ENABLED_MESSAGE.to_string()),
+                },
+            )
+            .into());
+        }
+
+        // A `nextToken` is this service's own opaque encoding of a page cursor,
+        // so one it did not issue names no page and is refused rather than
+        // silently read as "start again".
+        let resume_after = match input.next_token.as_deref() {
+            Some(token) => match crate::state::decode_page_token(token) {
+                Some(cursor) => Some(cursor),
+                None => {
+                    return Err(ListFindingsErrorModeled::ValidationException(
+                        ValidationException {
+                            message: Some(crate::state::FOREIGN_PAGE_TOKEN_MESSAGE.to_string()),
+                        },
+                    )
+                    .into())
+                }
+            },
+            None => None,
+        };
+
+        // `maxResults` is a bare `__integer` with neither a modelled range nor a
+        // documented default, so an absent or non-positive value takes the
+        // emulator's default page size and anything larger than its maximum is
+        // capped there.
+        let page_size = match input.max_results {
+            Some(requested) if requested > 0 => usize::try_from(requested)
+                .unwrap_or(crate::state::MAX_FINDING_PAGE_SIZE)
+                .min(crate::state::MAX_FINDING_PAGE_SIZE),
+            _ => crate::state::DEFAULT_FINDING_PAGE_SIZE,
+        };
+
+        let mut selected: Vec<&crate::state::StoredFinding> = state
+            .findings_in(&region)
+            .filter(|finding| {
+                criterion.is_none_or(|criterion| {
+                    crate::state::matches_criteria(&finding.finding, criterion)
+                })
+            })
+            .collect();
+
+        if let Err(message) =
+            crate::state::sort_findings(&mut selected, input.sort_criteria.as_ref())
+        {
+            return Err(ListFindingsErrorModeled::ValidationException(
+                ValidationException {
+                    message: Some(message),
+                },
+            )
+            .into());
+        }
+
+        // The cursor is the id the previous page ended on, so a page resumes
+        // from the finding after it in the order this request asked for. A
+        // cursor naming no finding of this selection — the findings of the
+        // region were deleted with its session, or this request's criteria
+        // select a different set than the one the token was issued for — has no
+        // page after it, so the enumeration is reported as exhausted rather
+        // than restarted from the beginning, which would serve a caller the
+        // first page again forever.
+        let start = match resume_after.as_deref() {
+            Some(cursor) => selected
+                .iter()
+                .position(|finding| finding.id() == cursor)
+                .map_or(selected.len(), |at| at.saturating_add(1)),
+            None => 0,
+        };
+        let end = start.saturating_add(page_size).min(selected.len());
+        let page = selected.get(start..end).unwrap_or_default();
+
+        let finding_ids: Vec<String> = page
+            .iter()
+            .map(|finding| finding.id().to_string())
+            .collect();
+        // A token only when findings remain after this page, so a caller stops
+        // paging exactly when the enumeration is exhausted.
+        let next_token = (end < selected.len())
+            .then(|| {
+                finding_ids
+                    .last()
+                    .map(|id| crate::state::encode_page_token(id))
+            })
+            .flatten();
+
+        Ok(ListFindingsOutput {
+            finding_ids: Some(finding_ids),
+            next_token,
+        })
     }
 }

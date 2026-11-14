@@ -1,15 +1,9 @@
 // SPDX-License-Identifier: CC0-1.0
 
 //! @op GetFindings
-//! SCAFFOLDED, NOT IMPLEMENTED: this operation answers HTTP 501 `NotImplemented` and
-//! asserts NOTHING about `GetFindings`'s real behaviour. Implement it here — this is
-//! the ONLY file to touch for this operation.
-//!
-//! A 501 from this operation means "nobody has written it yet", never "the emulator is
-//! broken". Replace the `Err(..)` in [`GetFindings::handle`] with real behaviour and
-//! delete the SCAFFOLDED marker line above; that line is the machine-readable record of
-//! which operations are still stubs (`grep -rl '^//! SCAFFOLDED, NOT IMPLEMENTED:' */src/ops/`),
-//! so leaving it on an implemented operation under-reports progress.
+//! Implemented: projects the findings `crate::state` holds for the ids the
+//! request names, in the order the request named them or the one its
+//! `sortCriteria` asks for.
 //!
 //! ## Shape of an operation
 //!
@@ -157,18 +151,100 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         input: Self::Input,
         ctx: &smithy_server_runtime::OperationContext<'_>,
     ) -> Result<Self::Output, Self::Error> {
-        // The engine is reachable from `&self` (constructor-injected); `ctx` carries
-        // request metadata. Both are bound here so an implementer has them in scope.
-        let _ = (&input, ctx, &self.engine);
-        // Implement `GetFindings` here, then delete the SCAFFOLDED marker at the top of
-        // this file. Return modeled failures as
-        // `Err(GetFindingsErrorModeled::Variant(..).into())` — the `From` impl above lifts it.
-        //
-        // To refuse a bad request this operation models no error for, return
-        // `Err(crate::scaffolded::Scaffolded::validation("..."))` — a 400
-        // `ValidationException`. Do NOT answer 501 for it: 501 means "not written yet",
-        // not "bad request". Modeled constraints are already refused BEFORE this
-        // handler runs, so reaching here means the input satisfies every one of them.
-        Err(crate::scaffolded::Scaffolded::not_implemented("GetFindings"))
+        let Some(store) = crate::state::service_state(&*self.engine) else {
+            return Err(GetFindingsErrorModeled::InternalServerException(
+                InternalServerException {
+                    message: Some("the findings store is unavailable on this engine".to_string()),
+                },
+            )
+            .into());
+        };
+        let region = crate::state::request_region(ctx);
+
+        // "You can specify as many as 50 unique identifiers in this array."
+        // The ARRAY ITSELF is bounded first, before any per-element work, so a
+        // request carrying a large array costs nothing to refuse.
+        if input.finding_ids.len() > crate::state::MAX_GET_FINDINGS_IDS {
+            return Err(GetFindingsErrorModeled::ValidationException(
+                ValidationException {
+                    message: Some(format!(
+                        "The findingIds array can contain as many as {} unique identifiers; \
+                         the request named {}.",
+                        crate::state::MAX_GET_FINDINGS_IDS,
+                        input.finding_ids.len()
+                    )),
+                },
+            )
+            .into());
+        }
+
+        // An id named twice names one identifier, so each finding is reported
+        // once, in the order the request first named it. The set is already
+        // bounded by the check above, and membership is a hash lookup rather
+        // than a scan, so the work is linear in the request.
+        let mut seen: ::std::collections::HashSet<&str> = ::std::collections::HashSet::new();
+        let requested: Vec<&str> = input
+            .finding_ids
+            .iter()
+            .map(String::as_str)
+            .filter(|id| seen.insert(*id))
+            .collect();
+
+        // Without `sortCriteria` the findings are reported in the order the
+        // request named their ids, which is the only order the request states.
+        // The criteria themselves are checked BEFORE the store is locked, the
+        // way `ListFindings` checks a `findingCriteria`, so a request naming an
+        // order this service cannot serve is refused without contending for the
+        // lock.
+        if let Err(message) = crate::state::validate_sort_criteria(input.sort_criteria.as_ref()) {
+            return Err(GetFindingsErrorModeled::ValidationException(
+                ValidationException {
+                    message: Some(message),
+                },
+            )
+            .into());
+        }
+
+        let state = store.lock();
+        if state.session(&region).is_none() {
+            return Err(GetFindingsErrorModeled::AccessDeniedException(
+                AccessDeniedException {
+                    message: Some(crate::state::MACIE_NOT_ENABLED_MESSAGE.to_string()),
+                },
+            )
+            .into());
+        }
+
+        // One object "for each finding that matches the criteria specified in
+        // the request": an id this region holds no finding for matches none, so
+        // it contributes nothing rather than failing the whole call.
+        let mut found: Vec<&crate::state::StoredFinding> = requested
+            .iter()
+            .filter_map(|id| state.finding(&region, id))
+            .collect();
+
+        // Without `sortCriteria` the findings are reported in the order the
+        // request named their ids; the criteria were checked above.
+        if input.sort_criteria.is_some() {
+            if let Err(message) =
+                crate::state::sort_findings(&mut found, input.sort_criteria.as_ref())
+            {
+                return Err(GetFindingsErrorModeled::ValidationException(
+                    ValidationException {
+                        message: Some(message),
+                    },
+                )
+                .into());
+            }
+        }
+
+        Ok(GetFindingsOutput {
+            findings: Some(
+                found
+                    .into_iter()
+                    .map(|stored| stored.finding.clone())
+                    .collect(),
+            ),
+        })
     }
 }

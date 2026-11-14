@@ -24,14 +24,22 @@
 //! this administrator account, which `GetMember` projects and `ListMembers`
 //! enumerates.
 //!
-//! One plane of this state has a file of its own: the allow lists
-//! (`CreateAllowList` stores one, `GetAllowList` projects it together with the
-//! status it derives for it, `ListAllowLists` enumerates them) live in
-//! [`allow_lists`], which is where the object-store read that status rests on
-//! lives too.
+//! Two planes of this state have a file of their own. The findings plane lives
+//! in [`findings`], because it carries a query of its own — the conditions a
+//! `findingCriteria` names and the order a `sortCriteria` asks for — beside the
+//! records themselves. The allow lists (`CreateAllowList` stores one,
+//! `GetAllowList` projects it together with the status it derives for it,
+//! `ListAllowLists` enumerates them) live in [`allow_lists`], which is where the
+//! object-store read that status rests on lives too. Everything either of them
+//! declares is re-exported here, so a handler reaches all of this service's
+//! state through `crate::state::…` whichever plane it touches.
+
+pub mod findings;
 
 use std::collections::BTreeMap;
 use std::time::SystemTime;
+
+pub use findings::*;
 
 use crate::ops::types::{ClassificationExportConfiguration, S3Destination, SeverityLevel};
 
@@ -555,6 +563,10 @@ pub struct ComAmazonawsMacie2Macie2State {
     /// Custom data identifiers keyed by id, so an id-addressed read is
     /// O(log n) and an enumeration is in a stable total order.
     pub custom_data_identifiers: BTreeMap<String, CustomDataIdentifier>,
+    /// The findings Macie holds, keyed by finding id, so an id-addressed read
+    /// is O(log n) and an enumeration is in a stable total order. Each record
+    /// names the region it belongs to, the way a custom data identifier does.
+    pub findings: BTreeMap<String, StoredFinding>,
     /// Allow lists keyed by id, for the same reasons as
     /// [`Self::custom_data_identifiers`]: an id-addressed read is O(log n) and
     /// `ListAllowLists` enumerates them in a stable total order.
@@ -680,11 +692,28 @@ impl ComAmazonawsMacie2Macie2State {
         self.classification_export.remove(region);
         self.custom_data_identifiers
             .retain(|_, identifier| identifier.region != region);
+        self.findings.retain(|_, finding| finding.region != region);
         self.allow_lists
             .retain(|_, allow_list| allow_list.region != region);
         self.members.retain(|_, member| member.region != region);
         let prefix = region_key_prefix(region);
         self.idempotency.retain(|key, _| !key.starts_with(&prefix));
+    }
+
+    /// The finding `id` of `region`, or `None` when no finding of that region
+    /// carries the id — which is what an id from another region answers too.
+    pub fn finding(&self, region: &str, id: &str) -> Option<&StoredFinding> {
+        self.findings
+            .get(id)
+            .filter(|finding| finding.region == region)
+    }
+
+    /// The findings of `region`, in id order — the order the store holds them
+    /// in, so the total order a page boundary rests on is stable.
+    pub fn findings_in<'a>(&'a self, region: &'a str) -> impl Iterator<Item = &'a StoredFinding> {
+        self.findings
+            .values()
+            .filter(move |finding| finding.region == region)
     }
 
     /// The account `account_id` associated in `region`, or `None` when no
@@ -810,6 +839,26 @@ pub fn decode_page_token(token: &str) -> Option<String> {
 /// the only variable part is the id the request named.
 pub fn custom_data_identifier_not_found_message(id: &str) -> String {
     format!("Custom Data Identifier not found for id: {id}")
+}
+
+/// The partition every ARN this emulator mints carries, which is what
+/// `Finding$partition` reports: "the Amazon Web Services partition that Amazon
+/// Macie created the finding in". Read off an emulated ARN rather than written
+/// out, so the two cannot disagree.
+pub fn emulator_partition() -> String {
+    ::engine::emulator_arn(ARN_SERVICE, DEFAULT_REGION, "partition")
+        .split(':')
+        .nth(1)
+        .unwrap_or_default()
+        .to_string()
+}
+
+/// The ARN of an S3 bucket: `arn:<partition>:s3:::<name>`. An S3 bucket ARN
+/// carries neither a region nor an account id, so it is not one
+/// [`::engine::emulator_arn`] can mint; the partition still comes from there,
+/// through [`emulator_partition`].
+pub fn s3_bucket_arn(name: &str) -> String {
+    format!("arn:{}:s3:::{name}", emulator_partition())
 }
 
 /// Mint the ARN of an associated member account:
