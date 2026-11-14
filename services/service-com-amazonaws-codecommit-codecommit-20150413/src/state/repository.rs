@@ -14,10 +14,15 @@ use super::*;
 impl Repository {
     /// Build a repository, deriving every generated field from the name, the
     /// region and the creation instant.
+    ///
+    /// `kms_key_id` is the key this repository is encrypted under, already
+    /// resolved to the key itself ([`resolve_encryption_key`]) — every repository
+    /// is encrypted, and which key a selector names is KMS's answer rather than
+    /// this constructor's.
     pub fn new(
         name: &str,
         description: Option<String>,
-        kms_key_id: Option<String>,
+        kms_key_id: String,
         tags: BTreeMap<String, String>,
         region: &str,
         created: SystemTime,
@@ -30,12 +35,7 @@ impl Repository {
             description,
             default_branch: None,
             arn: ::engine::emulator_arn("codecommit", region, name),
-            // Every repository is encrypted, so a request that names no key of
-            // its own takes the service's managed key rather than none.
-            kms_key_id: canonical_encryption_key(
-                kms_key_id.as_deref().unwrap_or(DEFAULT_ENCRYPTION_KEY_ALIAS),
-                region,
-            ),
+            kms_key_id,
             tagging_id: tagging_id(name, created),
             creation_date: created,
             last_modified_date: created,
@@ -273,17 +273,17 @@ impl Repository {
     /// was encrypted under before — the `originalKmsKeyId` a rotation reports.
     /// A repository always carries a key, so there is always one to report.
     ///
-    /// Both keys are the [`canonical_encryption_key`] form of their selector, so
-    /// a rotation reports the same key the metadata of this repository reports
-    /// before and after it.
+    /// `kms_key_id` is the key the rotation resolved the requested selector to
+    /// ([`resolve_encryption_key`]), which is the form this repository's metadata
+    /// reports its key in — so a rotation reports the same key the metadata
+    /// reports, before and after it.
     ///
     /// Only which key the repository DEPENDS on changes: its identity, its
     /// metadata and its whole history carry over, and the last-modified instant
     /// records the change. A request naming the key already in effect changes
     /// nothing at all, so it leaves that instant where it is too.
     pub fn rotate_encryption_key(&mut self, kms_key_id: &str, rotated: SystemTime) -> String {
-        let canonical = canonical_encryption_key(kms_key_id, &self.region);
-        let original = ::std::mem::replace(&mut self.kms_key_id, canonical);
+        let original = ::std::mem::replace(&mut self.kms_key_id, kms_key_id.to_string());
         if original != self.kms_key_id {
             self.last_modified_date = rotated;
         }

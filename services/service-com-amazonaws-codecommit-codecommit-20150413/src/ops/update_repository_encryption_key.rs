@@ -5,9 +5,8 @@
 //! under: the STORED repository takes the requested key, so every later read of
 //! its metadata reports that key, and the call answers with the repository's id,
 //! the key now in effect and the key formerly in effect. Both keys are reported
-//! in the one form a repository's key is held in
-//! (`crate::state::canonical_encryption_key`): a bare key id resolves to that
-//! key's ARN, and every other selector KMS documents is kept as it was set.
+//! as the key itself, which is what the requested selector is resolved to against
+//! KMS before it is stored (`crate::state::resolve_encryption_key`).
 //! Nothing else about the
 //! repository moves — its id, name, description, tags and whole history carry
 //! over — and a key selector that names no KMS key is refused, leaving the
@@ -228,29 +227,50 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
             // rather than claiming a KMS integrity check failed.
             crate::scaffolded::Scaffolded::validation("the repository store is unavailable")
         })?;
-        let mut store = state.lock();
+        // How a `repositoryName` the account does not hold is refused, worded once
+        // for both readings of the store below.
+        let does_not_exist = || {
+            UpdateRepositoryEncryptionKeyErrorModeled::RepositoryDoesNotExistException(
+                RepositoryDoesNotExistException {
+                    message: Some(crate::state::repository_does_not_exist_message(
+                        &input.repository_name,
+                    )),
+                },
+            )
+        };
 
-        let repository = store
+        // The region to resolve the key in is the REPOSITORY's own: a repository and
+        // the key it is encrypted under live at the same endpoint, and the
+        // repository keeps the region its ARN was built for whatever region this
+        // request was signed for. Read under a guard that is released before KMS is
+        // asked, so no request holds two stores' guards at once.
+        let region = state
+            .lock()
             .repositories
-            .get_mut(&input.repository_name)
-            .ok_or_else(|| {
-                UpdateRepositoryEncryptionKeyErrorModeled::RepositoryDoesNotExistException(
-                    RepositoryDoesNotExistException {
-                        message: Some(crate::state::repository_does_not_exist_message(
-                            &input.repository_name,
-                        )),
-                    },
-                )
-            })?;
+            .get(&input.repository_name)
+            .map(|repository| repository.region.clone())
+            .ok_or_else(does_not_exist)?;
+
+        // Which KEY the accepted selector names is KMS's answer.
+        let kms_key_id = crate::state::resolve_encryption_key(
+            &*self.engine,
+            &region,
+            Some(input.kms_key_id.as_str()),
+        );
 
         // The write: the stored repository now depends on the requested key, which
         // is what every later read of its metadata reports. The key it leaves
         // behind is the `originalKmsKeyId` this call answers with — every
-        // repository is encrypted, so there is always one to report. Both are the
-        // canonical form of their selector (`crate::state::canonical_encryption_key`),
-        // which is the form this repository's metadata reports the key in.
+        // repository is encrypted, so there is always one to report. The repository
+        // is looked up again under the writing guard, so a repository deleted while
+        // its key was being resolved is refused rather than resurrected.
+        let mut store = state.lock();
+        let repository = store
+            .repositories
+            .get_mut(&input.repository_name)
+            .ok_or_else(does_not_exist)?;
         let original_kms_key_id =
-            repository.rotate_encryption_key(&input.kms_key_id, std::time::SystemTime::now());
+            repository.rotate_encryption_key(&kms_key_id, std::time::SystemTime::now());
 
         Ok(UpdateRepositoryEncryptionKeyOutput {
             repository_id: Some(repository.repository_id.clone()),

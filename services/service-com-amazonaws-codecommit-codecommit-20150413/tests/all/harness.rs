@@ -9,9 +9,9 @@
 //! lives here is what more than one repository suite needs: the `GetRepository`
 //! metadata projection a stored repository is read back through, the timestamp reader
 //! its date members are compared with, the reader that answers a failed call's
-//! error code AND the message text that came with it, the key a repository with no
-//! key of its own is encrypted under together with the ARN form a key id is
-//! reported in, and the wording CodeCommit
+//! error code AND the message text that came with it, the selector a repository with
+//! no key of its own is encrypted under together with the readings of the KEY that
+//! selector resolves to, and the wording CodeCommit
 //! refuses a `pullRequestId` or a `revisionId` naming nothing with. One definition
 //! each, so two suites cannot disagree about what "the stored repository", "that
 //! instant", "that error's message", "that repository's key" or "that refusal's
@@ -32,11 +32,12 @@ pub(crate) async fn metadata_of(router: &MultiServiceRouter, name: &str) -> Valu
 }
 
 /// The Amazon Web Services managed key a repository created without a `kmsKeyId`
-/// of its own is encrypted under: `CreateRepository`'s `kmsKeyId` documents that
-/// "If no key is specified, the default aws/codecommit Amazon Web Services managed
-/// key is used"
-/// (`smithy_query(query="doc",shape="CreateRepositoryInput",member="kmsKeyId")`),
-/// and the service names that key by its alias.
+/// of its own is encrypted under, by the alias KMS names that key by:
+/// `CreateRepository`'s `kmsKeyId` documents that "If no key is specified, the
+/// default aws/codecommit Amazon Web Services managed key is used"
+/// (`smithy_query(query="doc",shape="CreateRepositoryInput",member="kmsKeyId")`).
+/// What a repository REPORTS is the key that alias resolves to
+/// ([`managed_encryption_key_arn`]), never the alias.
 pub(crate) const DEFAULT_ENCRYPTION_KEY_ALIAS: &str = "alias/aws/codecommit";
 
 /// The ARN of a KMS key id: `arn:<partition>:kms:<region>:<account>:key/<key id>`
@@ -49,6 +50,55 @@ pub(crate) fn kms_key_arn_of(key_id: &str) -> String {
         "arn:aws:kms:{}:{}:key/{key_id}",
         crate::repository_lifecycle::REGION,
         engine::emulator_account_id()
+    )
+}
+
+/// The ARN of the key KMS holds for `selector` at `region`'s endpoint, read out of
+/// the KMS store on the shared engine — the key ITSELF, which is what a
+/// repository's `kmsKeyId` reports once the selector it was named by has been
+/// resolved. `None` when that endpoint holds no key for the selector.
+///
+/// Read-only: a lookup resolves a key without associating one, so asking this does
+/// not give a predefined Amazon Web Services alias a key — which is what lets a
+/// suite check that the CODECOMMIT call is what materialised the managed key.
+pub(crate) fn kms_key_arn_for(
+    engine: &engine::InMemoryEngine,
+    region: &str,
+    selector: &str,
+) -> Option<String> {
+    use service_com_amazonaws_kms_trentservice::state as kms;
+
+    let keys = kms::service_state(engine).expect("the in-memory engine carries the KMS store");
+    let keys = keys.lock();
+    match keys.resolve(region, selector) {
+        kms::KeyRef::Found(key) => Some(key.arn.clone()),
+        _ => None,
+    }
+}
+
+/// The key a repository created with no `kmsKeyId` of its own is encrypted under:
+/// the Amazon Web Services managed key KMS holds for this service's predefined
+/// alias ([`DEFAULT_ENCRYPTION_KEY_ALIAS`]) in the Region the suites sign for.
+///
+/// Panics when KMS holds no key for that alias, which is the defect itself: a
+/// repository was created without the key behind the alias ever being resolved.
+pub(crate) fn managed_encryption_key_arn(engine: &engine::InMemoryEngine) -> String {
+    kms_key_arn_for(
+        engine,
+        crate::repository_lifecycle::REGION,
+        DEFAULT_ENCRYPTION_KEY_ALIAS,
+    )
+    .unwrap_or_else(|| {
+        panic!("KMS holds no key for {DEFAULT_ENCRYPTION_KEY_ALIAS}: nothing resolved the alias")
+    })
+}
+
+/// The key a repository SEEDED straight into the store is encrypted under: this
+/// service's own resolution of a create that names no key, so a seeded repository
+/// carries exactly what `CreateRepository` would have stored for it.
+pub(crate) fn seeded_encryption_key(engine: &engine::InMemoryEngine, region: &str) -> String {
+    service_com_amazonaws_codecommit_codecommit_20150413::state::resolve_encryption_key(
+        engine, region, None,
     )
 }
 

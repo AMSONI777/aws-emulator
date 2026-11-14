@@ -18,6 +18,11 @@ service-com-amazonaws-sts-awssecuritytokenservicev20110615 = { workspace = true 
 # and reads the identity-based documents in force on it through IAM's own accessors
 # (`src/service/git_authorization.rs`).
 service-com-amazonaws-iam-awsidentitymanagementv20100508 = { workspace = true }
+# KMS's own key and alias store, on the same shared engine: which key a repository's
+# `kmsKeyId` selector names — an alias above all, and the service's managed key — is
+# KMS's answer rather than a value this service invents
+# (`src/state/encryption_key.rs`).
+service-com-amazonaws-kms-trentservice = { workspace = true }
 # `iam_authorization`: the ONE evaluation of an IAM policy document against an action,
 # a resource and a condition context, which is what decides `codecommit:GitPull` and
 # per-reference `codecommit:GitPush`; `iam_role` and `caller_principal`: the shared

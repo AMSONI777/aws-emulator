@@ -4,8 +4,10 @@
 //! Implemented: persists a new repository in `crate::state` and answers with the
 //! stored repository's metadata. Every repository is encrypted, so a request
 //! naming no `kmsKeyId` takes the service's managed key
-//! (`crate::state::DEFAULT_ENCRYPTION_KEY_ALIAS`) and the stored key is reported
-//! in the one canonical form (`crate::state::canonical_encryption_key`).
+//! (`crate::state::DEFAULT_ENCRYPTION_KEY_ALIAS`), and the key the request's
+//! selector names is resolved against KMS before it is stored
+//! (`crate::state::resolve_encryption_key`), so the metadata reports the key
+//! itself rather than the selector it was named by.
 //!
 //! ## Shape of an operation
 //!
@@ -288,6 +290,7 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
             .into());
         }
 
+        let region = crate::state::region_of(ctx.parts());
         let state = crate::state::service_state(&*self.engine).ok_or_else(|| {
             // An unreachable store is an internal mounting fault, not a modelled
             // CodeCommit failure: every handler in this crate refuses it the same
@@ -335,12 +338,26 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
             .into());
         }
 
+        // Which KEY the accepted selector names is KMS's answer, asked once here
+        // and recorded on the repository: `kmsKeyId` reports "The ID of the Key
+        // Management Service encryption key used to encrypt and decrypt the
+        // repository", so an alias — the service's managed key included — is
+        // resolved to the key behind it rather than stored as a name for one. Asked
+        // only once the create is going to be served, because resolving the
+        // service's alias is what gives it its managed key, and a refused create
+        // must leave KMS exactly as it was.
+        let kms_key_id = crate::state::resolve_encryption_key(
+            &*self.engine,
+            &region,
+            input.kms_key_id.as_deref(),
+        );
+
         let repository = crate::state::Repository::new(
             &input.repository_name,
             input.repository_description.clone(),
-            input.kms_key_id.clone(),
+            kms_key_id,
             tags,
-            &crate::state::region_of(ctx.parts()),
+            &region,
             std::time::SystemTime::now(),
         );
         // The clone URLs name an address of THIS emulator, which is where its git

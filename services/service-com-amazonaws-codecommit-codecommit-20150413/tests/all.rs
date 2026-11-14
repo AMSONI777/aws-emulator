@@ -199,6 +199,8 @@ mod repository_description;
 mod repository_encryption_key;
 #[path = "all/repository_encryption_key_projection.rs"]
 mod repository_encryption_key_projection;
+#[path = "all/repository_encryption_key_resolution.rs"]
+mod repository_encryption_key_resolution;
 #[path = "all/repository_lifecycle.rs"]
 mod repository_lifecycle;
 #[path = "all/repository_name_and_system_tag_message_text.rs"]

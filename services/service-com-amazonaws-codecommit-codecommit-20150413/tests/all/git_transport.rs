@@ -2234,6 +2234,7 @@ async fn a_repository_holds_no_more_refs_than_the_emulator_keeps() {
 #[tokio::test]
 async fn the_transport_is_claimed_by_path_whatever_host_the_client_was_given() {
     let (router, engine) = emulator_with_engine();
+    let seeded_key = crate::harness::seeded_encryption_key(&engine, "us-west-2");
     engine
         .state::<service_com_amazonaws_codecommit_codecommit_20150413::ComAmazonawsCodecommitCodecommit20150413State>()
         .lock()
@@ -2243,7 +2244,7 @@ async fn the_transport_is_claimed_by_path_whatever_host_the_client_was_given() {
             service_com_amazonaws_codecommit_codecommit_20150413::state::Repository::new(
                 "hosts",
                 None,
-                None,
+                seeded_key,
                 BTreeMap::new(),
                 "us-west-2",
                 std::time::SystemTime::now(),
@@ -2350,6 +2351,7 @@ async fn the_announced_clone_url_names_whichever_endpoint_the_request_arrived_at
 
     // One repository, created once: the URLs are not stored, so every read
     // reports the endpoint of the request that asked.
+    let seeded_key = crate::harness::seeded_encryption_key(&engine, "us-west-2");
     engine
         .state::<service_com_amazonaws_codecommit_codecommit_20150413::ComAmazonawsCodecommitCodecommit20150413State>()
         .lock()
@@ -2359,7 +2361,7 @@ async fn the_announced_clone_url_names_whichever_endpoint_the_request_arrived_at
             service_com_amazonaws_codecommit_codecommit_20150413::state::Repository::new(
                 "endpoints",
                 None,
-                None,
+                seeded_key,
                 BTreeMap::new(),
                 "us-west-2",
                 std::time::SystemTime::now(),
@@ -2424,6 +2426,7 @@ async fn a_git_client_is_served_without_a_sigv4_signature() {
             &engine,
         )),
     );
+    let seeded_key = crate::harness::seeded_encryption_key(&engine, "us-west-2");
     engine
         .state::<service_com_amazonaws_codecommit_codecommit_20150413::ComAmazonawsCodecommitCodecommit20150413State>()
         .lock()
@@ -2433,7 +2436,7 @@ async fn a_git_client_is_served_without_a_sigv4_signature() {
             service_com_amazonaws_codecommit_codecommit_20150413::state::Repository::new(
                 "unsigned",
                 None,
-                None,
+                seeded_key,
                 BTreeMap::new(),
                 "us-west-2",
                 std::time::SystemTime::now(),

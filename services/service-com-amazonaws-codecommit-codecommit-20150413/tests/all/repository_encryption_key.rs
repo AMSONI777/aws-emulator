@@ -7,8 +7,8 @@
 //! repository, so every later read of its metadata reports that key and the call
 //! answers with the repository's id, the key now in effect and the key it left
 //! behind (always present — every repository is encrypted); each of the two is
-//! reported in the one canonical form of the selector it was set from, a bare
-//! key id as that key's ARN; nothing else about the
+//! reported as the KEY its selector resolves to, a bare key id as that key's
+//! ARN; nothing else about the
 //! repository — its id, name, description, default branch, ARN, clone URLs,
 //! creation date or content — moves with it, the last-modified instant records
 //! the change, and a `kmsKeyId` that selects no KMS key, or a repository the
@@ -26,8 +26,10 @@ use std::time::Duration;
 use serde_json::{json, Value};
 use smithy_server_runtime::MultiServiceRouter;
 
-use crate::harness::{kms_key_arn_of, DEFAULT_ENCRYPTION_KEY_ALIAS};
-use crate::repository_lifecycle::{emulator, error, is_uuid, ok, string_at, REGION};
+use crate::harness::{kms_key_arn_of, managed_encryption_key_arn};
+use crate::repository_lifecycle::{
+    emulator, emulator_with_engine, error, is_uuid, ok, string_at, REGION,
+};
 
 /// The account every ARN this emulator mints is scoped to.
 fn account() -> String {
@@ -59,6 +61,9 @@ fn key_arn() -> String {
     kms_key_arn_of(&key_id())
 }
 
+/// An alias KMS holds no key for: the key is the caller's own, so the selector is
+/// held as it was set. An alias KMS DOES hold a key for resolves to that key — see
+/// [`crate::repository_encryption_key_resolution`].
 fn alias_name() -> String {
     "alias/codecommit-repository-key".to_string()
 }
@@ -116,14 +121,16 @@ async fn put_file(router: &MultiServiceRouter, repository: &str, branch: &str, p
 }
 
 /// One row of the rotation table: the repository, the key it was created with (or
-/// none at all), the key its metadata must report once created, the rotations it
+/// none at all), the key its metadata must report once created (`None` where that
+/// is the managed key KMS associates with this service's alias, whose identity is
+/// read off the KMS store rather than written here), the rotations it
 /// is walked through in order — each the selector requested paired with the key
 /// the service must report for it — and whether it carries a file.
 #[derive(Debug, Clone)]
 struct Case {
     name: String,
     created_with: Option<String>,
-    reported_after_create: String,
+    reported_after_create: Option<String>,
     rotations: Vec<(String, String)>,
     content: Option<(&'static str, &'static str)>,
 }
@@ -142,7 +149,7 @@ fn rotation_cases() -> Vec<Case> {
             // it resolves to the same ARN and changes nothing.
             name: "rotate-every-form".to_string(),
             created_with: Some(key_arn()),
-            reported_after_create: key_arn(),
+            reported_after_create: Some(key_arn()),
             rotations: vec![
                 (key_id(), key_arn()),
                 (alias_name(), alias_name()),
@@ -153,11 +160,12 @@ fn rotation_cases() -> Vec<Case> {
             content: Some(("main", "README.md")),
         },
         Case {
-            // Created with no key of its own: it is encrypted under the service's
-            // managed key, which is what the first rotation leaves behind.
+            // Created with no key of its own: it is encrypted under the Amazon Web
+            // Services managed key of this service, which is what the first
+            // rotation leaves behind.
             name: "rotate.from_none-1".to_string(),
             created_with: None,
-            reported_after_create: DEFAULT_ENCRYPTION_KEY_ALIAS.to_string(),
+            reported_after_create: None,
             rotations: vec![(key_id(), key_arn()), (alias_name(), alias_name())],
             content: None,
         },
@@ -166,7 +174,7 @@ fn rotation_cases() -> Vec<Case> {
             // nothing — not even the last-modified instant.
             name: "r".to_string(),
             created_with: Some(alias_name()),
-            reported_after_create: alias_name(),
+            reported_after_create: Some(alias_name()),
             rotations: vec![
                 (alias_name(), alias_name()),
                 (alias_name(), alias_name()),
@@ -179,7 +187,7 @@ fn rotation_cases() -> Vec<Case> {
             // multi-region key id — reported as that key's ARN — and rotated once.
             name: "x".repeat(100),
             created_with: Some(multi_region_key_id()),
-            reported_after_create: kms_key_arn_of(&multi_region_key_id()),
+            reported_after_create: Some(kms_key_arn_of(&multi_region_key_id())),
             rotations: vec![(alias_arn(), alias_arn())],
             content: None,
         },
@@ -188,7 +196,7 @@ fn rotation_cases() -> Vec<Case> {
 
 #[tokio::test]
 async fn a_rotation_moves_the_stored_repositorys_key_and_reports_the_one_it_left() {
-    let router = emulator();
+    let (router, engine) = emulator_with_engine();
 
     for case in rotation_cases() {
         let mut create = json!({ "repositoryName": case.name, "repositoryDescription": "rotated" });
@@ -212,7 +220,10 @@ async fn a_rotation_moves_the_stored_repositorys_key_and_reports_the_one_it_left
             None => None,
         };
 
-        let mut in_effect = case.reported_after_create.clone();
+        let mut in_effect = case
+            .reported_after_create
+            .clone()
+            .unwrap_or_else(|| managed_encryption_key_arn(&engine));
         for (requested, expected) in &case.rotations {
             let label = format!("{} -> {requested}", case.name);
             let before = metadata_of(&router, &case.name).await;

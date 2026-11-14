@@ -667,7 +667,7 @@ pub(crate) fn seeded(fill: impl FnOnce(&mut Repository)) -> MultiServiceRouter {
     let mut repository = Repository::new(
         REPOSITORY,
         None,
-        None,
+        crate::harness::seeded_encryption_key(&engine, REGION),
         BTreeMap::new(),
         REGION,
         SystemTime::now(),

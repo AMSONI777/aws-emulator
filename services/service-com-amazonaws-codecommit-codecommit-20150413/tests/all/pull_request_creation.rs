@@ -921,7 +921,7 @@ async fn a_source_branch_with_no_shared_history_reports_no_merge_base() {
     let mut repository = Repository::new(
         REPOSITORY,
         None,
-        None,
+        crate::harness::seeded_encryption_key(&engine, REGION),
         BTreeMap::new(),
         REGION,
         SystemTime::now(),

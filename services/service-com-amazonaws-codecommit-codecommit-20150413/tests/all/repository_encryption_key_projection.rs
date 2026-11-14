@@ -10,10 +10,12 @@
 //! the shared `harness` module, rather than a second copy.
 //!
 //! The rule under test: a repository is always encrypted, so `kmsKeyId` is
-//! always reported — the service's managed key for a request that names no
-//! selector of its own, and otherwise the one canonical form of the selector the
-//! caller set: a bare key id as the ARN of that key in the repository's own
-//! account and region, every other form KMS documents for `KeyId` as it was set.
+//! always reported — and what it reports is the KEY, resolved against KMS from
+//! whichever of the four selector forms the create named it by: the Amazon Web
+//! Services managed key of this service for a request that names no selector at
+//! all, and otherwise the key the named selector resolves to. A selector KMS
+//! holds no key for is held in the fullest form it names by itself (a bare key id
+//! as that key's ARN in this account and region).
 //! `CreateRepository`, `GetRepository` and `BatchGetRepositories` project one
 //! stored repository, so all three report that same key, and a selector that
 //! names no key at all is refused and stores nothing.
@@ -29,8 +31,10 @@
 
 use serde_json::{json, Value};
 
-use super::harness::{kms_key_arn_of, metadata_of, DEFAULT_ENCRYPTION_KEY_ALIAS};
-use super::repository_lifecycle::{emulator, error, is_uuid, ok, string_at, REGION};
+use super::harness::{kms_key_arn_of, managed_encryption_key_arn, metadata_of};
+use super::repository_lifecycle::{
+    emulator, emulator_with_engine, error, is_uuid, ok, string_at, REGION,
+};
 
 /// The account every ARN this emulator mints is scoped to.
 fn account() -> String {
@@ -38,12 +42,14 @@ fn account() -> String {
 }
 
 /// One row: the repository, the `kmsKeyId` its creation carries (`None` for a
-/// request that names none), the key every projection of it must report, and the
-/// tags it is created with.
+/// request that names none), the key every projection of it must report —
+/// `None` where that key is the managed key KMS associates with this service's
+/// alias, which is read off the KMS store rather than written here — and the tags
+/// it is created with.
 struct Case {
     name: String,
     requested: Option<String>,
-    reported: String,
+    reported: Option<String>,
     tags: Vec<(&'static str, &'static str)>,
 }
 
@@ -61,10 +67,11 @@ fn cases() -> Vec<Case> {
     let multi_region_key_id = format!("mrk-{}", "0f1e2d3c".repeat(4));
     vec![
         Case {
-            // No selector at all: the managed key, in its alias form.
+            // No selector at all: the Amazon Web Services managed key of this
+            // service, which is the key KMS associates with its predefined alias.
             name: "key-default".to_string(),
             requested: None,
-            reported: DEFAULT_ENCRYPTION_KEY_ALIAS.to_string(),
+            reported: None,
             tags: vec![("team", "builders")],
         },
         Case {
@@ -72,43 +79,46 @@ fn cases() -> Vec<Case> {
             // resolves to that key's ARN.
             name: "key-by-id".to_string(),
             requested: Some(key_id.to_string()),
-            reported: kms_key_arn_of(key_id),
+            reported: Some(kms_key_arn_of(key_id)),
             tags: Vec::new(),
         },
         Case {
             // The multi-region shape of a key id resolves the same way.
             name: "key.by_multi-region-id".to_string(),
             requested: Some(multi_region_key_id.clone()),
-            reported: kms_key_arn_of(&multi_region_key_id),
+            reported: Some(kms_key_arn_of(&multi_region_key_id)),
             tags: vec![("env", "test"), ("owner", "team-a")],
         },
         Case {
             // A key ARN already names the key in full and is kept as it was set.
             name: "k".to_string(),
             requested: Some(kms_key_arn_of(other_key_id)),
-            reported: kms_key_arn_of(other_key_id),
+            reported: Some(kms_key_arn_of(other_key_id)),
             tags: Vec::new(),
         },
         Case {
-            // An alias names a key this emulator resolves no further, so the
-            // alias is what the repository carries.
+            // An alias KMS holds no key for: the key is the caller's own, in an
+            // account or a key store this emulator does not keep, so the selector
+            // is held as the caller set it. An alias KMS DOES hold a key for is
+            // resolved to that key — see
+            // `crate::repository_encryption_key_resolution`.
             name: "key-by-alias".to_string(),
             requested: Some("alias/codecommit-repository-key".to_string()),
-            reported: "alias/codecommit-repository-key".to_string(),
+            reported: Some("alias/codecommit-repository-key".to_string()),
             tags: vec![("a", "1")],
         },
         Case {
             // The modelled maximum `RepositoryName` length (100), created with
-            // an alias ARN.
+            // an alias ARN KMS holds no key for.
             name: "x".repeat(100),
             requested: Some(format!(
                 "arn:aws:kms:{REGION}:{}:alias/codecommit-repository-key",
                 account()
             )),
-            reported: format!(
+            reported: Some(format!(
                 "arn:aws:kms:{REGION}:{}:alias/codecommit-repository-key",
                 account()
-            ),
+            )),
             tags: Vec::new(),
         },
     ]
@@ -133,7 +143,7 @@ fn create_body(case: &Case) -> Value {
 
 #[tokio::test]
 async fn every_projection_reports_the_repositorys_key_in_its_canonical_form() {
-    let router = emulator();
+    let (router, engine) = emulator_with_engine();
     let cases = cases();
 
     for case in &cases {
@@ -143,9 +153,16 @@ async fn every_projection_reports_the_repositorys_key_in_its_canonical_form() {
             .get("repositoryMetadata")
             .unwrap_or_else(|| panic!("case {label:?}: no repositoryMetadata in {created}"))
             .clone();
+        // A row that names no selector asks for the managed key, whose identity is
+        // KMS's: the expectation is read off the KMS store rather than written in
+        // the table.
+        let expected = case
+            .reported
+            .clone()
+            .unwrap_or_else(|| managed_encryption_key_arn(&engine));
         assert_eq!(
             created_metadata.get("kmsKeyId").and_then(Value::as_str),
-            Some(case.reported.as_str()),
+            Some(expected.as_str()),
             "case {label:?}: CreateRepository must report the repository's key, got {created_metadata}"
         );
 
@@ -154,7 +171,7 @@ async fn every_projection_reports_the_repositorys_key_in_its_canonical_form() {
         let read_back = metadata_of(&router, &case.name).await;
         assert_eq!(
             read_back.get("kmsKeyId").and_then(Value::as_str),
-            Some(case.reported.as_str()),
+            Some(expected.as_str()),
             "case {label:?}: GetRepository must report the repository's key, got {read_back}"
         );
         assert_eq!(
@@ -191,9 +208,13 @@ async fn every_projection_reports_the_repositorys_key_in_its_canonical_form() {
             .iter()
             .find(|entry| string_at(entry, "/repositoryName") == case.name)
             .unwrap_or_else(|| panic!("case {label:?}: not reported in {payload}"));
+        let expected = case
+            .reported
+            .clone()
+            .unwrap_or_else(|| managed_encryption_key_arn(&engine));
         assert_eq!(
             entry.get("kmsKeyId").and_then(Value::as_str),
-            Some(case.reported.as_str()),
+            Some(expected.as_str()),
             "case {label:?}: the batch must report the repository's key, got {entry}"
         );
         assert_eq!(

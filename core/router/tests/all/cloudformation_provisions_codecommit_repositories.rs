@@ -56,6 +56,12 @@ const MAX_REPOSITORY_NAME: usize = 100;
 /// other suite here; the in-process callback CloudFormation makes signs its request either
 /// way (the credential scope is what routes it).
 fn build_router() -> MultiServiceRouter {
+    build_router_with_engine().0
+}
+
+/// [`build_router`], with the shared engine as well — for the row that checks a
+/// repository's encryption key against the key KMS holds in the very same engine.
+fn build_router_with_engine() -> (MultiServiceRouter, Arc<engine::InMemoryEngine>) {
     let engine: Arc<engine::InMemoryEngine> = Arc::new(engine::InMemoryEngine::new());
     let mut router = MultiServiceRouter::new();
     router.set_request_authentication(false);
@@ -65,9 +71,11 @@ fn build_router() -> MultiServiceRouter {
         )),
     );
     router.register_service(
-        service_com_amazonaws_codecommit_codecommit_20150413::EmulatedService::new(engine),
+        service_com_amazonaws_codecommit_codecommit_20150413::EmulatedService::new(Arc::clone(
+            &engine,
+        )),
     );
-    router
+    (router, engine)
 }
 
 /// A SigV4 `Authorization` header whose credential scope names `service` in `region`, which
@@ -184,9 +192,11 @@ struct Row {
     /// The `repositoryDescription` `GetRepository` must report, if the row declares one.
     expected_description: Option<&'static str>,
     /// The `kmsKeyId` `GetRepository` must report: the key the row's template
-    /// declares, or [`DEFAULT_KEY_ALIAS`] where it declares none — every CodeCommit
-    /// repository is encrypted, so one is always reported.
-    expected_kms_key_id: &'static str,
+    /// declares, or `None` where it declares none — every CodeCommit repository is
+    /// encrypted, so one is always reported, and a repository created without a key
+    /// of its own carries the Amazon Web Services managed key of the service
+    /// ([`managed_codecommit_key`]).
+    expected_kms_key_id: Option<&'static str>,
     /// The triggers `GetRepositoryTriggers` must report, built from what the row declares.
     expected_triggers: fn(&str) -> Value,
     /// The tags the repository's own declaration asks for.
@@ -196,11 +206,32 @@ struct Row {
     name_outputs: &'static [&'static str],
 }
 
-/// The Amazon Web Services managed key a repository created without a key of its
-/// own is encrypted under: `CreateRepository`'s `kmsKeyId` documents that "If no key
-/// is specified, the default aws/codecommit Amazon Web Services managed key is used",
-/// and CodeCommit names that key by its alias.
+/// The alias of the Amazon Web Services managed key a repository created without a
+/// key of its own is encrypted under: `CreateRepository`'s `kmsKeyId` documents that
+/// "If no key is specified, the default aws/codecommit Amazon Web Services managed
+/// key is used". What the repository REPORTS is the KEY that alias names
+/// ([`managed_codecommit_key`]).
 const DEFAULT_KEY_ALIAS: &str = "alias/aws/codecommit";
+
+/// The ARN of the key KMS holds for [`DEFAULT_KEY_ALIAS`] at `region`'s endpoint,
+/// read out of the KMS store on the shared engine — the key a repository created
+/// without a key of its own must report.
+///
+/// A plain lookup, which resolves a key without associating one, so asking does not
+/// give the predefined alias a key: the CodeCommit create is what must have.
+fn managed_codecommit_key(engine: &engine::InMemoryEngine, region: &str) -> String {
+    use service_com_amazonaws_kms_trentservice::state as kms;
+
+    let keys = kms::service_state(engine).expect("the in-memory engine carries the KMS store");
+    let keys = keys.lock();
+    match keys.resolve(region, DEFAULT_KEY_ALIAS) {
+        kms::KeyRef::Found(key) => key.arn.clone(),
+        _ => panic!(
+            "KMS holds no key for {DEFAULT_KEY_ALIAS} in {region}: the repository's create did \
+             not resolve the alias"
+        ),
+    }
+}
 
 const ROWS: &[Row] = &[
     Row {
@@ -241,7 +272,7 @@ const ROWS: &[Row] = &[
         },
         declared_name: Some("orders-service"),
         expected_description: Some("the orders service's sources"),
-        expected_kms_key_id: DEFAULT_KEY_ALIAS,
+        expected_kms_key_id: None,
         expected_triggers: |region| {
             json!([{
                 "name": "notify-releases",
@@ -289,7 +320,7 @@ const ROWS: &[Row] = &[
         },
         declared_name: Some("billing-service"),
         expected_description: None,
-        expected_kms_key_id: DEFAULT_KEY_ALIAS,
+        expected_kms_key_id: None,
         expected_triggers: |region| {
             json!([
                 {
@@ -331,8 +362,9 @@ const ROWS: &[Row] = &[
         },
         declared_name: None,
         expected_description: None,
-        expected_kms_key_id:
+        expected_kms_key_id: Some(
             "arn:aws:kms:eu-west-1:000000000000:key/12345678-1234-1234-1234-123456789012",
+        ),
         expected_triggers: |_| json!([]),
         expected_tags: &[("Owner", "platform")],
         name_outputs: &["RepoRef"],
@@ -345,7 +377,7 @@ const ROWS: &[Row] = &[
 /// `PutRepositoryTriggers` had written it — and deleting the stack releases it there.
 #[tokio::test]
 async fn a_stack_provisions_the_codecommit_repository_its_template_declares() {
-    let router = build_router();
+    let (router, engine) = build_router_with_engine();
 
     for (index, row) in ROWS.iter().enumerate() {
         let case = row.case;
@@ -471,9 +503,16 @@ async fn a_stack_provisions_the_codecommit_repository_its_template_declares() {
             row.expected_description,
             "case {case:?}: expected the declared description, got {metadata}"
         );
+        // The key the template declared, or — where it declared none — the managed
+        // key of the service, which is the KEY KMS holds for its predefined alias
+        // rather than the alias itself.
+        let expected_kms_key_id = match row.expected_kms_key_id {
+            Some(declared) => declared.to_string(),
+            None => managed_codecommit_key(&engine, region),
+        };
         assert_eq!(
             metadata.get("kmsKeyId").and_then(Value::as_str),
-            Some(row.expected_kms_key_id),
+            Some(expected_kms_key_id.as_str()),
             "case {case:?}: expected the declared encryption key, or the managed key where \
              the template declared none, got {metadata}"
         );

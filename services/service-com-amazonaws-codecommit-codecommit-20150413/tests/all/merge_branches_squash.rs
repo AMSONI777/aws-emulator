@@ -785,7 +785,7 @@ async fn a_target_that_is_a_tag_name_is_not_a_branch() {
     let mut built = Repository::new(
         repository,
         None,
-        None,
+        crate::harness::seeded_encryption_key(&engine, REGION),
         BTreeMap::new(),
         REGION,
         SystemTime::now(),

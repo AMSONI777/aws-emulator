@@ -20,6 +20,9 @@
 //! reading a file at a commit specifier is a lookup rather than a tree walk.
 
 pub mod conflict_report;
+/// Which KMS key a repository is encrypted under: the selector forms this service
+/// accepts, and the resolution of one to the key it names.
+mod encryption_key;
 pub mod git_endpoint;
 pub mod git_object;
 pub mod merge;
@@ -27,6 +30,8 @@ mod merge_record;
 /// The EventBridge envelope a recorded change to a pull request is published as.
 pub mod pull_request_events;
 mod repository;
+
+pub use encryption_key::*;
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -1487,12 +1492,16 @@ pub struct Repository {
     pub description: Option<String>,
     pub default_branch: Option<String>,
     pub arn: String,
-    /// The KMS key this repository is encrypted under, in the single form
-    /// [`canonical_encryption_key`] holds every selector in. Never absent: a
-    /// repository created without a key of its own carries
-    /// [`DEFAULT_ENCRYPTION_KEY_ALIAS`], the managed key `kmsKeyId`'s own
-    /// documentation names — "If no key is specified, the default
-    /// aws/codecommit Amazon Web Services managed key is used"
+    /// The KMS key this repository is encrypted under, as the ARN of the key
+    /// itself: `kmsKeyId` reports "The ID of the Key Management Service
+    /// encryption key used to encrypt and decrypt the repository"
+    /// (`smithy_query(query="doc",shape="RepositoryMetadata",member="kmsKeyId")`),
+    /// so what is held is the key a request's selector resolved to
+    /// ([`resolve_encryption_key`]) rather than the selector. Never absent: a
+    /// repository created without a key of its own is encrypted under the
+    /// managed key `kmsKeyId`'s own documentation names — "If no key is
+    /// specified, the default aws/codecommit Amazon Web Services managed key is
+    /// used"
     /// (`smithy_query(query="doc",shape="CreateRepositoryInput",member="kmsKeyId")`).
     pub kms_key_id: String,
     /// The id of this repository's tagging record, reported beside the tags
@@ -3727,104 +3736,6 @@ fn uuid_v8(seed: &str) -> String {
 /// prohibited too.
 pub fn has_prohibited_git_suffix(name: &str) -> bool {
     name.to_ascii_lowercase().ends_with(".git")
-}
-
-/// The number of hexadecimal digits after the `mrk-` prefix of the id KMS mints
-/// for a multi-region key.
-const MULTI_REGION_KEY_ID_DIGITS: usize = 32;
-
-/// Is this a KMS key id — a UUID for a single-region key, as every KMS `KeyId`
-/// example is (`1234abcd-12ab-34cd-56ef-1234567890ab`), or `mrk-` and
-/// [`MULTI_REGION_KEY_ID_DIGITS`] hexadecimal digits for a multi-region key?
-///
-/// This emulator resolves no KMS key, so only the FORM of the selector is
-/// judged — but that form is the id's two shapes exactly, read through the same
-/// [`is_uuid`] every other UUID-shaped selector in this module is read through.
-fn is_kms_key_id(candidate: &str) -> bool {
-    if let Some(digits) = candidate.strip_prefix("mrk-") {
-        return digits.len() == MULTI_REGION_KEY_ID_DIGITS
-            && digits.bytes().all(|byte| byte.is_ascii_hexdigit());
-    }
-    is_uuid(candidate)
-}
-
-/// Is this a KMS alias path — `alias/` followed by a non-empty name of the
-/// characters `KmsKeyId`'s modelled pattern `^[a-zA-Z0-9:/_-]+$` allows?
-fn is_kms_alias(candidate: &str) -> bool {
-    candidate.strip_prefix("alias/").is_some_and(|name| {
-        !name.is_empty()
-            && name
-                .bytes()
-                .all(|byte| byte.is_ascii_alphanumeric() || b":/_-".contains(&byte))
-    })
-}
-
-/// Is this the full ARN of a KMS key or alias
-/// (`arn:<partition>:kms:<region>:<account>:key/<key id>` or `…:alias/<name>`)?
-///
-/// Read with the same six-field `splitn` this module's
-/// [`repository_name_of_resource_arn`] uses, so one file has one way of reading an
-/// ARN; this adds only which vendor and resource the value has to name.
-fn is_kms_arn(candidate: &str) -> bool {
-    let [prefix, partition, vendor, region, account, resource] =
-        candidate.splitn(6, ':').collect::<Vec<_>>()[..]
-    else {
-        return false;
-    };
-    prefix == "arn"
-        && !partition.is_empty()
-        && vendor == "kms"
-        && !region.is_empty()
-        && account.len() == ACCOUNT_ID_DIGITS
-        && account.bytes().all(|byte| byte.is_ascii_digit())
-        && (is_kms_alias(resource) || resource.strip_prefix("key/").is_some_and(is_kms_key_id))
-}
-
-/// Does `key_id` select a KMS key at all?
-///
-/// `KmsKeyId`'s documentation sends a caller to KMS for the acceptable values —
-/// "For more information about acceptable values for keyID, see KeyId in the
-/// Decrypt API description in the Key Management Service API Reference"
-/// (`smithy_query(query="doc",shape="UpdateRepositoryEncryptionKeyInput",member="kmsKeyId")`)
-/// — and that description lists four forms: a key id, a key ARN, an alias name
-/// and an alias ARN. The modelled pattern `^[a-zA-Z0-9:/_-]+$` admits text that
-/// is none of them, so this is the rule a handler is left to apply; a value
-/// outside every form names no key, and the operation answers the modelled
-/// `EncryptionKeyInvalidIdException`.
-pub fn is_kms_key_selector(key_id: &str) -> bool {
-    is_kms_alias(key_id) || is_kms_key_id(key_id) || is_kms_arn(key_id)
-}
-
-/// The message `EncryptionKeyInvalidIdException` carries: one code, one
-/// sentence, worded in a single place so the two operations that take a
-/// `kmsKeyId` cannot word the same refusal differently. The only variable part
-/// is the selector the request named.
-pub fn invalid_encryption_key_id_message(key_id: &str) -> String {
-    format!(
-        "the encryption key id {key_id} is not valid: it names neither a key id, a key ARN, an alias nor an alias ARN"
-    )
-}
-
-/// The Amazon Web Services managed key a repository is encrypted under when the
-/// request names no key of its own, in the alias form KMS names that key by:
-/// `kmsKeyId`'s own documentation states "If no key is specified, the default
-/// aws/codecommit Amazon Web Services managed key is used"
-/// (`smithy_query(query="doc",shape="CreateRepositoryInput",member="kmsKeyId")`).
-pub const DEFAULT_ENCRYPTION_KEY_ALIAS: &str = "alias/aws/codecommit";
-
-/// The ONE form a repository's encryption key is held and reported in, for every
-/// selector that names a key ([`is_kms_key_selector`]).
-///
-/// KMS's `KeyId` admits four selectors for the same key, and of them only the
-/// bare key id leaves the key's account and region unsaid; a key id therefore
-/// resolves to the ARN of that key in the repository's own account and region,
-/// the identifier KMS reports a key by, while a selector that already names a
-/// key or an alias in full is kept as the caller set it.
-pub fn canonical_encryption_key(selector: &str, region: &str) -> String {
-    if is_kms_key_id(selector) {
-        return ::engine::emulator_arn("kms", region, &format!("key/{selector}"));
-    }
-    selector.to_string()
 }
 
 /// The region this request is addressed to: the SigV4 credential scope's region,
