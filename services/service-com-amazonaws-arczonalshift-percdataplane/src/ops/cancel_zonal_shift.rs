@@ -99,7 +99,7 @@
 
 #[allow(unused_imports)]
 use super::types::*;
-use crate::state::{as_date_time, ZonalShiftStatus};
+use crate::state::{as_date_time, zonal_shift_not_active, ZonalShiftStatus};
 use std::time::SystemTime;
 
 // `#[operation_error]` below expands to an invocation of the LOCAL declarative
@@ -197,18 +197,12 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
             .map_err(CancelZonalShiftErrorModeled::AccessDeniedException)?;
 
         // Cancelling is only meaningful while the shift is running: one already
-        // canceled, or that has expired, has nothing left to cancel.
+        // canceled, or that has expired, has nothing left to cancel. The refusal is the
+        // one sentence ARC states for that precondition, shared with the update that
+        // runs into it.
         if shift.status != ZonalShiftStatus::Active {
             return Err(CancelZonalShiftErrorModeled::ConflictException(
-                ConflictException {
-                    message: format!(
-                        "zonal shift {} is {} and can no longer be canceled",
-                        shift.zonal_shift_id,
-                        shift.status.as_wire()
-                    ),
-                    reason: "ZonalShiftStatusNotActive".to_string(),
-                    zonal_shift_id: Some(shift.zonal_shift_id.clone()),
-                },
+                zonal_shift_not_active(&shift.zonal_shift_id),
             )
             .into());
         }

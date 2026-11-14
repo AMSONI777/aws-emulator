@@ -38,6 +38,18 @@ pub use practice_runs::{
     PRACTICE_CONFIGURATION_MISSING_MESSAGE, PRACTICE_CONFIGURATION_MISSING_REASON,
 };
 
+/// The refusals every zonal-shift mutation answers, each worded once for the class it
+/// refuses.
+mod shift_refusals;
+
+pub use shift_refusals::{
+    active_zonal_shift_exists, invalid_availability_zone, invalid_expires_in,
+    zonal_shift_not_active, ACTIVE_ZONAL_SHIFT_EXISTS_MESSAGE, INVALID_AVAILABILITY_ZONE_MESSAGE,
+    INVALID_EXPIRES_IN_MESSAGE, INVALID_EXPIRES_IN_REASON, UNSUPPORTED_AZ_REASON,
+    ZONAL_SHIFT_ALREADY_EXISTS_REASON, ZONAL_SHIFT_NOT_ACTIVE_MESSAGE,
+    ZONAL_SHIFT_NOT_ACTIVE_REASON,
+};
+
 /// The zonal autoshift status ARC holds for a resource, and the rule the operation
 /// that writes one applies to it.
 mod zonal_autoshift;

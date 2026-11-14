@@ -111,7 +111,9 @@
 
 #[allow(unused_imports)]
 use super::types::*;
-use crate::state::{as_date_time, parse_expires_in, ZonalShiftStatus};
+use crate::state::{
+    as_date_time, invalid_expires_in, parse_expires_in, zonal_shift_not_active, ZonalShiftStatus,
+};
 use std::time::SystemTime;
 
 // `#[operation_error]` below expands to an invocation of the LOCAL declarative
@@ -206,13 +208,7 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
                 Some(expiry) => Some(expiry),
                 None => {
                     return Err(UpdateZonalShiftErrorModeled::ValidationException(
-                        ValidationException {
-                            message: format!(
-                                "expiresIn {raw} must be a whole number of minutes (m) or \
-                                 hours (h), up to three days (72h)"
-                            ),
-                            reason: "InvalidExpiresIn".to_string(),
-                        },
+                        invalid_expires_in(),
                     )
                     .into())
                 }
@@ -232,18 +228,11 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
             .map_err(UpdateZonalShiftErrorModeled::AccessDeniedException)?;
 
         // Only a shift that is still running can be updated: one that has expired or
-        // been canceled is over.
+        // been canceled is over. The refusal is the one sentence ARC states for that
+        // precondition, shared with the cancel that runs into it.
         if shift.status != ZonalShiftStatus::Active {
             return Err(UpdateZonalShiftErrorModeled::ConflictException(
-                ConflictException {
-                    message: format!(
-                        "zonal shift {} is {} and can no longer be updated",
-                        shift.zonal_shift_id,
-                        shift.status.as_wire()
-                    ),
-                    reason: "ZonalShiftStatusNotActive".to_string(),
-                    zonal_shift_id: Some(shift.zonal_shift_id.clone()),
-                },
+                zonal_shift_not_active(&shift.zonal_shift_id),
             )
             .into());
         }

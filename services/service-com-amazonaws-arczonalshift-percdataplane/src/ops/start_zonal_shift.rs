@@ -131,7 +131,10 @@
 
 #[allow(unused_imports)]
 use super::types::*;
-use crate::state::{parse_expires_in, ShiftType, ZonalShift, ZonalShiftStatus};
+use crate::state::{
+    active_zonal_shift_exists, invalid_availability_zone, invalid_expires_in, parse_expires_in,
+    ShiftType, ZonalShift, ZonalShiftStatus,
+};
 use std::time::SystemTime;
 
 // `#[operation_error]` below expands to an invocation of the LOCAL declarative
@@ -234,32 +237,19 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
             .authorized_resource(&published, &input.resource_identifier)
             .map_err(StartZonalShiftErrorModeled::AccessDeniedException)?;
 
-        // Traffic can only be moved away from a zone the resource is deployed in.
+        // Traffic can only be moved away from a zone the resource is deployed in. The
+        // refusal is the one sentence ARC states for the class, held with the others.
         if !resource.availability_zones.contains(&input.away_from) {
-            return Err(StartZonalShiftErrorModeled::ValidationException(
-                ValidationException {
-                    message: format!(
-                        "awayFrom {} is not an Availability Zone that resource {} is deployed in",
-                        input.away_from, input.resource_identifier
-                    ),
-                    reason: "UnsupportedAz".to_string(),
-                },
-            )
-            .into());
+            return Err(
+                StartZonalShiftErrorModeled::ValidationException(invalid_availability_zone())
+                    .into(),
+            );
         }
 
         let Some(expires_in) = parse_expires_in(&input.expires_in) else {
-            return Err(StartZonalShiftErrorModeled::ValidationException(
-                ValidationException {
-                    message: format!(
-                        "expiresIn {} must be a whole number of minutes (m) or hours (h), \
-                         up to three days (72h)",
-                        input.expires_in
-                    ),
-                    reason: "InvalidExpiresIn".to_string(),
-                },
-            )
-            .into());
+            return Err(
+                StartZonalShiftErrorModeled::ValidationException(invalid_expires_in()).into(),
+            );
         };
 
         // One customer-initiated zonal shift at a time per resource.
@@ -267,14 +257,7 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
             store.active_shift_of_type(&input.resource_identifier, ShiftType::ZonalShift)
         {
             return Err(StartZonalShiftErrorModeled::ConflictException(
-                ConflictException {
-                    message: format!(
-                        "zonal shift {} is already active for resource {}",
-                        existing.zonal_shift_id, input.resource_identifier
-                    ),
-                    reason: "ZonalShiftAlreadyExists".to_string(),
-                    zonal_shift_id: Some(existing.zonal_shift_id.clone()),
-                },
+                active_zonal_shift_exists(&existing.zonal_shift_id),
             )
             .into());
         }
@@ -282,16 +265,9 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         // `checked_add`, so the expiry time does not depend on the bound another
         // module holds to stay representable.
         let Some(expiry_time) = now.checked_add(expires_in) else {
-            return Err(StartZonalShiftErrorModeled::ValidationException(
-                ValidationException {
-                    message: format!(
-                        "expiresIn {} names a time this service cannot represent",
-                        input.expires_in
-                    ),
-                    reason: "InvalidExpiresIn".to_string(),
-                },
-            )
-            .into());
+            return Err(
+                StartZonalShiftErrorModeled::ValidationException(invalid_expires_in()).into(),
+            );
         };
 
         let zonal_shift_id = store.next_zonal_shift_id();

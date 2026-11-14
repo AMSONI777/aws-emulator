@@ -27,6 +27,8 @@ mod refusal_disclosure;
 mod refusal_message_rules;
 #[path = "all/registered_managed_resources.rs"]
 mod registered_managed_resources;
+#[path = "all/shift_refusal_sentences.rs"]
+mod shift_refusal_sentences;
 #[path = "all/state_roundtrip.rs"]
 mod state_roundtrip;
 #[path = "all/uri_label_refusal.rs"]
