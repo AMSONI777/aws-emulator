@@ -35,21 +35,59 @@ pub fn invalid_vpn_concentrator_id_not_found<E>(vpn_concentrator_id: &str) -> Sc
     )
 }
 
+/// The `ResourceType` a `TagSpecification` names to tag a VPN concentrator as it is
+/// created: `vpn-concentrator`, a member of that enum
+/// (`smithy_query(query="shape",shape="ResourceType")`).
+pub const RESOURCE_TYPE_VPN_CONCENTRATOR: &str = "vpn-concentrator";
+
 /// The caller-chosen bytes one stored concentrator holds: its tags, the only member of
 /// `VpnConcentrator` whose size a caller decides.
 pub(super) fn vpn_concentrator_payload_bytes(view: &VpnConcentrator) -> usize {
     tag_list_bytes(view.tags.as_deref().unwrap_or_default())
 }
 
+/// What `CreateVpnConcentrator` asks the store to write: the three things the REQUEST
+/// decides about a concentrator.
+///
+/// Everything else about one — its id, its state, the attachment it aggregates onto its
+/// transit gateway through, and the moves the clock owes both — is the store's to mint, so
+/// no path can report a concentrator in a state the store does not hold.
+#[derive(Debug, Clone)]
+pub struct VpnConcentratorSpec {
+    /// "The ID of the transit gateway to attach the VPN concentrator to"
+    /// (`CreateVpnConcentratorRequest$TransitGatewayId`).
+    pub transit_gateway_id: String,
+    /// "The type of VPN concentrator to create" (`CreateVpnConcentratorRequest$Type`).
+    pub concentrator_type: String,
+    /// "The tags to apply to the VPN concentrator during creation"
+    /// (`CreateVpnConcentratorRequest$TagSpecifications`), as the one shared reader of a
+    /// create's tag specifications resolved them.
+    pub tags: Vec<Tag>,
+}
+
+/// The bytes a created concentrator and the attachment it is aggregated through add to the
+/// store's budget: the fixed [`STORED_RECORD_OVERHEAD_BYTES`] of each of the TWO records
+/// plus the caller-chosen tags the concentrator holds.
+///
+/// Beside [`ComAmazonawsEc2Amazonec2State::insert_created_vpn_concentrator`], which charges
+/// exactly these bytes, so the gate a handler asks before writing and the charge the write
+/// then makes cannot drift.
+pub fn created_vpn_concentrator_bytes(spec: &VpnConcentratorSpec) -> usize {
+    STORED_RECORD_OVERHEAD_BYTES
+        .saturating_mul(2)
+        .saturating_add(tag_list_bytes(&spec.tags))
+}
+
 /// The store's VPN concentrators, and the one way one is written and taken away. Kept in
 /// this section, beside the resource they are about, rather than in one of the module's
 /// shared `impl` blocks.
 ///
-/// [`Self::has_vpn_concentrator_capacity`] and [`Self::insert_vpn_concentrator`] are the one
-/// write path for a concentrator, and nothing in `src/ops/` reaches them yet: the operation
-/// that will is `CreateVpnConcentrator`, still a scaffold under its own issue, so today the
-/// only caller is the test harness that seeds a concentrator for the delete path. A reader
-/// should not take their existence for "an operation already mints concentrators".
+/// [`Self::insert_created_vpn_concentrator`] is what `CreateVpnConcentrator` writes a
+/// concentrator through: it mints the record, the transit gateway attachment the
+/// concentrator aggregates its connections through, and the `available` moves the clock owes
+/// both. [`Self::insert_vpn_concentrator`] underneath it is the one place a concentrator
+/// record is stored and charged, and [`Self::remove_vpn_concentrator`] the one place one
+/// leaves the store.
 impl ComAmazonawsEc2Amazonec2State {
     /// Whether another VPN concentrator fits inside the store's ceiling
     /// ([`MAX_STORED_RECORDS_PER_STORE`]), on the contract of
@@ -98,19 +136,142 @@ impl ComAmazonawsEc2Amazonec2State {
         Some(vpn_concentrator_id)
     }
 
+    /// Write a created VPN concentrator: the record itself in the non-terminal state a
+    /// create leaves it in, the transit gateway attachment it aggregates its VPN connections
+    /// onto that gateway through, and the `available` move the clock owes each. Answers the
+    /// `VpnConcentratorId` it was given, or `None` when the store is at
+    /// [`MAX_STORED_RECORDS_PER_STORE`] for either record and NOTHING was stored.
+    ///
+    /// The attachment is a REAL record of the one store every kind of transit gateway
+    /// attachment shares, so the `TransitGatewayAttachmentId` the concentrator reports is one
+    /// `DescribeTransitGatewayAttachments` resolves — it reports the concentrator as the
+    /// resource it attaches, under the `vpn-concentrator`
+    /// [`TRANSIT_GATEWAY_ATTACHMENT_RESOURCE_TYPE_VPN_CONCENTRATOR`] resource type.
+    ///
+    /// A concentrator aggregates connections only once that attachment carries traffic, and
+    /// the attachment carries traffic only once the gateway it is on does, so the two moves
+    /// fall due one dependency level apart: the attachment one [`TRANSITION_DELAY`] after the
+    /// gateway's own move is due ([`Self::transit_gateway_available_at`], and one span after
+    /// this call for a gateway in service already), and the concentrator one span after the
+    /// attachment's. Both instants are RECORDED rather than slept for, and applied by
+    /// [`Self::materialize_due_transitions`].
+    pub fn insert_created_vpn_concentrator(&mut self, spec: VpnConcentratorSpec) -> Option<String> {
+        // Both records or neither: the concentrator is reported WITH its attachment, so a
+        // store with room for only one of them stores nothing at all.
+        if !self.has_vpn_concentrator_capacity() || !self.has_transit_gateway_attachment_capacity() {
+            return None;
+        }
+        let now = Instant::now();
+        let gateway_ready_at = self
+            .transit_gateway_available_at
+            .get(&spec.transit_gateway_id)
+            .copied()
+            .unwrap_or(now);
+        let attachment_due_at = now.max(gateway_ready_at) + TRANSITION_DELAY;
+
+        let vpn_concentrator_id = self.insert_vpn_concentrator(VpnConcentrator {
+            // Minted by the insert itself, like every other resource id in this store.
+            vpn_concentrator_id: None,
+            state: Some(VPN_STATE_PENDING.to_string()),
+            transit_gateway_id: Some(spec.transit_gateway_id.clone()),
+            // Stamped below, once the attachment this concentrator is reached through has
+            // been written and has an id of its own.
+            transit_gateway_attachment_id: None,
+            r#type: Some(spec.concentrator_type),
+            // An empty tag set is reported as no tag set rather than as an empty one.
+            tags: (!spec.tags.is_empty()).then_some(spec.tags),
+        })?;
+
+        let account = ::engine::emulator_account_id().to_string();
+        let attachment = self.insert_transit_gateway_attachment(
+            TransitGatewayAttachmentView::VpnConcentrator(TransitGatewayAttachment {
+                transit_gateway_attachment_id: None,
+                transit_gateway_id: Some(spec.transit_gateway_id),
+                transit_gateway_owner_id: Some(account.clone()),
+                resource_owner_id: Some(account),
+                resource_type: Some(
+                    TRANSIT_GATEWAY_ATTACHMENT_RESOURCE_TYPE_VPN_CONCENTRATOR.to_string(),
+                ),
+                resource_id: Some(vpn_concentrator_id.clone()),
+                state: Some(TRANSIT_GATEWAY_ATTACHMENT_STATE_PENDING.to_string()),
+                // An attachment nothing has associated with a route or policy table carries
+                // no association; the one a caller makes is read off those stores.
+                association: None,
+                creation_time: Some(system_time_to_date_time(SystemTime::now())),
+                // "The tags to apply to the VPN CONCENTRATOR during creation"
+                // (`TagSpecifications`): the tags are the concentrator's, not the
+                // attachment's.
+                tags: None,
+            }),
+        );
+        let Some(transit_gateway_attachment_id) = attachment else {
+            // The ceiling was checked above under this same lock, so this cannot be reached
+            // from a handler; if it ever were, the concentrator written a moment ago goes
+            // back out rather than being left without the attachment it is reached through.
+            self.remove_vpn_concentrator(&vpn_concentrator_id);
+            return None;
+        };
+        if let Some(record) = self
+            .transit_gateway_attachments
+            .get_mut(&transit_gateway_attachment_id)
+        {
+            record.pending = Some(PendingStateMove {
+                to: TRANSIT_GATEWAY_ATTACHMENT_STATE_AVAILABLE.to_string(),
+                due_at: attachment_due_at,
+            });
+        }
+        if let Some(view) = self.vpn_concentrators.get_mut(&vpn_concentrator_id) {
+            view.transit_gateway_attachment_id = Some(transit_gateway_attachment_id);
+        }
+        // One span PER DEPENDENCY LEVEL, on the crate's one transition span: the
+        // concentrator comes into service after the attachment it aggregates through, which
+        // comes into service after the gateway that attachment is on — the same chaining
+        // `insert_transit_gateway_vpc_attachment` applies to an attachment of a `pending`
+        // gateway. The total is a consequence of the chain and of [`TRANSITION_DELAY`], never
+        // a span chosen for this resource, so a concentrator and every other resource of this
+        // store come up on the one clock and the one span.
+        self.vpn_concentrator_available_at.insert(
+            vpn_concentrator_id.clone(),
+            attachment_due_at + TRANSITION_DELAY,
+        );
+        Some(vpn_concentrator_id)
+    }
+
     /// Take the VPN concentrator `vpn_concentrator_id` names out of the store and answer it
     /// as it was last reported, or `None` when this account holds no such concentrator.
     ///
     /// The bytes the record held go back to the store's budget on the terms
     /// [`vpn_concentrator_payload_bytes`] took them on, the way
-    /// [`Self::remove_carrier_gateway`] gives a removed gateway's back. The ONE place a
+    /// [`Self::remove_carrier_gateway`] gives a removed gateway's back, and the `available`
+    /// move the clock may still owe it goes with it, so a later materialisation cannot
+    /// resurrect a deleted concentrator's state. The attachment the concentrator was reached
+    /// through attaches nothing once the concentrator is gone, so it begins the deletion the
+    /// attachment family's state enum spells (`deleting`, then the terminal `deleted` one
+    /// [`TRANSITION_DELAY`] later) rather than being left in service. The ONE place a
     /// concentrator leaves the store, so the delete path cannot drop a record while leaving
-    /// its bytes charged.
+    /// its bytes charged or its attachment available.
     pub fn remove_vpn_concentrator(
         &mut self,
         vpn_concentrator_id: &str,
     ) -> Option<VpnConcentrator> {
         let view = self.vpn_concentrators.remove(vpn_concentrator_id)?;
+        self.vpn_concentrator_available_at.remove(vpn_concentrator_id);
+        if let Some(record) = view
+            .transit_gateway_attachment_id
+            .as_deref()
+            .and_then(|attachment_id| self.transit_gateway_attachments.get_mut(attachment_id))
+            .filter(|record| {
+                matches!(
+                    record.view,
+                    TransitGatewayAttachmentView::VpnConcentrator(_)
+                )
+            })
+        {
+            record.begin_move(
+                TRANSIT_GATEWAY_ATTACHMENT_STATE_DELETING,
+                TRANSIT_GATEWAY_ATTACHMENT_STATE_DELETED,
+            );
+        }
         self.release_stored_bytes(
             STORED_RECORD_OVERHEAD_BYTES + vpn_concentrator_payload_bytes(&view),
         );

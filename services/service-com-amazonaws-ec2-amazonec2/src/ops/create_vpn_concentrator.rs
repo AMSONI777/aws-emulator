@@ -1,15 +1,18 @@
 // SPDX-License-Identifier: CC0-1.0
 
 //! @op CreateVpnConcentrator
-//! SCAFFOLDED, NOT IMPLEMENTED: this operation answers HTTP 501 `NotImplemented` and
-//! asserts NOTHING about `CreateVpnConcentrator`'s real behaviour. Implement it here — this is
-//! the ONLY file to touch for this operation.
 //!
-//! A 501 from this operation means "nobody has written it yet", never "the emulator is
-//! broken". Replace the `Err(..)` in [`CreateVpnConcentrator::handle`] with real behaviour and
-//! delete the SCAFFOLDED marker line above; that line is the machine-readable record of
-//! which operations are still stubs (`grep -rl '^//! SCAFFOLDED, NOT IMPLEMENTED:' */src/ops/`),
-//! so leaving it on an implemented operation under-reports progress.
+//! Creates a VPN concentrator on a transit gateway: the concentrator record and the transit
+//! gateway attachment it aggregates its VPN connections onto that gateway through are both
+//! written by [`crate::state::ComAmazonawsEc2Amazonec2State::insert_created_vpn_concentrator`],
+//! so the `TransitGatewayAttachmentId` this answers with is one
+//! `DescribeTransitGatewayAttachments` resolves and the `VpnConcentratorId` is one
+//! `CreateVpnConnection` and `DeleteVpnConcentrator` resolve.
+//!
+//! The concentrator is reported in the non-terminal `pending` state and the clock owes it
+//! `available` once its attachment is in service; nothing is slept for.
+//!
+//! This is the ONLY file to touch for this operation.
 //!
 //! ## Shape of an operation
 //!
@@ -139,18 +142,122 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         input: Self::Input,
         ctx: &smithy_server_runtime::OperationContext<'_>,
     ) -> Result<Self::Output, Self::Error> {
-        // The engine is reachable from `&self` (constructor-injected); `ctx` carries
-        // request metadata. Both are bound here so an implementer has them in scope.
-        let _ = (&input, ctx, &self.engine);
-        // Implement `CreateVpnConcentrator` here, then delete the SCAFFOLDED marker at the top of
-        // this file. Return modeled failures as
-        // `Err(CreateVpnConcentratorErrorModeled::Variant(..).into())` — the `From` impl above lifts it.
-        //
-        // To refuse a bad request this operation models no error for, return
-        // `Err(crate::scaffolded::Scaffolded::validation("..."))` — a 400
-        // `ValidationException`. Do NOT answer 501 for it: 501 means "not written yet",
-        // not "bad request". Modeled constraints are already refused BEFORE this
-        // handler runs, so reaching here means the input satisfies every one of them.
-        Err(crate::scaffolded::Scaffolded::not_implemented("CreateVpnConcentrator"))
+        // `ctx` carries request metadata only; this operation reads none of it — the gateway
+        // and the type come from the request and everything else from the store, which is
+        // reached through the engine held on `self`.
+        let _ = ctx;
+        use crate::state;
+
+        // "The type of VPN concentrator to create" (`Type`) is `@required` and targets an
+        // enum of one member, and BOTH of those are applied at the request boundary: a
+        // request that names no type is refused there, and so is one naming a type outside
+        // the enum. This is the backstop that keeps a type the store would then report from
+        // ever being one the model does not publish
+        // (`smithy_query(query="shape",shape="VpnConcentratorType")`, as the generated
+        // catalog spells it).
+        if !VPN_CONCENTRATOR_TYPE_VALUES.contains(&input.r#type.as_str()) {
+            return Err(state::invalid_parameter_value(format!(
+                "Invalid value '{requested}' for type. The only supported type is \
+                 '{supported}'",
+                requested = input.r#type,
+                supported = VPN_CONCENTRATOR_TYPE_VALUES[0],
+            )));
+        }
+
+        // "Creates a VPN concentrator that aggregates multiple VPN connections to a TRANSIT
+        // GATEWAY" (`CreateVpnConcentrator`), and "the ID of the transit gateway to attach
+        // the VPN concentrator to" (`TransitGatewayId`): a concentrator exists to aggregate
+        // connections onto one gateway, so a request that names none names nothing to
+        // aggregate onto. That member is NOT `@required`, so a request without it reaches
+        // this handler, and a parameter with no value is a parameter the request did not
+        // give — which is EC2's `MissingParameter`.
+        let transit_gateway_id = input.transit_gateway_id.as_deref().unwrap_or_default();
+        if transit_gateway_id.is_empty() {
+            return Err(state::missing_parameter(
+                "The request must contain the parameter transitGatewayId",
+            ));
+        }
+
+        // "The tags to apply to the VPN concentrator during creation" (`TagSpecifications`)
+        // — "you must specify the resource type to tag, otherwise the request will fail"
+        // (`TagSpecification`), and the only type this action tags is the concentrator it
+        // creates. The tag payload's own bounds are applied by the one shared reader every
+        // create holds its tags to.
+        let tags: Vec<Tag> = state::tags_from_specifications(
+            input.tag_specifications.as_deref(),
+            state::RESOURCE_TYPE_VPN_CONCENTRATOR,
+            Self::NAME,
+        )?;
+
+        let handle = state::require_service_state(&*self.engine)?;
+        let mut store = handle.lock();
+        // The clock first: whether the gateway this concentrator goes onto is in service is
+        // asked of the state it is ACTUALLY in rather than of the one its last writer left
+        // it in.
+        store.materialize_due_transitions();
+
+        // The gateway has to be one this account holds: a concentrator cannot aggregate
+        // connections onto a transit gateway that does not exist, which is the refusal
+        // `DescribeTransitGateways` answers for an id it cannot resolve.
+        if !store.transit_gateways.contains_key(transit_gateway_id) {
+            return Err(state::invalid_transit_gateway_id_not_found(
+                transit_gateway_id,
+            ));
+        }
+
+        let spec = state::VpnConcentratorSpec {
+            transit_gateway_id: transit_gateway_id.to_string(),
+            concentrator_type: input.r#type.clone(),
+            tags,
+        };
+
+        // A count ceiling first, then the byte budget: a record count on its own admits
+        // gigabytes, because each record holds strings the caller chose the length of. Both
+        // records a create writes are asked about, the concentrator being reported WITH the
+        // attachment it is reached through.
+        if !store.has_vpn_concentrator_capacity() || !store.has_transit_gateway_attachment_capacity()
+        {
+            return Err(state::resource_count_exceeded(
+                "This emulator holds as many VPN concentrators as it will store",
+            ));
+        }
+        // The very number the write then charges, asked of the budget before anything is
+        // written: the two records' own overhead plus the caller-chosen bytes they hold.
+        let payload_bytes = state::created_vpn_concentrator_bytes(&spec);
+        if store.would_exceed_stored_bytes(payload_bytes) {
+            return Err(crate::scaffolded::Scaffolded::tag_limit_exceeded(format!(
+                "This emulator holds {held} of at most {max} bytes of caller-supplied data, \
+                 so it cannot store {payload_bytes} more",
+                held = store.stored_bytes(),
+                max = state::MAX_STORED_BYTES,
+            )));
+        }
+
+        // The request is one that would have succeeded, so a dry run stops HERE: "If you
+        // have the required permissions, the error response is DryRunOperation" (`DryRun`).
+        // Nothing has been written yet, and nothing is.
+        if input.dry_run.unwrap_or(false) {
+            return Err(state::dry_run_operation());
+        }
+
+        // The write itself: the id, the state, the attachment and the clock-owed `available`
+        // moves all come from the store, never from the request.
+        let Some(vpn_concentrator_id) = store.insert_created_vpn_concentrator(spec) else {
+            return Err(state::resource_count_exceeded(
+                "This emulator holds as many VPN concentrators as it will store",
+            ));
+        };
+
+        // The answer is the record as it was STORED, so this operation and every later
+        // report of the same concentrator cannot drift apart.
+        let Some(view) = store.vpn_concentrator(&vpn_concentrator_id) else {
+            return Err(state::internal_error(
+                "the VPN concentrator just created could not be read back",
+            ));
+        };
+        Ok(CreateVpnConcentratorOutput {
+            // "Information about the VPN concentrator" (`CreateVpnConcentratorResult$VpnConcentrator`).
+            vpn_concentrator: Some(view.clone()),
+        })
     }
 }

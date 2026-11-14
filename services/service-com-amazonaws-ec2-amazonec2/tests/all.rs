@@ -381,6 +381,11 @@ mod create_transit_gateway_connect;
 // What `DeleteVpnConcentrator` takes away, what it refuses and what it leaves alone.
 #[path = "all/delete_vpn_concentrator.rs"]
 mod delete_vpn_concentrator;
+// What `CreateVpnConcentrator` mints — the concentrator and the transit gateway attachment it
+// aggregates its VPN connections through — the `pending` -> `available` move the clock owes
+// it, and what it refuses.
+#[path = "all/create_vpn_concentrator.rs"]
+mod create_vpn_concentrator;
 // What `DisassociateSubnetCidrBlock` lets go of: the association it names, wherever in the
 // account's subnets it is held, the transient state it answers, the clock-owed terminal
 // state, and what it refuses. Declared beside `prefix_lists` for the reason the note above

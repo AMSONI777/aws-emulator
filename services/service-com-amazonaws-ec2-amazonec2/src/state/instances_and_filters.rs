@@ -348,7 +348,9 @@ impl ComAmazonawsEc2Amazonec2State {
     /// a later caller would otherwise have seen. It covers every resource kind that
     /// has one — an instance's next state, a `pending` VPC becoming `available` with
     /// its IPv6 association moving `associating` -> `associated`, a `pending` carrier
-    /// gateway becoming `available`, a subnet another service
+    /// gateway becoming `available`, a `pending` VPN concentrator becoming `available` once
+    /// the attachment it aggregates its connections through is in service, a subnet another
+    /// service
     /// handed over `pending` becoming `available` and a subnet's own IPv6 association
     /// making that same `associating` -> `associated` move (and the `disassociating` ->
     /// `disassociated` one, in the other direction, for a block
@@ -700,6 +702,25 @@ impl ComAmazonawsEc2Amazonec2State {
             });
         }
         self.release_stored_bytes(released_route_bytes);
+        // A VPN concentrator `CreateVpnConcentrator` answered as `pending` is `available`
+        // once its own due instant has passed — the instant the attachment it aggregates
+        // through reaches `available` plus one span, recorded by
+        // [`Self::insert_created_vpn_concentrator`] — whether or not anybody called, the same
+        // contract as the `pending` VPC's move above.
+        let vpn_concentrators = &mut self.vpn_concentrators;
+        self.vpn_concentrator_available_at
+            .retain(|vpn_concentrator_id, due_at| {
+                if now < *due_at {
+                    return true;
+                }
+                if let Some(view) = vpn_concentrators.get_mut(vpn_concentrator_id) {
+                    if view.state.as_deref() == Some(VPN_STATE_PENDING) {
+                        view.state = Some(VPN_STATE_AVAILABLE.to_string());
+                    }
+                }
+                // The move is applied once; nothing is owed on this concentrator any more.
+                false
+            });
         // A customer gateway written in a non-terminal `CustomerGateway$State` reaches the
         // state recorded for it once its due instant has passed, whether or not anybody
         // called — the same contract as the VPN connection's own move above.

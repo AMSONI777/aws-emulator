@@ -2790,11 +2790,7 @@ mod bedrock_agent_ingestion_populates_its_s3_vectors_index;
 // leaving a note here. (An inner doc comment only opens a file, so this note travelled
 // here as `//` rather than `//!`.)
 // suite left at the top level of `tests/` fails the build. Declare each suite exactly
-// ONCE: this is one crate root, so a second `mod` for the same name is `E0428` and fails
-// every suite in this target. `all/all_rs_declares_each_suite_once.rs` checks that for
-// this file and for every service crate's `tests/all.rs`, so check there rather than
 // leaving a note here.
-// A suite left at the top level of `tests/` fails the build. Declare each suite exactly
 // leaving a note here. (This note sits mid-file, so it is a plain comment: an inner doc
 // comment is only accepted before the first item of a module.)
 // Declared here, in the appended tail: WAFv2 protection a stack provisions.
@@ -2989,3 +2985,5 @@ mod cloudformation_task_definition_runs_an_ecs_service;
 // leaving a note here. (These five lines are a fragment of this file's own header that a
 // merge of two appended tails landed down here; they are ordinary comments because an
 // inner doc comment may only appear before an item.)
+// leaving a note here. (Written as ordinary comments: an inner doc comment `//!` may only
+// appear before any item, so one in this appended tail is `E0753` and compiles nothing.)

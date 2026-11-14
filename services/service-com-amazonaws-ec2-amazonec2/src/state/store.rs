@@ -2760,12 +2760,23 @@ pub struct ComAmazonawsEc2Amazonec2State {
     /// (see the "VPN concentrators" section of this module). Ordered by id, the stable
     /// order a reader of them reports and pages over.
     ///
-    /// `CreateVpnConcentrator` is the operation that adds one and `DeleteVpnConcentrator`
-    /// the one that takes it away; the create is still a scaffold under its own issue, so a
-    /// fresh account holds none — which is why `DeleteVpnConcentrator` answers
-    /// [`INVALID_VPN_CONCENTRATOR_ID_NOT_FOUND`] for every id until it is written, exactly
-    /// as the real service does for a concentrator that does not exist.
+    /// `CreateVpnConcentrator` is the operation that adds one
+    /// ([`Self::insert_created_vpn_concentrator`]) and `DeleteVpnConcentrator` the one that
+    /// takes it away, so a fresh account holds none and every id is answered with
+    /// [`INVALID_VPN_CONCENTRATOR_ID_NOT_FOUND`] until a create mints one, exactly as the
+    /// real service answers for a concentrator that does not exist.
     pub vpn_concentrators: BTreeMap<String, crate::ops::types::VpnConcentrator>,
+    /// When each VPN concentrator's `pending` -> `available` transition falls due, for the
+    /// concentrators that have one.
+    ///
+    /// The concentrator counterpart of [`Self::carrier_gateway_available_at`], for the same
+    /// reason and on the same clock: `CreateVpnConcentrator` answers a concentrator in the
+    /// non-terminal `pending` state, so the clock owes it `available` whether or not anybody
+    /// calls again. A concentrator aggregates its connections onto its transit gateway
+    /// THROUGH the attachment the same create mints, so its own move falls due one
+    /// [`TRANSITION_DELAY`] after that attachment's — see
+    /// [`Self::insert_created_vpn_concentrator`].
+    pub vpn_concentrator_available_at: BTreeMap<String, Instant>,
     /// Every transit gateway attachment the account holds, by
     /// `TransitGatewayAttachmentId` — ONE map for every kind of attachment, because one id
     /// space serves them all and an id therefore identifies at most one attachment of one
@@ -3668,6 +3679,7 @@ impl Default for ComAmazonawsEc2Amazonec2State {
             vpn_connections: BTreeMap::new(),
             // A fresh account has created no VPN concentrator.
             vpn_concentrators: BTreeMap::new(),
+            vpn_concentrator_available_at: BTreeMap::new(),
             transit_gateway_attachments: BTreeMap::new(),
             transit_gateway_multicast_domains: BTreeMap::new(),
             transit_gateway_route_table_announcements: BTreeMap::new(),

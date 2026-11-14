@@ -794,6 +794,11 @@ pub const TRANSIT_GATEWAY_ATTACHMENT_RESOURCE_TYPE_CLIENT_VPN: &str = "client-vp
 /// The `TransitGatewayAttachmentResourceType` of a Connect attachment: `connect`.
 pub const TRANSIT_GATEWAY_ATTACHMENT_RESOURCE_TYPE_CONNECT: &str = "connect";
 
+/// The `TransitGatewayAttachmentResourceType` of the attachment a VPN concentrator is
+/// aggregated onto a transit gateway through: `vpn-concentrator`, a member of that enum
+/// (`smithy_query(query="shape",shape="TransitGatewayAttachmentResourceType")`).
+pub const TRANSIT_GATEWAY_ATTACHMENT_RESOURCE_TYPE_VPN_CONCENTRATOR: &str = "vpn-concentrator";
+
 /// The sentence EC2 refuses something that is not a transit gateway attachment id AT ALL
 /// with, whichever code the operation at hand carries it under.
 ///
@@ -844,6 +849,15 @@ pub enum TransitGatewayAttachmentView {
     /// (`CreateTransitGatewayConnectPeer`, "Creates a Connect peer for a specified transit
     /// gateway Connect attachment").
     Connect(TransitGatewayConnect),
+    /// The attachment a VPN concentrator aggregates its connections onto its transit gateway
+    /// through (`CreateVpnConcentrator`, "Creates a VPN concentrator that aggregates multiple
+    /// VPN connections to a transit gateway").
+    ///
+    /// The model gives this kind no per-kind shape of its own, so it keeps the
+    /// kind-independent [`TransitGatewayAttachment`] — the shape the one operation that
+    /// reports it, `DescribeTransitGatewayAttachments`, answers with — on the same terms as
+    /// every other variant here: the shape a report of it is built from.
+    VpnConcentrator(TransitGatewayAttachment),
 }
 
 impl TransitGatewayAttachmentView {
@@ -854,13 +868,15 @@ impl TransitGatewayAttachmentView {
     /// the terminal `rejected` itself.
     pub fn states(&self) -> TransitGatewayAttachmentStates {
         match self {
-            Self::Vpc(_) | Self::Peering(_) | Self::Connect(_) => TransitGatewayAttachmentStates {
-                pending_acceptance: TRANSIT_GATEWAY_ATTACHMENT_STATE_PENDING_ACCEPTANCE,
-                accepting: TRANSIT_GATEWAY_ATTACHMENT_STATE_PENDING,
-                available: TRANSIT_GATEWAY_ATTACHMENT_STATE_AVAILABLE,
-                rejecting: TRANSIT_GATEWAY_ATTACHMENT_STATE_REJECTING,
-                rejected: TRANSIT_GATEWAY_ATTACHMENT_STATE_REJECTED,
-            },
+            Self::Vpc(_) | Self::Peering(_) | Self::Connect(_) | Self::VpnConcentrator(_) => {
+                TransitGatewayAttachmentStates {
+                    pending_acceptance: TRANSIT_GATEWAY_ATTACHMENT_STATE_PENDING_ACCEPTANCE,
+                    accepting: TRANSIT_GATEWAY_ATTACHMENT_STATE_PENDING,
+                    available: TRANSIT_GATEWAY_ATTACHMENT_STATE_AVAILABLE,
+                    rejecting: TRANSIT_GATEWAY_ATTACHMENT_STATE_REJECTING,
+                    rejected: TRANSIT_GATEWAY_ATTACHMENT_STATE_REJECTED,
+                }
+            }
             Self::ClientVpn(_) => TransitGatewayAttachmentStates {
                 pending_acceptance: CLIENT_VPN_ATTACHMENT_STATE_PENDING_ACCEPTANCE,
                 accepting: TRANSIT_GATEWAY_ATTACHMENT_STATE_PENDING,
@@ -887,6 +903,7 @@ impl TransitGatewayAttachmentView {
                 .and_then(|info| info.transit_gateway_id.as_deref()),
             Self::ClientVpn(attachment) => attachment.transit_gateway_id.as_deref(),
             Self::Connect(attachment) => attachment.transit_gateway_id.as_deref(),
+            Self::VpnConcentrator(attachment) => attachment.transit_gateway_id.as_deref(),
         }
     }
 
@@ -904,6 +921,9 @@ impl TransitGatewayAttachmentView {
                 .as_ref()
                 .and_then(|info| info.owner_id.as_deref()),
             Self::Vpc(_) | Self::ClientVpn(_) | Self::Connect(_) => None,
+            // The kind-independent shape DOES carry the member, so what it was written with
+            // is what it reports; a record left without one falls back to the gateway's own.
+            Self::VpnConcentrator(attachment) => attachment.transit_gateway_owner_id.as_deref(),
         }
     }
 
@@ -919,6 +939,7 @@ impl TransitGatewayAttachmentView {
             Self::Vpc(attachment) => attachment.creation_time,
             Self::Peering(attachment) => attachment.creation_time,
             Self::Connect(attachment) => attachment.creation_time,
+            Self::VpnConcentrator(attachment) => attachment.creation_time,
             Self::ClientVpn(attachment) => {
                 parse_iso8601_timestamp(attachment.creation_time.as_deref())
             }
@@ -932,6 +953,7 @@ impl TransitGatewayAttachmentView {
             Self::Vpc(attachment) => attachment.tags.as_ref(),
             Self::Peering(attachment) => attachment.tags.as_ref(),
             Self::Connect(attachment) => attachment.tags.as_ref(),
+            Self::VpnConcentrator(attachment) => attachment.tags.as_ref(),
             // `TransitGatewayClientVpnAttachment` models no tags at all.
             Self::ClientVpn(_) => None,
         }
@@ -944,6 +966,7 @@ impl TransitGatewayAttachmentView {
             Self::Peering(_) => TRANSIT_GATEWAY_ATTACHMENT_RESOURCE_TYPE_PEERING,
             Self::ClientVpn(_) => TRANSIT_GATEWAY_ATTACHMENT_RESOURCE_TYPE_CLIENT_VPN,
             Self::Connect(_) => TRANSIT_GATEWAY_ATTACHMENT_RESOURCE_TYPE_CONNECT,
+            Self::VpnConcentrator(_) => TRANSIT_GATEWAY_ATTACHMENT_RESOURCE_TYPE_VPN_CONCENTRATOR,
         }
     }
 
@@ -963,6 +986,8 @@ impl TransitGatewayAttachmentView {
             Self::Connect(attachment) => attachment
                 .transport_transit_gateway_attachment_id
                 .as_deref(),
+            // The resource a concentrator attachment attaches is the concentrator itself.
+            Self::VpnConcentrator(attachment) => attachment.resource_id.as_deref(),
         }
     }
 
@@ -978,6 +1003,7 @@ impl TransitGatewayAttachmentView {
             // `TransitGatewayConnect` carries no owner member: a Connect attachment is made
             // from an attachment of the same account, so there is no second owner to report.
             Self::Connect(_) => None,
+            Self::VpnConcentrator(attachment) => attachment.resource_owner_id.as_deref(),
         }
     }
 
@@ -988,6 +1014,7 @@ impl TransitGatewayAttachmentView {
             Self::Peering(attachment) => attachment.state.as_deref(),
             Self::ClientVpn(attachment) => attachment.state.as_deref(),
             Self::Connect(attachment) => attachment.state.as_deref(),
+            Self::VpnConcentrator(attachment) => attachment.state.as_deref(),
         }
     }
 
@@ -1009,6 +1036,7 @@ impl TransitGatewayAttachmentView {
             }
             Self::ClientVpn(attachment) => attachment.state = Some(state.to_string()),
             Self::Connect(attachment) => attachment.state = Some(state.to_string()),
+            Self::VpnConcentrator(attachment) => attachment.state = Some(state.to_string()),
         }
     }
 
@@ -1026,6 +1054,9 @@ impl TransitGatewayAttachmentView {
                 attachment.transit_gateway_attachment_id = Some(attachment_id.to_string());
             }
             Self::Connect(attachment) => {
+                attachment.transit_gateway_attachment_id = Some(attachment_id.to_string());
+            }
+            Self::VpnConcentrator(attachment) => {
                 attachment.transit_gateway_attachment_id = Some(attachment_id.to_string());
             }
         }
@@ -1064,6 +1095,9 @@ impl TransitGatewayAttachmentView {
                         .len(),
                 ),
             Self::Connect(attachment) => transit_gateway_connect_payload_bytes(attachment),
+            Self::VpnConcentrator(attachment) => {
+                tag_list_bytes(attachment.tags.as_deref().unwrap_or_default())
+            }
         }
     }
 }
