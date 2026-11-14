@@ -2987,3 +2987,6 @@ mod cloudformation_task_definition_runs_an_ecs_service;
 // inner doc comment may only appear before an item.)
 // leaving a note here. (Written as ordinary comments: an inner doc comment `//!` may only
 // appear before any item, so one in this appended tail is `E0753` and compiles nothing.)
+// name is `E0428` and fails every suite in this target.
+// `all/all_rs_declares_each_suite_once.rs` checks that for this file and for every service
+// crate's `tests/all.rs`, so check there rather than leaving a note here.

@@ -15,6 +15,11 @@
 //! (another bucket, a sibling prefix, a sibling key), and the permission the vend asks for
 //! against the action it then attempts.
 //!
+//! The last suite takes the OTHER half of the same rule: the credential stands for the
+//! location's role and keeps that role's permissions, which the derived session policy only
+//! narrows — so what the role's own documents do not allow, or explicitly deny, is refused
+//! inside the granted scope too, and each row there varies the document in force on the role.
+//!
 //! The vended session's ARN is never written here: it is read back through
 //! `sts:GetCallerIdentity` with the very credentials under test, which is the question that
 //! service owns — S3 Access Grants mints a new session per call, so nothing about it can be
@@ -316,13 +321,25 @@ async fn session_arn(case: &str, store: &ObjectStore, vended: &Vended) -> String
         .unwrap_or_else(|| panic!("case {case:?}: no <Arn> in {body}"))
 }
 
+/// The sentence Amazon S3 refuses a request with, as IAM words it: the principal, the action,
+/// the resource it addressed, and the `reason` clause saying which document withheld the
+/// grant.
+fn refusal_because(principal: &str, action: &str, resource: &str, reason: &str) -> String {
+    format!(
+        "User: {principal} is not authorized to perform: {action} on resource: \
+         \"{resource}\" {reason}"
+    )
+}
+
 /// The sentence Amazon S3 refuses a request its session policy does not allow with, as IAM
 /// words it: the principal, the action, the resource it addressed, and the document that
 /// withheld the grant.
 fn expected_refusal(principal: &str, action: &str, resource: &str) -> String {
-    format!(
-        "User: {principal} is not authorized to perform: {action} on resource: \
-         \"{resource}\" because no session policy allows the {action} action"
+    refusal_because(
+        principal,
+        action,
+        resource,
+        &format!("because no session policy allows the {action} action"),
     )
 }
 
@@ -740,5 +757,283 @@ async fn each_vend_mints_a_session_of_its_own() {
             arn.contains(&format!("assumed-role/{LOCATION_ROLE_NAME}/")),
             "case {label:?}: expected a session of {LOCATION_ROLE_NAME}, got {arn}"
         );
+    }
+}
+
+/// The reason clause IAM publishes for a request the documents in force on the calling
+/// identity do not allow, over the `action` it asked for.
+///
+/// Written out here rather than read from the crate that composes it: what a client reads is
+/// the sentence itself, so a test that borrowed the implementation's own wording would follow
+/// it wherever it went instead of holding it.
+fn no_identity_policy_allows(action: &str) -> String {
+    format!("because no identity-based policy allows the {action} action")
+}
+
+/// The reason clause IAM publishes for a request one of those documents explicitly DENIES,
+/// written out for the reason [`no_identity_policy_allows`] gives.
+const IDENTITY_POLICY_DENY_REASON: &str = "with an explicit deny in an identity-based policy";
+
+/// One statement of an identity-based policy document.
+fn statement(effect: &str, actions: &[&str], resources: &[&str]) -> String {
+    let quoted = |values: &[&str]| {
+        values
+            .iter()
+            .map(|value| format!("\"{value}\""))
+            .collect::<Vec<_>>()
+            .join(",")
+    };
+    format!(
+        "{{\"Effect\":\"{effect}\",\"Action\":[{}],\"Resource\":[{}]}}",
+        quoted(actions),
+        quoted(resources)
+    )
+}
+
+/// One identity-based policy document holding `statements`.
+fn document(statements: &[String]) -> String {
+    format!(
+        "{{\"Version\":\"2012-10-17\",\"Statement\":[{}]}}",
+        statements.join(",")
+    )
+}
+
+/// Leave `document` as the ONLY policy in force on the location's role — or the role with no
+/// policy of its own when it is `None` — replacing the broad one [`hold_location_role`] left
+/// there.
+///
+/// The role is what the vended credential's permissions are the intersection WITH, so the
+/// rows below move the refusal to the ROLE's documents while the grant and the vend keep
+/// covering everything they ask for.
+fn only_policy_on_the_location_role(engine: &engine::InMemoryEngine, document: Option<&str>) {
+    let state = iam::service_state(engine).expect("the in-memory engine carries the IAM store");
+    let mut store = state.lock();
+    let policies = store
+        .role_inline_policies
+        .entry(iam::name_key(LOCATION_ROLE_NAME))
+        .or_default();
+    policies.clear();
+    if let Some(document) = document {
+        policies.insert(
+            iam::name_key(LOCATION_ROLE_POLICY),
+            iam::InlinePolicy {
+                policy_name: LOCATION_ROLE_POLICY.to_string(),
+                policy_document: document.to_string(),
+            },
+        );
+    }
+}
+
+/// One row of the role table: the document in force on the location's role, the request made
+/// under the vended credential, and how the data plane must answer it.
+struct RoleRow {
+    case: &'static str,
+    /// The only policy in force on the location's role, or `None` for a role carrying none.
+    role_document: Option<String>,
+    /// The request made with the vended credential: its method and the key it addresses.
+    method: &'static str,
+    key: &'static str,
+    /// The IAM action that request is, as a refusal of it names it.
+    action: &'static str,
+    /// The reason clause the refusal must name, or `None` where the request must be served.
+    refused_because: Option<String>,
+}
+
+/// A vended credential keeps the permissions of the location's role and gains none of its
+/// own: the grant-derived session policy only NARROWS them, so a request inside the granted
+/// scope is still refused 403 `AccessDenied` where the role's own documents do not allow it
+/// or explicitly deny it, and served where they do.
+///
+/// Every row leaves the grant and the vend covering both the read and the write of every key
+/// under the scope, so the only thing that can move the answer is the document in force on
+/// the role: which action it allows, which resource it names, its absence altogether, and an
+/// explicit deny inside an otherwise broad grant.
+///
+/// What a vend records about an EMPTY scope is not observable from here: a vend always
+/// derives a session policy from the scope the token carries, so the documents in force on
+/// the credential are never empty and the mint's "no document means no permissions" flag
+/// cannot decide any request this suite can make. What this suite holds is the half that IS
+/// observable: the role's own documents are in force on the credential, and the derived
+/// session policy only narrows them.
+#[tokio::test]
+async fn a_vended_credential_is_capped_by_the_location_roles_own_policies() {
+    let read_key = "granted/inside.txt";
+    let sibling_key = "granted/other.txt";
+    let write_key = "granted/written.txt";
+    let granted_objects = format!("arn:aws:s3:::{GRANTED_BUCKET}/granted/*");
+    let allow_everything = document(&[statement(
+        "Allow",
+        &["s3:*"],
+        &["arn:aws:s3:::*", "arn:aws:s3:::*/*"],
+    )]);
+    let deny_one_read = document(&[
+        statement("Allow", &["s3:*"], &["arn:aws:s3:::*", "arn:aws:s3:::*/*"]),
+        statement(
+            "Deny",
+            &["s3:GetObject"],
+            &[&object_resource(GRANTED_BUCKET, read_key)],
+        ),
+    ]);
+    let rows = [
+        RoleRow {
+            case: "the role allows the read of the key",
+            role_document: Some(document(&[statement(
+                "Allow",
+                &["s3:GetObject"],
+                &[&granted_objects],
+            )])),
+            method: "GET",
+            key: read_key,
+            action: "s3:GetObject",
+            refused_because: None,
+        },
+        RoleRow {
+            case: "the role allows the read of another key only",
+            role_document: Some(document(&[statement(
+                "Allow",
+                &["s3:GetObject"],
+                &[&object_resource(GRANTED_BUCKET, sibling_key)],
+            )])),
+            method: "GET",
+            key: read_key,
+            action: "s3:GetObject",
+            refused_because: Some(no_identity_policy_allows("s3:GetObject")),
+        },
+        RoleRow {
+            case: "the role carries no policy of its own",
+            role_document: None,
+            method: "GET",
+            key: read_key,
+            action: "s3:GetObject",
+            refused_because: Some(no_identity_policy_allows("s3:GetObject")),
+        },
+        RoleRow {
+            case: "the role allows the write but not the read",
+            role_document: Some(document(&[statement(
+                "Allow",
+                &["s3:PutObject"],
+                &[&granted_objects],
+            )])),
+            method: "GET",
+            key: read_key,
+            action: "s3:GetObject",
+            refused_because: Some(no_identity_policy_allows("s3:GetObject")),
+        },
+        RoleRow {
+            case: "the role allows the write, and the write is attempted",
+            role_document: Some(document(&[statement(
+                "Allow",
+                &["s3:PutObject"],
+                &[&granted_objects],
+            )])),
+            method: "PUT",
+            key: write_key,
+            action: "s3:PutObject",
+            refused_because: None,
+        },
+        RoleRow {
+            case: "the role allows everything",
+            role_document: Some(allow_everything),
+            method: "GET",
+            key: read_key,
+            action: "s3:GetObject",
+            refused_because: None,
+        },
+        RoleRow {
+            case: "the role explicitly denies the read of the key",
+            role_document: Some(deny_one_read.clone()),
+            method: "GET",
+            key: read_key,
+            action: "s3:GetObject",
+            refused_because: Some(IDENTITY_POLICY_DENY_REASON.to_string()),
+        },
+        RoleRow {
+            case: "the role explicitly denies the read of a sibling key only",
+            role_document: Some(deny_one_read),
+            method: "GET",
+            key: sibling_key,
+            action: "s3:GetObject",
+            refused_because: None,
+        },
+    ];
+    for row in rows {
+        let case = row.case;
+        let (store, engine, role_arn) = granted_data(case).await;
+        only_policy_on_the_location_role(&engine, row.role_document.as_deref());
+        create_instance(case, &store).await;
+        let location_id = create_location(case, &store, "s3://ledger/granted/", &role_arn).await;
+        // The grant and the vend both cover the read AND the write of every key under the
+        // scope, so neither can be what refuses a row below.
+        create_grant(case, &store, &location_id, "*", PERMISSION_READWRITE).await;
+        let vended = vend(
+            case,
+            &store,
+            "s3://ledger/granted/*",
+            PERMISSION_READWRITE,
+            None,
+        )
+        .await;
+        let principal = session_arn(case, &store, &vended).await;
+
+        // A read carries no body and a write carries the bytes it is to store, as a client
+        // sends each.
+        let sent: &[u8] = if row.method == "PUT" {
+            b"written under the vended credential"
+        } else {
+            b""
+        };
+        let (status, body) = s3_as(
+            &store,
+            &vended,
+            row.method,
+            &format!("/{GRANTED_BUCKET}/{}", row.key),
+            sent,
+        )
+        .await;
+        match row.refused_because {
+            None => {
+                assert_eq!(
+                    status, 200,
+                    "case {case:?}: expected {} {} to be served, got {status} with body {body}",
+                    row.method, row.key
+                );
+                // A served read answers the object's own bytes, so the row holds the read
+                // itself rather than any 200.
+                if row.method == "GET" {
+                    let expected = String::from_utf8(content(GRANTED_BUCKET, row.key))
+                        .expect("UTF-8 content");
+                    assert_eq!(
+                        body, expected,
+                        "case {case:?}: expected the object's own bytes {expected:?}, got \
+                         {body:?}"
+                    );
+                }
+            }
+            Some(reason) => {
+                assert_eq!(
+                    status, 403,
+                    "case {case:?}: expected {} {} to be refused 403, got {status} with body \
+                     {body}",
+                    row.method, row.key
+                );
+                let code = elements(&body, "Code").into_iter().next().unwrap_or_default();
+                assert_eq!(
+                    code, "AccessDenied",
+                    "case {case:?}: expected the refusal code AccessDenied, got {code:?} in \
+                     {body}"
+                );
+                let answered = message(case, &body);
+                let expected = refusal_because(
+                    &principal,
+                    row.action,
+                    &object_resource(GRANTED_BUCKET, row.key),
+                    &reason,
+                );
+                assert_eq!(
+                    answered, expected,
+                    "case {case:?}: expected the refusal {expected:?}, got {answered:?}"
+                );
+            }
+        }
     }
 }
