@@ -14,9 +14,8 @@
 //!
 //! The rule, asserted over a TABLE of collections rather than one listing: a paginated
 //! collection of this service writes its page member — `item` on the wire — whenever it
-//! answers, as the EMPTY list when the collection holds no element, and the base path
-//! mappings of a domain name are the one collection whose empty answer leaves the member
-//! out, so the whole body that one answers is `{}`.
+//! answers, as the EMPTY list when the collection holds no element, on every collection
+//! alike.
 //!
 //! Each row reaches the empty collection by DELETING the one element it created, not by
 //! never creating one, so what is asserted is the answer a collection makes once it is
@@ -31,13 +30,10 @@ use crate::domain_name_collection::created_domain;
 use crate::rest_api_lifecycle::{create_api, make_deployable, string_member, Gateway};
 use crate::vpc_links::{create_vpc_link, target_arn};
 
-/// The one collection of this service whose empty answer leaves the page member out.
-const ITEMLESS_COLLECTION: &str = "GetBasePathMappings";
-
 /// Every collection this suite empties, named by the operation that lists it. Three of
 /// them — `GetDeployments`, `GetDocumentationVersions` and `GetVpcLinks` — are
-/// API-scoped, API-scoped and account-level respectively; `GetBasePathMappings` is the
-/// exception row.
+/// API-scoped, API-scoped and account-level respectively; `GetBasePathMappings` hangs off
+/// a domain name.
 const COLLECTIONS: &[&str] = &[
     "GetRestApis",
     "GetApiKeys",
@@ -46,11 +42,21 @@ const COLLECTIONS: &[&str] = &[
     "GetVpcLinks",
     "GetDeployments",
     "GetDocumentationVersions",
-    ITEMLESS_COLLECTION,
+    "GetBasePathMappings",
 ];
 
 /// A POST of `request` to `uri`, asserting `expected`, and answering the created record.
-async fn created(gateway: &Gateway, uri: &str, request: Value, expected: u16, case: &str) -> Value {
+///
+/// `pub(crate)` so the sibling `collection_empty_page_member` suite, which this one splits
+/// the collections of the rule with, drives its creates through the same spelling rather
+/// than keeping a second copy.
+pub(crate) async fn created(
+    gateway: &Gateway,
+    uri: &str,
+    request: Value,
+    expected: u16,
+    case: &str,
+) -> Value {
     let answer = gateway.call("POST", uri, Some(request)).await;
     assert_eq!(
         answer.status, expected,
@@ -61,7 +67,9 @@ async fn created(gateway: &Gateway, uri: &str, request: Value, expected: u16, ca
 }
 
 /// A DELETE of `uri`, asserting the 202 every delete of this service answers.
-async fn deleted(gateway: &Gateway, uri: &str, case: &str) {
+///
+/// `pub(crate)` for the reason [`created`] is.
+pub(crate) async fn deleted(gateway: &Gateway, uri: &str, case: &str) {
     let answer = gateway.call("DELETE", uri, None).await;
     assert_eq!(
         answer.status, 202,
@@ -164,7 +172,7 @@ async fn emptied(gateway: &Gateway, collection: &str) -> String {
             .await;
             format!("/restapis/{api}/documentation/versions")
         }
-        ITEMLESS_COLLECTION => {
+        "GetBasePathMappings" => {
             let (api, stage) = deployed_api(gateway, "emptied-mappings", "prod").await;
             let domain_name = "emptied-mappings.example.com";
             created_domain(gateway, domain_name, json!({})).await;
@@ -204,14 +212,10 @@ async fn an_emptied_collection_reports_the_empty_page_and_nothing_beside_it() {
         // The page member, and nothing beside it: an emptied collection has no element
         // after the page it reports, so it carries on at no cursor and echoes no page
         // size.
-        let expected = if *collection == ITEMLESS_COLLECTION {
-            json!({})
-        } else {
-            json!({ "item": [] })
-        };
         assert_eq!(
-            answer.body, expected,
-            "case {case}: expected {expected:?}, got {:?}",
+            answer.body,
+            json!({ "item": [] }),
+            "case {case}: expected the empty page and nothing beside it, got {:?}",
             answer.body
         );
     }
@@ -238,14 +242,10 @@ async fn an_emptied_collection_asked_for_a_page_size_reports_the_same_empty_page
                 "case {case}: expected 200, got {} with {:?}",
                 answer.status, answer.body
             );
-            let expected = if *collection == ITEMLESS_COLLECTION {
-                json!({})
-            } else {
-                json!({ "item": [] })
-            };
             assert_eq!(
-                answer.body, expected,
-                "case {case}: expected {expected:?}, got {:?}",
+                answer.body,
+                json!({ "item": [] }),
+                "case {case}: expected the same empty page, got {:?}",
                 answer.body
             );
         }

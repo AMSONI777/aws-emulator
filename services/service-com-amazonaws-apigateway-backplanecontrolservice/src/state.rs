@@ -2841,9 +2841,6 @@ pub struct Page {
     pub next_position: Option<String>,
     /// The page size the REQUEST asked for; see [`Page::echoed_limit`].
     requested_limit: Option<i32>,
-    /// Whether the sequence this page was cut out of holds no element at all; see
-    /// [`Page::items_absent_while_the_collection_is_empty`].
-    sequence_empty: bool,
 }
 
 impl Page {
@@ -2867,7 +2864,6 @@ impl Page {
             next_position: ordered.get(end).cloned(),
             ids,
             requested_limit: limit,
-            sequence_empty: ordered.is_empty(),
         }
     }
 
@@ -2886,32 +2882,10 @@ impl Page {
     /// or not anything is on it. That holds both for the window a caller that walked to
     /// the end asks for and for a collection that holds no element at all.
     ///
-    /// One copy for every `position`/`limit` collection, so two listings cannot disagree
-    /// about what an empty page looks like. The one collection of this service that
-    /// answers an empty collection differently reports it through
-    /// [`Page::items_absent_while_the_collection_is_empty`].
+    /// One copy for EVERY `position`/`limit` collection of this service, so two listings
+    /// cannot disagree about what an empty page looks like.
     pub fn reported_items<Element>(&self, items: Vec<Element>) -> Option<Vec<Element>> {
         Some(items)
-    }
-
-    /// The page as the base-path-mapping collection of a domain name reports it: the
-    /// member is left UNSET while the domain name carries no mapping at all, so the whole
-    /// answer that collection makes is `{}`.
-    ///
-    /// The one collection of this service observed to answer that way; every other one
-    /// writes the empty page ([`Page::reported_items`]). A page that is empty because the
-    /// caller walked PAST the last mapping of a domain name that does carry mappings is
-    /// still the present-but-empty page: the collection holds elements, and this page of
-    /// it holds none.
-    pub fn items_absent_while_the_collection_is_empty<Element>(
-        &self,
-        items: Vec<Element>,
-    ) -> Option<Vec<Element>> {
-        if self.sequence_empty {
-            None
-        } else {
-            Some(items)
-        }
     }
 }
 

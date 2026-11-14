@@ -3104,3 +3104,21 @@ mod ecr_scan_on_push_event_reaches_its_queue_target;
 // leaving a note here. (An ordinary comment, not an inner doc comment: `//!` is legal only
 // at the start of the file, so a block of it landing here stops this target from compiling
 // with `E0753`.)
+// region above: a module may be declared only once, and branches landing at once each
+// appended their own copy here, which compiled neither.)
+// above: a module may be declared only once, and branches landing at once each appended
+// their own copy here, which compiled neither.)
+// module may be declared only once, and branches landing at once each appended their own
+// copy here, which compiled neither.)
+// tail: a module may be declared only once, and branches landing at once each appended
+// their own copy here, which compiled neither. The HTTPS front-door suite, appended here
+// as well, is declared once further up this tail for the same reason.)
+// `cloudformation_metric_stream_estate_is_drainable` are each declared ONCE, further up
+// this tail: a module may be declared only once, and branches landing at once each appended
+// Declared in the appended tail, for the reason the entries above record: what a
+// (`cloudfront_edge_4xx_share_decides_the_alarm` is declared ONCE, in the span above: a
+// (`cloudformation_kms_encrypted_sns_sqs_pipeline` is declared ONCE, further up this file: a
+// (A note on this file's own rule, from the header at the top of it: every suite file under
+// `tests/all/` must be declared here and a suite left at the top level of `tests/` fails the
+// build. Declare each suite exactly ONCE: this is one crate root, so a second `mod` for the
+// same name is `E0428` and fails every suite in this target.
