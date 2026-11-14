@@ -189,13 +189,12 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         // serve the change: while the clock still owes it a transition
         // (`CREATING`, `UPDATING`), or it is on its way out in `DELETING`, its
         // targets cannot be removed one by one, and the caller is told which
-        // status to wait out. The refusal is worded by the ONE helper every
-        // operation this service refuses on gateway status shares, so they cannot
-        // drift.
+        // status it found. The refusal is worded by the ONE helper every
+        // operation on a gateway's TARGETS shares, so they cannot drift.
         let gateway_status = gateway.status_at(now).to_string();
         if gateway_status != crate::state::STATUS_READY {
             return Err(DeleteGatewayTargetErrorModeled::ValidationException(
-                crate::state::gateway_status_conflict(Self::NAME, &gateway_status),
+                crate::state::gateway_target_status_conflict(Self::NAME, &gateway_status),
             )
             .into());
         }

@@ -256,15 +256,19 @@ pub fn status_in_prose(status: &str) -> String {
         .collect()
 }
 
-/// The modelled validation error a gateway operation gets while the gateway is
-/// in a status that cannot serve it: the operation that was asked for and the
-/// status it found, with the one remedy the caller has ("DeleteGateway operation
-/// can't be performed on gateway when it is in Creating state. Retry the request
-/// when the gateway is in a valid state.").
+/// The modelled validation error an operation on the GATEWAY itself gets while
+/// the gateway is in a status that cannot serve it: the operation that was asked
+/// for and the status it found, with the one remedy the caller has
+/// ("DeleteGateway operation can't be performed on gateway when it is in
+/// Creating state. Retry the request when the gateway is in a valid state.").
 ///
 /// The sentence is fixed; its variable parts are the asking operation's own name
 /// and the gateway's current status, the latter spelled as prose
 /// ([`status_in_prose`]) rather than as the wire's enum token.
+///
+/// This wording belongs to the operations that address the gateway and its own
+/// configuration. An operation on the gateway's TARGETS is refused in a
+/// different sentence, which is [`gateway_target_status_conflict`]'s.
 ///
 /// A gateway reaches `READY` on the clock, so every mutation of it is refused
 /// while it is still `CREATING`, `UPDATING` or on its way out in `DELETING`:
@@ -276,6 +280,37 @@ pub fn gateway_status_conflict(operation: &str, status: &str) -> ValidationExcep
             "{operation} operation can't be performed on {RESOURCE_GATEWAY} when it is in {} \
              state. Retry the request when the {RESOURCE_GATEWAY} is in a valid state.",
             status_in_prose(status)
+        ),
+        reason: VALIDATION_REASON_RESOURCE_CONFLICT.to_string(),
+        field_list: None,
+    }
+}
+
+/// The modelled validation error an operation on a gateway's TARGETS gets while
+/// the gateway that serves them is in a status that cannot serve it: the
+/// operation that was asked for and the status it found ("Cannot perform
+/// operation CreateGatewayTarget when gateway is in CREATING status").
+///
+/// The target family words this refusal in its own sentence, not the one
+/// [`gateway_status_conflict`] words a refusal of an operation on the GATEWAY
+/// itself in: the two families are refused in different sentences, so one
+/// formatter cannot serve both. Here the sentence is fixed and its variable
+/// parts are the asking operation's own name and the gateway's current status
+/// spelled as the raw screaming-snake token its enum declares
+/// (`smithy_query shape=GatewayStatus`), the same form the response members
+/// carry it in — not as prose.
+///
+/// `reason` is [`VALIDATION_REASON_RESOURCE_CONFLICT`] and there is no
+/// `fieldList`, for the reason [`gateway_status_conflict`] has none: nothing is
+/// wrong with the request's members, it is the gateway's state that refuses it.
+///
+/// Shared by every operation on a gateway's targets — the create, the update,
+/// the delete and the synchronize — so the one refusal cannot be worded four
+/// ways.
+pub fn gateway_target_status_conflict(operation: &str, status: &str) -> ValidationException {
+    ValidationException {
+        message: format!(
+            "Cannot perform operation {operation} when {RESOURCE_GATEWAY} is in {status} status"
         ),
         reason: VALIDATION_REASON_RESOURCE_CONFLICT.to_string(),
         field_list: None,

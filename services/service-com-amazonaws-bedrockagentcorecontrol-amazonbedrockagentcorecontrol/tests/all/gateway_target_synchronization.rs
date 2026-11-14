@@ -42,7 +42,7 @@
 //!    naming the operation and the status it found.
 
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use bytes::Bytes;
 use serde_json::{json, Value};
@@ -59,6 +59,12 @@ const ROLE_ARN: &str = "arn:aws:iam::000000000000:role/GatewayRole";
 /// The settle span `src/state.rs` gives a gateway's and a target's clock-owed
 /// transition to `READY`, plus slack, so a row can wait the clock out.
 const PAST_SETTLE: Duration = Duration::from_millis(900);
+
+/// How long a row waits for a clock-owed transition at the most, and how long it pauses
+/// between two reads while it waits: the wait is for the CONDITION, so a host slower than
+/// this one only reads again instead of failing.
+const POLL_DEADLINE: Duration = Duration::from_secs(30);
+const POLL_PAUSE: Duration = Duration::from_millis(20);
 
 /// A `gatewayIdentifier` inside `GatewayIdentifier`'s pattern
 /// `^([0-9a-z][-]?){1,100}-[0-9a-z]{10}$` that no row ever creates.
@@ -196,8 +202,16 @@ async fn synchronize(router: &MultiServiceRouter, gateway: &str, target_ids: &[&
 /// settled gateway.
 async fn settled_gateway(router: &MultiServiceRouter, name: &str) -> String {
     let gateway_id = creating_gateway(router, name).await;
-    tokio::time::sleep(PAST_SETTLE).await;
-    let settled = send(router, "GET", &format!("/gateways/{gateway_id}/"), None).await;
+    // The transition is the clock's, so the wait looks for the CONDITION rather than for a
+    // fixed time.
+    let started = Instant::now();
+    let settled = loop {
+        let read = send(router, "GET", &format!("/gateways/{gateway_id}/"), None).await;
+        if text(&read.body, "status") == "READY" || started.elapsed() > POLL_DEADLINE {
+            break read;
+        }
+        tokio::time::sleep(POLL_PAUSE).await;
+    };
     assert_eq!(
         (settled.status, text(&settled.body, "status").as_str()),
         (200, "READY"),
@@ -692,7 +706,14 @@ async fn synchronization_is_refused_for_resources_it_cannot_address() {
     )
     .await;
     let target_id = text(&created.body, "targetId");
-    tokio::time::sleep(PAST_SETTLE).await;
+    // The target's own transition is the clock's too: read it again until it reports the
+    // status this row starts from, rather than waiting a fixed time for it.
+    let started = Instant::now();
+    while text(&get_target(&router, &gateway, &target_id).await.body, "status") != "READY"
+        && started.elapsed() <= POLL_DEADLINE
+    {
+        tokio::time::sleep(POLL_PAUSE).await;
+    }
 
     // A gateway identifier naming no stored gateway, and a target id naming no target of a
     // stored gateway, are each the modelled 404 — the target is addressed only through its
@@ -777,8 +798,7 @@ async fn synchronization_is_refused_for_resources_it_cannot_address() {
     );
     assert_eq!(
         text(&answer.body, "message"),
-        "SynchronizeGatewayTargets operation can't be performed on gateway when it is in \
-         Creating state. Retry the request when the gateway is in a valid state.",
+        "Cannot perform operation SynchronizeGatewayTargets when gateway is in CREATING status",
         "case \"a gateway still CREATING\": expected the shared status refusal, got {}",
         answer.body
     );

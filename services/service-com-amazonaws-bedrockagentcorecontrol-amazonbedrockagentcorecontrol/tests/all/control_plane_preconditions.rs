@@ -30,7 +30,7 @@
 //!    there — because the sentence varies with neither: what failed is the lookup.
 
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use bytes::Bytes;
 use serde_json::{json, Value};
@@ -47,6 +47,12 @@ const PAST_SETTLE: Duration = Duration::from_millis(900);
 
 /// A role ARN inside `RoleArn`'s pattern `^arn:aws(-[^:]+)?:iam::([0-9]{12})?:role/.+$`.
 const ROLE_ARN: &str = "arn:aws:iam::000000000000:role/AgentCoreRole";
+
+/// How long a row waits for a clock-owed transition at the most, and how long it pauses
+/// between two reads while it waits: the wait is for the CONDITION, so a host slower than
+/// this one only reads again instead of failing.
+const POLL_DEADLINE: Duration = Duration::from_secs(30);
+const POLL_PAUSE: Duration = Duration::from_millis(20);
 
 fn router() -> MultiServiceRouter {
     let engine: Arc<engine::InMemoryEngine> = Arc::new(engine::InMemoryEngine::new());
@@ -132,6 +138,19 @@ async fn create_gateway(router: &MultiServiceRouter, name: &str) -> String {
     text(&created, "gatewayId")
 }
 
+/// Read the gateway again until it reports `READY`, or the deadline passes: the transition
+/// is the clock's, so the wait looks for the CONDITION rather than for a fixed time.
+async fn gateway_ready(router: &MultiServiceRouter, gateway_id: &str) {
+    let started = Instant::now();
+    loop {
+        let (_, read) = send(router, "GET", &format!("/gateways/{gateway_id}/"), None).await;
+        if text(&read, "status") == "READY" || started.elapsed() > POLL_DEADLINE {
+            return;
+        }
+        tokio::time::sleep(POLL_PAUSE).await;
+    }
+}
+
 async fn create_target(router: &MultiServiceRouter, gateway: &str, body: &Value) -> (u16, Value) {
     send(
         router,
@@ -206,8 +225,7 @@ async fn a_gateway_takes_a_target_only_once_it_reports_ready() {
         );
         assert_eq!(
             text(&refused, "message"),
-            "CreateGatewayTarget operation can't be performed on gateway when it is in Creating \
-             state. Retry the request when the gateway is in a valid state.",
+            "Cannot perform operation CreateGatewayTarget when gateway is in CREATING status",
             "case {case:?}: the refusal names the operation and the status to wait out, got {}",
             text(&refused, "message")
         );
@@ -218,7 +236,7 @@ async fn a_gateway_takes_a_target_only_once_it_reports_ready() {
 
         // The gateway is READY once the transition it was owed comes due, and then the
         // very same request is accepted and reads back.
-        tokio::time::sleep(PAST_SETTLE).await;
+        gateway_ready(&router, &gateway_id).await;
         let (status, gateway) = send(
             &router,
             "GET",
@@ -289,7 +307,7 @@ async fn a_targets_own_transient_status_does_not_gate_the_next_target() {
 async fn a_gateway_on_its_way_out_takes_no_target() {
     let router = router();
     let gateway_id = create_gateway(&router, "deletinggate").await;
-    tokio::time::sleep(PAST_SETTLE).await;
+    gateway_ready(&router, &gateway_id).await;
 
     // `DeleteGateway` is `DELETE /gateways/{gatewayIdentifier}/` (HTTP 202,
     // `smithy_query(query="operation",operation="DeleteGateway")`): it accepts the
@@ -320,8 +338,7 @@ async fn a_gateway_on_its_way_out_takes_no_target() {
         );
         assert_eq!(
             text(&refused, "message"),
-            "CreateGatewayTarget operation can't be performed on gateway when it is in Deleting \
-             state. Retry the request when the gateway is in a valid state.",
+            "Cannot perform operation CreateGatewayTarget when gateway is in DELETING status",
             "case {case:?}: the refusal names the status it found, got {}",
             text(&refused, "message")
         );

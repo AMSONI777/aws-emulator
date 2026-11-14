@@ -274,13 +274,13 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
             // to serve it: while the gateway is still in the transient status the
             // clock owes a transition for (`CREATING`, `UPDATING`), or on its way
             // out in `DELETING`, its targets cannot be reconfigured, and the
-            // caller is told which status to wait out. The refusal is worded by
-            // the ONE helper every operation this service refuses on gateway
-            // status shares, so they cannot drift.
+            // caller is told which status it found. The refusal is worded by
+            // the ONE helper every operation on a gateway's TARGETS shares, so
+            // they cannot drift.
             let status = gateway.status_at(now);
             if status != crate::state::STATUS_READY {
                 return Err(UpdateGatewayTargetErrorModeled::ValidationException(
-                    crate::state::gateway_status_conflict(Self::NAME, status),
+                    crate::state::gateway_target_status_conflict(Self::NAME, status),
                 )
                 .into());
             }
@@ -317,7 +317,7 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         let status = gateway.status_at(now).to_string();
         if status != crate::state::STATUS_READY {
             return Err(UpdateGatewayTargetErrorModeled::ValidationException(
-                crate::state::gateway_status_conflict(Self::NAME, &status),
+                crate::state::gateway_target_status_conflict(Self::NAME, &status),
             )
             .into());
         }

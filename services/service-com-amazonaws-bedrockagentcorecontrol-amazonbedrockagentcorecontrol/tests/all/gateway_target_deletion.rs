@@ -35,7 +35,7 @@
 //!    same refusal a target id naming nothing gets.
 
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use bytes::Bytes;
 use serde_json::{json, Value};
@@ -52,6 +52,12 @@ const ROLE_ARN: &str = "arn:aws:iam::000000000000:role/GatewayRole";
 /// The settle span `src/state.rs` gives a gateway's and a target's clock-owed transitions,
 /// plus slack, so a row can wait the clock out.
 const PAST_SETTLE: Duration = Duration::from_millis(900);
+
+/// How long a row waits for a clock-owed transition at the most, and how long it pauses
+/// between two reads while it waits: the wait is for the CONDITION, so a host slower than
+/// this one only reads again instead of failing.
+const POLL_DEADLINE: Duration = Duration::from_secs(30);
+const POLL_PAUSE: Duration = Duration::from_millis(20);
 
 /// A `gatewayIdentifier` inside `GatewayIdentifier`'s pattern
 /// `^([0-9a-z][-]?){1,100}-[0-9a-z]{10}$` that no row ever creates.
@@ -203,8 +209,16 @@ async fn settled_gateway(router: &MultiServiceRouter, name: &str) -> String {
         created.status, created.body
     );
     let gateway_id = text(&created.body, "gatewayId");
-    tokio::time::sleep(PAST_SETTLE).await;
-    let settled = send(router, "GET", &format!("/gateways/{gateway_id}/"), None).await;
+    // The transition is the clock's, so the wait looks for the CONDITION rather than for a
+    // fixed time.
+    let started = Instant::now();
+    let settled = loop {
+        let read = send(router, "GET", &format!("/gateways/{gateway_id}/"), None).await;
+        if text(&read.body, "status") == "READY" || started.elapsed() > POLL_DEADLINE {
+            break read;
+        }
+        tokio::time::sleep(POLL_PAUSE).await;
+    };
     assert_eq!(
         (settled.status, text(&settled.body, "status").as_str()),
         (200, "READY"),
@@ -574,14 +588,14 @@ async fn a_deletion_of_something_that_is_not_there_is_the_modelled_404() {
 /// and the refusal names the status it found.
 #[tokio::test]
 async fn a_gateway_that_cannot_serve_the_change_refuses_the_deletion() {
-    // (case, the request that moves the gateway out of READY, the status it then reports,
-    // that status as the refusal's prose spells it)
-    let rows: [(&str, &str, &str, &str); 2] = [
-        ("an update in flight on the gateway", "PUT", "UPDATING", "Updating"),
-        ("a deletion accepted for the gateway", "DELETE", "DELETING", "Deleting"),
+    // (case, the request that moves the gateway out of READY, the status it then reports —
+    // which is also the status the refusal names, as the enum token)
+    let rows: [(&str, &str, &str); 2] = [
+        ("an update in flight on the gateway", "PUT", "UPDATING"),
+        ("a deletion accepted for the gateway", "DELETE", "DELETING"),
     ];
 
-    for (case, method, status_name, status_prose) in rows {
+    for (case, method, status_name) in rows {
         let router = router();
         let gateway_id = settled_gateway(&router, "gatewaygatedelete").await;
         let created = create_target(
@@ -646,10 +660,7 @@ async fn a_gateway_that_cannot_serve_the_change_refuses_the_deletion() {
         );
         assert_eq!(
             text(&refused.body, "message"),
-            format!(
-                "DeleteGatewayTarget operation can't be performed on gateway when it is in \
-                 {status_prose} state. Retry the request when the gateway is in a valid state."
-            ),
+            format!("Cannot perform operation DeleteGatewayTarget when gateway is in {status_name} status"),
             "case {case:?}: the refusal names the operation and the status it found, got {}",
             text(&refused.body, "message")
         );

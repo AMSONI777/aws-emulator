@@ -177,13 +177,13 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         // A target is served BY the gateway, so the gateway has to be ready to
         // serve it: while the clock still owes the gateway a transition
         // (`CREATING`, `UPDATING`), or it is on its way out in `DELETING`, its
-        // targets are not synchronized, and the caller is told which status to
-        // wait out. The refusal is worded by the ONE helper every operation this
-        // service refuses on gateway status shares, so they cannot drift.
+        // targets are not synchronized, and the caller is told which status it
+        // found. The refusal is worded by the ONE helper every operation on a
+        // gateway's TARGETS shares, so they cannot drift.
         let gateway_status = gateway.status_at(now).to_string();
         if gateway_status != crate::state::STATUS_READY {
             return Err(SynchronizeGatewayTargetsErrorModeled::ValidationException(
-                crate::state::gateway_status_conflict(Self::NAME, &gateway_status),
+                crate::state::gateway_target_status_conflict(Self::NAME, &gateway_status),
             )
             .into());
         }
