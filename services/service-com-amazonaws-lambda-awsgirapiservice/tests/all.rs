@@ -137,6 +137,8 @@ mod event_source_mapping_deletion;
 mod event_source_mapping_duplicate_source;
 #[path = "all/event_source_mapping_event_counts.rs"]
 mod event_source_mapping_event_counts;
+#[path = "all/event_source_mapping_failure_destination.rs"]
+mod event_source_mapping_failure_destination;
 #[path = "all/event_source_mapping_least_privilege_role.rs"]
 mod event_source_mapping_least_privilege_role;
 #[path = "all/event_source_mapping_metrics_duplicates.rs"]

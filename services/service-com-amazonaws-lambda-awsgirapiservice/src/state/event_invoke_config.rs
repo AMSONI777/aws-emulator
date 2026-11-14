@@ -171,7 +171,7 @@ impl EventInvokeConfigRecord {
 /// `DestinationArn`'s own pattern is `^$|kafka://…|arn:…`, so the EMPTY STRING is a value
 /// the member admits and the only one that is no resource at all: it is how a caller takes
 /// a destination away, and it is held as "no destination" rather than as an ARN of nothing.
-fn named_destination(destination: Option<&str>) -> Option<String> {
+pub(crate) fn named_destination(destination: Option<&str>) -> Option<String> {
     destination
         .filter(|destination| !destination.is_empty())
         .map(str::to_string)

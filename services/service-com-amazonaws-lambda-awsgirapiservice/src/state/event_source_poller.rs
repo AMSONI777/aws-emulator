@@ -48,6 +48,11 @@
 //!   that has moved on starts it again. Between two attempts at one batch the wait GROWS
 //!   ([`undelivered_backoff`]), so a function that keeps failing is not invoked at the rate
 //!   a healthy mapping polls.
+//! * THE BATCH A MAPPING GAVE UP ON IS RECORDED WHERE IT SAYS. The records a mapping
+//!   discards are gone from its function's reach, so the only thing a client can still learn
+//!   about them is what its `DestinationConfig$OnFailure` names: where it names a
+//!   destination, one record describing that batch — not its payloads — is written there
+//!   ([`failure_destination`]).
 //!
 //! * NOTHING IS READ FOR A FUNCTION THAT CANNOT BE INVOKED. "Lambda reads items from the
 //!   event source and invokes the function" (`CreateEventSourceMapping`), so a mapping
@@ -83,6 +88,8 @@ use super::{
 
 /// How a DynamoDB table's stream is listed, read and handed over.
 pub mod dynamodb_stream;
+/// What a batch whose retries are spent is recorded as, and where that record goes.
+pub mod failure_destination;
 /// How a Kinesis data stream is listed, read and handed over.
 pub mod kinesis_stream;
 
@@ -289,6 +296,9 @@ struct ShardSourcedMapping {
     /// from `MaximumRetryAttempts`; `None` for the infinite default
     /// ([`attempts_allowed`]).
     attempts_allowed: Option<u32>,
+    /// The destination the mapping's `DestinationConfig$OnFailure` names, when it names one:
+    /// where the record of a discarded batch is written ([`failure_destination`]).
+    on_failure_destination: Option<String>,
     /// Where the mapping reads next in each shard it has already read from.
     cursors: BTreeMap<String, ShardCursor>,
     /// Where it reads a shard it has not read from yet.
@@ -331,6 +341,35 @@ enum Outcome {
         /// at the interval a mapping waiting on a resource looks at ([`retry_backoff`]).
         undelivered: bool,
     },
+}
+
+/// What ONE attempt at one batch came to.
+struct Attempt {
+    /// The records of the batch the attempt PROCESSED, in the order the batch holds them.
+    processed: Vec<String>,
+    /// What the invocation itself answered, and `None` when no invocation was made at all.
+    answered: Option<Answered>,
+    /// Why the attempt processed no record of the batch, when it processed none.
+    failure: Option<String>,
+}
+
+/// What one invocation of the mapped function reported about the batch it was handed.
+///
+/// Every member is the invocation's own answer (`InvocationResponse`), kept because the
+/// record of a DISCARDED batch reports what the last attempt at it came to
+/// ([`failure_destination`]).
+pub(crate) struct Answered {
+    /// `StatusCode`: "The HTTP status code is in the 200 range for a successful request."
+    pub(crate) status_code: Option<i32>,
+    /// `ExecutedVersion`: "The version of the function that executed."
+    pub(crate) executed_version: Option<String>,
+    /// `FunctionError`: "If present, indicates that an error occurred during function
+    /// execution."
+    pub(crate) function_error: Option<String>,
+    /// The id of the invocation request this answer answers, as the answer carried it.
+    pub(crate) request_id: Option<String>,
+    /// `Payload`: "The response from the function, or an error object."
+    pub(crate) payload: Option<Vec<u8>>,
 }
 
 /// Poll one mapping until it is gone.
@@ -622,6 +661,9 @@ fn run_of(
             &mapping.function_response_types,
         ),
         attempts_allowed: attempts_allowed(mapping.maximum_retry_attempts),
+        on_failure_destination: failure_destination::on_failure_destination(
+            mapping.destination_config.as_ref(),
+        ),
         cursors: mapping.shard_cursors.clone(),
         initial_cursor: mapping.initial_shard_cursor(),
     })
@@ -640,7 +682,8 @@ fn run_of(
 /// `work` carries this poller's own working state: the clients this data plane reaches the
 /// rest of the emulator through, and how many attempts the batch at the head of each shard
 /// has already had — so a batch the function keeps failing is discarded once the mapping's
-/// `MaximumRetryAttempts` is spent on it ([`failed_attempt`]).
+/// `MaximumRetryAttempts` is spent on it ([`failed_attempt`]), and the record of the batch it
+/// gave up on is written where the mapping says ([`failure_destination`]).
 async fn move_batches(
     callback: &smithy_server_runtime::EmbeddedEmulator,
     work: &mut PollerWork,
@@ -703,69 +746,71 @@ async fn move_batches(
             iterator_age_millis(last.arrived_at.as_ref(), SystemTime::now()),
         );
         let payload = batch_event(&records);
-        match hand_over_batch(callback, &mut work.clients, run, &payload, &sequence_numbers).await {
-            Ok(processed) => {
-                // The mapping reads on from past the records the attempt processed, and the
-                // attempt is reported as what the mapping last came to. A shard has ONE
-                // position, so what it reads on from is the run of records at the head of
-                // the batch the attempt processed: the first record its function reported it
-                // did not process is where the next read starts, whatever the report says
-                // about the records behind that one.
-                match checkpointed_through(&sequence_numbers, &processed) {
-                    Some(sequence_number) => {
-                        checkpoint(
-                            state,
-                            uuid,
-                            run,
-                            &shard,
-                            Some(sequence_number),
-                            super::LAST_PROCESSING_RESULT_OK,
-                        );
-                        // The shard has moved on, so the attempts the batch it was at had are
-                        // spent on nothing further: the next batch starts its own count.
-                        work.attempts.remove(&shard);
-                        delivered = true;
-                    }
-                    None => {
-                        // The report named the batch's own first record, so the cursor stays
-                        // where it was and the whole batch is read again: an attempt that
-                        // moved the shard's position not at all is one that did not process
-                        // the batch, which is what it reports and what the poller backs off
-                        // after.
-                        failure = Some(failed_attempt(
-                            state,
-                            uuid,
-                            run,
-                            &shard,
-                            &sequence_numbers,
-                            &mut work.attempts,
-                            format!(
-                                "{} reported the first record of the batch it was handed as \
-                                 one it did not process",
-                                run.function_arn
-                            ),
-                        ));
-                        undelivered = true;
-                    }
-                }
-            }
-            Err(detail) => {
-                // Not delivered: the cursor stays where it was, so this batch is read
-                // again — until the mapping's `MaximumRetryAttempts` is spent on it — and
-                // the failed attempt is what the mapping last came to. Each shard is read on
-                // its own, so the other shards of the stream are still read on this pass.
-                failure = Some(failed_attempt(
-                    state,
-                    uuid,
-                    run,
-                    &shard,
-                    &sequence_numbers,
-                    &mut work.attempts,
-                    detail,
-                ));
-                undelivered = true;
-            }
+        let attempt =
+            hand_over_batch(callback, &mut work.clients, run, &payload, &sequence_numbers).await;
+        // The mapping reads on from past the records the attempt processed, and the attempt
+        // is reported as what the mapping last came to. A shard has ONE position, so what it
+        // reads on from is the run of records at the head of the batch the attempt
+        // processed: the first record its function reported it did not process is where the
+        // next read starts, whatever the report says about the records behind that one.
+        let through = attempt
+            .failure
+            .is_none()
+            .then(|| checkpointed_through(&sequence_numbers, &attempt.processed))
+            .flatten();
+        if let Some(sequence_number) = through {
+            checkpoint(
+                state,
+                uuid,
+                run,
+                &shard,
+                Some(sequence_number),
+                super::LAST_PROCESSING_RESULT_OK,
+            );
+            // The shard has moved on, so the attempts the batch it was at had are spent on
+            // nothing further: the next batch starts its own count.
+            work.attempts.remove(&shard);
+            delivered = true;
+            continue;
         }
+        // Nothing at the head of the batch was processed: the cursor stays where it was, so
+        // this batch is read again — until the mapping's `MaximumRetryAttempts` is spent on
+        // it — and the failed attempt is what the mapping last came to. Each shard is read on
+        // its own, so the other shards of the stream are still read on this pass.
+        let detail = attempt.failure.clone().unwrap_or_else(|| {
+            format!(
+                "{} reported the first record of the batch it was handed as one it did not \
+                 process",
+                run.function_arn
+            )
+        });
+        let failed = failed_attempt(
+            state,
+            uuid,
+            run,
+            &shard,
+            &sequence_numbers,
+            &mut work.attempts,
+            detail,
+        );
+        if let Some(attempts) = failed.discarded {
+            // The records are gone from the function's reach, so the only thing a client can
+            // still learn about them is what the mapping's own failure destination says.
+            failure_destination::discard_batch(
+                callback,
+                &mut work.clients,
+                &failure_destination::FailedBatch {
+                    run,
+                    shard: &shard,
+                    records: &records,
+                    attempts,
+                    answered: attempt.answered.as_ref(),
+                },
+            )
+            .await;
+        }
+        failure = Some(failed.detail);
+        undelivered = true;
     }
     match failure {
         Some(detail) => Outcome::Failed {
@@ -795,9 +840,12 @@ fn failed_attempt(
     sequence_numbers: &[String],
     attempts: &mut BTreeMap<String, BatchAttempts>,
     detail: String,
-) -> String {
+) -> FailedAttempt {
     let (Some(head), Some(tail)) = (sequence_numbers.first(), sequence_numbers.last()) else {
-        return detail;
+        return FailedAttempt {
+            detail,
+            discarded: None,
+        };
     };
     let made = match attempts.get_mut(shard) {
         // The shard is still at the position this batch was read from, so this is one more
@@ -832,13 +880,34 @@ fn failed_attempt(
         super::LAST_PROCESSING_RESULT_FUNCTION_CALL_FAILED,
     );
     if discarded {
-        return format!(
-            "{detail}, and the mapping allows {made} attempt(s) at a batch, so the {} \
-             record(s) of this one were discarded and {shard} reads on past them",
-            sequence_numbers.len()
-        );
+        return FailedAttempt {
+            detail: format!(
+                "{detail}, and the mapping allows {made} attempt(s) at a batch, so the {} \
+                 record(s) of this one were discarded and {shard} reads on past them",
+                sequence_numbers.len()
+            ),
+            discarded: Some(made),
+        };
     }
-    format!("{detail}, so {shard} reads the same batch again")
+    FailedAttempt {
+        detail: format!("{detail}, so {shard} reads the same batch again"),
+        discarded: None,
+    }
+}
+
+/// What one failed attempt at a batch came to: the sentence it is logged with, and — when
+/// this attempt was the last one the mapping allows that batch — how many attempts the
+/// discarded batch had in all.
+///
+/// The count travels because the record of a discarded batch reports it
+/// ([`failure_destination`]); a batch that is to be attempted again carries none, and is
+/// recorded nowhere.
+struct FailedAttempt {
+    /// Why the attempt did not process the batch, and what became of the batch.
+    detail: String,
+    /// The attempts the batch had, for the batch that was DISCARDED; `None` for one the
+    /// mapping will attempt again.
+    discarded: Option<u32>,
 }
 
 /// The event ONE batch is handed over as: "Lambda reads items from the event source and
@@ -947,17 +1016,50 @@ async fn hand_over_batch(
     run: &ShardSourcedMapping,
     payload: &Value,
     sequence_numbers: &[String],
-) -> Result<Vec<String>, String> {
-    let answered = invoke_function(callback, clients, run, payload).await?;
-    if !run.reports_batch_item_failures {
-        return Ok(sequence_numbers.to_vec());
+) -> Attempt {
+    let answered = match invoke_function(callback, clients, run, payload).await {
+        Ok(answered) => answered,
+        // The invocation was not made at all, so there is nothing it answered.
+        Err(detail) => {
+            return Attempt {
+                processed: Vec::new(),
+                answered: None,
+                failure: Some(detail),
+            }
+        }
+    };
+    // "If present, indicates that an error occurred during function execution"
+    // (`InvocationResponse$FunctionError`): the batch was not processed, so it is not
+    // checkpointed past.
+    if let Some(failure) = answered.function_error.as_deref() {
+        let detail = format!("{} answered a {failure} error for the batch", run.function_arn);
+        return Attempt {
+            processed: Vec::new(),
+            answered: Some(answered),
+            failure: Some(detail),
+        };
     }
-    match super::read_batch_item_failures(answered.as_deref(), sequence_numbers) {
-        super::BatchReport::WholeBatchFailed(detail) => Err(format!(
-            "{} reported no record of the batch as processed: {detail}",
-            run.function_arn
-        )),
-        report => Ok(super::processed_records(&report, sequence_numbers).unwrap_or_default()),
+    if !run.reports_batch_item_failures {
+        return Attempt {
+            processed: sequence_numbers.to_vec(),
+            answered: Some(answered),
+            failure: None,
+        };
+    }
+    match super::read_batch_item_failures(answered.payload.as_deref(), sequence_numbers) {
+        super::BatchReport::WholeBatchFailed(detail) => Attempt {
+            processed: Vec::new(),
+            answered: Some(answered),
+            failure: Some(format!(
+                "{} reported no record of the batch as processed: {detail}",
+                run.function_arn
+            )),
+        },
+        report => Attempt {
+            processed: super::processed_records(&report, sequence_numbers).unwrap_or_default(),
+            answered: Some(answered),
+            failure: None,
+        },
     }
 }
 
@@ -979,13 +1081,13 @@ fn checkpointed_through(sequence_numbers: &[String], processed: &[String]) -> Op
 }
 
 /// Hand one batch to the function, synchronously, as a stream event source's invocation is,
-/// and answer with the response document it returned.
+/// and answer with everything the invocation reported about it.
 async fn invoke_function(
     callback: &smithy_server_runtime::EmbeddedEmulator,
     clients: &mut Clients,
     run: &ShardSourcedMapping,
     payload: &Value,
-) -> Result<Option<Vec<u8>>, String> {
+) -> Result<Answered, String> {
     let answer = clients
         .lambda(callback, &run.region)
         .invoke()
@@ -1002,18 +1104,20 @@ async fn invoke_function(
                 ::aws_smithy_types::error::display::DisplayErrorContext(&error)
             )
         })?;
-    // "If present, indicates that an error occurred during function execution"
-    // (`InvocationResponse$FunctionError`): the batch was not processed, so it is not
-    // checkpointed past.
-    if let Some(failure) = answer.function_error.as_deref() {
-        return Err(format!(
-            "{} answered a {failure} error for the batch",
-            run.function_arn
-        ));
-    }
-    // "The response from the function, or an error object" (`InvocationResponse$Payload`):
-    // the document a mapping that reads a batch item failure report reads it out of.
-    Ok(answer.payload.map(::aws_smithy_types::Blob::into_inner))
+    Ok(Answered {
+        // "The HTTP status code is in the 200 range for a successful request"
+        // (`InvocationResponse$StatusCode`).
+        status_code: Some(answer.status_code),
+        // "The version of the function that executed"
+        // (`InvocationResponse$ExecutedVersion`).
+        executed_version: answer.executed_version.clone(),
+        function_error: answer.function_error.clone(),
+        request_id: ::aws_types::request_id::RequestId::request_id(&answer).map(str::to_string),
+        // "The response from the function, or an error object"
+        // (`InvocationResponse$Payload`): the document a mapping that reads a batch item
+        // failure report reads it out of.
+        payload: answer.payload.map(::aws_smithy_types::Blob::into_inner),
+    })
 }
 
 /// The clients this data plane reaches the other services of this emulator through, built
@@ -1029,6 +1133,11 @@ pub(crate) struct Clients {
     kinesis: Option<(String, ::aws_sdk_kinesis::Client)>,
     dynamodbstreams: Option<(String, ::aws_sdk_dynamodbstreams::Client)>,
     lambda: Option<(String, ::aws_sdk_lambda::Client)>,
+    /// The two destination services the record of a discarded batch is written through
+    /// ([`failure_destination`]).
+    sqs: Option<(String, ::aws_sdk_sqs::Client)>,
+    /// See [`Self::sqs`].
+    sns: Option<(String, ::aws_sdk_sns::Client)>,
 }
 
 /// Build each client the same way: over the in-process callback into this same emulator,
@@ -1083,6 +1192,8 @@ impl Clients {
     callback_client!(kinesis, aws_sdk_kinesis, "kinesis");
     callback_client!(dynamodbstreams, aws_sdk_dynamodbstreams, "streams.dynamodb");
     callback_client!(lambda, aws_sdk_lambda, "lambda");
+    callback_client!(sqs, aws_sdk_sqs, "sqs");
+    callback_client!(sns, aws_sdk_sns, "sns");
 }
 
 #[cfg(test)]

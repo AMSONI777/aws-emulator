@@ -110,6 +110,15 @@ uuid = { version = "1", features = ["v4"] }
 aws-sdk-kinesis = { version = "1", default-features = false }
 aws-sdk-dynamodbstreams = { version = "1", default-features = false }
 aws-sdk-lambda = { version = "1", default-features = false }
+# The queue the record of a batch that mapping gave up on is written to, when its
+# `DestinationConfig$OnFailure` names one (`state::event_source_poller::failure_destination`):
+# that write is Amazon SQS's own `SendMessage`, made over the same in-process callback. (A
+# topic destination is the `aws-sdk-sns` client already taken below.)
+aws-sdk-sqs = { version = "1", default-features = false }
+# The id of the invocation request such a record reports, read off the answer the SDK client
+# above got back: the request id is response METADATA rather than a modelled member, and this
+# is the trait the SDKs expose it through.
+aws-types = { version = "1", default-features = false }
 # The concurrent fan-out one pass of the queue poller makes: a mapping configured for several
 # concurrent instances hands that many batches to its function AT ONCE
 # (`state::sqs_poller`), which is this crate's `join_all` over the attempts rather than a

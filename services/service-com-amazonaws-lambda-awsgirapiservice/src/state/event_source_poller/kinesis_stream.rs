@@ -207,6 +207,7 @@ mod tests {
             batch_size: MAX_RECORDS_PER_BATCH,
             reports_batch_item_failures: false,
             attempts_allowed: None,
+            on_failure_destination: None,
             cursors: std::collections::BTreeMap::new(),
             initial_cursor: ShardCursor::TrimHorizon,
         }
