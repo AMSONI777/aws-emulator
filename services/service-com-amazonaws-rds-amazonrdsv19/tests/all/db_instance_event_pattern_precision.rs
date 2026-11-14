@@ -139,7 +139,14 @@ fn near_misses(arn: &str, sibling_arn: &str) -> Vec<NearMiss> {
 /// Put the rule `name` on the default bus with `pattern`, give it its own queue, and grant
 /// EventBridge the send on that queue scoped by `aws:SourceArn` to this rule — the grant a
 /// client writes for a rule's SQS target. Answers the queue's URL.
-async fn rule_to_its_own_queue(router: &MultiServiceRouter, name: &str, pattern: &Value) -> String {
+///
+/// `pub(crate)` so the sibling suite over what a REFUSED call publishes stands its rule and
+/// target up through this one path rather than growing a second copy of it.
+pub(crate) async fn rule_to_its_own_queue(
+    router: &MultiServiceRouter,
+    name: &str,
+    pattern: &Value,
+) -> String {
     let put = events(
         router,
         "PutRule",
@@ -243,7 +250,10 @@ impl Scenario {
 
 /// `CreateDBInstance` for `identifier`, waited until it is available, as the ARN the service
 /// itself reports for it.
-async fn create_available(router: &MultiServiceRouter, identifier: &str) -> String {
+///
+/// `pub(crate)` so the sibling suite over what a REFUSED call publishes reaches the same
+/// starting point — an instance a reboot would be accepted for — rather than restating it.
+pub(crate) async fn create_available(router: &MultiServiceRouter, identifier: &str) -> String {
     let created = expect_ok(
         identifier,
         call(

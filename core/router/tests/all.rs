@@ -3435,3 +3435,7 @@ mod chime_deleted_meeting_tagging;
 // doc comment past the first item is `E0753` and compiles no suite of this target.)
 // comment may only appear before an item.)
 // doc comment may only appear before an item, so a `//!` line in this appended tail is
+// leaving a note here. (Ordinary comments: an inner doc comment `//!` is legal only before
+// the first item of a crate root, so these lines are `E0753` in this appended tail.)
+// this file and for every service crate's `tests/all.rs`. (An ordinary comment: `//!` here,
+// past the first item of this crate root, is `E0753`.)
