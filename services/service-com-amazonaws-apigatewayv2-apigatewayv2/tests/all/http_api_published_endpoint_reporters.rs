@@ -6,12 +6,13 @@
 //! The rule, one level above the recorded case that filed the issue (a client that read
 //! `ApiEndpoint` off `CreateApi` and could not reach the address it was given):
 //!
-//! > A value this service publishes for a client to DIAL is an address this emulator itself
-//! > answers on, so EVERY operation that reports an api's `ApiEndpoint` reports that one
-//! > address, and every invoke URL a client builds from it — the endpoint with the stage
-//! > name appended, and the endpoint on its own for the stage that serves the api's root
-//! > ("the stage name is typically appended to this URI to form a complete path to a
-//! > deployed API stage", `Api$ApiEndpoint`) — reaches the route the api deployed.
+//! > EVERY operation that reports an api's `ApiEndpoint` reports the one endpoint that
+//! > member documents for the api — `{api-id}.execute-api.{region}.amazonaws.com`, with no
+//! > path of its own — and this emulator's front door claims that host, so every invoke
+//! > URL a client builds from it — the endpoint with the stage name appended, and the
+//! > endpoint on its own for the stage that serves the api's root ("the stage name is
+//! > typically appended to this URI to form a complete path to a deployed API stage",
+//! > `Api$ApiEndpoint`) — reaches the route the api deployed.
 //!
 //! The rows span what the rule generalises over: the endpoint the control-plane request was
 //! addressed at (a loopback literal with a port, a loopback NAME with another port, and one
@@ -58,25 +59,14 @@ const ROOT_ROUTE_KEY: &str = "GET /";
 const NESTED_ROUTE_KEY: &str = "GET /items";
 const NESTED_ROUTE_PATH: &str = "/items";
 
-/// Which address a row must be announced on.
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
-enum Announced {
-    /// The emulator's own endpoint, with the api behind the reserved data-plane path.
-    EmulatorEndpoint,
-    /// The `{api-id}.execute-api.{region}.amazonaws.com` host `Api$ApiEndpoint` documents,
-    /// which this data plane claims host-style.
-    ExecuteApiHost,
-}
-
-/// One row: the endpoint the control-plane calls are addressed at, the Region they are signed
-/// for, and the address the api must be announced on.
+/// One row: the endpoint the control-plane calls are addressed at and the Region they are
+/// signed for. Every row is announced the same documented endpoint — that is the rule.
 struct Row {
     case: &'static str,
     /// The `Host` the control-plane request carries — the endpoint the client is configured
     /// with.
     host: &'static str,
     region: &'static str,
-    announced: Announced,
 }
 
 fn rows() -> Vec<Row> {
@@ -86,19 +76,16 @@ fn rows() -> Vec<Row> {
                    endpoint",
             host: "127.0.0.1:39461",
             region: "us-west-2",
-            announced: Announced::EmulatorEndpoint,
         },
         Row {
             case: "the same endpoint named by its loopback NAME on another port",
             host: "localhost:9297",
             region: "ap-south-1",
-            announced: Announced::EmulatorEndpoint,
         },
         Row {
-            case: "a client that resolves AWS's own hosts: the documented execute-api host",
+            case: "a client that resolves AWS's own hosts: this service's own endpoint host",
             host: "apigateway.eu-north-1.amazonaws.com",
             region: "eu-north-1",
-            announced: Announced::ExecuteApiHost,
         },
     ]
 }
@@ -118,9 +105,8 @@ fn announced_parts(announced: &str) -> (String, String) {
     }
 }
 
-/// Assert `announced` is the address this emulator serves this api on, in the form this row's
-/// client is announced it, and answer the authority and base path a client builds its invoke
-/// URL from.
+/// Assert `announced` is the api's own documented endpoint, and answer the authority and base
+/// path a client builds its invoke URL from.
 fn assert_announced(row: &Row, reporter: &str, api_id: &str, announced: &str) -> (String, String) {
     assert!(
         announced.starts_with("https://"),
@@ -129,44 +115,18 @@ fn assert_announced(row: &Row, reporter: &str, api_id: &str, announced: &str) ->
         row.case
     );
     let (authority, base_path) = announced_parts(announced);
-    match row.announced {
-        Announced::EmulatorEndpoint => {
-            assert_eq!(
-                authority, row.host,
-                "case {:?}: {reporter} must announce the endpoint the request reached, got \
-                 {announced:?}",
-                row.case
-            );
-            assert!(
-                !authority.ends_with("amazonaws.com"),
-                "case {:?}: {reporter} must not announce an AWS host no client of this \
-                 emulator resolves, got {announced:?}",
-                row.case
-            );
-            assert_eq!(
-                base_path,
-                format!("/_aws/execute-api/{api_id}"),
-                "case {:?}: {reporter} must name the api in the reserved data-plane path, got \
-                 {announced:?}",
-                row.case
-            );
-        }
-        Announced::ExecuteApiHost => {
-            assert_eq!(
-                authority,
-                format!("{api_id}.execute-api.{}.amazonaws.com", row.region),
-                "case {:?}: {reporter} must announce the api's own execute-api host, got \
-                 {announced:?}",
-                row.case
-            );
-            assert!(
-                base_path.is_empty(),
-                "case {:?}: the documented endpoint carries no path of its own, got \
-                 {announced:?}",
-                row.case
-            );
-        }
-    }
+    assert_eq!(
+        authority,
+        format!("{api_id}.execute-api.{}.amazonaws.com", row.region),
+        "case {:?}: {reporter} must announce the api's own execute-api host, got \
+         {announced:?}",
+        row.case
+    );
+    assert!(
+        base_path.is_empty(),
+        "case {:?}: the documented endpoint carries no path of its own, got {announced:?}",
+        row.case
+    );
     (authority, base_path)
 }
 
@@ -313,8 +273,7 @@ async fn assert_served(
 /// `(what a failing assertion calls it, the path to send)`.
 ///
 /// `base_path` is what the endpoint carries ahead of the stage, which is empty for the
-/// documented execute-api host and the reserved data-plane path for the emulator's own
-/// endpoint; an empty path is the root itself.
+/// documented execute-api host; an empty path is the root itself.
 fn spellings(base_path: &str) -> Vec<(String, String)> {
     let at = |path: String| if path.is_empty() { "/".to_string() } else { path };
     vec![

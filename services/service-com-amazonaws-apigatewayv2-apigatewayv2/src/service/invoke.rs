@@ -24,9 +24,9 @@
 //! status it answers is computed from them.
 //!
 //! A client on the machine this emulator runs on cannot reach that host at all: nothing
-//! resolves `{api-id}.execute-api.{region}.amazonaws.com` there, so the api is ANNOUNCED on
-//! the emulator's own endpoint instead, with the api id in the PATH behind the
-//! [`LOCAL_ENDPOINT_PREFIX`] marker (`crate::state::announced_execute_api_endpoint`), and a
+//! resolves `{api-id}.execute-api.{region}.amazonaws.com` there, so the same api is also
+//! reached at the emulator's own endpoint, with the api id in the PATH behind the
+//! [`LOCAL_ENDPOINT_PREFIX`] marker, and a
 //! client that built its own address carries in the path what it cannot carry in the host —
 //! the api id ahead of the stage (plainly, or behind that same marker), or the stage alone.
 //! [`resolve`] reads every one of those addressings, and each is checked against this
@@ -575,8 +575,8 @@ pub fn claims_request<Eng: Send + Sync + 'static>(engine: &Eng, req: &RtRequest)
 ///
 /// The api id is read from the two addressings that NAME an endpoint: the host AWS documents
 /// (`{api-id}.execute-api.{region}.amazonaws.com`), and the emulator's own rewriting of it
-/// behind the [`LOCAL_ENDPOINT_PREFIX`] marker, which is the endpoint this service ANNOUNCES
-/// to a client that resolves nothing else (`crate::state::announced_execute_api_endpoint`) —
+/// behind the [`LOCAL_ENDPOINT_PREFIX`] marker, which is where this service also serves an
+/// api for a client that resolves nothing else —
 /// so the address a client was handed answers the same way whichever of the two it is.
 ///
 /// What this does NOT claim, so nothing an api of this service holds changes hands: an
@@ -1806,10 +1806,9 @@ fn request_headers(req: &RtRequest) -> BTreeMap<String, String> {
 /// ([`crate::state::execute_api_host`]) — which is the `domainName` an event reports and
 /// the first label of which is its `domainPrefix`.
 ///
-/// Composed from the api's stored id and Region rather than from the endpoint it ANNOUNCED:
-/// what this emulator announces is the address it serves the api at, which for a client
-/// that reached the emulator's own endpoint carries no api host at all
-/// ([`crate::state::announced_execute_api_endpoint`]), while the domain the request was made
+/// Composed from the api's stored id and Region rather than from the endpoint member it
+/// reports: a WEBSOCKET api reports the socket its data plane was opened on, which carries
+/// no api host at all, while the domain the request was made
 /// to as far as the api is concerned is the api's own either way.
 fn endpoint_host(api: &Api) -> String {
     crate::state::execute_api_host(&api.api_id, &api.region)

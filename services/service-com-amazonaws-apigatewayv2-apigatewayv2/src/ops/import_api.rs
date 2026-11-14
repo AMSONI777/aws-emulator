@@ -252,14 +252,12 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         let region = crate::state::request_region(ctx.parts());
         let record = crate::state::Api {
             // An imported api speaks HTTP, so its endpoint carries that protocol's
-            // scheme — the same value `CreateApi` reports for an HTTP api, on the address
-            // this emulator serves the api at.
-            api_endpoint: crate::state::announced_execute_api_endpoint(
+            // scheme — the same value `CreateApi` reports for an HTTP api, in the form
+            // `Api$ApiEndpoint` documents for the api id this import minted.
+            api_endpoint: crate::state::execute_api_endpoint(
                 &api_id,
                 &region,
                 crate::state::HTTP_PROTOCOL_TYPE,
-                ctx.parts(),
-                ctx.endpoint().as_str(),
             ),
             api_id: api_id.clone(),
             region,

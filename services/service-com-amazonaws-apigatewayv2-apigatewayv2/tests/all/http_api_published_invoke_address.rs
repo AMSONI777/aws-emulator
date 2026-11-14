@@ -5,14 +5,14 @@
 //! The rule, one level above the recorded case that filed the issue (an HTTP api with a
 //! JWT authorizer whose published endpoint a client could not reach):
 //!
-//! > The address this service publishes for an api's data plane is one this emulator
-//! > itself answers on, so the invoke URL a client builds from `ApiEndpoint` —
-//! > that value with the stage name appended ("the stage name is typically appended to
-//! > this URI to form a complete path to a deployed API stage", `Api$ApiEndpoint`) —
-//! > reaches the api's route. A client configured with the emulator's own endpoint is
-//! > announced that endpoint with the api behind the reserved data-plane path; a client
-//! > that resolves AWS's own hosts is announced the `{api-id}.execute-api.{region}
-//! > .amazonaws.com` host that member documents, which the front door claims host-style.
+//! > An api's `ApiEndpoint` is the api's own default endpoint in the form that member
+//! > documents — `{api-id}.execute-api.{region}.amazonaws.com`, with no path of its own —
+//! > and this emulator's front door claims that host, so the invoke URL a client builds
+//! > from it (that value with the stage name appended: "the stage name is typically
+//! > appended to this URI to form a complete path to a deployed API stage",
+//! > `Api$ApiEndpoint`) reaches the api's route. The same api is reached at the emulator's
+//! > own endpoint with the api behind the reserved data-plane path, whichever endpoint the
+//! > control-plane request itself was addressed at.
 //!
 //! The rows span what the rule generalises over: the endpoint the control-plane request
 //! was addressed at (an IPv4 loopback literal, a loopback NAME, a bracketed IPv6 literal,
@@ -53,18 +53,9 @@ const ROUTE_PATH: &str = "/items";
 /// segment in the path at all.
 const DEFAULT_STAGE: &str = "$default";
 
-/// Which address a row must be announced on.
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
-enum Announced {
-    /// The emulator's own endpoint, with the api behind the reserved data-plane path.
-    EmulatorEndpoint,
-    /// The `{api-id}.execute-api.{region}.amazonaws.com` host `Api$ApiEndpoint` documents.
-    ExecuteApiHost,
-}
-
 /// One row: the endpoint the control-plane calls are addressed at, the Region they are
-/// signed for, the stage the api is deployed to, and the address the api must be announced
-/// on.
+/// signed for, and the stage the api is deployed to. The address the api is announced on is
+/// the same documented one for every row — that is the point of the rule.
 struct Row {
     case: &'static str,
     /// The `Host` the control-plane request carries — the endpoint the client is
@@ -72,7 +63,6 @@ struct Row {
     host: &'static str,
     region: &'static str,
     stage_name: &'static str,
-    announced: Announced,
 }
 
 fn rows() -> Vec<Row> {
@@ -83,35 +73,30 @@ fn rows() -> Vec<Row> {
             host: "127.0.0.1:45923",
             region: "us-west-2",
             stage_name: DEFAULT_STAGE,
-            announced: Announced::EmulatorEndpoint,
         },
         Row {
             case: "the same endpoint named by its loopback NAME, deployed to a named stage",
             host: "localhost:9297",
             region: "eu-west-1",
             stage_name: "prod",
-            announced: Announced::EmulatorEndpoint,
         },
         Row {
             case: "the same endpoint named by a bracketed IPv6 literal",
             host: "[::1]:9297",
             region: "ap-southeast-2",
             stage_name: "live",
-            announced: Announced::EmulatorEndpoint,
         },
         Row {
-            case: "a client that resolves AWS's own hosts: the documented execute-api host",
+            case: "a client that resolves AWS's own hosts: this service's own endpoint host",
             host: "apigateway.us-east-1.amazonaws.com",
             region: "us-east-1",
             stage_name: DEFAULT_STAGE,
-            announced: Announced::ExecuteApiHost,
         },
         Row {
             case: "a client that resolves AWS's own hosts, a named stage in another Region",
             host: "apigateway.eu-central-1.amazonaws.com",
             region: "eu-central-1",
             stage_name: "staging",
-            announced: Announced::ExecuteApiHost,
         },
     ]
 }
@@ -131,9 +116,8 @@ fn announced_parts(announced: &str) -> (String, String) {
     }
 }
 
-/// Assert `announced` is an address this emulator answers on, in the form this row's
-/// client is announced, and answer the authority and base path a client builds its invoke
-/// URL from.
+/// Assert `announced` is the api's own documented endpoint, and answer the authority and
+/// base path a client builds its invoke URL from.
 fn assert_announced(row: &Row, reporter: &str, api_id: &str, announced: &str) -> (String, String) {
     let scheme = "https://";
     assert!(
@@ -143,44 +127,18 @@ fn assert_announced(row: &Row, reporter: &str, api_id: &str, announced: &str) ->
         row.case
     );
     let (authority, base_path) = announced_parts(announced);
-    match row.announced {
-        Announced::EmulatorEndpoint => {
-            assert_eq!(
-                authority, row.host,
-                "case {:?}: {reporter} must announce the endpoint the request reached, got \
-                 {announced:?}",
-                row.case
-            );
-            assert!(
-                !authority.ends_with("amazonaws.com"),
-                "case {:?}: {reporter} must not announce an AWS host no client of this \
-                 emulator resolves, got {announced:?}",
-                row.case
-            );
-            assert_eq!(
-                base_path,
-                format!("/_aws/execute-api/{api_id}"),
-                "case {:?}: {reporter} must name the api in the reserved data-plane path, \
-                 got {announced:?}",
-                row.case
-            );
-        }
-        Announced::ExecuteApiHost => {
-            assert_eq!(
-                authority,
-                format!("{api_id}.execute-api.{}.amazonaws.com", row.region),
-                "case {:?}: {reporter} must announce the api's own execute-api host, got \
-                 {announced:?}",
-                row.case
-            );
-            assert!(
-                base_path.is_empty(),
-                "case {:?}: the documented endpoint carries no path of its own, got \
-                 {announced:?}",
-                row.case
-            );
-        }
-    }
+    assert_eq!(
+        authority,
+        format!("{api_id}.execute-api.{}.amazonaws.com", row.region),
+        "case {:?}: {reporter} must announce the api's own execute-api host, got \
+         {announced:?}",
+        row.case
+    );
+    assert!(
+        base_path.is_empty(),
+        "case {:?}: the documented endpoint carries no path of its own, got {announced:?}",
+        row.case
+    );
     (authority, base_path)
 }
 

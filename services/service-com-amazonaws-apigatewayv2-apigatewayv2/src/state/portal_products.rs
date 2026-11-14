@@ -545,12 +545,12 @@ pub fn rest_endpoint_identifier_parts(
 /// API on, as every portal page of one stage reports the same base.
 ///
 /// The endpoint is the one a consumer DIALS — it is the address a published portal sends
-/// them to — so which address it names follows the one reading this service applies to
-/// every value it announces for a client to reach ([`announced_execute_api_endpoint`]): the
-/// emulator's own endpoint with the API behind the [`LOCAL_ENDPOINT_PREFIX`] marker for a
-/// client that resolves nothing else, and the `{api-id}.execute-api.{region}.amazonaws.com`
-/// host for a client that resolves AWS's own hosts. A REST (API Gateway v1) stage of this
-/// emulator is served at exactly that marker
+/// them to — and this member's own documentation fixes no form for it, so which address it
+/// names follows the one reading this service applies to such a value
+/// ([`emulator_served_api_endpoint`]): the emulator's own endpoint with the API behind the
+/// [`LOCAL_ENDPOINT_PREFIX`] marker for a client that resolves nothing else, and the
+/// `{api-id}.execute-api.{region}.amazonaws.com` host for a client that resolves AWS's own
+/// hosts. A REST (API Gateway v1) stage of this emulator is served at exactly that marker
 /// (`/_aws/execute-api/{api-id}/{stage}/{resource-path}`), so the address published for the
 /// page is the one its stage answers on.
 pub fn rest_endpoint_invoke_url(
@@ -561,7 +561,7 @@ pub fn rest_endpoint_invoke_url(
 ) -> String {
     format!(
         "{}/{}",
-        announced_execute_api_endpoint(
+        emulator_served_api_endpoint(
             &parts.rest_api_id,
             region,
             HTTP_PROTOCOL_TYPE,
