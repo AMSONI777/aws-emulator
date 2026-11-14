@@ -8,6 +8,10 @@
 //! primary resources: a gateway's and a file share's members are whatever the activating /
 //! creating call stored, every reporting operation computes its answer from that record,
 //! and an ARN that names no stored record is refused rather than answered.
+//!
+//! The request harness here ([`emulator`], [`call`], [`Answer`] and the signing constants)
+//! is `pub(crate)`, so a sibling suite in this target drives the same emulator the same
+//! way rather than building a second one.
 
 use std::collections::BTreeSet;
 use std::sync::Arc;
@@ -24,19 +28,19 @@ use smithy_server_runtime::MultiServiceRouter;
 
 /// A SigV4 credential scope naming this service. It is what routes a request to the
 /// storagegateway service, and its region is what the ARNs it mints name.
-const SIGNED_FOR_EU_WEST_1: &str = "AWS4-HMAC-SHA256 \
+pub(crate) const SIGNED_FOR_EU_WEST_1: &str = "AWS4-HMAC-SHA256 \
      Credential=AKIDEXAMPLE/20260101/eu-west-1/storagegateway/aws4_request, \
      SignedHeaders=host, Signature=abc";
 
 /// The region [`SIGNED_FOR_EU_WEST_1`] signs for.
-const REGION: &str = "eu-west-1";
+pub(crate) const REGION: &str = "eu-west-1";
 
 /// The canonical account id every emulated ARN carries, spelled out here rather than
 /// imported so a wrong account in the implementation fails this test.
-const ACCOUNT_ID: &str = "000000000000";
+pub(crate) const ACCOUNT_ID: &str = "000000000000";
 
 /// The `X-Amz-Target` prefix `OPERATIONS.md` gives for this service's awsJson1_1 routing.
-const TARGET_PREFIX: &str = "StorageGateway_20130630";
+pub(crate) const TARGET_PREFIX: &str = "StorageGateway_20130630";
 
 /// An IAM role ARN matching `CreateNFSFileShareInput$Role`'s
 /// `^arn:(aws(|-cn|-us-gov|-iso[A-Za-z0-9_-]*|-eusc)):iam::([0-9]+):role/(\S+)$`.
@@ -52,7 +56,7 @@ const NEVER_CREATED_SHARE: &str =
 
 /// The wire error code every bad-request refusal in this service carries: each of the 96
 /// operations declares exactly `InternalServerError` (500) and this one (400).
-const INVALID_GATEWAY_REQUEST: &str = "InvalidGatewayRequestException";
+pub(crate) const INVALID_GATEWAY_REQUEST: &str = "InvalidGatewayRequestException";
 
 /// `GatewayId`'s 12..30, and the `sgw-` + hex form Storage Gateway ids take. Checked here
 /// rather than through the crate's own code so a wrong id cannot make this test pass.
@@ -73,7 +77,7 @@ fn is_file_share_id(value: &str) -> bool {
 
 /// True when `value` is `arn:aws:storagegateway:<REGION>:<ACCOUNT_ID>:<kind>/<id>` and the
 /// id satisfies `id_ok` — and when it is inside `GatewayARN` / `FileShareARN`'s 50..500.
-fn is_resource_arn(value: &str, kind: &str, id_ok: fn(&str) -> bool) -> bool {
+pub(crate) fn is_resource_arn(value: &str, kind: &str, id_ok: fn(&str) -> bool) -> bool {
     if !(50..=500).contains(&value.len()) {
         return false;
     }
@@ -93,7 +97,7 @@ fn is_resource_arn(value: &str, kind: &str, id_ok: fn(&str) -> bool) -> bool {
 }
 
 /// One emulator: a router carrying only this service, over one shared engine.
-fn emulator() -> MultiServiceRouter {
+pub(crate) fn emulator() -> MultiServiceRouter {
     let engine: Arc<engine::InMemoryEngine> = Arc::new(engine::InMemoryEngine::new());
     let mut router = MultiServiceRouter::new();
     router.set_request_authentication(false);
@@ -102,15 +106,15 @@ fn emulator() -> MultiServiceRouter {
 }
 
 /// What the emulator answered: the HTTP status and the JSON body.
-struct Answer {
-    status: u16,
-    body: Value,
+pub(crate) struct Answer {
+    pub(crate) status: u16,
+    pub(crate) body: Value,
 }
 
 impl Answer {
     /// The wire error code (`__type`), without any namespace prefix, or the empty string
     /// on a success.
-    fn error_code(&self) -> &str {
+    pub(crate) fn error_code(&self) -> &str {
         let raw = self.body["__type"].as_str().unwrap_or_default();
         match raw.rsplit_once('#') {
             Some((_, name)) => name,
@@ -119,13 +123,13 @@ impl Answer {
     }
 
     /// A string member of the answer, or the empty string.
-    fn string(&self, member: &str) -> String {
+    pub(crate) fn string(&self, member: &str) -> String {
         self.body[member].as_str().unwrap_or_default().to_string()
     }
 }
 
 /// Call one operation, the way an SDK client does: `POST /` with `X-Amz-Target`.
-async fn call(router: &MultiServiceRouter, operation: &str, body: Value) -> Answer {
+pub(crate) async fn call(router: &MultiServiceRouter, operation: &str, body: Value) -> Answer {
     let request = ::http::Request::builder()
         .method("POST")
         .uri("/")

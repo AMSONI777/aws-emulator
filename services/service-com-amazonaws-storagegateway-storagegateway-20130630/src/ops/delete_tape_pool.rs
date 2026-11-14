@@ -1,15 +1,9 @@
 // SPDX-License-Identifier: CC0-1.0
 
 //! @op DeleteTapePool
-//! SCAFFOLDED, NOT IMPLEMENTED: this operation answers HTTP 501 `NotImplemented` and
-//! asserts NOTHING about `DeleteTapePool`'s real behaviour. Implement it here — this is
-//! the ONLY file to touch for this operation.
-//!
-//! A 501 from this operation means "nobody has written it yet", never "the emulator is
-//! broken". Replace the `Err(..)` in [`DeleteTapePool::handle`] with real behaviour and
-//! delete the SCAFFOLDED marker line above; that line is the machine-readable record of
-//! which operations are still stubs (`grep -rl '^//! SCAFFOLDED, NOT IMPLEMENTED:' */src/ops/`),
-//! so leaving it on an implemented operation under-reports progress.
+//! Deletes the custom tape pool its `PoolARN` names from [`crate::state`], so
+//! `ListTapePools` stops reporting it; a `PoolARN` that names no stored pool is refused
+//! rather than answered.
 //!
 //! ## Shape of an operation
 //!
@@ -143,18 +137,44 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         input: Self::Input,
         ctx: &smithy_server_runtime::OperationContext<'_>,
     ) -> Result<Self::Output, Self::Error> {
-        // The engine is reachable from `&self` (constructor-injected); `ctx` carries
-        // request metadata. Both are bound here so an implementer has them in scope.
-        let _ = (&input, ctx, &self.engine);
-        // Implement `DeleteTapePool` here, then delete the SCAFFOLDED marker at the top of
-        // this file. Return modeled failures as
-        // `Err(DeleteTapePoolErrorModeled::Variant(..).into())` — the `From` impl above lifts it.
-        //
-        // To refuse a bad request this operation models no error for, return
-        // `Err(crate::scaffolded::Scaffolded::validation("..."))` — a 400
-        // `ValidationException`. Do NOT answer 501 for it: 501 means "not written yet",
-        // not "bad request". Modeled constraints are already refused BEFORE this
-        // handler runs, so reaching here means the input satisfies every one of them.
-        Err(crate::scaffolded::Scaffolded::not_implemented("DeleteTapePool"))
+        // AWS decides authorization at the IAM layer, ahead of the service looking at the
+        // request's own input, so a caller whose identity-based policies do not allow this
+        // action on the pool the request NAMES is refused before the store is reached —
+        // whether or not a pool answers to that ARN.
+        if let Some(denied) = crate::service::authorization::denied_on(
+            &*self.engine,
+            ctx,
+            Self::NAME,
+            &input.pool_arn,
+        ) {
+            return Err(denied);
+        }
+
+        let Some(state) = crate::state::service_state(&*self.engine) else {
+            return Err(DeleteTapePoolErrorModeled::InternalServerError(
+                InternalServerError {
+                    message: Some("the storage gateway store is unavailable".to_string()),
+                    error: None,
+                },
+            )
+            .into());
+        };
+
+        let mut store = state.lock();
+        // "A custom tape pool can only be deleted if there are no tapes in the pool
+        // and if there are no automatic tape creation policies that reference the
+        // custom tape pool." This store holds neither tapes nor tape creation
+        // policies, so nothing can reference the pool and the delete always
+        // proceeds for a pool that exists.
+        let Some(pool) = store.remove_tape_pool(&input.pool_arn) else {
+            return Err(DeleteTapePoolErrorModeled::InvalidGatewayRequestException(
+                crate::state::tape_pool_not_found(&input.pool_arn),
+            )
+            .into());
+        };
+
+        Ok(DeleteTapePoolOutput {
+            pool_arn: Some(pool.arn),
+        })
     }
 }

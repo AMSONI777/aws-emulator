@@ -149,7 +149,20 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         input: Self::Input,
         ctx: &smithy_server_runtime::OperationContext<'_>,
     ) -> Result<Self::Output, Self::Error> {
-        let _ = ctx;
+        // AWS decides authorization at the IAM layer, ahead of the service looking at the
+        // request's own input, so a caller whose identity-based policies do not allow this
+        // action is refused before the store is reached and the answer reports nothing
+        // about what this account holds. The decision is made against the gateway the
+        // request names, and against every resource for a listing that names none.
+        if let Some(denied) = crate::service::authorization::denied_on_optional(
+            &*self.engine,
+            ctx,
+            Self::NAME,
+            input.gateway_arn.as_deref(),
+        ) {
+            return Err(denied);
+        }
+
         let Some(state) = crate::state::service_state(&*self.engine) else {
             return Err(ListFileSharesErrorModeled::InternalServerError(
                 InternalServerError {

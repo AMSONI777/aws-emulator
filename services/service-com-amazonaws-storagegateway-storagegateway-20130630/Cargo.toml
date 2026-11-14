@@ -8,6 +8,16 @@ build = "build.rs"
 
 [dependencies]
 engine = { workspace = true }
+# `service-common` carries the shared readings this crate's authorization gate needs.
+# `iam_authorization`: the ONE evaluation of IAM policy documents against an action on a
+# resource, so this service reads a document exactly as every other service does.
+# `iam_role`: which IAM entity a principal ARN names.
+service-common = { path = "../common" }
+# The STS store, for the identity an access key id speaks for: the principal
+# `sts:GetCallerIdentity` answers for the credentials a request signed with.
+service-com-amazonaws-sts-awssecuritytokenservicev20110615 = { workspace = true }
+# The IAM store, for the identity-based policy documents in force on that principal.
+service-com-amazonaws-iam-awsidentitymanagementv20100508 = { workspace = true }
 smithy-macros = { workspace = true }
 aws-smithy-schema = { workspace = true }
 aws-smithy-schema-server = { workspace = true }
@@ -28,6 +38,11 @@ emulator-core-build-support = { workspace = true }
 [dev-dependencies]
 sha2 = { workspace = true }
 hex = { workspace = true }
+# IAM and STS, mounted BESIDE this service in `tests/all/identity_authorization.rs`: the
+# principals and the policies in force on them are made with those services' own
+# operations, so the documents this service's gate reads are the ones they wrote.
+service-com-amazonaws-iam-awsidentitymanagementv20100508 = { workspace = true }
+service-com-amazonaws-sts-awssecuritytokenservicev20110615 = { workspace = true }
 
 [lints]
 workspace = true

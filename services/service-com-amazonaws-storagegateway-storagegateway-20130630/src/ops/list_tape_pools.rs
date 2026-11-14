@@ -1,15 +1,9 @@
 // SPDX-License-Identifier: CC0-1.0
 
 //! @op ListTapePools
-//! SCAFFOLDED, NOT IMPLEMENTED: this operation answers HTTP 501 `NotImplemented` and
-//! asserts NOTHING about `ListTapePools`'s real behaviour. Implement it here — this is
-//! the ONLY file to touch for this operation.
-//!
-//! A 501 from this operation means "nobody has written it yet", never "the emulator is
-//! broken". Replace the `Err(..)` in [`ListTapePools::handle`] with real behaviour and
-//! delete the SCAFFOLDED marker line above; that line is the machine-readable record of
-//! which operations are still stubs (`grep -rl '^//! SCAFFOLDED, NOT IMPLEMENTED:' */src/ops/`),
-//! so leaving it on an implemented operation under-reports progress.
+//! Reports the custom tape pools stored in [`crate::state`], every `PoolInfo` computed
+//! from the record `CreateTapePool` persisted: all of them, or just the ones the
+//! request's `PoolARNs` name, one `Limit`-sized page at a time.
 //!
 //! ## Shape of an operation
 //!
@@ -157,18 +151,55 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         input: Self::Input,
         ctx: &smithy_server_runtime::OperationContext<'_>,
     ) -> Result<Self::Output, Self::Error> {
-        // The engine is reachable from `&self` (constructor-injected); `ctx` carries
-        // request metadata. Both are bound here so an implementer has them in scope.
-        let _ = (&input, ctx, &self.engine);
-        // Implement `ListTapePools` here, then delete the SCAFFOLDED marker at the top of
-        // this file. Return modeled failures as
-        // `Err(ListTapePoolsErrorModeled::Variant(..).into())` — the `From` impl above lifts it.
-        //
-        // To refuse a bad request this operation models no error for, return
-        // `Err(crate::scaffolded::Scaffolded::validation("..."))` — a 400
-        // `ValidationException`. Do NOT answer 501 for it: 501 means "not written yet",
-        // not "bad request". Modeled constraints are already refused BEFORE this
-        // handler runs, so reaching here means the input satisfies every one of them.
-        Err(crate::scaffolded::Scaffolded::not_implemented("ListTapePools"))
+        // AWS decides authorization at the IAM layer, ahead of the service looking at the
+        // request's own input, so a caller whose identity-based policies do not allow this
+        // action is refused before the store is reached and the answer reports nothing
+        // about what this account holds. The listing is account-wide — `PoolARNs` only
+        // narrows what is reported — so the action addresses no resource of its own.
+        if let Some(denied) = crate::service::authorization::denied_account_wide(
+            &*self.engine,
+            ctx,
+            Self::NAME,
+        ) {
+            return Err(denied);
+        }
+
+        let Some(state) = crate::state::service_state(&*self.engine) else {
+            return Err(ListTapePoolsErrorModeled::InternalServerError(
+                InternalServerError {
+                    message: Some("the storage gateway store is unavailable".to_string()),
+                    error: None,
+                },
+            )
+            .into());
+        };
+
+        let store = state.lock();
+
+        // `PoolARNs`: "The Amazon Resource Name (ARN) of each of the custom tape
+        // pools you want to list. If you don't specify a custom tape pool ARN, the
+        // response lists all custom tape pools." Only the page this request asked
+        // for is built: the iterator is lazy, so a `PoolInfo` is cloned out of the
+        // store only for a pool the page actually carries.
+        let page = crate::state::paginate(
+            crate::state::after_marker(&store.tape_pools, input.marker.as_deref())
+                .filter(|(arn, _)| {
+                    input
+                        .pool_ar_ns
+                        .as_ref()
+                        .is_none_or(|wanted| wanted.iter().any(|asked| asked == *arn))
+                })
+                .map(|(arn, pool)| (arn.clone(), pool.to_pool_info())),
+            input.limit,
+        );
+
+        Ok(ListTapePoolsOutput {
+            // "If there are no custom tape pools, the PoolInfos is an empty array."
+            pool_infos: Some(page.items),
+            // "Use the marker in your next request to continue pagination of tape
+            // pools. If there are no more tape pools to list, this element does not
+            // appear in the response body."
+            marker: page.next_marker,
+        })
     }
 }

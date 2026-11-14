@@ -1,15 +1,10 @@
 // SPDX-License-Identifier: CC0-1.0
 
 //! @op CreateTapePool
-//! SCAFFOLDED, NOT IMPLEMENTED: this operation answers HTTP 501 `NotImplemented` and
-//! asserts NOTHING about `CreateTapePool`'s real behaviour. Implement it here — this is
-//! the ONLY file to touch for this operation.
-//!
-//! A 501 from this operation means "nobody has written it yet", never "the emulator is
-//! broken". Replace the `Err(..)` in [`CreateTapePool::handle`] with real behaviour and
-//! delete the SCAFFOLDED marker line above; that line is the machine-readable record of
-//! which operations are still stubs (`grep -rl '^//! SCAFFOLDED, NOT IMPLEMENTED:' */src/ops/`),
-//! so leaving it on an implemented operation under-reports progress.
+//! Mints a custom tape pool: every member the request carries is persisted in
+//! [`crate::state`] — with `RetentionLockType` and `RetentionLockTimeInDays` filled from
+//! their own documented "no lock" values when the request names none — so `ListTapePools`
+//! reports back exactly what was created.
 //!
 //! ## Shape of an operation
 //!
@@ -161,18 +156,74 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         input: Self::Input,
         ctx: &smithy_server_runtime::OperationContext<'_>,
     ) -> Result<Self::Output, Self::Error> {
-        // The engine is reachable from `&self` (constructor-injected); `ctx` carries
-        // request metadata. Both are bound here so an implementer has them in scope.
-        let _ = (&input, ctx, &self.engine);
-        // Implement `CreateTapePool` here, then delete the SCAFFOLDED marker at the top of
-        // this file. Return modeled failures as
-        // `Err(CreateTapePoolErrorModeled::Variant(..).into())` — the `From` impl above lifts it.
-        //
-        // To refuse a bad request this operation models no error for, return
-        // `Err(crate::scaffolded::Scaffolded::validation("..."))` — a 400
-        // `ValidationException`. Do NOT answer 501 for it: 501 means "not written yet",
-        // not "bad request". Modeled constraints are already refused BEFORE this
-        // handler runs, so reaching here means the input satisfies every one of them.
-        Err(crate::scaffolded::Scaffolded::not_implemented("CreateTapePool"))
+        // AWS decides authorization at the IAM layer, ahead of the service looking at the
+        // request's own input, so a caller whose identity-based policies do not allow this
+        // action is refused before any pool is created. A custom tape pool does not exist
+        // yet when this call is made — its ARN carries a minted id no request can name — so
+        // the action addresses no resource of its own.
+        if let Some(denied) = crate::service::authorization::denied_account_wide(
+            &*self.engine,
+            ctx,
+            Self::NAME,
+        ) {
+            return Err(denied);
+        }
+
+        let Some(state) = crate::state::service_state(&*self.engine) else {
+            return Err(CreateTapePoolErrorModeled::InternalServerError(
+                InternalServerError {
+                    message: Some("the storage gateway store is unavailable".to_string()),
+                    error: None,
+                },
+            )
+            .into());
+        };
+
+        let now = ::std::time::SystemTime::now();
+        let region = crate::state::request_region(ctx.parts());
+        let mut store = state.lock();
+
+        // The store is bounded: past the ceiling a create is refused rather than
+        // adding another record that lives for the life of the process.
+        if store.tape_pools.len() >= crate::state::MAX_TAPE_POOLS {
+            return Err(CreateTapePoolErrorModeled::InvalidGatewayRequestException(
+                crate::state::invalid_gateway_request(
+                    crate::state::ERROR_CODE_INVALID_PARAMETERS,
+                    format!(
+                        "This account already holds the maximum of {} custom tape pools.",
+                        crate::state::MAX_TAPE_POOLS
+                    ),
+                ),
+            )
+            .into());
+        }
+
+        let pool_id = store.mint_tape_pool_id();
+        let arn = crate::state::tape_pool_arn(&region, &pool_id);
+        let pool = crate::state::TapePool {
+            arn: arn.clone(),
+            pool_id,
+            name: input.pool_name,
+            storage_class: input.storage_class,
+            // A pool the request asked no retention lock for records the
+            // `RetentionLockType` value that says so, and the zero lock time that
+            // goes with it.
+            retention_lock_type: input
+                .retention_lock_type
+                .unwrap_or_else(|| crate::state::RETENTION_LOCK_TYPE_NONE.to_string()),
+            retention_lock_time_in_days: input
+                .retention_lock_time_in_days
+                .unwrap_or(crate::state::RETENTION_LOCK_TIME_NONE),
+            tags: input.tags.unwrap_or_default(),
+            // The pool is usable the instant this call answers: the operation
+            // reports no asynchronous work for the clock to settle.
+            status: crate::state::POOL_STATUS_ACTIVE.to_string(),
+            created_at: now,
+        };
+        store.tape_pools.insert(arn.clone(), pool);
+
+        Ok(CreateTapePoolOutput {
+            pool_arn: Some(arn),
+        })
     }
 }

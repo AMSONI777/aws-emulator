@@ -2,13 +2,16 @@
 
 //! Engine state for the com-amazonaws-storagegateway-storagegateway-20130630 service.
 //!
-//! Two resources anchor the Storage Gateway control plane, and this module holds
-//! the one copy of each that every handler reads and writes:
+//! Three resources anchor the Storage Gateway control plane, and this module
+//! holds the one copy of each that every handler reads and writes:
 //!
 //! * a **gateway** — minted by `ActivateGateway`, reported by `ListGateways` and
 //!   `DescribeGatewayInformation`, removed by `DeleteGateway`;
 //! * a **file share** — minted by `CreateNFSFileShare`, reported by
-//!   `ListFileShares` and `DescribeNFSFileShares`, removed by `DeleteFileShare`.
+//!   `ListFileShares` and `DescribeNFSFileShares`, removed by `DeleteFileShare`;
+//! * a **custom tape pool** — minted by `CreateTapePool`, reported by
+//!   `ListTapePools`, removed by `DeleteTapePool`; its record and projection live
+//!   in [`tape_pools`].
 //!
 //! A share names its gateway (`FileShare::gateway_arn`) and that single field is
 //! the whole gateway→share relation: there is deliberately no second index of
@@ -17,6 +20,10 @@
 //! Every projection the model asks for (`GatewayInfo`,
 //! `DescribeGatewayInformationOutput`, `FileShareInfo`, `NFSFileShareInfo`) is
 //! built here, from the stored record, so no handler invents a value.
+
+mod tape_pools;
+
+pub use tape_pools::*;
 
 use std::collections::BTreeMap;
 use std::ops::Bound;
@@ -395,10 +402,17 @@ pub struct ComAmazonawsStoragegatewayStoragegateway20130630State {
     /// this map is also the idempotency index — there is no second collection of
     /// tokens to outlive the shares it names.
     pub file_shares: BTreeMap<String, FileShare>,
+    /// Every custom tape pool, keyed by its ARN, in the same stable order for
+    /// `ListTapePools`. A pool is an account-level resource — no member of
+    /// `CreateTapePoolInput` names a gateway — so this map is not indexed by
+    /// anything else. See [`tape_pools`] for the record and its projection.
+    pub tape_pools: BTreeMap<String, TapePool>,
     /// The counter gateway ids are minted from.
     pub gateway_id_seq: u64,
     /// The counter file share ids are minted from.
     pub file_share_id_seq: u64,
+    /// The counter custom tape pool ids are minted from.
+    pub tape_pool_id_seq: u64,
 }
 
 impl ComAmazonawsStoragegatewayStoragegateway20130630State {

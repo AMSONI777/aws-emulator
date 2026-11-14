@@ -39,6 +39,11 @@
 //! table, and the default error renderers — lives in the generated `ServiceDefinition`
 //! and is reached, not edited, through the one `definition` method below. You
 //! do not write it; editing the entry would let this file drift from the model.
+//!
+//! Beside those seams, [`authorization`] holds the IAM decision every implemented
+//! operation of this service takes before it reads or writes state.
+
+pub mod authorization;
 
 use smithy_server_runtime::{
     http, ErasedOperation, Refusal, Refused, Service,

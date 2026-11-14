@@ -245,6 +245,19 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         input: Self::Input,
         ctx: &smithy_server_runtime::OperationContext<'_>,
     ) -> Result<Self::Output, Self::Error> {
+        // AWS decides authorization at the IAM layer, ahead of the service looking at the
+        // request's own input, so a caller whose identity-based policies do not allow this
+        // action on the gateway the share is created on is refused before any share is
+        // created — whether or not a gateway answers to that ARN.
+        if let Some(denied) = crate::service::authorization::denied_on(
+            &*self.engine,
+            ctx,
+            Self::NAME,
+            &input.gateway_arn,
+        ) {
+            return Err(denied);
+        }
+
         let Some(state) = crate::state::service_state(&*self.engine) else {
             return Err(CreateNFSFileShareErrorModeled::InternalServerError(
                 InternalServerError {

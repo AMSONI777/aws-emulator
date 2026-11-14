@@ -13,5 +13,9 @@
 // points it into `tests/all/`.
 #[path = "all/gateway_nfs_share_lifecycle.rs"]
 mod gateway_nfs_share_lifecycle;
+#[path = "all/identity_authorization.rs"]
+mod identity_authorization;
 #[path = "all/state_roundtrip.rs"]
 mod state_roundtrip;
+#[path = "all/tape_pool_lifecycle.rs"]
+mod tape_pool_lifecycle;

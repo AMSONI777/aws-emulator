@@ -179,6 +179,19 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         input: Self::Input,
         ctx: &smithy_server_runtime::OperationContext<'_>,
     ) -> Result<Self::Output, Self::Error> {
+        // AWS decides authorization at the IAM layer, ahead of the service looking at the
+        // request's own input, so a caller whose identity-based policies do not allow this
+        // action is refused before any gateway is activated. The gateway does not exist
+        // yet — its ARN carries a minted id no request can name — so the action addresses
+        // no resource of its own.
+        if let Some(denied) = crate::service::authorization::denied_account_wide(
+            &*self.engine,
+            ctx,
+            Self::NAME,
+        ) {
+            return Err(denied);
+        }
+
         let Some(state) = crate::state::service_state(&*self.engine) else {
             return Err(ActivateGatewayErrorModeled::InternalServerError(
                 InternalServerError {
