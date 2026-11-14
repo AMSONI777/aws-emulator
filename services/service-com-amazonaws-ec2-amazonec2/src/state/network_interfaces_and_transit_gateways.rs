@@ -550,6 +550,39 @@ impl ComAmazonawsEc2Amazonec2State {
         );
     }
 
+    /// Complete, NOW, every attachment the launch of the instance `instance_id` made: each
+    /// interface the instance holds reports [`ATTACHMENT_STATUS_ATTACHED`] and nothing is left
+    /// owed on it.
+    ///
+    /// For a launch no CALLER is answered the attachment of: Amazon EC2 Auto Scaling launches
+    /// an instance itself, so no response reports an attachment being made and the first thing
+    /// any client sees of that instance's interface is the finished attachment —
+    /// `DescribeNetworkInterfaces` is reached only after the group has launched it. A caller's
+    /// own `RunInstances` IS answered that attachment (`attaching` in its reply), so its
+    /// completion stays the clock's to make
+    /// ([`Self::owe_network_interface_attachment_completion`]).
+    ///
+    /// Written through the owning store rather than by the launching service, so the status,
+    /// the index and the owed move stay consistent in one place.
+    pub fn complete_launched_interface_attachments(&mut self, instance_id: &str) {
+        let held: Vec<String> = self
+            .network_interfaces_by_instance
+            .get(instance_id)
+            .map(|held| held.iter().cloned().collect())
+            .unwrap_or_default();
+        for network_interface_id in held {
+            self.network_interface_attachment_move_at
+                .remove(&network_interface_id);
+            if let Some(attachment) = self
+                .network_interfaces
+                .get_mut(&network_interface_id)
+                .and_then(|interface| interface.attachment.as_mut())
+            {
+                attachment.status = Some(ATTACHMENT_STATUS_ATTACHED.to_string());
+            }
+        }
+    }
+
     /// Apply every move the clock owes a network interface's attachment that has come due by
     /// `now`.
     ///

@@ -7,10 +7,12 @@
 //! rather than the one request that exposed it:
 //!
 //! 1. a cache operation that finds no cache to address is refused 404
-//!    `NotFoundException` whose message names the CALL that met the absence and whether
-//!    the cache was torn down or never configured; the teardown is not one of them — it
-//!    asks for the absence itself, so an empty cache slot already satisfies it and it is
-//!    served;
+//!    `NotFoundException` whose message names the CALL that met the absence and WHICH
+//!    absence it met: a teardown still removing the instance is a cache that HAS BEEN
+//!    DELETED, while an API past that removal — one whose removal the clock finished or a
+//!    later teardown completed, and one that never had a cache — holds none.
+//!    The teardown is not one of them — it asks for the absence itself, so an empty cache
+//!    slot already satisfies it and it is served;
 //! 2. a create on an API that already has a cache is refused 400 `BadRequestException`
 //!    with AppSync's fixed sentence for that class, and the stored cache is untouched;
 //! 3. a teardown's precondition is the CREATION of the instance, not the status it is
@@ -77,9 +79,9 @@ struct CacheOp {
     method: &'static str,
     path: &'static str,
     carries_body: bool,
-    /// AWS's sentence when no cache was ever configured on the API.
-    never_configured_message: &'static str,
-    /// AWS's sentence when the API's cache was torn down.
+    /// AWS's sentence when the API holds no cache and no teardown is still removing one.
+    absent_message: &'static str,
+    /// AWS's sentence while a teardown is still removing the instance.
     deleted_message: &'static str,
 }
 
@@ -91,42 +93,41 @@ const CACHE_OPS: &[CacheOp] = &[
         method: "GET",
         path: "ApiCaches",
         carries_body: false,
-        never_configured_message: "Unable to get the cache as it doesn't exist, please create the \
-                                   cache first.",
-        deleted_message: "Unable to get the cache as it has been deleted, please re-create the \
-                          cache.",
+        absent_message: "Unable to get the cache as it doesn't exist, please create the \
+                         cache first.",
+        deleted_message: "Unable to get the cache as it has been deleted, please re-create \
+                          the cache.",
     },
     CacheOp {
         name: "UpdateApiCache",
         method: "POST",
         path: "ApiCaches/update",
         carries_body: true,
-        never_configured_message: "Unable to update the cache as it doesn't exist, please create \
-                                   the cache first.",
-        deleted_message: "Unable to update the cache as it has been deleted, please re-create \
-                          the cache.",
+        absent_message: "Unable to update the cache as it doesn't exist, please create \
+                         the cache first.",
+        deleted_message: "Unable to update the cache as it has been deleted, please \
+                          re-create the cache.",
     },
     CacheOp {
         name: "FlushApiCache",
         method: "DELETE",
         path: "FlushCache",
         carries_body: false,
-        never_configured_message: "Unable to flush the cache as it doesn't exist, please create \
-                                   the cache first.",
-        deleted_message: "Unable to flush the cache as it has been deleted, please re-create the \
-                          cache.",
+        absent_message: "Unable to flush the cache as it doesn't exist, please create \
+                         the cache first.",
+        deleted_message: "Unable to flush the cache as it has been deleted, please \
+                          re-create the cache.",
     },
 ];
 
-/// AWS's sentence for a read of an API whose cache was torn down, the one the lifecycle
-/// assertions below read back.
+/// AWS's sentence for a read of an API that holds no cache — one whose teardown has
+/// finished removing the instance and one that never had a cache alike.
+const ABSENT_MESSAGE: &str =
+    "Unable to get the cache as it doesn't exist, please create the cache first.";
+
+/// AWS's sentence for a read taken while a teardown is still removing the instance.
 const DELETED_MESSAGE: &str =
     "Unable to get the cache as it has been deleted, please re-create the cache.";
-
-/// AWS's sentence for a read of an API no teardown of which has ever removed a cache —
-/// one that never had one at all.
-const NEVER_CONFIGURED_MESSAGE: &str =
-    "Unable to get the cache as it doesn't exist, please create the cache first.";
 
 /// AWS's fixed sentence for a create on an API that already has a cache.
 const ALREADY_ENABLED_MESSAGE: &str = "The API has already enabled caching.";
@@ -276,9 +277,9 @@ enum Absence {
     Deleted,
 }
 
-/// Rule 1: an absent cache's refusal names the call that met it, and a read of an API
-/// whose cache was torn down names the deletion — while the teardown, which asks for
-/// that absence, is served instead of refused.
+/// Rule 1: an absent cache's refusal names the call that met it and which absence it met —
+/// a teardown still removing the instance, or an API that holds no cache — while the
+/// teardown, which asks for that absence, is served instead of refused.
 ///
 /// The rows differ along what the rule generalises over: why the cache is absent, the
 /// settings the deleted cache was created with, and which of the four cache operations
@@ -315,15 +316,27 @@ async fn an_absent_caches_refusal_names_the_call_that_met_it() {
                 deleted.status, 200,
                 "case {case:?}: expected the seed delete to be served, got {deleted:?}"
             );
+            // STRAIGHT AFTER the teardown the removal of the instance is still being
+            // carried out, which every cache operation reports as a cache that has been
+            // deleted and asks the caller to re-create.
+            for operation in CACHE_OPS {
+                let answer = send(&router, operation, &api_id, *ttl, behavior, cache_type).await;
+                assert_eq!(
+                    (answer.status, answer.message.as_str()),
+                    (404, operation.deleted_message),
+                    "case {case:?} {} during the teardown: expected 404 {:?}, got {answer:?}",
+                    operation.name,
+                    operation.deleted_message
+                );
+            }
+            // And once the removal is done the API simply holds no cache.
+            tokio::time::sleep(CACHE_SPAN + SLACK).await;
         }
 
         for operation in CACHE_OPS {
             let answer = send(&router, operation, &api_id, *ttl, behavior, cache_type).await;
-            // Which sentence the operation owes for the absence this row built.
-            let expected = match absence {
-                Absence::NeverConfigured => operation.never_configured_message,
-                Absence::Deleted => operation.deleted_message,
-            };
+            // The sentence is the operation's own, for an API that holds no cache.
+            let expected = operation.absent_message;
             assert_eq!(
                 answer.status, 404,
                 "case {case:?} {}: expected status 404, got {answer:?}",
@@ -360,10 +373,7 @@ async fn an_absent_caches_refusal_names_the_call_that_met_it() {
             after_no_op.status, 404,
             "case {case:?}: expected the cache to still be absent, got {after_no_op:?}"
         );
-        let after_expected = match absence {
-            Absence::NeverConfigured => NEVER_CONFIGURED_MESSAGE,
-            Absence::Deleted => DELETED_MESSAGE,
-        };
+        let after_expected = ABSENT_MESSAGE;
         assert_eq!(
             after_no_op.message, after_expected,
             "case {case:?}: expected {after_expected:?} after a teardown that removed \
@@ -540,7 +550,8 @@ async fn a_cache_is_deletable_while_its_new_settings_are_being_applied() {
             "case {case:?}: expected the delete to be served, got {deleted:?}"
         );
 
-        // And the cache is gone, reported as deleted rather than as never configured.
+        // And the cache is gone: read straight after the teardown, that absence is the
+        // instance still being removed.
         let gone = get_cache(&router, &api_id).await;
         assert_eq!(
             gone.status, 404,
@@ -549,6 +560,13 @@ async fn a_cache_is_deletable_while_its_new_settings_are_being_applied() {
         assert_eq!(
             gone.message, DELETED_MESSAGE,
             "case {case:?}: expected {DELETED_MESSAGE:?}, got {gone:?}"
+        );
+        // Once the removal is done the API holds no cache at all.
+        tokio::time::sleep(CACHE_SPAN + SLACK).await;
+        let gone = get_cache(&router, &api_id).await;
+        assert_eq!(
+            gone.message, ABSENT_MESSAGE,
+            "case {case:?}: expected {ABSENT_MESSAGE:?}, got {gone:?}"
         );
     }
 }
@@ -649,16 +667,16 @@ async fn two_racing_deletes_remove_the_cache_once_and_both_are_served() {
         }
 
         // The cache is gone for every later caller, whichever racer removed it — and the
-        // racer that arrived second removed nothing, so the absence a reader meets is
-        // still the one a torn-down cache leaves behind.
+        // racer that arrived second found no instance to remove, so it finished the removal
+        // the first one started: the API holds no cache at all.
         let gone = get_cache(&router, &api_id).await;
         assert_eq!(
             gone.status, 404,
             "case {case:?}: expected the cache to be gone, got {gone:?}"
         );
         assert_eq!(
-            gone.message, DELETED_MESSAGE,
-            "case {case:?}: expected {DELETED_MESSAGE:?}, got {gone:?}"
+            gone.message, ABSENT_MESSAGE,
+            "case {case:?}: expected {ABSENT_MESSAGE:?}, got {gone:?}"
         );
     }
 }

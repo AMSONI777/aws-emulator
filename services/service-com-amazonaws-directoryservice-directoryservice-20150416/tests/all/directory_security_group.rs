@@ -325,6 +325,106 @@ async fn a_directory_placed_in_a_vpc_reports_the_security_group_ec2_holds_for_it
     }
 }
 
+/// RULE: the group exists for the directory's servers, so it does not outlive the
+/// directory: a `DeleteDirectory` releases it in the service that owns security groups, so a
+/// client reconciling the account against Amazon EC2 after the teardown finds no group of a
+/// directory that is gone — and the groups of every OTHER directory are untouched.
+///
+/// The rows differ along what the rule generalises over: the directory type, and so which
+/// create provisioned the group and which placement member carries it.
+#[tokio::test]
+async fn deleting_a_directory_releases_the_security_group_ec2_held_for_its_servers() {
+    let network = network().await;
+    let router = &network.router;
+    let ec2 = ec2_client(&EmbeddedEmulator::from_router(router.clone()));
+
+    let rows: [(&str, Kind, Vec<AccountSubnet>); 3] = [
+        (
+            "a Managed Microsoft AD",
+            Kind::MicrosoftAd,
+            vec![network.client[0].clone(), network.client[1].clone()],
+        ),
+        (
+            "a Simple AD",
+            Kind::SimpleAd,
+            vec![network.client[2].clone(), network.client[3].clone()],
+        ),
+        (
+            "an AD Connector",
+            Kind::Connector,
+            vec![network.client[1].clone(), network.client[0].clone()],
+        ),
+    ];
+
+    // Every row's directory and group, created before any of them is deleted, so a delete
+    // can be shown to release its OWN group and no other.
+    let mut held: Vec<(&str, String, String)> = Vec::new();
+    for (index, (case, kind, subnets)) in rows.iter().enumerate() {
+        let name = format!("sgdelete{index}.example.com");
+        let directory_id = create_in(router, *kind, &name, &network.vpc, subnets, case).await;
+        let described = described_in_service(router, &directory_id, case).await;
+        let group_id = string(&described[kind.placement()], "SecurityGroupId", case);
+        group_reported_by_ec2(&ec2, &group_id, case).await;
+        held.push((case, directory_id, group_id));
+    }
+
+    for (position, (case, directory_id, group_id)) in held.iter().enumerate() {
+        ok(
+            router,
+            "DeleteDirectory",
+            json!({ "DirectoryId": directory_id }),
+            case,
+        )
+        .await;
+
+        // The group is gone from the owner of security groups: polled, because a teardown is
+        // work the service carries out rather than something a caller waits on inline.
+        let started = std::time::Instant::now();
+        loop {
+            let described = ec2
+                .describe_security_groups()
+                .group_ids(group_id)
+                .send()
+                .await;
+            let still_held = described.is_ok_and(|answer| {
+                answer
+                    .security_groups()
+                    .iter()
+                    .any(|group| group.group_id() == Some(group_id.as_str()))
+            });
+            if !still_held {
+                break;
+            }
+            assert!(
+                started.elapsed() < POLL_DEADLINE,
+                "case {case:?}: expected the group {group_id} of the deleted {directory_id} to \
+                 be released within {POLL_DEADLINE:?}"
+            );
+            tokio::time::sleep(POLL_INTERVAL).await;
+        }
+
+        // A repeated delete releases nothing twice and is still served.
+        ok(
+            router,
+            "DeleteDirectory",
+            json!({ "DirectoryId": directory_id }),
+            case,
+        )
+        .await;
+
+        // And the groups of the directories this delete did not name are untouched.
+        for (other_case, other_directory, other_group) in held.iter().skip(position + 1) {
+            let group = group_reported_by_ec2(&ec2, other_group, other_case).await;
+            assert_eq!(
+                group.group_id(),
+                Some(other_group.as_str()),
+                "case {case:?}: expected the group of {other_directory} to survive the delete \
+                 of {directory_id}, got {group:?}"
+            );
+        }
+    }
+}
+
 /// RULE: nothing is invented for a placement the account does not have — a directory whose
 /// subnets the owner of subnets reports nothing for has no VPC to be given a group in, so it
 /// reports no `SecurityGroupId` rather than an id naming no group anywhere.

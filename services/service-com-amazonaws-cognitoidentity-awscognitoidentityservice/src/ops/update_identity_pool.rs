@@ -314,7 +314,9 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> UpdateIdentityPoo
             return Err(
                 UpdateIdentityPoolErrorModeled::ConcurrentModificationException(
                     ConcurrentModificationException {
-                        message: Some(crate::state::PARALLEL_MODIFICATION_MESSAGE.to_string()),
+                        message: Some(crate::state::parallel_modification_message(
+                            crate::state::IDENTITY_POOL_WRITE_RESOURCE_TYPE,
+                        )),
                     },
                 )
                 .into(),

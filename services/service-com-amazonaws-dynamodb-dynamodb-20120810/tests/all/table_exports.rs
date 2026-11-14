@@ -12,8 +12,8 @@
 //!    recovery was turned on and then off again is in exactly that state;
 //! 2. an `ExportTime` must lie inside the table's recovery window, and one outside it is
 //!    refused with `InvalidExportTimeException`; a request that names none exports the
-//!    newest point that window reaches, which is the `LatestRestorableDateTime` the
-//!    continuous-backups reader reports for the same table;
+//!    table as it stands at the instant of the request, so an item written a moment
+//!    before the call is in the snapshot;
 //! 3. an accepted export is RECORDED, and every member of the description is read from
 //!    that record: the export reports `IN_PROGRESS` for the transition span and
 //!    `COMPLETED` after it, and only once it has finished does it report an end instant,
@@ -389,10 +389,19 @@ async fn an_accepted_export_is_recorded_and_read_back() {
         }
         if extra.get("ExportTime").is_none() {
             let answered = reported["ExportTime"].as_f64().unwrap_or_default();
+            // The documented default is the instant of the request, so the point exported
+            // sits between the window's newest RESTORABLE point (five minutes behind, which
+            // it must be PAST) and this test's own clock: an instant further out would be a
+            // point in time nothing has reached.
+            let asked_at = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_secs_f64();
             assert!(
-                (latest - answered).abs() < 0.002,
-                "case {case:?}: an export that names no point in time exports the newest the \
-                 window reaches ({latest}), got {answered}"
+                answered >= latest && answered <= asked_at,
+                "case {case:?}: an export that names no point in time exports the table as it \
+                 stands when the request is made, which is past the newest restorable point \
+                 ({latest}) and no later than {asked_at}, got {answered}"
             );
         }
         // While the task is running it reports nothing of what it will have written.
@@ -1056,4 +1065,128 @@ async fn an_export_to_a_bucket_the_object_store_does_not_hold_fails() {
             "a failed export reports no {member}, got {finished}"
         );
     }
+}
+
+/// RULE: an export that names no `ExportTime` is a snapshot of the table AS IT STANDS when
+/// the request is made, so every item the table holds at that instant is exported —
+/// including the ones written AFTER point-in-time recovery was turned on, which sit past
+/// the window's newest restorable point ("typically 5 minutes before the current time").
+/// The record, the summary manifest and the file list all count that same data.
+///
+/// The rows differ along what the rule generalises over: how many items the table holds
+/// when the export is taken, and whether they were written before recovery was enabled,
+/// after it, or on both sides of it.
+#[tokio::test]
+async fn an_export_naming_no_point_in_time_holds_the_items_the_table_holds_now() {
+    let router = emulator_with_destination().await;
+
+    // (case, items written before recovery is enabled, items written after it)
+    let rows: &[(&str, usize, usize)] = &[
+        ("every item written after recovery was enabled", 0, 3),
+        ("one item on each side of the enable", 1, 1),
+        ("every item written before recovery was enabled", 2, 0),
+        ("a dozen items written after the enable", 0, 12),
+    ];
+
+    for (index, (case, before, after)) in rows.iter().enumerate() {
+        let table = format!("ExportNow{index}");
+        table_with_items(&router, &table, *before).await;
+        set_recovery(&router, &table, true).await;
+        for item in 0..*after {
+            ok(
+                &router,
+                "PutItem",
+                json!({
+                    "TableName": &table,
+                    "Item": {
+                        "Part": {"S": format!("after-{item}")},
+                        "Payload": {"S": "y".repeat(16)},
+                    },
+                }),
+            )
+            .await;
+        }
+        let expected = *before + *after;
+
+        let table_arn = state::table_arn(REGION, &table);
+        let started = ok(
+            &router,
+            "ExportTableToPointInTime",
+            export_body(&table_arn),
+        )
+        .await;
+        let arn = export_arn(&started);
+        let id = arn.rsplit('/').next().unwrap_or_default().to_string();
+
+        settle().await;
+        let finished = description(
+            &ok(
+                &router,
+                "DescribeExport",
+                json!({"ExportArn": arn.clone()}),
+            )
+            .await,
+        );
+        assert_eq!(
+            finished["ExportStatus"],
+            json!("COMPLETED"),
+            "case {case:?}: the export must complete, got {finished}"
+        );
+        assert_eq!(
+            finished["ItemCount"],
+            json!(expected),
+            "case {case:?}: expected the record to count {expected} items, got {finished}"
+        );
+
+        // The objects say the same thing: the summary manifest and the file list both
+        // count the data the export wrote.
+        let under = format!("AWSDynamoDB/{id}/");
+        let summary: Value = serde_json::from_slice(
+            &object_bytes(&router, BUCKET, &format!("{under}manifest-summary.json")).await,
+        )
+        .unwrap_or(Value::Null);
+        assert_eq!(
+            summary["itemCount"],
+            json!(expected),
+            "case {case:?}: expected the manifest to count {expected} items, got {summary}"
+        );
+        let files = String::from_utf8(
+            object_bytes(&router, BUCKET, &format!("{under}manifest-files.json")).await,
+        )
+        .unwrap_or_default();
+        let listed_file: Value = serde_json::from_str(files.trim()).unwrap_or(Value::Null);
+        assert_eq!(
+            listed_file["itemCount"],
+            json!(expected),
+            "case {case:?}: expected the file list to count {expected} items, got {listed_file}"
+        );
+
+        // And the data file holds exactly those items, one line each.
+        let data = object_bytes(
+            &router,
+            BUCKET,
+            listed_file["dataFileS3Key"].as_str().unwrap_or_default(),
+        )
+        .await;
+        let lines = gunzipped_lines(&data);
+        assert_eq!(
+            lines.len(),
+            expected,
+            "case {case:?}: expected {expected} exported items in the data file, got {lines:?}"
+        );
+    }
+}
+
+/// The lines of a GZIP-compressed export data file, one per exported item.
+fn gunzipped_lines(data: &[u8]) -> Vec<String> {
+    use std::io::Read;
+
+    let mut text = String::new();
+    flate2::read::GzDecoder::new(data)
+        .read_to_string(&mut text)
+        .expect("the export's data file is GZIP");
+    text.lines()
+        .filter(|line| !line.trim().is_empty())
+        .map(str::to_string)
+        .collect()
 }

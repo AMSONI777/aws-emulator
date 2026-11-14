@@ -489,12 +489,12 @@ async fn a_rule_moved_onto_a_taken_priority_rolls_the_stack_back() {
         .await;
         if row.collides() {
             // The refusal, as the resource that ran into it reports it: Elastic Load
-            // Balancing's own message naming the priority the REQUEST asked for, and the class
-            // a client branches on.
+            // Balancing's own message for the set of priorities the move asked for, and the
+            // class a client branches on.
             let (quoted, class) = parts(case, &reason);
-            let worded = format!("Priority '{}' is currently in use", row.target_priority);
+            let worded = "One or more priorities not found";
             assert!(
-                quoted.starts_with(&worded),
+                quoted.starts_with(worded),
                 "case {case:?}: expected the quoted exception to open with {worded:?}, got \
                  {quoted:?}"
             );

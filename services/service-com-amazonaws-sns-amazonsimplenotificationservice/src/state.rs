@@ -47,8 +47,8 @@ pub mod delivery_status;
 /// Whether a delivery-status feedback role a write of a topic attribute names is one this
 /// service could assume at all, asked before the attribute lands on the topic.
 pub mod feedback_role;
-/// Whether this account holds an origination entity SNS could send an SMS message from,
-/// which every operation whose own work is to send one asks before it accepts.
+/// What the records of this account's dedicated origination-entity inventory mean: the
+/// capability an entity has to carry for an SMS message to leave from it.
 pub mod sms_origination;
 /// The published per-second request quota an operation's calls are admitted at, and the
 /// throttling answer the calls past it are refused with.
@@ -193,14 +193,14 @@ pub const CONFIRMATION_TOKEN_HEX_CHARS: usize = 64;
 /// The sentence a `ConfirmSubscription` carrying a token that is not the one sent to
 /// one of the topic's awaiting endpoints is refused with.
 ///
-/// WHOLLY FIXED text: the token is opaque and secret, so the sentence reproduces
-/// NEITHER the token the caller sent nor the one that was sent to the endpoint, and it
-/// carries no member frame either — a token that confirms nothing is not a member whose
-/// value broke a constraint, so SNS names the condition itself rather than the member it
-/// arrived in. Recorded evidence: `ConfirmSubscription` with a token that is not a
-/// confirmation token of the topic answers `400 InvalidParameter` with exactly this
-/// sentence.
-pub const INVALID_CONFIRMATION_TOKEN_REFUSAL: &str = "Invalid token";
+/// WHOLLY FIXED text: `Invalid parameter:` and the MEMBER the unusable value arrived in,
+/// which is all a caller can act on. The token is opaque and secret, so the sentence
+/// reproduces NEITHER the token the caller sent nor the one that was sent to the
+/// endpoint, and it states no reason clause either — nothing about an opaque token is
+/// readable enough to report. Recorded evidence: `ConfirmSubscription` with a token that
+/// is not a confirmation token of the topic answers `400 InvalidParameter` with exactly
+/// this sentence.
+pub const INVALID_CONFIRMATION_TOKEN_REFUSAL: &str = "Invalid parameter: Token";
 
 /// The attribute names SNS defines for a subscription, from the `Subscribe` /
 /// `SetSubscriptionAttributes` docs. Closed for the same two reasons as
@@ -1786,19 +1786,17 @@ pub fn json_object(value: &str) -> Option<serde_json::Map<String, serde_json::Va
 }
 
 /// The clause SNS opens the refusal of the attribute `name` whose document it could not
-/// parse with: `Invalid parameter:`, the attribute AS THE CALLER SPELLED IT, and the
-/// parse that failed — which the parser's own diagnostic is appended to (see
-/// [`attribute_parse_refusal`]).
+/// parse with: `Invalid parameter:`, the member the write arrived in, the attribute AS
+/// THE CALLER SPELLED IT, and the parse that failed — which the parser's own diagnostic
+/// is appended to (see [`attribute_parse_refusal`]).
 ///
-/// The fault is in the named attribute's own document, so SNS names that attribute
-/// DIRECTLY: there is no `<member> Reason: ` frame here, whichever member carried the
-/// write. (That frame belongs to the refusals whose offending parameter IS the
-/// `Attributes` map — see [`AttributeMember`].) Recorded evidence:
-/// `SetSubscriptionAttributes` with a `FilterPolicy` value that is not JSON answers `400
-/// InvalidParameter` with `Invalid parameter: FilterPolicy: failed to parse JSON. ` and
-/// the parser's diagnostic, and nothing in front of the attribute name.
-pub fn attribute_parse_refusal_opening(name: &str) -> String {
-    format!("Invalid parameter: {name}: failed to parse JSON.")
+/// The parse failure is one condition of an attribute's value, so it is framed by the
+/// member the value arrived in exactly as every other refusal of a value is
+/// ([`AttributeMember::refusal`]): a write carried in an `Attributes` MAP is told which
+/// member holds the document it has to change, and then which entry of it, while a write
+/// given the attribute BY NAME names that attribute alone.
+pub fn attribute_parse_refusal_opening(name: &str, member: AttributeMember) -> String {
+    member.refusal(name, "failed to parse JSON.")
 }
 
 /// The WHOLE sentence SNS refuses a value of the attribute `name` that is not JSON at
@@ -1818,7 +1816,12 @@ pub fn attribute_parse_refusal_opening(name: &str) -> String {
 /// ([`::service_common::json_parse_fault`]), taken from the parse that actually ran, so
 /// the position is the parser's rather than a guess. Nothing in the sentence echoes the
 /// document back: its source is reported as redacted.
-pub fn attribute_parse_refusal(name: &str, value: &str, error: &serde_json::Error) -> String {
+pub fn attribute_parse_refusal(
+    name: &str,
+    value: &str,
+    error: &serde_json::Error,
+    member: AttributeMember,
+) -> String {
     use ::service_common::json_parse_fault as fault;
 
     let diagnosis = match fault::unrecognized_token(value, error) {
@@ -1833,7 +1836,10 @@ pub fn attribute_parse_refusal(name: &str, value: &str, error: &serde_json::Erro
             fault::source_location(error.line(), error.column())
         ),
     };
-    format!("{} {diagnosis}", attribute_parse_refusal_opening(name))
+    format!(
+        "{} {diagnosis}",
+        attribute_parse_refusal_opening(name, member)
+    )
 }
 
 /// The sentence a value of the attribute `name` is refused with when it is not JSON at
@@ -1842,10 +1848,14 @@ pub fn attribute_parse_refusal(name: &str, value: &str, error: &serde_json::Erro
 /// The gate every attribute whose value is a JSON document passes first: a value the
 /// parser could not read is a parse failure ([`attribute_parse_refusal`]), and only a
 /// document that DID parse is then judged against the shape that attribute requires.
-pub fn attribute_json_parse_refusal(name: &str, value: &str) -> Option<String> {
+pub fn attribute_json_parse_refusal(
+    name: &str,
+    value: &str,
+    member: AttributeMember,
+) -> Option<String> {
     serde_json::from_str::<serde_json::Value>(value)
         .err()
-        .map(|error| attribute_parse_refusal(name, value, &error))
+        .map(|error| attribute_parse_refusal(name, value, &error, member))
 }
 
 /// The sentence SNS refuses a NESTED filter policy scoped to the message attributes
@@ -2051,7 +2061,7 @@ pub fn subscription_attribute_refusal(
             // What SNS reports when its parse of the document failed, naming the
             // attribute, the parse and where in the document it stopped — never the
             // document the caller sent.
-            Err(error) => Some(attribute_parse_refusal(name, value, &error)),
+            Err(error) => Some(attribute_parse_refusal(name, value, &error, member)),
             // The document parses and is an object, so what is left to judge is its
             // GRAMMAR and its size, which the matching's own reading of a policy states.
             // The reader's own sentence stands as it is; a LIMIT on the policy as a
@@ -2076,7 +2086,7 @@ pub fn subscription_attribute_refusal(
         // document's own shape: it is the parse failure every attribute's document
         // shares ([`attribute_json_parse_refusal`]).
         DELIVERY_POLICY_ATTRIBUTE => {
-            if let Some(refusal) = attribute_json_parse_refusal(name, value) {
+            if let Some(refusal) = attribute_json_parse_refusal(name, value, member) {
                 return Some(refusal);
             }
             match serde_json::from_str::<ConfiguredSubscriptionDeliveryPolicy>(value) {
@@ -2110,7 +2120,7 @@ pub fn subscription_attribute_refusal(
         REPLAY_POLICY_ATTRIBUTE => json_object(value).is_none().then(|| {
             // Not JSON at all is the parse failure every attribute's document shares;
             // JSON that is no object is no replay policy.
-            attribute_json_parse_refusal(name, value).unwrap_or_else(|| {
+            attribute_json_parse_refusal(name, value, member).unwrap_or_else(|| {
                 attribute_reason(format!(
                     "{name} - the value must be a replay policy document: a JSON object"
                 ))

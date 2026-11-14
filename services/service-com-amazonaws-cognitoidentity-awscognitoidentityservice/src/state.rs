@@ -2183,14 +2183,24 @@ pub fn claimed_pool_write(
     })
 }
 
-/// The text `ConcurrentModificationException` (HTTP 400) carries, in the model's own words
-/// for the shape: "Thrown if there are parallel requests to modify a resource"
-/// (`smithy_query(query="shape",shape="ConcurrentModificationException")`).
+/// The text `ConcurrentModificationException` (HTTP 400) carries: the service writes one
+/// resource of a KIND at a time ("Thrown if there are parallel requests to modify a
+/// resource", `smithy_query(query="shape",shape="ConcurrentModificationException")`), so
+/// the sentence states the resource TYPE whose write was already in flight and that only
+/// one such request is processed at a time.
 ///
-/// Fixed text with no request- or state-derived part: what the caller acts on is that the
-/// write lost a race, which is the same fact whichever pool it was for.
-pub const PARALLEL_MODIFICATION_MESSAGE: &str =
-    "There are parallel requests to modify this resource.";
+/// The type is the only request- or state-derived part, and both writes of a pool
+/// ([`pool_writes_in_flight`](ComAmazonawsCognitoidentityAwscognitoidentityserviceState::pool_writes_in_flight))
+/// contend for the same one ([`IDENTITY_POOL_WRITE_RESOURCE_TYPE`]): what a caller acts on is
+/// which kind of resource it has to retry its write of, not which instance of it.
+pub fn parallel_modification_message(resource_type: &str) -> String {
+    format!("Only one request to update resource type {resource_type} can be processed at a time")
+}
+
+/// The resource type both pool writes claim, as this API names the pool resource to a
+/// caller: `UpdateIdentityPool` and `SetIdentityPoolRoles` reconfigure one identity pool,
+/// so a writer that loses the race reports that type ([`parallel_modification_message`]).
+pub const IDENTITY_POOL_WRITE_RESOURCE_TYPE: &str = "Identity Pool";
 
 impl ComAmazonawsCognitoidentityAwscognitoidentityserviceState {
     /// Whether another pool would take this emulator past [`MAX_IDENTITY_POOLS`].

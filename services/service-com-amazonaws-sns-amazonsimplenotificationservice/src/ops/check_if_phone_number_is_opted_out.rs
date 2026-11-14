@@ -143,15 +143,14 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
     /// every number `OptInPhoneNumber` opted back in.
     ///
     /// A REPORT: it reads the record and writes nothing, so two reads of one number
-    /// answer the same thing — and it reports for WHATEVER number it is handed. The
-    /// model leaves this operation's `phoneNumber` an unconstrained string
-    /// (`smithy_query(query="shape", shape="PhoneNumber")` reports no `@length` and no
-    /// `@pattern`), and the output's documented default settles what a number the
-    /// account holds no record for reports: "false – The phone number is opted in". So
-    /// no value is refused here for its FORM: the constrained `PhoneNumberString` the
-    /// sandbox and publish members target is a different member carrying a constraint
-    /// of its own, and the operations that ACT on a number keep their own argument
-    /// validation.
+    /// answer the same thing. It reports for every number that COULD be one: SNS
+    /// documents a phone-number member as "Use E.164 format", so a value that is no
+    /// phone number at all is bad input and is refused `InvalidParameterException`
+    /// before the record is read ([`state::phone_number_refusal`]) — the same argument
+    /// validation the operations that ACT on a number apply, since the member is the
+    /// same one. A number of that form the account holds no record for is not bad input:
+    /// the output's documented default settles it — "false – The phone number is opted
+    /// in".
     async fn handle(
         &self,
         input: Self::Input,
@@ -167,6 +166,19 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
             return Err(
                 CheckIfPhoneNumberIsOptedOutErrorModeled::AuthorizationErrorException(
                     AuthorizationErrorException {
+                        message: Some(message),
+                    },
+                )
+                .into(),
+            );
+        }
+
+        // The form of the number, before the store is consulted: a value that could be
+        // no phone number anywhere is bad input, whichever operation carried it.
+        if let Some(message) = state::phone_number_refusal(&input.phone_number) {
+            return Err(
+                CheckIfPhoneNumberIsOptedOutErrorModeled::InvalidParameterException(
+                    InvalidParameterException {
                         message: Some(message),
                     },
                 )

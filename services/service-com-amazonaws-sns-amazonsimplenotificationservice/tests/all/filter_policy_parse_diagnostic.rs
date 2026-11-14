@@ -15,24 +15,30 @@
 //! The rows differ along what the rule generalises over: which word the document stops the
 //! parse on, where in the document it sits (the first value, a member's value, a later line),
 //! and which operation carried the write — `Subscribe` and `SetSubscriptionAttributes` refuse
-//! the same document with the same sentence.
+//! the same document with the same diagnostic, each under the MEMBER it read the document
+//! from: a write carried in the `Attributes` map is framed `Attributes Reason: ` and one
+//! given the attribute by name is not.
 //!
 //! Every call goes over the wire through the router the emulator serves in production, so
 //! nothing but persisted state carries information between calls.
 
 use super::topics_subscriptions_publish::{attribute_map, Answer, Sns};
 
-/// The clause every refusal of an unparseable filter policy opens with: the attribute
-/// the document was written to, named DIRECTLY — the fault is in that document, so SNS
-/// states no `<member> Reason: ` frame in front of it, whichever operation carried the
-/// write.
-const LEADING_CLAUSE: &str = "Invalid parameter: FilterPolicy: failed to parse JSON.";
+/// The clause a refusal of an unparseable filter policy carried in the `Attributes` MAP of
+/// a `Subscribe` request opens with: the member the document arrived in, then the entry of
+/// it that could not be read.
+const MAP_LEADING_CLAUSE: &str =
+    "Invalid parameter: Attributes Reason: FilterPolicy: failed to parse JSON.";
+
+/// The clause a refusal of the same document, written through the operation that is GIVEN
+/// the attribute by name, opens with: the name is the whole input, so no member frames it.
+const NAMED_LEADING_CLAUSE: &str = "Invalid parameter: FilterPolicy: failed to parse JSON.";
 
 /// The WHOLE sentence a document the parse stopped on `token` at `line`:`column` is refused
-/// with.
-fn expected_message(token: &str, line: usize, column: usize) -> String {
+/// with, under the member clause the operation that carried it states.
+fn expected_message(clause: &str, token: &str, line: usize, column: usize) -> String {
     format!(
-        "{LEADING_CLAUSE} Unrecognized token '{token}': was expecting (JSON String, Number, \
+        "{clause} Unrecognized token '{token}': was expecting (JSON String, Number, \
          Array, Object or token 'null', 'true' or 'false')\n at [Source: REDACTED \
          (`StreamReadFeature.INCLUDE_SOURCE_IN_LOCATION` disabled); line: {line}, column: \
          {column}]"
@@ -167,7 +173,7 @@ type DiagnosticCase<'a> = (&'a str, &'a str, &'a str, usize, usize);
     ];
 
     for (case, document, token, line, column) in rows {
-        let expected = expected_message(token, *line, *column);
+        let expected = expected_message(MAP_LEADING_CLAUSE, token, *line, *column);
 
         let subscribed = subscribe_with(&sns, &topic, &[("FilterPolicy", document)]).await;
         let message = refusal_message(case, &subscribed);
@@ -176,6 +182,8 @@ type DiagnosticCase<'a> = (&'a str, &'a str, &'a str, usize, usize);
             "case {case:?}: Subscribe must refuse the document with the parser's diagnostic: \
              expected {expected:?}, got {message:?}"
         );
+
+        let expected = expected_message(NAMED_LEADING_CLAUSE, token, *line, *column);
 
         let written = sns
             .call(
@@ -191,7 +199,8 @@ type DiagnosticCase<'a> = (&'a str, &'a str, &'a str, usize, usize);
         assert_eq!(
             message, expected,
             "case {case:?}: SetSubscriptionAttributes must refuse the same document with the \
-             same sentence: expected {expected:?}, got {message:?}"
+             same diagnostic under its own member clause: expected {expected:?}, got \
+             {message:?}"
         );
         assert!(
             message.contains("REDACTED"),
@@ -228,8 +237,9 @@ async fn a_filter_policy_with_no_offending_word_is_refused_for_the_parse_alone()
         }
         let message = refusal_message(case, &answer);
         assert!(
-            message.starts_with(LEADING_CLAUSE),
-            "case {case:?}: expected a refusal opening with {LEADING_CLAUSE:?}, got {message:?}"
+            message.starts_with(MAP_LEADING_CLAUSE),
+            "case {case:?}: expected a refusal opening with {MAP_LEADING_CLAUSE:?}, got \
+             {message:?}"
         );
     }
 

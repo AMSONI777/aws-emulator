@@ -165,7 +165,8 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         // The only write a read performs: materialising the transition to available
         // that the CLOCK already made due, which was owed at this instant whether or
         // not anybody called.
-        guard.settle_api_caches(std::time::SystemTime::now());
+        let now = std::time::SystemTime::now();
+        guard.settle_api_caches(now);
 
         let Some(api) = guard.graphql_apis.get(&input.api_id) else {
             return Err(GetApiCacheErrorModeled::NotFoundException(NotFoundException {
@@ -173,14 +174,14 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
             })
             .into());
         };
-        // An API that holds no cache has none to report — and the refusal names both
-        // this call and WHY there is no cache: one that was torn down is not one that
-        // was never configured.
+        // An API that holds no cache has none to report, and the refusal names both this
+        // call and WHICH absence it met: a teardown still removing the instance is a cache
+        // that has been deleted, and anything else is an API that holds none.
         let Some(cache) = api.api_cache.as_ref() else {
             return Err(GetApiCacheErrorModeled::NotFoundException(NotFoundException {
                 message: Some(crate::state::absent_cache_message(
                     crate::state::CacheCall::Get,
-                    api.api_cache_was_deleted(),
+                    api.api_cache_is_being_removed(now),
                 )),
             })
             .into());

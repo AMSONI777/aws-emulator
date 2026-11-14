@@ -752,9 +752,11 @@ async fn set_priorities(router: &MultiServiceRouter, pairs: &[(&str, i32)]) -> R
     call(router, &form).await
 }
 
-/// Rule 5: `SetRulePriorities` answers three failures under three codes — a repeated priority
-/// and a priority already in use each naming the value the caller has to change, and a pair
-/// naming no rule worded about the SET of priorities it was asked to place.
+/// Rule 5: `SetRulePriorities` answers three failures under two codes — a priority it
+/// cannot place, whether the request repeated it or a rule outside the request holds it,
+/// and a pair naming no rule — each worded about the SET of priorities it was asked to
+/// place, because the request carries one pair per rule and any of them may be the one to
+/// change.
 ///
 /// The rows vary the priority the request repeats, the rule the collision is with, and the
 /// shape of the ARN that names no rule — so each code is driven by several inputs rather
@@ -807,8 +809,9 @@ async fn set_rule_priorities_tells_a_repeated_priority_from_one_in_use_and_from_
     )
     .await;
 
-    // A priority the REQUEST repeats says nothing about which rule evaluates there: the
-    // request is what has to be fixed, and the refusal states the repeated value.
+    // A priority the REQUEST repeats says nothing about which rule evaluates there, so it
+    // is a priority this request cannot place — the modelled conflict, worded about the
+    // set of priorities it asked for.
     for priority in [7, 30, 50_000] {
         let reply = set_priorities(
             &router,
@@ -818,21 +821,20 @@ async fn set_rule_priorities_tells_a_repeated_priority_from_one_in_use_and_from_
         assert_refused(
             &format!("two rules of one request onto the priority {priority}"),
             &reply,
-            VALIDATION_ERROR,
-            &format!("Priority '{priority}' was provided multiple times"),
+            PRIORITY_IN_USE,
+            ABOUT_THE_SET,
         );
     }
 
-    // A priority a rule OUTSIDE the request holds is the modelled conflict, worded with the
-    // priority the request asked for — one sentence for one rule of the service, whichever
-    // operation places the priority.
+    // A priority a rule OUTSIDE the request holds is the same conflict, under the same
+    // code and the same sentence.
     for priority in [10, 20, 30] {
         let reply = set_priorities(&router, &[(moved.as_str(), priority)]).await;
         assert_refused(
             &format!("the reorder onto the taken priority {priority}"),
             &reply,
             PRIORITY_IN_USE,
-            &format!("Priority '{priority}' is currently in use"),
+            ABOUT_THE_SET,
         );
     }
 

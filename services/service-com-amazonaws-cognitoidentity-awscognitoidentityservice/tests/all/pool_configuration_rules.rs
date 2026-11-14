@@ -21,7 +21,8 @@
 //! * a role the pool is configured with is a role the caller PASSES to Amazon Cognito, so a
 //!   value naming no IAM role of this account is refused `NotAuthorizedException`;
 //! * a pool is reconfigured as a whole, so a write that meets another write of the same pool
-//!   already in flight is refused `ConcurrentModificationException` and stores nothing.
+//!   already in flight is refused `ConcurrentModificationException`, naming the resource
+//!   TYPE only one request of which is processed at a time, and stores nothing.
 //!
 //! Each rule is asserted on EVERY operation it holds for — `CreateIdentityPool`,
 //! `UpdateIdentityPool` and (for the tag rule) `TagResource` — rather than on the one the
@@ -749,6 +750,15 @@ async fn a_write_meeting_another_write_of_the_same_pool_loses_the_race() {
             (status, error_code(&body).as_str()),
             (CLIENT_ERROR_STATUS, "ConcurrentModificationException"),
             "case {case:?}: expected the parallel-modification refusal, got {status} with {body}"
+        );
+        // The sentence states the resource TYPE whose write was already in flight, which
+        // is the same for both writes of a pool.
+        let expected = "Only one request to update resource type Identity Pool can be \
+                        processed at a time";
+        assert_eq!(
+            error_message(&body),
+            expected,
+            "case {case:?}: expected {expected:?}, got {body}"
         );
         let after = emulator
             .ok(

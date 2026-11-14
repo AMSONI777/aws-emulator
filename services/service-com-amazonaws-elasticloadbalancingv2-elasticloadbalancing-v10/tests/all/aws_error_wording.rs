@@ -66,9 +66,11 @@ const TOO_MANY_CERTIFICATES: &str = "TooManyCertificates";
 /// documents in prose and for a value the framework refused at the boundary alike.
 const VALIDATION_ERROR: &str = "ValidationError";
 
-/// The sentence `SetRulePriorities` refuses a PAIR NAMING NO RULE with: there the refusal is
-/// about the set of priorities the request asked for rather than about one value, which the
-/// error code tells apart from the conflict below.
+/// The sentence `SetRulePriorities` refuses a request it cannot place the priorities of
+/// with — a pair naming no rule, a priority a rule outside the request holds, a priority
+/// the list repeats: that operation addresses a LIST, so the refusal is about the set of
+/// priorities it asked for rather than about one value, and the error code tells the three
+/// apart.
 const SET_PRIORITIES_REFUSAL: &str = "One or more priorities not found";
 
 /// How many certificate ARNs one request may carry, from the documentation of the
@@ -126,9 +128,10 @@ fn rule_fields(target_group_arn: &str, path: &str) -> Form {
 ///
 /// "A listener can't have multiple rules with the same priority" is one rule of the
 /// service, so both operations that place a rule at a priority — `CreateRule` and
-/// `SetRulePriorities` — refuse it under `PriorityInUse` with the same sentence: the
-/// priority the request asked for, which is the value the caller has to change. Neither
-/// names the listener whose namespace it is.
+/// `SetRulePriorities` — refuse it under `PriorityInUse`. The sentence is the one the
+/// REQUEST makes available: `CreateRule` names the one priority it carries, which is the
+/// value the caller has to change, while `SetRulePriorities` carries a LIST of pairs and
+/// states the refusal about that set. Neither names the listener whose namespace it is.
 #[tokio::test]
 async fn a_priority_already_in_use_is_refused_naming_only_the_priority() {
     let (router, _engine) = emulator();
@@ -181,11 +184,11 @@ async fn a_priority_already_in_use_is_refused_naming_only_the_priority() {
             &format!("SetRulePriorities onto the taken priority {priority}"),
             &set,
             PRIORITY_IN_USE,
-            &expected,
+            SET_PRIORITIES_REFUSAL,
         );
 
-        // The listener the priority lives in is NOT part of the refusal: the message is
-        // the one above, which quotes nothing but the priority.
+        // The listener the priority lives in is NOT part of either refusal, and neither
+        // is the rule that holds the priority.
         for reply in [&created, &set] {
             let message = unescaped(&reply.text("Message").unwrap_or_default());
             assert!(

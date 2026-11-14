@@ -6,7 +6,8 @@
 //! RULES under test:
 //!
 //! * `DeploymentAlreadyCompletedException` says
-//!   `The deployment <deploymentId> is already in state <STATE>` — the id the
+//!   `The deployment <deploymentId> has already completed, current state <STATE>.`
+//!   — the id the
 //!   request named and the deployment's INTERNAL state name, the upper-snake form
 //!   of its `DeploymentStatus`, in which a deployment a caller stopped is
 //!   `ABORTED` rather than `Stopped`. Rows span the three outcomes a deployment
@@ -152,7 +153,8 @@ fn blue_green_style() -> Value {
 }
 
 /// RULE: `DeploymentAlreadyCompletedException` says
-/// `The deployment <deploymentId> is already in state <STATE>` — the deployment
+/// `The deployment <deploymentId> has already completed, current state <STATE>.` —
+/// the deployment
 /// id the request carried and the deployment's internal state name, which for a
 /// stopped deployment is `ABORTED` and not its API status — whichever operation
 /// was refused and however the deployment reached its outcome.
@@ -270,7 +272,7 @@ async fn a_completed_deployment_is_refused_with_its_internal_state() {
         );
 
         let expected = format!(
-            "The deployment {deployment_id} is already in state {}",
+            "The deployment {deployment_id} has already completed, current state {}.",
             row.state
         );
         for operation in row.operations {

@@ -78,11 +78,11 @@ async fn list(sns: &Sns, params: &[(&str, &str)]) -> Answer {
 /// Put one SMS-capable origination number in the account's inventory, the way the
 /// out-of-band provisioning writes it.
 ///
-/// The sandbox registration SENDS a one-time password, so it is answered only for an
-/// account that holds something to send it from; every suite that registers a number
-/// gives the account one through this seam (`pub(crate)` so the sibling verification
-/// suite uses the same one), and the suites that assert the refusal leave the
-/// inventory empty.
+/// The registration does not depend on it — AWS sends the sandbox one-time password
+/// itself — so this is here to drive the sandbox suites against an account that DOES
+/// hold a dedicated entity; `sms_sandbox_origination_entities.rs` holds the rule that
+/// the inventory decides nothing. `pub(crate)` so the sibling verification suite uses
+/// the same seam.
 pub(crate) fn given_an_origination_number(sns: &Sns) {
     let state = sns.state();
     let mut state = state.lock();

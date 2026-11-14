@@ -20,11 +20,11 @@
 //!    request is refused, even though the stack itself stays readable by its own id.
 //!
 //! The tables span the class rather than one recorded request: the malformed-identifier side
-//! over TWELVE values differing along what the rule generalises over (an empty value,
+//! over ELEVEN values differing along what the rule generalises over (an empty value,
 //! characters the expression does not admit in the positions it does not admit them, and
-//! values in or near the form a stack's unique id takes, which the expression does not admit
-//! either — `stack_unique_id_identifiers.rs` pins that form on its own) crossed with every
-//! operation whose identifier member this service checks itself; the
+//! values NEAR the form a stack's unique id takes without being it — that form is resolved
+//! rather than refused, and `stack_unique_id_identifiers.rs` pins it on its own) crossed with
+//! every operation whose identifier member this service checks itself; the
 //! absent-member side over four operations and three different required members; and the
 //! physical-id side over a live stack, the same stack once deleted, and an id nothing ever
 //! created.
@@ -185,9 +185,9 @@ const IDENTIFIER_ROWS: &[IdentifierRow] = &[
 ];
 
 /// The identifiers no stack could ever carry: an empty value, values whose characters — or the
-/// position of them — the expression does not admit, and values in or near the form a stack's
-/// unique id takes (`stack_unique_id_identifiers.rs` pins that form on its own), which is
-/// hexadecimal and so outside the name alternative whenever it starts with a digit.
+/// position of them — the expression does not admit, and values NEAR the form a stack's unique
+/// id takes without being it (that form is resolved rather than refused, and
+/// `stack_unique_id_identifiers.rs` pins it on its own).
 const MALFORMED: &[(&str, &str)] = &[
     ("an empty identifier", ""),
     ("a name with an underscore", "identifier_stack"),
@@ -195,7 +195,6 @@ const MALFORMED: &[(&str, &str)] = &[
     ("a name starting with a digit", "9identifier"),
     ("a name starting with a hyphen", "-identifier"),
     ("a name with a space", "identifier stack"),
-    ("a stack's unique id", "0e81d159-090a-7b61-9856-04d0999cb465"),
     ("a unique id a group short", "0e81d159-090a-7b61-04d0999cb465"),
     (
         "a unique id with a short last group",

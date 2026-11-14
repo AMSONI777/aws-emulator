@@ -71,6 +71,8 @@ mod policy_read_projection;
 mod reference_data_catalogs;
 #[path = "all/rollback_instance_refresh.rs"]
 mod rollback_instance_refresh;
+#[path = "all/scale_in_releases_instance_interfaces.rs"]
+mod scale_in_releases_instance_interfaces;
 #[path = "all/scale_out_launches_ec2_instances.rs"]
 mod scale_out_launches_ec2_instances;
 #[path = "all/scaling_policies.rs"]

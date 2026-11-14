@@ -334,7 +334,7 @@ pub const DEPLOYMENT_INTERNAL_STATE_ABORTED: &str = "ABORTED";
 /// that refusal the same way.
 pub fn deployment_already_completed(deployment_id: &str, status: &str) -> String {
     format!(
-        "The deployment {deployment_id} is already in state {}",
+        "The deployment {deployment_id} has already completed, current state {}.",
         deployment_internal_state(status)
     )
 }

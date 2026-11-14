@@ -10,9 +10,9 @@
 //!    phone number in E.164 format — a `+`, a country code that does not begin with
 //!    `0`, then digits only, between the published minimum and maximum digit counts —
 //!    and a value that is not one is refused as bad input (400 `InvalidParameter`),
-//!    before any state is read or written, by the operation that ACTS on the number
-//!    (the opt-in). The opt-out CHECK only reports, so it answers for whatever number
-//!    it is handed — `opt_out_check_reports_every_number.rs` is that rule;
+//!    before any state is read or written, by every operation that carries the member:
+//!    the one that ACTS on the number (the opt-in) and the one that REPORTS its
+//!    opt-out state (the check) alike;
 //! 2. the opt-out state a check reports is the one the number's record HOLDS, and an
 //!    opt-in is what clears it: a number with no record, and a number opted back in,
 //!    both report `false`;
@@ -71,8 +71,7 @@ pub(crate) fn e164_numbers() -> Vec<(&'static str, String)> {
 /// including one digit below the published minimum and one past the published maximum.
 ///
 /// `pub(crate)` so the sibling suite that drives the opt-out CHECK over the same values
-/// — which reports for every one of them rather than refusing it — reads them from this
-/// one catalog.
+/// reads them from this one catalog.
 pub(crate) fn not_e164_values() -> Vec<(&'static str, String)> {
     vec![
         ("no plus prefix", "12065550100".to_string()),
@@ -358,53 +357,53 @@ async fn a_second_opt_in_inside_the_documented_interval_is_refused() {
     }
 }
 
-/// A value that is not a phone number in E.164 format is bad input to the operation
-/// that ACTS on the number: the refusal names the member and the constraint, echoes
-/// none of the (sensitive) value, and leaves the store alone.
+/// A value that is not a phone number in E.164 format is bad input to EVERY operation
+/// that carries the member — the one that acts on the number and the one that reports
+/// its opt-out state: the refusal names the member and the constraint, echoes none of
+/// the (sensitive) value, and leaves the store alone.
 #[tokio::test]
 async fn a_phone_number_that_is_not_e164_is_refused_by_the_opt_in() {
     let sns = Sns::new();
     let opted_out = "+12065550100";
     seed_opted_out(&sns, opted_out, None);
 
-    let action = "OptInPhoneNumber";
-    for (case, value) in not_e164_values() {
-        let answer = sns.call(action, &[(PHONE_NUMBER_PARAM, &value)]).await;
-        assert_eq!(
-            answer.status, 400,
-            "{action} case {case:?}: expected 400, got {} / {}",
-            answer.status, answer.body
-        );
-        assert_eq!(
-            answer.code(),
-            "InvalidParameter",
-            "{action} case {case:?}: expected the InvalidParameter code, got {}",
-            answer.body
-        );
-        assert_eq!(
-            answer.element("Message"),
-            Some(invalid_phone_number_message()),
-            "{action} case {case:?}: expected the fixed badly-formatted-number \
-             sentence, got {}",
-            answer.body
-        );
-        if !value.is_empty() {
+    for action in ["OptInPhoneNumber", "CheckIfPhoneNumberIsOptedOut"] {
+        for (case, value) in not_e164_values() {
+            let answer = sns.call(action, &[(PHONE_NUMBER_PARAM, &value)]).await;
+            assert_eq!(
+                answer.status, 400,
+                "{action} case {case:?}: expected 400, got {} / {}",
+                answer.status, answer.body
+            );
+            assert_eq!(
+                answer.code(),
+                "InvalidParameter",
+                "{action} case {case:?}: expected the InvalidParameter code, got {}",
+                answer.body
+            );
+            assert_eq!(
+                answer.element("Message"),
+                Some(invalid_phone_number_message()),
+                "{action} case {case:?}: expected the fixed badly-formatted-number \
+                 sentence, got {}",
+                answer.body
+            );
+            if !value.is_empty() {
+                assert!(
+                    !answer.body.contains(value.as_str()),
+                    "{action} case {case:?}: the refusal must not echo the sensitive \
+                     value, got {}",
+                    answer.body
+                );
+            }
             assert!(
-                !answer.body.contains(value.as_str()),
-                "{action} case {case:?}: the refusal must not echo the sensitive \
-                 value, got {}",
+                reported_opt_out(&answer).is_none(),
+                "{action} case {case:?}: a refused request must report no opt-out \
+                 state, got {}",
                 answer.body
             );
         }
-        assert!(
-            reported_opt_out(&answer).is_none(),
-            "{action} case {case:?}: a refused request must report no opt-out \
-             state, got {}",
-            answer.body
-        );
-    }
 
-    {
         // The refusals touched nothing: the seeded record is exactly as it was.
         let state = sns.state();
         let state = state.lock();

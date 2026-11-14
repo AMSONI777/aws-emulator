@@ -245,8 +245,11 @@ async fn stopping_a_completed_deployment_is_refused() {
         assert_eq!(
             body["message"].as_str(),
             Some(
-                format!("The deployment {deployment_id} is already in state {}", terminal.to_uppercase())
-                    .as_str()
+                format!(
+                    "The deployment {deployment_id} has already completed, current state {}.",
+                    terminal.to_uppercase()
+                )
+                .as_str()
             ),
             "case {case:?}: expected the refusal to name the state it settled in, got {body:?}"
         );

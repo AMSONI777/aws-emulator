@@ -89,8 +89,8 @@ async fn an_e164_destination_number_reaches_the_sandbox_through_every_operation(
     let sns = Sns::new();
 
     for (case, number) in accepted_number_forms() {
-        // The registration SENDS a one-time password, so the account needs something to send
-        // it from before the number itself can be what the call is judged on.
+        // An account that holds a dedicated origination entity, so the number itself is
+        // plainly what the call is judged on.
         given_an_origination_number(&sns);
         // The add is served, so the number is one the sandbox holds …
         let added = sns

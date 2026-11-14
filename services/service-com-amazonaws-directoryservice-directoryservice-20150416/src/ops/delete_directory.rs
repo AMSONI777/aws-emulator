@@ -2,30 +2,28 @@
 
 //! @op DeleteDirectory
 //!
-//! Starts the teardown of a stored directory and answers with its id. The directory is NOT
+//! IMPLEMENTED: starts the teardown of one directory of this account. The directory is NOT
 //! taken away while the caller waits: the delete moves it out of the stage it was serving
 //! in and into `Deleting`, and the clock finishes the teardown — the stage settles on
-//! `Deleted` and the record then leaves the store, with the snapshots, trusts and shares
-//! that describe nothing without it. `crate::state::directory_deletion` is where that chain
-//! lives.
+//! `Deleted` one span later and the record leaves the store one span after that
+//! (`crate::state::directory_deletion`).
 //!
-//! So `DescribeDirectories` keeps describing the directory for the whole teardown, which is
+//! What a client does with that: `DescribeDirectories` keeps reporting the directory while
+//! the teardown runs, in the teardown stage rather than the one it served in, which is
 //! the progress every delete-and-wait client polls for, and only once the record is gone do
-//! calls naming the id answer as they do for an id the account no longer holds: a
-//! reporting call that takes the id as a FILTER narrows to an empty page, and every other
-//! call reports `EntityDoesNotExistException`.
+//! the reads answer for a directory this account no longer has — an id it HAD, which is
+//! what makes a later filtered read an empty page rather than a refusal.
 //!
 //! A repeated delete of a directory already being torn down answers the same id and moves
-//! the teardown no further: it neither restarts the chain nor pushes the removal out.
+//! the teardown no further: the chain keeps the instant the first delete started it from.
 //!
-//! The teardown also releases the NETWORK the create provisioned for the directory's servers:
-//! the domain controller security group is Amazon EC2's resource, so it is deleted there
-//! ([`crate::state::release_controllers_group`]) and the directory stops naming a group the
-//! owner of security groups no longer holds.
+//! The teardown also releases what the create provisioned for the directory in ANOTHER
+//! service: the domain controller security group is Amazon EC2's resource, created there by
+//! the create, so it is deleted THERE over the same in-process callback, and the directory
+//! stops naming a group the owner of security groups no longer holds.
 //!
-//! The alias the directory held stays RESERVED: `CreateAlias`' own documentation says
 //! "After an alias has been created, it cannot be deleted or reused", so deleting the
-//! directory that holds one does not hand the alias back to the next caller.
+//! directory leaves its alias reserved: a later `CreateAlias` asking for it is refused.
 //!
 //! ## Shape of an operation
 //!
@@ -38,13 +36,7 @@
 //!
 //! The engine is held on `self` (constructor-injected), NOT passed per request — so
 //! engine access is guaranteed by the time any request runs. Reach the store through
-//! [`crate::state::service_state`] and read and write it through the guard it hands back:
-//!
-//! ```ignore
-//!     let state = crate::state::service_state(&*self.engine)
-//!         .ok_or(/* a modelled server error */)?;
-//!     state.lock().your_field = /* ... */;
-//! ```
+//! [`crate::state::service_state`] and read and write it through the guard it hands back.
 //!
 //! `ctx` ([`smithy_server_runtime::OperationContext`]) carries request metadata only —
 //! headers, URI, method, and anything middleware placed in `ctx.parts().extensions`.
@@ -65,19 +57,18 @@
 //! smithy_query(query="doc",shape="<Shape>",member="<Member>",model_path="services/service-com-amazonaws-directoryservice-directoryservice-20150416/smithy-model/com-amazonaws-directoryservice-directoryservice-20150416.json")
 //! ```
 //!
-//! Deletes an Directory Service directory. Before you call DeleteDirectory, ensure that all
-//! of the required permissions have been explicitly granted through a policy. For details
-//! about what permissions are required to run the DeleteDirectory operation, see Directory
-//! Service API Permissions: Actions, Resources, and Conditions Reference.
+//! Deletes an Directory Service directory. Before you call DeleteDirectory, ensure that all of
+//! the required permissions have been explicitly granted through a policy. For details about
+//! what permissions are required to run the DeleteDirectory operation, see Directory Service
+//! API Permissions: Actions, Resources, and Conditions Reference.
 //!
 //! ## Input
 //!
-//! * `DirectoryId` (DirectoryId, pattern ^d-[0-9a-f]{10}$) **required** — The identifier of
-//!   the directory to delete.
+//! * `DirectoryId` (DirectoryId) **required** — The identifier of the directory to delete.
 //!
 //! ## Output
 //!
-//! * `DirectoryId` (DirectoryId, pattern ^d-[0-9a-f]{10}$) — The directory identifier.
+//! * `DirectoryId` (DirectoryId) — The directory identifier.
 //!
 //! ## Errors
 //!
@@ -94,11 +85,7 @@ use super::types::*;
 // `DeleteDirectoryError` enum is never produced.
 smithy_macros::smithy_model!("smithy-model/com-amazonaws-directoryservice-directoryservice-20150416.json");
 
-// The operation's MODELED errors. `#[operation_error]` accepts only variants the
-// model declares for this operation, so the scaffold's `NotImplemented` cannot live
-// here — hence the `DeleteDirectoryError` alias below. An operation that models no errors
-// generates an UNINHABITED enum here, which is correct and expected: there is nothing
-// to construct until the model says otherwise.
+// The operation's MODELED errors.
 #[smithy_macros::operation_error("com.amazonaws.directoryservice#DeleteDirectory")]
 #[derive(Debug)]
 pub enum DeleteDirectoryErrorModeled {
@@ -112,10 +99,7 @@ pub enum DeleteDirectoryErrorModeled {
 /// lets a scaffolded operation answer 501 for one whose model declares no errors at all.
 pub type DeleteDirectoryError = crate::scaffolded::Scaffolded<DeleteDirectoryErrorModeled>;
 
-/// Lets `?` and `.into()` lift a modeled failure into the error channel, so an
-/// implemented handler writes `Err(SomeModeledError.into())` rather than naming the
-/// wrapper variant. See `crate::scaffolded` for how to drop the wrapper entirely once
-/// this operation is implemented.
+/// Lets `?` and `.into()` lift a modeled failure into the error channel.
 impl From<DeleteDirectoryErrorModeled> for DeleteDirectoryError {
     fn from(modeled: DeleteDirectoryErrorModeled) -> Self {
         crate::scaffolded::Scaffolded::Modeled(modeled)
@@ -126,8 +110,7 @@ impl From<DeleteDirectoryErrorModeled> for DeleteDirectoryError {
 ///
 /// Owns the shared engine (the constructor seam) and implements
 /// [`smithy_server_runtime::Operation`]. Generic over the engine type `Eng`, so this
-/// crate names no concrete engine type: a migrated service that needs state picks a
-/// concrete engine where it mounts the service, not here.
+/// crate names no concrete engine type.
 pub struct DeleteDirectory<Eng> {
     engine: ::std::sync::Arc<Eng>,
 }
@@ -160,6 +143,7 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
     ) -> Result<Self::Output, Self::Error> {
         let state = crate::state::service_state(&*self.engine)
             .ok_or_else(crate::state::state_unavailable)?;
+        let region = crate::state::region_from_request(ctx.parts());
 
         let now = ::std::time::SystemTime::now();
         // The directory's own record, and the network its servers sat on, under ONE
@@ -189,18 +173,20 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
                 .get(&directory_id)
                 .and_then(|directory| directory.provisioned_security_group_id())
                 .map(str::to_string);
+
+            // The directory stops serving its OBJECTS the moment the teardown starts: a
+            // directory being decommissioned answers no data-plane call, so the shared
+            // inventory that plane reads must not keep claiming the account holds it. The
+            // record goes whole — the directory's domain name, its data-access switch and
+            // its accounts describe nothing any more — while this service's own record
+            // stays until the clock takes it, so the control plane can still report the
+            // teardown.
+            if let Some(inventory) = crate::state::ad_directory_inventory(&*self.engine) {
+                inventory.lock().forget(&directory_id);
+            }
+
             (directory_id, provisioned_group)
         };
-
-        // The directory stops serving its OBJECTS the moment the teardown starts: a
-        // directory being decommissioned answers no data-plane call, so the shared
-        // inventory that plane reads must not keep claiming the account holds it. The
-        // record goes whole — the directory's domain name, its data-access switch and its
-        // accounts describe nothing any more — while this service's own record stays until
-        // the clock takes it, so the control plane can still report the teardown.
-        if let Some(inventory) = crate::state::ad_directory_inventory(&*self.engine) {
-            inventory.lock().forget(&directory_id);
-        }
 
         // The teardown also releases the network the create provisioned for the directory's
         // servers: the domain controller security group is Amazon EC2's resource, created
@@ -210,7 +196,6 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         // gone. The directory then stops naming it, so no reported `SecurityGroupId` ever
         // names a group EC2 does not hold; a group EC2 still holds is still reported.
         if let Some(group_id) = provisioned_group {
-            let region = crate::state::region_from_request(ctx.parts());
             if crate::state::release_controllers_group(ctx, &region, &group_id).await {
                 let mut store = state.lock();
                 if let Some(directory) = store.directories.get_mut(&directory_id) {

@@ -210,9 +210,10 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         // afterwards, and a `CreateApiCache` is no longer a duplicate. An API that holds
         // no cache is already what the teardown asks for, whether a delete emptied the
         // slot or nothing ever filled it, so the same call is served there too. Either
-        // way the teardown records what IT removed, so a later read reports a cache that
-        // was torn down only after the delete that tore one down.
-        api.take_api_cache();
+        // way the teardown records WHEN its removal of the instance finishes, so a read
+        // while it is still being carried out reports a cache that has been deleted and
+        // one past it an API that holds none.
+        api.take_api_cache(now);
 
         // The modelled response carries no members.
         Ok(DeleteApiCacheOutput {})

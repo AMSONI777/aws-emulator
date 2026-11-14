@@ -15,8 +15,10 @@
 //! > the authorizer named, the policy it returned and the values it published. `claims` is a
 //! > user-pool authorizer's own member, so a Lambda-backed authorizer's report carries none
 //! > of it. The execution log reports what the authorizer RETURNED — the principal it named
-//! > and every value it published — and never the identity the request presented. An
-//! > identifier no record carries is `NotFoundException`.
+//! > and every value it published — and never the identity the request presented, and it
+//! > reports the ENDPOINT the authorizer was asked at, so an invocation that was attempted is
+//! > visible whichever way it turned out. An identifier no record carries is
+//! > `NotFoundException`.
 //!
 //! The rows differ along what the rule generalises over:
 //!
@@ -898,6 +900,129 @@ async fn a_simulation_holds_no_result_for_a_later_call() {
          simulation, got the same invocation marker {:?}",
         ran[0]
     );
+}
+
+/// RULE: the execution log reports the ENDPOINT the authorizer was asked at, so a log shows
+/// an invocation was ATTEMPTED whichever way it turned out — a function nothing holds
+/// included — while a request carrying no identity source invokes nothing and its log names
+/// no endpoint at all.
+///
+/// The rows differ along what the rule generalises over: the authorizer TYPE (`TOKEN`, whose
+/// function is handed a token, and `REQUEST`, handed the whole method request), the name of
+/// the function the authorizer points at, and whether the simulated request carries the
+/// identity source.
+#[tokio::test]
+async fn the_log_reports_the_endpoint_the_authorizer_was_asked_at() {
+    let router = emulator();
+    let api = accepted(
+        &router,
+        "CreateRestApi",
+        "POST",
+        "/restapis",
+        Some(json!({ "name": "attempted-invocation-api" })),
+        201,
+    )
+    .await;
+    let api = member("CreateRestApi", &api, "id");
+
+    // (case, the authorizer's type, the function its authorizerUri points at). No function
+    // of either name is ever created, so the invocation cannot succeed — which is the point:
+    // the log still has to show it was attempted.
+    let rows: &[(&str, &str, &str)] = &[
+        ("a TOKEN authorizer", "TOKEN", "nonexistent-authorizer"),
+        ("a REQUEST authorizer", "REQUEST", "nonexistent-backing"),
+    ];
+
+    for (case, kind, function) in rows {
+        let function_arn = format!(
+            "arn:aws:lambda:{REGION}:{account}:function:{function}",
+            account = engine::emulator_account_id(),
+        );
+        let authorizer_uri = format!(
+            "arn:aws:apigateway:{REGION}:lambda:path/2015-03-31/functions/{function_arn}/invocations"
+        );
+        let created = accepted(
+            &router,
+            case,
+            "POST",
+            &format!("/restapis/{api}/authorizers"),
+            Some(json!({
+                "name": format!("attempted-{function}"),
+                "type": kind,
+                "authorizerUri": authorizer_uri,
+                "identitySource": format!("method.request.header.{IDENTITY_HEADER}"),
+            })),
+            201,
+        )
+        .await;
+        let authorizer = member(case, &created, "id");
+        let path = format!("/restapis/{api}/authorizers/{authorizer}");
+
+        // The identity source IS carried, so the authorizer is asked: the log names the
+        // endpoint, and with it the function that was to answer.
+        let mut body = serde_json::Map::new();
+        body.insert("pathWithQueryString".to_string(), json!("/orders"));
+        body.insert("headers".to_string(), presenting("allow-me"));
+        let answered = apigw(&router, "POST", &path, Some(Value::Object(body))).await;
+        assert_eq!(
+            answered.status,
+            200,
+            "case {case:?}: expected the simulation to be answered HTTP 200, got {} with {:?}",
+            answered.status,
+            answered.text()
+        );
+        let reported = answered.json();
+        let log = reported
+            .get("log")
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .to_string();
+        assert!(
+            log.contains(function),
+            "case {case:?}: expected the execution log to name the function {function:?} the \
+             authorizer was asked at, got {log:?}"
+        );
+        assert!(
+            log.contains(&authorizer_uri),
+            "case {case:?}: expected the execution log to report the endpoint request URI \
+             {authorizer_uri:?}, got {log:?}"
+        );
+        // The function answered nothing, so no decision exists: the report carries the
+        // status a client would have received rather than 0.
+        assert_ne!(
+            reported.get("clientStatus").and_then(Value::as_i64),
+            Some(0),
+            "case {case:?}: an authorizer nothing could answer for earns no decision, got \
+             {reported}"
+        );
+
+        // With the identity source ABSENT nothing is invoked, so no endpoint is reported.
+        let answered = apigw(
+            &router,
+            "POST",
+            &path,
+            Some(json!({ "pathWithQueryString": "/orders" })),
+        )
+        .await;
+        assert_eq!(
+            answered.status,
+            200,
+            "case {case:?} with no identity source: expected HTTP 200, got {} with {:?}",
+            answered.status,
+            answered.text()
+        );
+        let log = answered
+            .json()
+            .get("log")
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .to_string();
+        assert!(
+            !log.contains(function),
+            "case {case:?}: a request carrying no identity source invokes nothing, so the log \
+             must name no function, got {log:?}"
+        );
+    }
 }
 
 /// An identifier no record of the account carries is `NotFoundException`, naming the record

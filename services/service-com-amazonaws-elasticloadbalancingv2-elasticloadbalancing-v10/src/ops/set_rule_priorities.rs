@@ -12,15 +12,14 @@
 //! of every rule the request names, together with the current priority of every rule of
 //! that listener it does not. That is what lets two rules swap priorities in one call,
 //! and why the same number already in use on ANOTHER listener is no conflict at all.
-//! A priority a rule OUTSIDE the request holds is the modelled `PriorityInUseException`,
-//! while a request LIST that repeats one priority says nothing about which rule evaluates
-//! there and is refused as malformed input (`ValidationError`), before the store is
-//! reached. The conflict is one rule of the service, so it is worded the same way whichever
-//! operation places the priority: the refusal states the PRIORITY the request asked for
-//! (`crate::state::priority_in_use_message`, which `CreateRule` answers too) and names
-//! neither the listener nor the rule that holds it. A pair naming no rule is a refusal about
-//! the SET this operation addresses instead, which is why it states the collection-level
-//! sentence.
+//! A priority the request cannot place — one a rule OUTSIDE the request holds, or one the
+//! request's own LIST asks two rules to evaluate at — is the modelled
+//! `PriorityInUseException`. This operation addresses a LIST, so every refusal about the
+//! priorities it was asked to place is worded about that SET
+//! (`crate::state::rule_priorities_refusal_message`): it names neither the priority, nor
+//! the rule, nor the listener, because any of the pairs may be the one to change. The
+//! operation that places ONE rule at ONE priority (`CreateRule`) states that priority
+//! instead — there is only one value a caller could change there.
 //!
 //! The rules are read and written on their listener's record, the one rule store
 //! `DescribeRules` walks, so a priority this operation persists is the priority that read
@@ -203,14 +202,11 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
                 )));
             }
             // One call cannot ask for two rules at one priority: the list would not say
-            // which of them evaluates there. That is a rule of the REQUEST — judged before
-            // the store is reached and whatever the listeners the rules belong to — so it
-            // is malformed input rather than the modelled conflict with a priority
-            // something already holds.
+            // which of them evaluates there, so the priority the second pair names is one
+            // this request cannot place — the modelled conflict, worded about the SET of
+            // priorities the request asked for like every other refusal of this member.
             if asked.iter().any(|(_, held)| *held == priority) {
-                return Err(crate::scaffolded::Scaffolded::validation_error(
-                    crate::state::repeated_priority_message(priority),
-                ));
+                return Err(priority_in_use());
             }
             asked.push((rule_arn, priority));
         }
@@ -265,18 +261,7 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
                     .find(|moved| moved.rule_arn == rule.arn)
                     .map_or(rule.priority, |moved| moved.priority);
                 if taken.contains(&priority) {
-                    return Err(SetRulePrioritiesErrorModeled::PriorityInUseException(
-                        PriorityInUseException {
-                            // The value the caller has to change is the PRIORITY the request
-                            // asked for, and a priority left taken is one this request named:
-                            // a repeat between two pairs of the request was refused above, so
-                            // the duplicate here is a move onto a priority a rule outside the
-                            // request holds. One sentence for one rule of the service, which
-                            // `CreateRule` answers the same conflict with.
-                            message: Some(crate::state::priority_in_use_message(priority)),
-                        },
-                    )
-                    .into());
+                    return Err(priority_in_use());
                 }
                 taken.push(priority);
             }
@@ -339,6 +324,20 @@ fn distinct_listeners(moves: &[Move]) -> Vec<&str> {
 /// every other list-addressing refusal of this service does.
 fn rule_not_found() -> SetRulePrioritiesError {
     SetRulePrioritiesErrorModeled::RuleNotFoundException(RuleNotFoundException {
+        message: Some(crate::state::rule_priorities_refusal_message()),
+    })
+    .into()
+}
+
+/// The refusal for a priority this request cannot place: one a rule outside the request
+/// holds, or one the request's own list asks two rules to evaluate at.
+///
+/// Worded about the SET this operation addresses ([`crate::state::rule_priorities_refusal_message`])
+/// and naming no value, for the same reason the not-found above does: the request carries
+/// one pair per rule, so no single priority, rule or listener is the one the caller has to
+/// change.
+fn priority_in_use() -> SetRulePrioritiesError {
+    SetRulePrioritiesErrorModeled::PriorityInUseException(PriorityInUseException {
         message: Some(crate::state::rule_priorities_refusal_message()),
     })
     .into()

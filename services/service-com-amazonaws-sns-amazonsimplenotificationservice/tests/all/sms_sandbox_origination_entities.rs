@@ -1,15 +1,16 @@
 // SPDX-License-Identifier: CC0-1.0
 
-//! End-to-end cover for the ORIGINATION ENTITY an SMS sandbox registration needs.
+//! End-to-end cover for what an SMS sandbox registration is judged on, and what it is
+//! NOT judged on: this account's dedicated origination-entity inventory.
 //!
-//! The RULE asserted here: an operation whose own work is to SEND an SMS message is
-//! answered only while the account holds an origination entity able to send one. The
-//! sandbox registration "sends a one-time password (OTP) to that phone number"
-//! (`CreateSMSSandboxPhoneNumber` doc), so an account whose origination inventory holds
-//! no SMS-capable entity is refused with the modelled `UserErrorException` (HTTP 400,
-//! awsQuery code `UserError`) carrying the fixed sentence `No origination entities
-//! available to send`, and NOTHING is stored: no pending destination number, hence no
-//! one-time password, hence nothing a verification could ever complete.
+//! The RULE asserted here: a sandbox destination number "sends a one-time password (OTP)
+//! to that phone number" (`CreateSMSSandboxPhoneNumber` doc) from AWS's own side, so the
+//! registration is judged on its own input and on this account's sandbox — never on the
+//! account's DEDICATED origination entities, which `ListOriginationNumbers` reports and
+//! which an account acquires out of band. A registration is therefore served, and the
+//! destination number reported pending with a one-time password delivered to it, whether
+//! the account holds no entity at all, entities that cannot send SMS, or SMS-capable
+//! ones — and the inventory the listing reports is unchanged by it.
 //!
 //! The rows differ along what the rule generalises over: the destination-number FORM
 //! (both branches of the modelled pattern and both published length bounds, from the
@@ -54,122 +55,89 @@ async fn register(sns: &Sns, number: &str) -> Answer {
         .await
 }
 
-/// Assert `answer` is the modelled origination refusal, stating AWS's sentence whole.
-fn assert_refused(case: &str, answer: &Answer) {
+/// Assert the registration was served and left the number pending with a password of
+/// its own.
+fn assert_registered(case: &str, sns: &Sns, number: &str, answer: &Answer) {
     assert_eq!(
-        answer.status, 400,
-        "case {case:?}: expected HTTP 400, got {} / {}",
+        answer.status, 200,
+        "case {case:?}: expected the registration to be served, got {} / {}",
         answer.status, answer.body
     );
+    let state = sns.state();
+    let state = state.lock();
+    let record = state
+        .sandbox_phone_numbers
+        .get(number)
+        .unwrap_or_else(|| panic!("case {case:?}: the served registration must store a record"));
     assert_eq!(
-        answer.code(),
-        "UserError",
-        "case {case:?}: expected the UserError code, got {}",
-        answer.body
+        record.status, SANDBOX_NUMBER_PENDING,
+        "case {case:?}: expected a pending destination number, got {record:?}"
     );
-    assert_eq!(
-        answer.element("Type").as_deref(),
-        Some("Sender"),
-        "case {case:?}: expected a sender fault, got {}",
-        answer.body
-    );
-    assert_eq!(
-        answer.element("Message").as_deref(),
-        Some(sms_origination::NO_ORIGINATION_ENTITIES),
-        "case {case:?}: expected the fixed no-origination sentence, got {}",
-        answer.body
+    assert!(
+        !record.one_time_password.is_empty(),
+        "case {case:?}: the served registration must deliver a one-time password"
     );
 }
 
-/// An account holding no origination entity cannot register a sandbox destination
-/// number, whatever form that number takes — and the refusal stores nothing.
+/// An account holding no origination entity registers a sandbox destination number all
+/// the same, whatever form that number takes — which is what makes the verification
+/// flow reachable at all.
 #[tokio::test]
-async fn a_registration_is_refused_while_the_account_holds_no_origination_entity() {
+async fn a_registration_is_served_while_the_account_holds_no_origination_entity() {
     let sns = Sns::new();
 
     for (case, number) in accepted_number_forms() {
         let answer = register(&sns, &number).await;
-        assert_refused(case, &answer);
-        let state = sns.state();
-        let state = state.lock();
-        assert!(
-            state.sandbox_phone_numbers.is_empty(),
-            "case {case:?}: the refused registration must store nothing, got {:?}",
-            state.sandbox_phone_numbers
-        );
+        assert_registered(case, &sns, &number, &answer);
     }
+
+    // Nothing the registrations did put an entity in the inventory the listing reports.
+    assert!(
+        sns.state().lock().origination_numbers.is_empty(),
+        "the registrations must not write an origination entity, got {:?}",
+        sns.state().lock().origination_numbers
+    );
 }
 
-/// The inventory is read for what the entities CAN DO: only an entity able to send SMS
-/// lets a registration through.
+/// What the inventory holds does not decide the registration: every capability set — and
+/// none at all — leaves the destination number pending just the same.
 #[tokio::test]
-async fn only_an_sms_capable_origination_entity_lets_a_registration_through() {
-    // (case, the capabilities the account's entities hold, whether a registration is
-    // served). The capability names are the values the modelled `NumberCapability` enum
-    // accepts (`crate::ops::types::NUMBER_CAPABILITY_VALUES`).
-    let rows: &[(&str, &[&[&str]], bool)] = &[
-        ("no entity at all", &[], false),
-        ("one voice-only entity", &[&["VOICE"]], false),
-        ("one MMS-only entity", &[&["MMS"]], false),
-        ("two entities, neither able to send SMS", &[&["VOICE"], &["MMS"]], false),
-        ("one SMS-capable entity", &[&["SMS"]], true),
-        ("one entity able to send SMS and MMS", &[&["MMS", "SMS"]], true),
-        (
-            "two entities, one of them able to send SMS",
-            &[&["VOICE"], &["SMS"]],
-            true,
-        ),
-        ("an entity with every modelled capability", &[NUMBER_CAPABILITY_VALUES], true),
+async fn the_origination_inventory_does_not_decide_the_registration() {
+    // (case, the capabilities the account's entities hold). The capability names are the
+    // values the modelled `NumberCapability` enum accepts
+    // (`crate::ops::types::NUMBER_CAPABILITY_VALUES`).
+    let rows: &[(&str, &[&[&str]])] = &[
+        ("no entity at all", &[]),
+        ("one voice-only entity", &[&["VOICE"]]),
+        ("one MMS-only entity", &[&["MMS"]]),
+        ("two entities, neither able to send SMS", &[&["VOICE"], &["MMS"]]),
+        ("one SMS-capable entity", &[&[sms_origination::SMS_CAPABILITY]]),
+        ("one entity able to send SMS and MMS", &[&["MMS", "SMS"]]),
+        ("two entities, one of them able to send SMS", &[&["VOICE"], &["SMS"]]),
+        ("an entity with every modelled capability", &[NUMBER_CAPABILITY_VALUES]),
     ];
 
     let destination = "+447700900123";
-    for (case, inventory, served) in rows {
+    for (case, inventory) in rows {
         let sns = Sns::new();
         for (at, capabilities) in inventory.iter().enumerate() {
             seed_origination(&sns, &format!("+1206555{at:04}"), capabilities);
         }
 
         let answer = register(&sns, destination).await;
-        if !*served {
-            assert_refused(case, &answer);
-            assert!(
-                sns.state().lock().sandbox_phone_numbers.is_empty(),
-                "case {case:?}: the refused registration must store nothing"
-            );
-            continue;
-        }
-
-        assert_eq!(
-            answer.status, 200,
-            "case {case:?}: expected the registration to be served, got {} / {}",
-            answer.status, answer.body
-        );
-        let state = sns.state();
-        let state = state.lock();
-        let record = state
-            .sandbox_phone_numbers
-            .get(destination)
-            .unwrap_or_else(|| panic!("case {case:?}: the served registration must store a record"));
-        assert_eq!(
-            record.status, SANDBOX_NUMBER_PENDING,
-            "case {case:?}: expected a pending destination number, got {record:?}"
-        );
-        assert!(
-            !record.one_time_password.is_empty(),
-            "case {case:?}: the served registration must deliver a one-time password"
-        );
+        assert_registered(case, &sns, destination, &answer);
     }
 }
 
-/// The pre-flight is asked on EVERY registration, the repeat of one the sandbox already
-/// holds included: an inventory that is emptied out of band stops the next registration
-/// and leaves the record the earlier one wrote exactly as it was.
+/// The registration is judged the same on EVERY call, the repeat of one the sandbox
+/// already holds included: an inventory emptied out of band stops nothing, and the
+/// repeat supersedes the one-time password of the record it keeps.
 #[tokio::test]
-async fn a_registration_is_refused_once_the_inventory_no_longer_holds_an_sms_entity() {
+async fn a_repeat_registration_is_served_once_the_inventory_holds_no_sms_entity() {
     let sns = Sns::new();
     let origination = "+12065550199";
     let destination = "+12065550100";
-    seed_origination(&sns, origination, &["SMS"]);
+    seed_origination(&sns, origination, &[sms_origination::SMS_CAPABILITY]);
 
     let served = register(&sns, destination).await;
     assert_eq!(
@@ -188,19 +156,19 @@ async fn a_registration_is_refused_once_the_inventory_no_longer_holds_an_sms_ent
         ("a number the sandbox does not hold", "+447700900123"),
     ] {
         let answer = register(&sns, number).await;
-        assert_refused(case, &answer);
+        assert_registered(case, &sns, number, &answer);
     }
 
     let state = sns.state();
     let state = state.lock();
     assert_eq!(
         state.sandbox_phone_numbers.len(),
-        1,
-        "the refused registrations must not add a record, got {:?}",
+        2,
+        "expected one record per registered number, got {:?}",
         state.sandbox_phone_numbers
     );
-    assert_eq!(
+    assert_ne!(
         state.sandbox_phone_numbers[destination].one_time_password, delivered,
-        "a refused registration must not supersede the delivered one-time password"
+        "a repeat registration must deliver a fresh one-time password"
     );
 }

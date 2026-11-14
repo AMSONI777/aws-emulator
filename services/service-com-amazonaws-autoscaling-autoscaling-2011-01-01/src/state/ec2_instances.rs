@@ -265,6 +265,14 @@ pub fn launch<Eng: Send + Sync + 'static>(
             instance_ids: Vec::new(),
         });
         store.insert_instance(record);
+        // The interface Amazon EC2 gives the instance it just stored is attached to that
+        // instance by this launch, not by a later call: NOTHING answers a caller the
+        // attachment being made — the group launches the instance itself, and the first
+        // thing a client can read of its interface is what `DescribeNetworkInterfaces`
+        // reports once the group has launched it. So the attachment is completed here,
+        // through the owning store's own seam, rather than left for the clock to finish
+        // under a caller who was never shown the transient state.
+        store.complete_launched_interface_attachments(&instance_id);
         launched.push(LaunchedInstance {
             instance_id,
             availability_zone: placement.availability_zone.clone(),

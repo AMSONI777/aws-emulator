@@ -371,11 +371,11 @@ async fn a_refused_reordering_moves_nothing() {
         ),
         (
             // One call cannot ask for two rules at one priority, whatever listeners they
-            // belong to: the list does not say which of them evaluates there, so it is the
-            // request that has to be fixed.
+            // belong to: the list does not say which of them evaluates there, so the
+            // priority is one this request cannot place.
             "two rules of one listener onto one priority",
             vec![(first.as_str(), "40"), (second.as_str(), "40")],
-            VALIDATION_ERROR,
+            PRIORITY_IN_USE,
         ),
         (
             "one rule named twice",

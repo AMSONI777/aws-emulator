@@ -26,12 +26,13 @@ use super::topics_subscriptions_publish::{Answer, Sns};
 /// value broke.
 const SUBJECT_REFUSAL: &str = "Invalid parameter: Subject";
 
-/// The sentence a `FilterPolicy` the service cannot parse is refused with: the leading
-/// clause and the parser's diagnostic for the document below, whose parse stops on the
-/// bare word `this` at the first column of the first line. Which word and which position
-/// the diagnostic names is `filter_policy_parse_diagnostic.rs`.
+/// The sentence a `FilterPolicy` the service cannot parse, carried in a `Subscribe`
+/// request's `Attributes` map, is refused with: the member clause that map's entries are
+/// refused under and the parser's diagnostic for the document below, whose parse stops on
+/// the bare word `this` at the first column of the first line. Which word and which
+/// position the diagnostic names is `filter_policy_parse_diagnostic.rs`.
 const FILTER_POLICY_PARSE_REFUSAL: &str =
-    "Invalid parameter: FilterPolicy: failed to parse JSON. \
+    "Invalid parameter: Attributes Reason: FilterPolicy: failed to parse JSON. \
      Unrecognized token 'this': was expecting (JSON String, Number, Array, Object or \
      token 'null', 'true' or 'false')\n at [Source: REDACTED \
      (`StreamReadFeature.INCLUDE_SOURCE_IN_LOCATION` disabled); line: 1, column: 1]";

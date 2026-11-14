@@ -191,6 +191,18 @@ pub(crate) async fn simulated<Eng: Send + Sync + 'static>(
         id = authorizer.id,
         kind = authorizer.r#type
     ));
+    // WHERE the authorizer is asked, reported BEFORE it is asked: a custom authorizer is a
+    // Lambda function, and the endpoint request the invocation is made through is the
+    // `authorizerUri` the record carries — so the log of an execution shows which function
+    // was asked, whichever way the invocation then turned out (a function that answered, one
+    // that errored, one this api may not invoke, one nothing holds). Echoed from the stored
+    // record and nothing else: an authorizer whose record holds no URI names no endpoint, and
+    // the line is left out rather than written blank — the refusal below states that there is
+    // no function to invoke. A request that carried no identity source returns above, having
+    // invoked nothing, so no such line is written for it either.
+    if let Some(uri) = authorizer.authorizer_uri.as_deref() {
+        report.steps.push(format!("Endpoint request URI: {uri}"));
+    }
     let pending = custom_authorizer::Pending {
         api_id: api.id.clone(),
         // The stage a simulated authorizer execution's own method ARN names

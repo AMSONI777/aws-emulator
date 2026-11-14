@@ -345,7 +345,9 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> SetIdentityPoolRo
             return Err(
                 SetIdentityPoolRolesErrorModeled::ConcurrentModificationException(
                     ConcurrentModificationException {
-                        message: Some(crate::state::PARALLEL_MODIFICATION_MESSAGE.to_string()),
+                        message: Some(crate::state::parallel_modification_message(
+                            crate::state::IDENTITY_POOL_WRITE_RESOURCE_TYPE,
+                        )),
                     },
                 )
                 .into(),

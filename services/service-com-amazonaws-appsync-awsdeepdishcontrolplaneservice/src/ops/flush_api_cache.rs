@@ -173,14 +173,15 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
             .into());
         };
         // An API that holds no cache has none to flush, and the refusal names both this
-        // call and WHY there is no cache.
+        // call and WHICH absence it met — read off the record before the instance is
+        // borrowed, so one arm answers the absence.
+        let being_removed = api.api_cache_is_being_removed(now);
         let Some(cache) = api.api_cache.as_mut() else {
-            let message = crate::state::absent_cache_message(
-                crate::state::CacheCall::Flush,
-                api.api_cache_was_deleted(),
-            );
             return Err(FlushApiCacheErrorModeled::NotFoundException(NotFoundException {
-                message: Some(message),
+                message: Some(crate::state::absent_cache_message(
+                    crate::state::CacheCall::Flush,
+                    being_removed,
+                )),
             })
             .into());
         };

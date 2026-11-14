@@ -257,7 +257,7 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
             };
             // The point in time this export reads the table at: the one the request named,
             // held inside that window, or the newest exportable one where it named none.
-            let export_time = export_point(input.export_time.as_ref(), earliest, latest)?;
+            let export_time = export_point(input.export_time.as_ref(), earliest, latest, now)?;
             // A capability this emulator cannot write real exported data for is refused as
             // "not written yet" rather than accepted and answered with a record of the
             // export the caller did not ask for. AFTER the modelled refusals above: what
@@ -483,15 +483,22 @@ fn unsupported_capability(
 /// snapshot of the table's state at this point in time" (`$ExportTime`), and "you can
 /// export data from any time within the point in time recovery window" (this operation's
 /// doc) — so a named instant must lie inside that window, which is what
-/// `InvalidExportTimeException` states. A request that names none exports the newest point
-/// the window reaches.
+/// `InvalidExportTimeException` states.
+///
+/// A request that names NONE exports the table as it stands at the instant of the request:
+/// the member is optional and documents the current time as what it defaults to, so the
+/// snapshot holds every item the table holds when the export is taken — including one
+/// written a moment before the call, which is behind the window's own newest RESTORABLE
+/// point ("typically 5 minutes before the current time") and would otherwise be left out of
+/// an export nobody asked to take in the past.
 fn export_point(
     requested: Option<&::aws_smithy_types::DateTime>,
     earliest: ::std::time::SystemTime,
     latest: ::std::time::SystemTime,
+    now: ::std::time::SystemTime,
 ) -> Result<::std::time::SystemTime, ExportTableToPointInTimeError> {
     let Some(requested) = requested else {
-        return Ok(latest);
+        return Ok(now);
     };
     let point = ::std::time::SystemTime::try_from(*requested).map_err(|_| invalid_export_time())?;
     // The window's bounds are reported at the precision a timestamp carries on the wire,

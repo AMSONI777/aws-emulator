@@ -346,10 +346,10 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
             api_keys: std::collections::BTreeMap::new(),
             // A fresh API holds no cache, no data source, no function, no type and no
             // resolver: `CreateApiCache`, `CreateDataSource`, `CreateFunction`,
-            // `CreateType` and `CreateResolver` are what create them. Nothing has torn
-            // a cache of it down either.
+            // `CreateType` and `CreateResolver` are what create them. No teardown of a
+            // cache of it is being carried out either.
             api_cache: None,
-            api_cache_deleted: false,
+            api_cache_removal_due: None,
             data_sources: std::collections::BTreeMap::new(),
             functions: std::collections::BTreeMap::new(),
             types: std::collections::BTreeMap::new(),

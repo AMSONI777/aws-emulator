@@ -4,11 +4,11 @@
 //! confirms nothing with.
 //!
 //! The RULE asserted here: a token that is not a confirmation token of the topic named
-//! is refused with HTTP 400 / `InvalidParameter` and the message `Invalid token` —
-//! WHOLLY FIXED text naming the condition itself. No part of it comes from the request:
-//! the token is not echoed (it is a short-lived secret sent to the endpoint), and
-//! there is no `<member> Reason: ` frame, because the fault is not a member whose value
-//! broke a constraint but a token that confirms nothing.
+//! is refused with HTTP 400 / `InvalidParameter` and the message
+//! `Invalid parameter: Token` — WHOLLY FIXED text naming the member the unusable value
+//! arrived in. No part of it comes from the request: the token is not echoed (it is a
+//! short-lived secret sent to the endpoint), and no reason clause follows the member,
+//! because nothing about an opaque token is readable enough to report.
 //!
 //! The rows differ along what the rule generalises over: the FORM of the value
 //! presented as a token (a bare word, a token-width hex string this service did not
@@ -26,7 +26,7 @@ use super::topics_subscriptions_publish::{Answer, Sns};
 /// The sentence AWS refuses a token that confirms nothing with, stated here as the
 /// recorded response words it rather than read from the crate, so the test pins the
 /// text and not just the constant.
-const INVALID_TOKEN: &str = "Invalid token";
+const INVALID_TOKEN: &str = "Invalid parameter: Token";
 
 /// Subscribe `endpoint` over `protocol`, asking for the ARN in every case.
 async fn subscribe(sns: &Sns, topic: &str, protocol: &str, endpoint: &str) -> String {
