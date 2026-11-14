@@ -2828,3 +2828,5 @@ mod cloudformation_provisions_lambda_event_invoke_configs;
 // and `zz_probe` ONCE further up this tail: two branches landing in the same window each
 // appended their own copy here, and a module declared twice loads the same file twice,
 // which compiles neither.)
+// and `zz_probe` ONCE further up this tail: two landings each appended a second copy of each
+// here, and a module declared twice loads the same file twice, which compiles neither.)
