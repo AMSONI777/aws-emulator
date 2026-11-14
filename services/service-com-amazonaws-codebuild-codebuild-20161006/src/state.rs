@@ -54,6 +54,8 @@ mod artifact_upload;
 mod batchspec;
 /// The cache one project carries from one of its builds into the next.
 mod build_cache;
+/// The IMAGE a build runs in: the variable naming it and the filesystem it presents.
+mod build_image;
 /// Running the builds the clock owes a run, where the object store can be reached.
 mod build_run;
 /// What ONE command line of a buildspec does, in the build environment's shell — the
@@ -81,6 +83,7 @@ pub use artifact_upload::*;
 pub use artifacts::*;
 pub use batchspec::*;
 pub use build_cache::*;
+pub use build_image::*;
 pub use build_run::*;
 pub use build_source::*;
 pub use buildspec::*;

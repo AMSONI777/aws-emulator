@@ -37,6 +37,12 @@
 //! The commands the build ENVIRONMENT provides beyond the shell's own utilities are the
 //! programs of the runtimes this build installed ([`super::runtime_versions`]), which the
 //! session asks for a command its catalog does not name.
+//!
+//! What the environment already HOLDS when the first command runs is the IMAGE's own
+//! filesystem ([`super::build_image`]), seeded into the same tree: the build runs inside
+//! that image, so its files are there to be read. They are the environment's rather than
+//! the build's output, so [`BuildShell::files`] leaves them out of what the run takes back
+//! out of the tree.
 
 use std::collections::BTreeMap;
 
@@ -45,16 +51,20 @@ use std::collections::BTreeMap;
 #[derive(Debug)]
 pub(super) struct BuildShell {
     session: ::service_common::posix_shell_session::ShellSession,
+    /// The paths the build's IMAGE presents in the environment's filesystem, which the
+    /// build itself did not produce.
+    image_paths: Vec<String>,
 }
 
 impl BuildShell {
-    /// A session holding `variables`, with `installed`'s programs and the build's whole
-    /// command budget left.
+    /// A session holding `variables`, with `installed`'s programs, `image_files` already in
+    /// its tree and the build's whole command budget left.
     pub(super) fn new(
         variables: BTreeMap<String, String>,
         installed: super::InstalledRuntimes,
+        image_files: &[(String, String)],
     ) -> Self {
-        Self {
+        let mut shell = Self {
             session: ::service_common::posix_shell_session::ShellSession::with_programs(
                 variables,
                 // The shared statuses and bounds, and no output: see this module's header.
@@ -64,7 +74,21 @@ impl BuildShell {
             // The build environment has a working directory of its own, so the file
             // utilities are commands this session performs over it.
             .with_file_utilities(),
+            image_paths: Vec::new(),
+        };
+        for (path, contents) in image_files {
+            // A file the tree could not hold is one the commands will not find, and it is
+            // not claimed to be there either.
+            if shell.session.put_file(path, contents) {
+                shell.image_paths.push(path.clone());
+            } else {
+                ::tracing::debug!(
+                    %path,
+                    "a build's working tree could not hold a file of the image it runs in"
+                );
+            }
         }
+        shell
     }
 
     /// Seed a file the build is to find in its working tree, answering whether the tree
@@ -75,8 +99,16 @@ impl BuildShell {
 
     /// The files this build's working tree holds, in path order: what its commands
     /// produced, which is what its artifacts and its cache are selected from.
+    ///
+    /// The files the IMAGE presents are not among them: they are the environment the build
+    /// ran in rather than output the build produced, so nothing selects an artifact or a
+    /// cached path out of them.
     pub(super) fn files(&self) -> Vec<(&str, &str)> {
-        self.session.tree_files()
+        self.session
+            .tree_files()
+            .into_iter()
+            .filter(|(path, _)| !self.image_paths.iter().any(|image| image == path))
+            .collect()
     }
 
     /// Forget an `exit` that ended one of this build's command blocks, so the block the

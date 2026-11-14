@@ -27,7 +27,9 @@
 //! buildspec with ([`super::batchspec::buildspec_document`]), and its command lines are
 //! run by the build environment's shell ([`super::build_shell`]) — which performs, beside
 //! its own utilities, the programs of the runtimes the install phase's `runtime-versions`
-//! selected ([`super::runtime_versions`]). A build whose buildspec cannot be read has no
+//! selected ([`super::runtime_versions`]). That environment is the build's EFFECTIVE one:
+//! the commands run inside the image it names, so the variable naming that image and the
+//! files the image presents are what they see of it ([`super::build_image`]). A build whose buildspec cannot be read has no
 //! phase to run: the source-download phase fails, and what it reports is what the reading
 //! answered — the YAML parser's own diagnostic for a buildspec that is not YAML, and
 //! CodeBuild's `YAML_FILE_ERROR` classification for a buildspec there was none of to parse.
@@ -39,6 +41,7 @@
 use std::collections::BTreeMap;
 
 use super::batchspec::{buildspec_document, mapping_get, scalar_string, UnreadableBuildspec};
+use super::build_image::{image_files, BUILD_IMAGE_VARIABLE};
 use super::build_shell::BuildShell;
 use super::runtime_versions::{install_runtimes, RuntimeInstallFailure};
 use super::{finished_phase, open_phase};
@@ -551,7 +554,13 @@ pub fn run_commands(
         None,
     ));
 
-    let mut shell = BuildShell::new(session_variables(build, &read, start_millis), installed);
+    let mut shell = BuildShell::new(
+        session_variables(build, &read, start_millis),
+        installed,
+        // The build runs INSIDE its effective environment's image, so what that image
+        // presents is in the environment's filesystem before the first command runs.
+        &image_files(effective_image(build)),
+    );
     for (path, contents) in &seed.files {
         // A file the environment could not hold is one the commands will not find: the
         // tree's own bounds are what refuse it, and nothing claims it is there.
@@ -696,6 +705,17 @@ fn run_command_block(shell: &mut BuildShell, commands: &[String]) -> Option<Phas
     None
 }
 
+/// The image this build's commands run in: its effective environment's `image`, which is
+/// the project's with `StartBuild`'s `imageOverride` already applied — empty for a build
+/// whose record carries no environment at all.
+fn effective_image(build: &Build) -> &str {
+    build
+        .environment
+        .as_ref()
+        .map(|environment| environment.image.trim())
+        .unwrap_or_default()
+}
+
 /// The variables one build's session starts with.
 ///
 /// In the order AWS resolves them, so a later one replaces an earlier one of the same
@@ -713,12 +733,19 @@ fn session_variables(
     start_millis: i64,
 ) -> BTreeMap<String, String> {
     let mut variables = BTreeMap::new();
-    let provided: [(&str, Option<String>); 6] = [
+    let image = effective_image(build);
+    let provided: [(&str, Option<String>); 7] = [
         ("CODEBUILD_BUILD_ID", build.id.clone()),
         ("CODEBUILD_BUILD_ARN", build.arn.clone()),
         (
             "CODEBUILD_BUILD_NUMBER",
             build.build_number.map(|number| number.to_string()),
+        ),
+        // The image the build is RUNNING in, which is the one its own commands execute
+        // inside: see [`super::build_image`].
+        (
+            BUILD_IMAGE_VARIABLE,
+            (!image.is_empty()).then(|| image.to_string()),
         ),
         ("CODEBUILD_INITIATOR", build.initiator.clone()),
         ("CODEBUILD_START_TIME", Some(start_millis.to_string())),

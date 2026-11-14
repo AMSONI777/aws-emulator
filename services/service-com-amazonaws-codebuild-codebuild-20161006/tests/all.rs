@@ -25,6 +25,8 @@ mod build_artifacts_destination;
 mod build_batch_fan_out;
 #[path = "all/build_batch_projection.rs"]
 mod build_batch_projection;
+#[path = "all/build_image.rs"]
+mod build_image;
 #[path = "all/buildspec_execution.rs"]
 mod buildspec_execution;
 #[path = "all/buildspec_file_tree.rs"]

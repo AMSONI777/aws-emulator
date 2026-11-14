@@ -264,19 +264,22 @@ pub trait ProgramFiles {
 ///
 /// Each one's whole effect is inside the session and the tree it works over: `printf` writes
 /// one line of output, `mkdir`, `touch` and `rm` change the tree, `test` (and its `[`
-/// spelling) answers a question about it, and `sh -c` performs a program in this same
-/// session, which is how a machine's init system runs one line. A session given neither tree
-/// provides none of them: a directory, a removal and a nested program are what an
-/// environment with storage of its own has, and such a session's tree is only the files its
-/// redirections left.
-pub const VOLUME_COMMANDS: &[&str] =
-    &["printf", "mkdir", "touch", "rm", "test", "[", "sh", "bash"];
+/// spelling) answers a question about it, `sh -c` performs a program in this same
+/// session, which is how a machine's init system runs one line, and `.` (with its bash
+/// `source` spelling) performs the commands of a file the tree holds in this same session,
+/// which is how a program reads a file of assignments the environment published to it. A
+/// session given neither tree provides none of them: a directory, a removal, a nested
+/// program and a file to read commands from are what an environment with storage of its own
+/// has, and such a session's tree is only the files its redirections left.
+pub const VOLUME_COMMANDS: &[&str] = &[
+    "printf", "mkdir", "touch", "rm", "test", "[", "sh", "bash", ".", "source",
+];
 
 /// The commands an assignment written before them persists in the session for: POSIX's
 /// special built-in utilities, for which "variable assignments specified with special
 /// built-in utilities remain in effect after the built-in completes". For every other command
 /// an assignment before it is that command's environment alone.
-const PERSISTING_COMMANDS: &[&str] = &[":", "exit", "export", "unset"];
+const PERSISTING_COMMANDS: &[&str] = &[":", ".", "exit", "export", "unset"];
 
 /// The statuses a session answers with, so a service whose API reports a status reports the
 /// one a shell answers for its own condition.
@@ -1543,7 +1546,8 @@ impl ShellSession {
     /// tree holds none, and `rm` removes a file (`-f` passes over one that is not there).
     /// `test`, and its `[` spelling, answers a question about the tree or about two values.
     /// `sh -c` performs a program in THIS session, which is how a machine's init system
-    /// runs one line of a script.
+    /// runs one line of a script, and `.` performs the commands of a file the tree holds in
+    /// it ([`Self::run_dot`]).
     fn run_volume_command(
         &mut self,
         name: &str,
@@ -1558,6 +1562,7 @@ impl ShellSession {
             "rm" => self.run_remove(arguments, redirections),
             "test" | "[" => self.run_test(name, arguments),
             "sh" | "bash" => self.run_nested_program(arguments),
+            "." | "source" => self.run_dot(arguments, redirections),
             _ => self.config.statuses.could_not_run,
         }
     }
@@ -1825,6 +1830,45 @@ impl ShellSession {
         self.substitutions_left = self.substitutions_left.saturating_sub(1);
         self.nested_programs = self.nested_programs.saturating_add(1);
         let status = self.run_program(program);
+        self.nested_programs = self.nested_programs.saturating_sub(1);
+        status
+    }
+
+    /// `. FILE` (and its bash `source` spelling): the commands of a file the tree holds,
+    /// performed in THIS session.
+    ///
+    /// The dot utility is specified to "execute commands from the file in the current
+    /// environment", so the variables the file's own assignments set are the session's once
+    /// it has run — which is how a program reads a file of assignments the environment
+    /// published to it, a distribution's release file or a tool's profile script. The file
+    /// is read out of the tree this session works over and out of nothing else: there is no
+    /// search path here, and no host path, so a path the tree holds no file for is one this
+    /// utility could not read — reported on standard error, with the status the utility
+    /// answers for a file it could not read rather than with the file's own.
+    ///
+    /// It runs another program in this session, so it spends the same budget and counts
+    /// against the same DEPTH an `sh -c` program does ([`Self::run_nested_program`]): a file
+    /// that sources itself is bounded by them.
+    fn run_dot(&mut self, arguments: &[String], redirections: &Redirections) -> i32 {
+        let Some(path) = arguments.first() else {
+            let _ = self.write_stderr(".: filename argument required\n", redirections);
+            return self.config.statuses.failure;
+        };
+        let Some(contents) = self.read_path(path) else {
+            let _ = self.write_stderr(
+                &format!(".: {path}: No such file or directory\n"),
+                redirections,
+            );
+            return self.config.statuses.failure;
+        };
+        if self.substitutions_left == 0
+            || self.nesting_depth() >= self.config.bounds.substitution_depth
+        {
+            return self.config.statuses.could_not_run;
+        }
+        self.substitutions_left = self.substitutions_left.saturating_sub(1);
+        self.nested_programs = self.nested_programs.saturating_add(1);
+        let status = self.run_program(&contents);
         self.nested_programs = self.nested_programs.saturating_sub(1);
         status
     }
@@ -3461,6 +3505,117 @@ mod tests {
             held.exit_status(),
             None,
             "a program that ended no session leaves no status behind"
+        );
+    }
+
+    /// RULE: `.` (and its `source` spelling) performs the commands of a file the tree holds
+    /// in THIS session, so the assignments that file carries are the session's variables
+    /// afterwards; a path the tree holds no file for is one the utility could not read, and
+    /// a session with no tree of its own performs none of it.
+    ///
+    /// The rows differ along what the rule generalises over: the spelling of the utility,
+    /// how the file's values are quoted, whether the file is there, and whether the
+    /// variables are read back by a later command or by a command substitution.
+    #[test]
+    fn a_file_of_assignments_is_performed_in_the_session() {
+        let statuses = Statuses::default();
+        // (case, the spelling, the file's contents, the status it answers, what READ holds)
+        let rows: [(&str, &str, &str, i32, &str); 5] = [
+            (
+                "a file of quoted assignments",
+                ".",
+                "NAME=\"Some Distribution\"\nID=\"somedist\"\n",
+                statuses.success,
+                "somedist",
+            ),
+            (
+                "the same file through the bash spelling",
+                "source",
+                "ID=\"somedist\"\n",
+                statuses.success,
+                "somedist",
+            ),
+            (
+                "an unquoted value",
+                ".",
+                "ID=somedist\nID_LIKE=other\n",
+                statuses.success,
+                "somedist",
+            ),
+            (
+                "a value the file computes from the one above it",
+                ".",
+                "BASE=some\nID=\"${BASE}dist\"\n",
+                statuses.success,
+                "somedist",
+            ),
+            (
+                "a file whose last assignment wins",
+                ".",
+                "ID=first\nID=somedist\n",
+                statuses.success,
+                "somedist",
+            ),
+        ];
+        for (case, spelling, contents, expected, read) in rows {
+            let mut held = working_tree_session();
+            assert!(
+                held.put_file("/etc/release-file", contents),
+                "case {case:?}: the tree must take the file the environment published"
+            );
+            let status = held.run(&format!("{spelling} /etc/release-file"));
+            assert_eq!(
+                status, expected,
+                "case {case:?}: expected the status {expected}, got {status}"
+            );
+            assert_eq!(
+                held.variable("ID").unwrap_or_default(),
+                read,
+                "case {case:?}: expected ID {read:?}, got {:?}",
+                held.variable("ID")
+            );
+            // The same file read inside a command substitution: what the sourced
+            // assignments set is the WORD, and the subshell leaves the session as it was.
+            let mut substituting = working_tree_session();
+            assert!(
+                substituting.put_file("/etc/release-file", contents),
+                "case {case:?}: the tree must take the file the environment published"
+            );
+            assert_eq!(
+                substituting.run(&format!(
+                    "export READ=\"$({spelling} /etc/release-file && echo $ID)\""
+                )),
+                statuses.success,
+                "case {case:?}: the substitution must be performed"
+            );
+            assert_eq!(
+                substituting.variable("READ").unwrap_or_default(),
+                read,
+                "case {case:?}: expected READ {read:?}, got {:?}",
+                substituting.variable("READ")
+            );
+            assert_eq!(
+                substituting.variable("ID"),
+                None,
+                "case {case:?}: the subshell's own variables do not reach the session, got {:?}",
+                substituting.variable("ID")
+            );
+        }
+        // A path the tree holds no file for: the utility could not read it, and nothing was
+        // performed.
+        let mut missing = working_tree_session();
+        assert_eq!(
+            missing.run(". /etc/absent-file"),
+            statuses.failure,
+            "case \"a path the tree holds no file for\": expected the status for a file that \
+             could not be read"
+        );
+        // A session with no tree of its own has no file to read commands from at all.
+        let mut without = session();
+        assert_eq!(
+            without.run(". /etc/release-file"),
+            statuses.could_not_run,
+            "case \"a session with no tree\": the utility is one it does not perform"
         );
     }
 }
