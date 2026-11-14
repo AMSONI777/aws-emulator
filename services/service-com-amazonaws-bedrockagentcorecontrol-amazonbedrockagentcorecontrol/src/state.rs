@@ -1299,16 +1299,22 @@ pub fn harness_not_found(harness_id: &str) -> ResourceNotFoundException {
     }
 }
 
-/// The modelled not-found error for an endpoint the named harness does not hold.
+/// The modelled not-found error for a harness endpoint the request addressed.
 ///
-/// Worded like the harness's own 404 ([`harness_not_found`]) — this control plane
-/// words a missing resource of the harness family in terms of the agent it runs —
-/// with the endpoint named by the one identifier its route addresses it by.
-/// Shared by the handlers rather than written per operation, so one endpoint
-/// cannot be reported missing in two different sentences by two operations.
-pub fn harness_endpoint_not_found(endpoint_name: &str) -> ResourceNotFoundException {
+/// An operation whose route addresses ONE endpoint carries both identifiers the
+/// endpoint is named by — the harness and the endpoint name, both `@required`
+/// `@httpLabel` — so what it could not find is that endpoint, and the sentence is
+/// at endpoint granularity: the endpoint name and the harness it was looked for
+/// on, both taken from the request path. The parent harness missing is the same
+/// answer: the lookup that failed is still the endpoint's, so an operation
+/// addressing an endpoint never reports the harness's own sentence
+/// ([`harness_not_found`], which belongs to the operations that address a
+/// harness). Shared by the handlers rather than written per operation, so one
+/// endpoint cannot be reported missing in two different sentences by two
+/// operations, and the asking operation's verb never appears.
+pub fn harness_endpoint_not_found(endpoint_name: &str, harness_id: &str) -> ResourceNotFoundException {
     ResourceNotFoundException {
-        message: Some(format!("Agent endpoint with name {endpoint_name} not found.")),
+        message: Some(format!("Endpoint {endpoint_name} not found for harness {harness_id}.")),
     }
 }
 

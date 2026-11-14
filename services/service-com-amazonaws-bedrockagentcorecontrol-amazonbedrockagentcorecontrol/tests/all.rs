@@ -81,6 +81,8 @@ mod gateway_wire_shape;
 mod harness;
 #[path = "all/harness_endpoint_lifecycle.rs"]
 mod harness_endpoint_lifecycle;
+#[path = "all/harness_endpoint_not_found_wording.rs"]
+mod harness_endpoint_not_found_wording;
 #[path = "all/harness_lifecycle.rs"]
 mod harness_lifecycle;
 #[path = "all/harness_version_listing.rs"]

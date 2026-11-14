@@ -156,18 +156,16 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         let now = ::std::time::SystemTime::now();
         let store = state.lock();
 
-        // An endpoint is addressed only through its harness, so a harness this account
-        // does not hold is reported missing as the harness it is, not as the endpoint.
-        let harness = store.harnesses.get(&input.harness_id).ok_or_else(|| {
+        // Both path labels address ONE endpoint, so the lookup this call performs is
+        // the endpoint's: its absence is reported at endpoint granularity whether the
+        // endpoint or the harness that would hold it is the missing one.
+        let not_found = || {
             GetHarnessEndpointErrorModeled::ResourceNotFoundException(
-                crate::state::harness_not_found(&input.harness_id),
+                crate::state::harness_endpoint_not_found(&input.endpoint_name, &input.harness_id),
             )
-        })?;
-        let endpoint = harness.endpoints.get(&input.endpoint_name).ok_or_else(|| {
-            GetHarnessEndpointErrorModeled::ResourceNotFoundException(
-                crate::state::harness_endpoint_not_found(&input.endpoint_name),
-            )
-        })?;
+        };
+        let harness = store.harnesses.get(&input.harness_id).ok_or_else(not_found)?;
+        let endpoint = harness.endpoints.get(&input.endpoint_name).ok_or_else(not_found)?;
 
         Ok(GetHarnessEndpointOutput {
             endpoint: endpoint.endpoint(&harness.harness_id, &harness.harness_name, now),

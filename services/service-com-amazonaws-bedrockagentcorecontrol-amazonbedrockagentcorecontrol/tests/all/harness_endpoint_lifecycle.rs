@@ -397,8 +397,8 @@ async fn an_endpoint_becomes_ready_and_serves_its_target_version() {
 ///
 /// The rows differ along what the request names that no stored endpoint answers to: a
 /// harness id nothing created, an endpoint name its harness does not hold, and another
-/// harness's endpoint name. A missing harness is reported as the harness it is; a missing
-/// endpoint as the endpoint.
+/// harness's endpoint name. Each is reported at endpoint granularity, because both path
+/// labels address one endpoint.
 #[tokio::test]
 async fn an_endpoint_is_addressed_only_through_its_harness() {
     let router = router();
@@ -417,19 +417,19 @@ async fn an_endpoint_is_addressed_only_through_its_harness() {
             "a harnessId inside its pattern that names no stored harness",
             ABSENT_HARNESS_ID.to_string(),
             "onlyHere",
-            format!("Agent with name {ABSENT_HARNESS_ID} not found."),
+            format!("Endpoint onlyHere not found for harness {ABSENT_HARNESS_ID}."),
         ),
         (
             "an endpoint name the harness does not hold",
             first.clone(),
             "neverCreated",
-            "Agent endpoint with name neverCreated not found.".to_string(),
+            format!("Endpoint neverCreated not found for harness {first}."),
         ),
         (
             "another harness's endpoint name",
             second.clone(),
             "onlyHere",
-            "Agent endpoint with name onlyHere not found.".to_string(),
+            format!("Endpoint onlyHere not found for harness {second}."),
         ),
     ];
 
