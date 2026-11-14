@@ -3218,3 +3218,9 @@ mod cloudformation_bucket_handles_drive_their_owning_services;
 // legal before the first item of a module, and this note sits in the appended tail.)
 // leaving a note here. (Ordinary comments: an inner doc comment `//!` may only appear
 // before any item, so one in this appended tail is `E0753` and compiles nothing.)
+// leaving a note here. (An inner doc comment — `//!` — belongs to the CRATE ROOT, so it
+// is only ever legal in the head of this file; one here is `E0753` and fails the target.)
+// leaving a note here. (Ordinary comments: an inner doc comment is legal only before the
+// first item, so a `//!` line in this tail is `E0753` and compiles no suite.)
+// this file and for every service crate's `tests/all.rs`. (Ordinary comment, for the
+// reason the note above records.)

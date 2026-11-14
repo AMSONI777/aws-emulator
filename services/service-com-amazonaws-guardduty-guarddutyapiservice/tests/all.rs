@@ -225,6 +225,8 @@ mod no_op_mutation_clock;
 mod object_malware_scan;
 #[path = "all/org_configuration_authorization.rs"]
 mod org_configuration_authorization;
+#[path = "all/org_configuration_refusal_shape.rs"]
+mod org_configuration_refusal_shape;
 #[path = "all/organization_admin_accounts.rs"]
 mod organization_admin_accounts;
 #[path = "all/organization_admin_no_op_clock.rs"]

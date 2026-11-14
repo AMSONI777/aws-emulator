@@ -47,7 +47,7 @@ use crate::organization_admin_accounts::{disable_admin, enable_admin, past_the_r
 /// The create and the listing are bound at `/custom-detection-rule/org-configuration`;
 /// the read, the update and the delete hang `{RuleId}` off it
 /// (`smithy_query(operation="CreateCustomDetectionRuleOrgConfiguration,ListCustomDetectionRuleOrgConfigurations,GetCustomDetectionRuleOrgConfiguration,UpdateCustomDetectionRuleOrgConfiguration,DeleteCustomDetectionRuleOrgConfiguration")`).
-const ORG_CONFIGURATION_PATH: &str = "/custom-detection-rule/org-configuration";
+pub(crate) const ORG_CONFIGURATION_PATH: &str = "/custom-detection-rule/org-configuration";
 
 /// `CreateCustomDetectionRuleAssociation` is `POST /custom-detection-rule/association`,
 /// and the read, the update and the delete of one association hang off
@@ -58,7 +58,7 @@ const ASSOCIATIONS_PATH: &str = "/custom-detection-rule/association";
 const RULES_PATH: &str = "/custom-detection-rule/rule";
 
 /// Every `AssociationMode` member (`smithy_query(shape="AssociationMode")`).
-const MODES: [&str; 2] = ["DRY_RUN", "LIVE"];
+pub(crate) const MODES: [&str; 2] = ["DRY_RUN", "LIVE"];
 
 /// The Region the harness signs for by default, and a second one, so the standing is
 /// shown to be the Region's own.
@@ -68,27 +68,27 @@ const OTHER_REGION: &str = "eu-west-1";
 
 /// The error CLASS the body of an authorization refusal carries in both `__type` and
 /// its own `type` member.
-const INVALID_INPUT: &str = "InvalidInputException";
+pub(crate) const INVALID_INPUT: &str = "InvalidInputException";
 
 /// The modelled error SHAPE such a refusal is enveloped in, as `x-amzn-errortype`
 /// carries it (`smithy_query(operation="CreateCustomDetectionRuleOrgConfiguration")`
 /// declares it).
-const ACCESS_DENIED: &str = "AccessDeniedException";
+pub(crate) const ACCESS_DENIED: &str = "AccessDeniedException";
 
 /// The modelled 404 shape the read and the update of an absent association answer.
 const NOT_FOUND: &str = "ResourceNotFoundException";
 
 /// The message a caller without the standing is refused with — written out here
 /// rather than read from the service, so this suite pins the words themselves.
-const NOT_AUTHORIZED: &str =
+pub(crate) const NOT_AUTHORIZED: &str =
     "The request is rejected because the caller is not authorized to call this API.";
 
 /// A well-formed account id (12 decimal digits) that is not the account this emulator
 /// serves, so designating it leaves the caller without the standing.
-const ANOTHER_ACCOUNT_ID: &str = "111122223333";
+pub(crate) const ANOTHER_ACCOUNT_ID: &str = "111122223333";
 
 /// Well-formed account ids an organization configuration's scope may name.
-const ACCOUNTS: [&str; 2] = ["222233334444", "333344445555"];
+pub(crate) const ACCOUNTS: [&str; 2] = ["222233334444", "333344445555"];
 
 /// A well-formed `AssociationId` (`^[a-zA-Z0-9_-]{1,64}$`) no create ever minted.
 const ABSENT_ASSOCIATION_ID: &str = "deadbeefdeadbeefdeadbeefdeadbeef";
@@ -214,7 +214,7 @@ fn assert_not_authorized(case: &str, status: u16, body: &Value) {
 
 /// The standing a case leaves the Region's organization in before it calls.
 #[derive(Debug, Clone, Copy)]
-enum Standing {
+pub(crate) enum Standing {
     /// Nothing designated at all.
     Undesignated,
     /// Another account designated, so the caller is not the one.
@@ -243,7 +243,7 @@ const WITHOUT_STANDING: [(&str, Standing); 4] = [
 ];
 
 /// Leave `region`'s organization in `standing`.
-async fn establish(router: &Router, region: &str, standing: Standing) {
+pub(crate) async fn establish(router: &Router, region: &str, standing: Standing) {
     match standing {
         Standing::Undesignated => {}
         Standing::AnotherAccount => {
