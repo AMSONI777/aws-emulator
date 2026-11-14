@@ -317,6 +317,24 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         )
         .await;
 
+        // The servers themselves are placed ON that network: Directory Service "creates a
+        // directory server and a DNS server in each of these subnets"
+        // (`DirectoryVpcSettings$SubnetIds`), and a server on a VPC subnet answers on an
+        // elastic network interface there. A network interface is Amazon EC2's resource, so
+        // each one is CREATED THERE — one per resolved subnet, in that subnet, carrying the
+        // group provisioned above and the address that subnet's server answers DNS at — and
+        // the identifiers EC2 minted are recorded on the directory, which is what the
+        // teardown releases again. A directory created with no placement at all has no
+        // resolved subnet, so nothing is asked for.
+        let provisioned_network_interfaces = crate::state::provision_server_interfaces(
+            ctx,
+            &primary_region,
+            &directory_id,
+            &subnet_networks,
+            security_group_id.as_deref(),
+        )
+        .await;
+
         let mut store = state.lock();
         let seq = store.next_seq();
         let record = crate::state::Directory {
@@ -353,6 +371,9 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
             // The subnets this directory's servers are placed in, as the owner of subnets
             // reported them: the blocks their addresses are counted out of.
             subnet_networks,
+            // The interfaces the hop above placed for those servers in the service that owns
+            // network interfaces, as EC2 minted them, keyed by the subnet each one sits in.
+            provisioned_network_interfaces,
             // A Simple AD directory serves DNS from its own directory servers, not from a
             // self-managed directory's.
             customer_dns_ips: Vec::new(),

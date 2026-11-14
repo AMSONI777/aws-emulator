@@ -151,7 +151,10 @@ async fn resize_settled(
 #[derive(Debug, Clone)]
 pub(crate) struct AccountSubnet {
     pub(crate) id: String,
-    cidr: String,
+    /// The block EC2 reports for the subnet: what an address of a server placed there has to
+    /// come out of. `pub(crate)` because the sibling suites assert against the block the
+    /// OWNER reports rather than reading it a second time.
+    pub(crate) cidr: String,
     zone: String,
 }
 

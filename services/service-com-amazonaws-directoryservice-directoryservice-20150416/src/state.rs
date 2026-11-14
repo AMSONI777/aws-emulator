@@ -58,6 +58,10 @@
 //! * [`directory_network`], where a directory's servers sit on the account's network: the
 //!   subnets a create places them in, as the service that OWNS subnets reports them, and the
 //!   address each server answers DNS at, counted out of its own subnet's CIDR block.
+//! * [`ec2_network_interfaces`], what a create PLACES on that network and what the teardown
+//!   releases again: one network interface per resolved subnet, created in the service that
+//!   OWNS network interfaces, carrying the group provisioned for the directory's servers and
+//!   the address that owner assigned the subnet's server.
 //! * [`subnet_zones`], the half of the two-zone placement rule ([`subnet_pair_defect`] is
 //!   the other) that is a fact about that network rather than about the request, decided
 //!   over the subnets a create already resolved.
@@ -87,6 +91,7 @@ mod directory_deletion;
 pub mod directory_network;
 pub mod directory_servers;
 pub mod directory_updates;
+pub mod ec2_network_interfaces;
 pub mod ec2_security_groups;
 pub mod ec2_subnets;
 pub mod security_log;
@@ -104,8 +109,11 @@ pub use diagnostics::*;
 pub use directory_deletion::{STAGE_DELETED, STAGE_DELETING};
 pub use directory_updates::UpdateActivityRecord;
 
-pub use directory_network::{server_address, SubnetNetwork};
+pub use directory_network::{address_after, server_address, SubnetNetwork};
 pub use directory_servers::{os_version_of, MICROSOFT_AD_OS_VERSION};
+pub use ec2_network_interfaces::{
+    provision_server_interfaces, release_server_interfaces, ServerInterface,
+};
 pub use ec2_security_groups::{
     placement_vpc_id, provision_controllers_group, release_controllers_group,
 };
@@ -2256,6 +2264,14 @@ pub struct Directory {
     /// ([`Self::server_addresses`]) and the zones it reports; a subnet the owner of subnets
     /// could not be asked about is simply absent, and its server then holds no address.
     pub subnet_networks: BTreeMap<String, SubnetNetwork>,
+    /// The network interfaces this service PLACED for this directory's servers in Amazon EC2
+    /// — the service that owns network interfaces — keyed by the subnet each one sits in: one
+    /// per subnet of the placement the create resolved
+    /// ([`ec2_network_interfaces::provision_server_interfaces`]), recorded off EC2's own
+    /// answers, which is what the teardown releases again and where the addresses the
+    /// directory's servers answer at come from. Empty for a directory whose placement resolved
+    /// to nothing, which has no network to answer on.
+    pub provisioned_network_interfaces: BTreeMap<String, ServerInterface>,
     /// The DNS servers of the SELF-MANAGED directory an AD Connector forwards to, as
     /// `ConnectDirectory` was called with them (`DirectoryConnectSettings$CustomerDnsIps`):
     /// what `DirectoryDescription$DnsIpAddrs` reports for a connector, whose DNS is served
@@ -2413,13 +2429,25 @@ impl Directory {
     }
 
     /// The address the `ordinal`-th server this directory places in the subnet `subnet_id`
-    /// holds: an address out of THAT subnet's own CIDR block ([`server_address`]).
+    /// holds.
+    ///
+    /// The address of the interface the create placed in that subnet when there is one, the
+    /// one the service that OWNS network interfaces assigned out of the subnet's range
+    /// ([`ec2_network_interfaces`]), counted on by `ordinal` for a second server of the same
+    /// subnet ([`address_after`]) — so the address this service reports is the address the
+    /// directory's server really answers on, and two directories in one subnet never report
+    /// one address. A subnet no interface was placed in falls back to the `ordinal`-th
+    /// assignable address of its own block ([`server_address`]).
     ///
     /// `None` when the subnet was not resolved — a directory created where the owner of
     /// subnets could not be asked serves no address rather than an invented one.
     pub fn server_address_in(&self, subnet_id: Option<&str>, ordinal: u32) -> Option<String> {
         let network = self.subnet_network(subnet_id)?;
-        server_address(network.cidr_block.as_deref()?, ordinal)
+        let block = network.cidr_block.as_deref()?;
+        match subnet_id.and_then(|subnet_id| self.interface_address_in(subnet_id)) {
+            Some(first) => address_after(first, ordinal, block),
+            None => server_address(block, ordinal),
+        }
     }
 
     /// The addresses of the servers this directory places ITSELF: one per subnet of its

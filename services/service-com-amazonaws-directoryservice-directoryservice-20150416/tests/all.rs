@@ -71,6 +71,8 @@ mod directory_networking_and_settings;
 mod directory_os_version;
 #[path = "all/directory_security_group.rs"]
 mod directory_security_group;
+#[path = "all/directory_server_interfaces.rs"]
+mod directory_server_interfaces;
 #[path = "all/directory_settings.rs"]
 mod directory_settings;
 #[path = "all/directory_unsharing.rs"]

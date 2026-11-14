@@ -18,9 +18,12 @@
 //! the teardown no further: the chain keeps the instant the first delete started it from.
 //!
 //! The teardown also releases what the create provisioned for the directory in ANOTHER
-//! service: the domain controller security group is Amazon EC2's resource, created there by
-//! the create, so it is deleted THERE over the same in-process callback, and the directory
-//! stops naming a group the owner of security groups no longer holds.
+//! service: the network interfaces the directory's servers answered on and the domain
+//! controller security group are Amazon EC2's resources, created there by the create, so they
+//! are deleted THERE over the same in-process callback — the interfaces first, since EC2
+//! refuses to delete a group an interface still holds — and the directory stops naming a
+//! group the owner of security groups no longer holds while the caller's own subnets stop
+//! being held by the interfaces of a directory that is gone.
 //!
 //! "After an alias has been created, it cannot be deleted or reused", so deleting the
 //! directory leaves its alias reserved: a later `CreateAlias` asking for it is refused.
@@ -148,7 +151,7 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         let now = ::std::time::SystemTime::now();
         // The directory's own record, and the network its servers sat on, under ONE
         // short-lived lock: the hop into the owner of security groups below holds no guard.
-        let (directory_id, provisioned_group) = {
+        let (directory_id, provisioned_group, provisioned_interfaces) = {
             let mut store = state.lock();
             store.advance_clock(now);
 
@@ -173,6 +176,13 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
                 .get(&directory_id)
                 .and_then(|directory| directory.provisioned_security_group_id())
                 .map(str::to_string);
+            // ...and the network interfaces those servers answered on, read off the same
+            // record for the same reason.
+            let provisioned_interfaces = store
+                .directories
+                .get(&directory_id)
+                .map(crate::state::Directory::provisioned_network_interface_ids)
+                .unwrap_or_default();
 
             // The directory stops serving its OBJECTS the moment the teardown starts: a
             // directory being decommissioned answers no data-plane call, so the shared
@@ -185,8 +195,25 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
                 inventory.lock().forget(&directory_id);
             }
 
-            (directory_id, provisioned_group)
+            (directory_id, provisioned_group, provisioned_interfaces)
         };
+
+        // The teardown releases what the create placed for the directory's servers in ANOTHER
+        // service. The network interfaces those servers answered on go FIRST: they are Amazon
+        // EC2's resources, created there by the create, so they are DELETED THERE — a client
+        // that reconciles the directory's network against EC2 after the delete finds them
+        // gone, and the caller's own subnets and VPC stop being held by interfaces of a
+        // directory that no longer exists. Before the group, because EC2 refuses to delete a
+        // security group an interface still holds.
+        if !provisioned_interfaces.is_empty() {
+            let released =
+                crate::state::release_server_interfaces(ctx, &region, &provisioned_interfaces)
+                    .await;
+            let mut store = state.lock();
+            if let Some(directory) = store.directories.get_mut(&directory_id) {
+                directory.forget_network_interfaces(&released);
+            }
+        }
 
         // The teardown also releases the network the create provisioned for the directory's
         // servers: the domain controller security group is Amazon EC2's resource, created

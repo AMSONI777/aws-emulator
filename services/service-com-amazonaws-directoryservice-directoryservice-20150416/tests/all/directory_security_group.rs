@@ -70,7 +70,11 @@ fn assert_security_group_id(id: &str, case: &str) {
 
 /// The VPC EC2 reports for `subnet_id` — the network the directory's servers really sit on,
 /// which is what the group it is given has to be in.
-async fn vpc_of(ec2: &::aws_sdk_ec2::Client, subnet_id: &str) -> String {
+///
+/// `pub(crate)` because the sibling suite `directory_server_interfaces` asks the owner of
+/// subnets the same question about the interfaces placed there, rather than reading it a
+/// second time.
+pub(crate) async fn vpc_of(ec2: &::aws_sdk_ec2::Client, subnet_id: &str) -> String {
     let described = ec2
         .describe_subnets()
         .subnet_ids(subnet_id)

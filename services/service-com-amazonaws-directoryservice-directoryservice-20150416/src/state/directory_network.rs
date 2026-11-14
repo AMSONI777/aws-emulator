@@ -66,8 +66,36 @@ pub struct SubnetNetwork {
 /// account can hold is the fifth one in the block.
 const RESERVED_LEADING_ADDRESSES: u32 = 4;
 
-/// The address the `ordinal`-th server a directory places in `cidr_block` holds: the
-/// `ordinal`-th assignable address of that block.
+/// The address the `ordinal`-th server a directory places in a subnet holds, counting from
+/// `first` — the address the owner of network interfaces assigned that subnet's FIRST server
+/// ([`super::ec2_network_interfaces`]).
+///
+/// The one place a server's address is counted from the address another service really
+/// assigned, so a directory whose servers answer on interfaces EC2 holds reports exactly
+/// those addresses and a second server of the same subnet still holds one of its own. Two
+/// directories in one subnet therefore never report one address: the owner of network
+/// interfaces hands each of them a free one.
+///
+/// `None` when `first` is not an IPv4 address, when `cidr_block` is not an IPv4 CIDR block, or
+/// when the block has no such address — an address counted past the end of the block, or onto
+/// one of the two addresses reserved at its ends, belongs to no server of that subnet.
+#[must_use]
+pub fn address_after(first: &str, ordinal: u32, cidr_block: &str) -> Option<String> {
+    let block: ::ipnet::Ipv4Net = cidr_block.parse().ok()?;
+    let first: ::std::net::Ipv4Addr = first.parse().ok()?;
+    let candidate = ::std::net::Ipv4Addr::from(u32::from(first).checked_add(ordinal)?);
+    if !block.contains(&candidate)
+        || candidate == block.network()
+        || candidate == block.broadcast()
+    {
+        return None;
+    }
+    Some(candidate.to_string())
+}
+
+/// The address the `ordinal`-th server a directory places in `cidr_block` holds, where the
+/// owner of network interfaces assigned none: the `ordinal`-th assignable address of that
+/// block.
 ///
 /// THE one place this service turns a subnet's block into a server's address, so a
 /// directory's DNS addresses and its domain controllers' addresses cannot disagree, and

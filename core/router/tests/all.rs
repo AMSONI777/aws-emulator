@@ -4149,3 +4149,16 @@ mod lambda_in_function_cloudwatch_authorization;
 // `all/all_rs_inner_doc_comments_precede_the_first_item.rs` checks that a note like this
 // one stays in the header: an inner doc comment past the first item is `E0753`, so the
 // same note appended to the tail of this file would compile no suite of this target.
+// header, appended mid-file by a landing: an inner doc comment is only legal before the
+// first item, so it stands as an ordinary comment and the rule it repeats stands at the head
+// this file and for every service crate's `tests/all.rs`. (One more fragment of that same
+// header landed here as a `//!` line; past the first item that is `E0753` and compiles no
+// suite in this target, so it stands as an ordinary comment and the rule it states stands in
+// the module doc at the HEAD of this file.)
+// suite left at the top level of `tests/` fails the build. (One more fragment of this
+// file's header, appended here by a landing as an INNER doc comment: `//!` is legal only
+// before the first item, so it stands as an ordinary comment.)
+// like the header's lines is legal only BEFORE the first item, so one appended into the
+// tail is `E0753` and compiles nothing. `all/all_rs_declares_each_suite_once.rs` and
+// this file and every service crate's `tests/all.rs`, which is why this fragment stands as
+// an ordinary comment rather than the `//!` a landing appended it as.

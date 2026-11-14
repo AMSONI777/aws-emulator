@@ -30,7 +30,11 @@
 //! security group is created in the service that OWNS security groups, in the VPC those
 //! subnets belong to ([`crate::state::provision_controllers_group`]), and the id it minted is
 //! recorded on the directory — the `VpcSettings.SecurityGroupId` every reporting operation
-//! then names.
+//! then names. The controllers are placed ON that network too: one network interface per
+//! resolved subnet is created in the service that OWNS network interfaces
+//! ([`crate::state::provision_server_interfaces`]), in that subnet, carrying that group and
+//! the address the subnet's controller answers DNS at, so a client reading the directory's
+//! network off EC2 finds the interfaces its servers really answer on.
 //!
 //! The directory is persisted in the modelled `Requested` stage, and the stage the create
 //! owes is the CHAIN a build goes through: `Creating` once
@@ -341,6 +345,23 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         )
         .await;
 
+        // The servers themselves are placed ON that network: Directory Service "creates a
+        // directory server and a DNS server in each of these subnets"
+        // (`DirectoryVpcSettings$SubnetIds`), and a server on a VPC subnet answers on an
+        // elastic network interface there. A network interface is Amazon EC2's resource, so
+        // each one is CREATED THERE — one per resolved subnet, in that subnet, carrying the
+        // group provisioned above and the address that subnet's server answers DNS at — and
+        // the identifiers EC2 minted are recorded on the directory, which is what the
+        // teardown releases again.
+        let provisioned_network_interfaces = crate::state::provision_server_interfaces(
+            ctx,
+            &region,
+            &directory_id,
+            &subnet_networks,
+            security_group_id.as_deref(),
+        )
+        .await;
+
         let mut store = state.lock();
         let seq = store.next_seq();
         let record = crate::state::Directory {
@@ -377,6 +398,9 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
             // reported them: the blocks their addresses — the `DnsIpAddrs` the directory
             // serves — are counted out of.
             subnet_networks,
+            // The interfaces the hop above placed for those servers in the service that owns
+            // network interfaces, as EC2 minted them, keyed by the subnet each one sits in.
+            provisioned_network_interfaces,
             // A Managed Microsoft AD directory serves DNS from its own domain controllers,
             // not from a self-managed directory's servers.
             customer_dns_ips: Vec::new(),

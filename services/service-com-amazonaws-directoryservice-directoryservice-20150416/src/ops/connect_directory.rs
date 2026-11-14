@@ -306,6 +306,21 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         )
         .await;
 
+        // The connector's servers are placed ON that network: a server on a VPC subnet
+        // answers on an elastic network interface there, which is Amazon EC2's resource, so
+        // each one is CREATED THERE — one per resolved subnet, in that subnet, carrying the
+        // group provisioned above and the address that subnet's connector server holds — and
+        // the identifiers EC2 minted are recorded on the directory, which is what the
+        // teardown releases again.
+        let provisioned_network_interfaces = crate::state::provision_server_interfaces(
+            ctx,
+            &region,
+            &directory_id,
+            &subnet_networks,
+            security_group_id.as_deref(),
+        )
+        .await;
+
         let mut store = state.lock();
         let seq = store.next_seq();
         let record = crate::state::Directory {
@@ -348,6 +363,9 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
             // The subnets this connector's servers are placed in, as the owner of subnets
             // reported them: the blocks their addresses are counted out of.
             subnet_networks,
+            // The interfaces the hop above placed for those servers in the service that owns
+            // network interfaces, as EC2 minted them, keyed by the subnet each one sits in.
+            provisioned_network_interfaces,
             // An AD Connector serves no DNS of its own: the servers a client points a
             // resolver at are the self-managed directory's, which this create names
             // (`DirectoryConnectSettings$CustomerDnsIps`) and `DnsIpAddrs` reports.
