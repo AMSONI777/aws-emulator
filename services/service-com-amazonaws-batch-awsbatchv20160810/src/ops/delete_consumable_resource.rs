@@ -13,7 +13,10 @@
 //! Like every removal on this surface (`DeleteComputeEnvironment`, `DeleteJobQueue`,
 //! `DeregisterJobDefinition`) it is IDEMPOTENT in its identifier: one that resolves to
 //! nothing asks for a post-state that already holds, so it answers the same empty
-//! success and stores nothing.
+//! success and stores nothing. An identifier outside the pattern Batch holds its resource
+//! names to is refused instead, before the lookup
+//! ([`crate::state::unsupported_identifier`]): it names no resource that could ever have
+//! existed, so there is no post-state for it to already hold.
 //!
 //! This is the ONLY file to touch for this operation.
 //!
@@ -152,6 +155,18 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
             .into());
         };
         let now = batch::now_millis();
+        // "The name or ARN of the consumable resource that will be deleted": a name
+        // outside the pattern Batch holds its resource names to names no resource this
+        // service could hold, so it is refused before the lookup
+        // ([`batch::unsupported_identifier`]) rather than reported as a delete of
+        // something already gone.
+        if let Some(refusal) = batch::unsupported_identifier(
+            &input.consumable_resource,
+            &input.consumable_resource,
+        ) {
+            return Err(DeleteConsumableResourceErrorModeled::ClientException(refusal).into());
+        }
+
         let mut state = state.lock();
         state.materialize_due(now);
 

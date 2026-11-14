@@ -187,6 +187,14 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
                 batch::limits::MAX_SERVICE_ENVIRONMENT_CAPACITY_LIMITS,
             )
             .map_err(refuse)?;
+            // The list REPLACES the stored one, so it is held to the rule the create holds
+            // its list to: an entry stating a non-positive `maxCapacity` is refused before
+            // anything is written, and the environment keeps the capacity it had. This
+            // plane is recorded stating that rule BARE, where the create states it in
+            // Batch's input-validation envelope.
+            if let Some(detail) = batch::service_environment_capacity_limits_detail(requested) {
+                return Err(refuse(detail.to_string()));
+            }
         }
 
         let Some(name) = state.service_environment_name(&input.service_environment) else {

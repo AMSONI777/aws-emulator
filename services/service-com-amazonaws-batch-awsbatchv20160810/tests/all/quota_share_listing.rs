@@ -17,9 +17,10 @@
 //!   order, `maxResults` is accepted on both published bounds and refused one past either,
 //!   and a request that names none is still bounded at the documented default;
 //! * a request this operation cannot answer is the modelled `ClientException` (HTTP 400):
-//!   a `jobQueue` that resolves to no stored queue, a `maxResults` outside the published
-//!   bounds, and a `nextToken` that resumes nothing — which carries the detail Batch words
-//!   an unusable token with, echoing nothing of the token itself;
+//!   a `maxResults` outside the published bounds, and a `nextToken` that resumes nothing —
+//!   which carries the detail Batch words an unusable token with, echoing nothing of the
+//!   token itself; a `jobQueue` that resolves to no stored queue is NOT one of them: the
+//!   queue filters the shares, so it answers an empty page;
 //! * a listing is a READ: it reports a share's `CREATING` status while the clock still owes
 //!   the move to `VALID`, it answers identically twice at one instant, and it follows the
 //!   writes.
@@ -120,7 +121,7 @@ fn shares() -> Vec<Share> {
                 "preemptionConfiguration": {"inSharePreemption": "ENABLED"},
                 "tags": {"team": "research", "cost-centre": "42"},
                 "capacityLimits": [
-                    {"maxCapacity": 0, "capacityUnit": "ml.m5.large"},
+                    {"maxCapacity": 1, "capacityUnit": "ml.m5.large"},
                     {"maxCapacity": 3, "capacityUnit": "ml.m5.2xlarge"},
                     {"maxCapacity": 9, "capacityUnit": "ml.p4d.24xlarge"},
                 ],
@@ -417,8 +418,8 @@ async fn paging_sees_every_quota_share_exactly_once() {
 }
 
 /// RULE: a request this operation cannot answer is the modelled `ClientException` (HTTP
-/// 400): an unknown `jobQueue`, a `maxResults` outside the published 1..100, and a
-/// `nextToken` that resumes nothing.
+/// 400): a `maxResults` outside the published 1..100, and a `nextToken` that resumes
+/// nothing.
 #[tokio::test]
 async fn a_listing_refuses_what_it_cannot_answer() {
     let batch = Batch::new();
@@ -427,18 +428,6 @@ async fn a_listing_refuses_what_it_cannot_answer() {
     // Rows differ in WHICH part of the request is unusable; each must be the modelled 400,
     // never a 5xx or a 501.
     let cases: Vec<(String, Value)> = vec![
-        (
-            "a job queue name nothing holds".to_string(),
-            json!({"jobQueue": "jq-no-such-queue"}),
-        ),
-        (
-            "a job queue ARN nothing holds".to_string(),
-            json!({"jobQueue": arn("job-queue/jq-no-such-queue")}),
-        ),
-        (
-            "a jobQueue that is not a reference to anything".to_string(),
-            json!({"jobQueue": "not-a-queue-at-all"}),
-        ),
         (
             "maxResults one below the published minimum".to_string(),
             json!({"jobQueue": QUEUE, "maxResults": state::MIN_LIST_QUOTA_SHARES_RESULTS - 1}),

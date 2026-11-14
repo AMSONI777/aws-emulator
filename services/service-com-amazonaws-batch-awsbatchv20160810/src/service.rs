@@ -69,7 +69,7 @@ use request_id_header::RequestIdHeaderOperation;
 // own: one definition, in `crate::scaffolded`, which the handlers on the tagging endpoint
 // answer through as well, so the boundary and the handlers cannot drift to two codes for
 // one layer.
-use crate::scaffolded::TAGGING_REFUSAL_CODE;
+use crate::scaffolded::FRONTEND_REFUSAL_CODE;
 
 /// The error code AWS answers every OTHER refusal of a Batch request with.
 ///
@@ -232,7 +232,7 @@ impl<Eng: Send + Sync + 'static> Service for EmulatedService<Eng> {
                             .unwrap_or_else(|| "invalid request".to_string())
                     };
                     return Some(Refused {
-                        code: TAGGING_REFUSAL_CODE.to_string(),
+                        code: FRONTEND_REFUSAL_CODE.to_string(),
                         message,
                     });
                 }

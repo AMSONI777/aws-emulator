@@ -12,7 +12,10 @@
 //! output and ending work that is not there is already the state the caller asked for, so
 //! the call answers 200, fabricates no job (a later `DescribeJobs` still reports none for
 //! that id) and leaves the store untouched — exactly as `CancelJob` beside it treats an
-//! unknown id. That is what makes a blind retry or a teardown path safe to call.
+//! unknown id. That is what makes a blind retry or a teardown path safe to call. An id a
+//! job could never carry is the separate, earlier refusal: a `jobId` outside the pattern
+//! Batch holds its resource names to is refused before any lookup
+//! ([`crate::state::unsupported_identifier`]).
 //!
 //! This is the ONLY file to touch for this operation.
 //!
@@ -154,6 +157,19 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
             );
         };
         let now = batch::now_millis();
+        // The same identifier rule the cancel applies: a `jobId` outside the pattern Batch
+        // holds its resource names to is refused before any lookup
+        // ([`batch::unsupported_identifier`]), never reported as a terminate that found
+        // nothing to end. An array CHILD is addressed as `<parent>:<index>`, so what the
+        // pattern governs is the id that reference names
+        // ([`batch::job_id_reference_name`]).
+        if let Some(refusal) = batch::unsupported_identifier(
+            &input.job_id,
+            batch::job_id_reference_name(&input.job_id),
+        ) {
+            return Err(TerminateJobErrorModeled::ClientException(refusal).into());
+        }
+
         // The store's lock lives in THIS block and no longer, so nothing holds it while
         // the state changes below are published (that call reaches another service
         // in-process).

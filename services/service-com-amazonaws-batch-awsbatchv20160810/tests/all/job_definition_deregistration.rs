@@ -23,6 +23,8 @@
 
 use serde_json::json;
 
+use service_com_amazonaws_batch_awsbatchv20160810::state;
+
 use crate::job_lifecycle::{
     compute_environment, container_properties, describe_job, error_code, job_definition, job_queue,
     Batch,
@@ -194,7 +196,14 @@ async fn deregistering_an_unknown_reference_changes_nothing() {
             "an ARN of another resource kind",
             format!("arn:aws:batch:us-east-1:000000000000:job-queue/{name}"),
         ),
-        ("an empty reference", String::new()),
+        // A reference OUTSIDE the name pattern Batch holds its identifiers to (an empty
+        // one, or one carrying a character the pattern does not admit) is not an unknown
+        // reference but a refused request; that rule is asserted in
+        // `identifier_and_capacity_rules`.
+        (
+            "a name at the longest accepted length that nothing is registered under",
+            "z".repeat(state::MAX_JOB_DEFINITION_NAME_LEN),
+        ),
     ];
 
     for (case, reference) in cases {

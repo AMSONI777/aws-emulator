@@ -194,14 +194,17 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
 
         // Everything is validated BEFORE anything is written, so a refused update leaves
         // the share exactly as it was. A `capacityLimits` the request carries REPLACES the
-        // stored list, so an empty one would leave the share with no capacity allocated at
-        // all — which is not a share this service can hold, the same refusal the create
-        // answers for it.
-        if input.capacity_limits.as_deref().is_some_and(<[_]>::is_empty) {
+        // stored list, so it is held to the rule the create holds its list to
+        // ([`batch::quota_share_capacity_limits_detail`]): a list that allocates no
+        // capacity, or an entry whose `maxCapacity` is not positive, is not a list this
+        // share may be left with.
+        if let Some(detail) = input
+            .capacity_limits
+            .as_deref()
+            .and_then(batch::quota_share_capacity_limits_detail)
+        {
             return Err(UpdateQuotaShareErrorModeled::ClientException(
-                batch::client_exception_enveloped(
-                    "capacityLimits must name at least one capacity limit.",
-                ),
+                batch::client_exception_enveloped(detail),
             )
             .into());
         }

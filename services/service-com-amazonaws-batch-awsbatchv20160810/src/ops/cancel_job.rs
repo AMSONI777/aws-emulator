@@ -10,7 +10,9 @@
 //! the clock materialises it when the jobs it waits on finish — and a job already in a
 //! terminal status is left exactly as it is. The call itself succeeds in every one of
 //! them, "even if no job is cancelled", including for a `jobId` the service holds no job
-//! for.
+//! for — PROVIDED the id is one a job could carry: a `jobId` outside the pattern Batch
+//! holds its resource names to is refused before any lookup
+//! ([`crate::state::unsupported_identifier`]).
 //!
 //! This is the ONLY file to touch for this operation.
 //!
@@ -156,6 +158,20 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
             return Err(CancelJobErrorModeled::ServerException(batch::unreachable_state()).into());
         };
         let now = batch::now_millis();
+        // `jobId` is a plain `String` in the model, so the framework admits anything: an
+        // identifier outside the pattern Batch holds its resource names to names no job it
+        // could ever hold, and is refused before any lookup
+        // ([`batch::unsupported_identifier`]) rather than reported as a cancel that found
+        // nothing to cancel. An array CHILD is addressed as `<parent>:<index>`, so what the
+        // pattern governs is the id that reference names
+        // ([`batch::job_id_reference_name`]).
+        if let Some(refusal) = batch::unsupported_identifier(
+            &input.job_id,
+            batch::job_id_reference_name(&input.job_id),
+        ) {
+            return Err(CancelJobErrorModeled::ClientException(refusal).into());
+        }
+
         // The store's lock lives in THIS block and no longer, so nothing holds it while
         // the state changes below are published (that call reaches another service
         // in-process).

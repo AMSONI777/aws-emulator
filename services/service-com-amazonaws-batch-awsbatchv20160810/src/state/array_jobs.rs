@@ -31,6 +31,25 @@ pub fn array_child_job_id(parent_id: &str, index: i32) -> String {
     format!("{parent_id}:{index}")
 }
 
+/// The id a job-addressing call NAMES, with the array-child form read apart: the PARENT's
+/// id for a `<parent>:<index>` reference, and the reference itself for any other.
+///
+/// The inverse of [`array_child_job_id`] for the purpose of the rules that govern the
+/// SHAPE of an identifier ([`super::unsupported_identifier`]): a child's id is a job id
+/// with its index after a colon, so the pattern a Batch identifier is held to governs the
+/// part before that colon — exactly as a job definition's `name:revision` reference is
+/// governed on its name ([`super::job_definition_reference_name`]).
+pub fn job_id_reference_name(job_id: &str) -> &str {
+    job_id
+        .rsplit_once(':')
+        .filter(|(parent, index)| {
+            !parent.is_empty()
+                && !index.is_empty()
+                && index.chars().all(|digit| digit.is_ascii_digit())
+        })
+        .map_or(job_id, |(parent, _)| parent)
+}
+
 /// What one CHILD of an array job depends on, given the dependencies its parent's submit
 /// named and the child's own `index`.
 ///

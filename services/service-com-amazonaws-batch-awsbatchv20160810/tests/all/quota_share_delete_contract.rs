@@ -390,7 +390,7 @@ fn rows() -> Vec<Row> {
                 "resourceSharingConfiguration": {"strategy": "LEND_AND_BORROW", "borrowLimit": 200},
                 "preemptionConfiguration": {"inSharePreemption": "ENABLED"},
                 "capacityLimits": [
-                    {"maxCapacity": 0, "capacityUnit": "ml.m5.large"},
+                    {"maxCapacity": 1, "capacityUnit": "ml.m5.large"},
                     {"maxCapacity": 3, "capacityUnit": "ml.m5.2xlarge"},
                     {"maxCapacity": 9, "capacityUnit": "ml.p4d.24xlarge"},
                 ],

@@ -74,10 +74,12 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 mod array_jobs;
+mod input_rules;
 mod job_logs;
 mod placement;
 
 pub use array_jobs::*;
+pub use input_rules::*;
 pub use job_logs::*;
 pub use placement::*;
 
@@ -1290,7 +1292,7 @@ pub fn service_job_arn(region: &str, job_id: &str) -> String {
 /// The resource part of an ARN (everything after the account field), or `None`
 /// when `value` is not an ARN at all.
 fn arn_resource(value: &str) -> Option<&str> {
-    if !value.starts_with("arn:") {
+    if !value.starts_with(ARN_PREFIX) {
         return None;
     }
     value.splitn(6, ':').nth(5)
@@ -2160,7 +2162,7 @@ pub fn does_not_exist_exception(arn: &str) -> ClientException {
 /// ARN it resolved the identifier to, and for an identifier naming nothing that ARN can
 /// only be computed from the request.
 pub fn resolved_arn(name_or_arn: &str, mint: impl FnOnce(&str) -> String) -> String {
-    if name_or_arn.starts_with("arn:") {
+    if name_or_arn.starts_with(ARN_PREFIX) {
         return name_or_arn.to_string();
     }
     mint(name_or_arn)
@@ -4248,7 +4250,7 @@ pub fn unknown_resource_arn<E>() -> crate::scaffolded::Scaffolded<E> {
 /// code and one sentence, whether the request alone breaks the ceiling or the merge into
 /// what the resource already holds does.
 pub fn tag_set_limit_exceeded<E>() -> crate::scaffolded::Scaffolded<E> {
-    crate::scaffolded::Scaffolded::tagging_refusal(tag_set_limit_message())
+    crate::scaffolded::Scaffolded::frontend_refusal(tag_set_limit_message())
 }
 
 /// The detail a tagging call's `resourceArn` is refused with when the value is not an ARN
@@ -4264,7 +4266,7 @@ pub const BAD_RESOURCE_ARN_MESSAGE: &str = "Invalid input resource arn: bad synt
 ///
 /// Resolving a tagging call's `resourceArn` is the tag frontend's work, not this
 /// service's, so a value of the wrong SHAPE is refused there, under that frontend's code
-/// ([`crate::scaffolded::TAGGING_REFUSAL_CODE`], HTTP 400) — the same code it refuses a
+/// ([`crate::scaffolded::FRONTEND_REFUSAL_CODE`], HTTP 400) — the same code it refuses a
 /// tag MAP outside its declared bounds with — and never reaches this service's lookup. An
 /// ARN the lookup then misses is that layer's not-found instead ([`unknown_resource_arn`]):
 /// a well-formed reference to a resource that is not there.
@@ -4274,7 +4276,7 @@ pub const BAD_RESOURCE_ARN_MESSAGE: &str = "Invalid input resource arn: bad synt
 /// returns it through its own error channel.
 pub fn malformed_resource_arn<E>(resource_arn: &str) -> Option<crate::scaffolded::Scaffolded<E>> {
     let is_arn = arn_resource(resource_arn).is_some_and(|resource| !resource.is_empty());
-    (!is_arn).then(|| crate::scaffolded::Scaffolded::tagging_refusal(BAD_RESOURCE_ARN_MESSAGE))
+    (!is_arn).then(|| crate::scaffolded::Scaffolded::frontend_refusal(BAD_RESOURCE_ARN_MESSAGE))
 }
 
 /// The container a job actually gets: the definition's `containerProperties` with

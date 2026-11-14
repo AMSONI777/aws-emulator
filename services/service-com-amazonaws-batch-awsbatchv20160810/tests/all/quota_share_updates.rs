@@ -139,9 +139,9 @@ fn updates() -> Vec<Update> {
             patch: json!({"capacityLimits": [{"maxCapacity": 11, "capacityUnit": "ml.c5.xlarge"}]}),
         },
         Update {
-            label: "capacityLimits alone: three limits, one of them zero",
+            label: "capacityLimits alone: three limits of mixed units and quantities",
             patch: json!({"capacityLimits": [
-                {"maxCapacity": 0, "capacityUnit": "ml.m5.large"},
+                {"maxCapacity": 1, "capacityUnit": "ml.m5.large"},
                 {"maxCapacity": 3, "capacityUnit": "ml.m5.2xlarge"},
                 {"maxCapacity": 9, "capacityUnit": "ml.p4d.24xlarge"},
             ]}),

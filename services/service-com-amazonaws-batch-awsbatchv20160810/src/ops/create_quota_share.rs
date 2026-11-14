@@ -11,10 +11,14 @@
 //!
 //! A request naming a `jobQueue` this service does not hold is refused with the modelled
 //! `ClientException` (HTTP 400), and so is a name the queue already carries a share for.
-//! AWS is recorded to word THIS operation's refusals in Batch's frontend envelope
-//! ([`crate::state::client_exception_enveloped`]) — unlike the share lookups of
-//! `DescribeQuotaShare`, `UpdateQuotaShare` and `DeleteQuotaShare`, where a miss the service
-//! itself finds states its sentence bare.
+//! AWS is recorded wording THIS operation's INPUT refusals — a name outside the pattern, a
+//! `capacityLimits` that allocates nothing — in Batch's frontend envelope
+//! ([`crate::state::client_exception_enveloped`]), while the refusals it derives from STATE
+//! state their sentence bare: the queue reference that names nothing, and the share name
+//! the queue already carries ([`crate::state::quota_share_exists_message`]), as the share
+//! lookups of `DescribeQuotaShare`, `UpdateQuotaShare` and `DeleteQuotaShare` do. A
+//! composed identity the ARN layer cannot read as an ARN is refused ahead of all of them,
+//! under that layer's own code ([`crate::state::malformed_quota_share_identity`]).
 //!
 //! AWS Batch hands a fresh quota share back in the non-terminal `CREATING` status, so the
 //! move to `VALID` is owed by the CLOCK ([`crate::state::JOB_PHASE_MILLIS`] later) and is
@@ -181,6 +185,16 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         let mut state = state.lock();
         state.materialize_due(now);
 
+        // A share's identity is composed UNDER the queue the request names, so a request
+        // that refers to the queue by ARN composes the share's own ARN: the ARN layer reads
+        // that composed value BEFORE this service validates or resolves anything, so a
+        // value it cannot read as an ARN is refused there, ahead of every rule below
+        // ([`batch::malformed_quota_share_identity`]).
+        if let Some(refusal) =
+            batch::malformed_quota_share_identity(&input.job_queue, &input.quota_share_name)
+        {
+            return Err(refusal);
+        }
         // `quotaShareName` is a plain `String` in the model with no `@pattern`, so the
         // framework admits anything: the service applies the pattern the member documents
         // ("up to 128 characters long … uppercase and lowercase letters, numbers, hyphens
@@ -194,13 +208,13 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
             )
             .into());
         }
-        // The list is required, so the framework proves it is PRESENT; an empty one
-        // allocates no capacity at all, which is not a share this service can hold.
-        if input.capacity_limits.is_empty() {
+        // The list is required, so the framework proves it is PRESENT; the capacity each
+        // entry allocates is the share itself, and a list that allocates none — no entry at
+        // all, or an entry whose `maxCapacity` is not positive — is not a share this
+        // service can hold ([`batch::quota_share_capacity_limits_detail`]).
+        if let Some(detail) = batch::quota_share_capacity_limits_detail(&input.capacity_limits) {
             return Err(CreateQuotaShareErrorModeled::ClientException(
-                batch::client_exception_enveloped(
-                    "capacityLimits must name at least one capacity limit.",
-                ),
+                batch::client_exception_enveloped(detail),
             )
             .into());
         }
@@ -221,14 +235,15 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         let queue_name = queue.name.clone();
         let arn = batch::quota_share_arn(&region, &queue_name, &input.quota_share_name);
         if state.quota_shares.contains_key(&arn) {
-            // A name collision is a CONFLICT: the same detail as before, answered with the
-            // status AWS answers rather than the model's `httpError`.
-            return Err(crate::scaffolded::Scaffolded::modeled_with_status(
-                CreateQuotaShareErrorModeled::ClientException(batch::client_exception_enveloped(
-                    batch::OBJECT_ALREADY_EXISTS,
-                )),
-                batch::CONFLICT_STATUS,
-            ));
+            // A name the queue already carries a share for is refused with the share's
+            // name and the queue as the REQUEST spells it
+            // ([`batch::quota_share_exists_message`]), bare and with the model's status:
+            // this plane states which name collided on which queue, where the older
+            // resource families answer the store's own duplicate-key detail.
+            return Err(CreateQuotaShareErrorModeled::ClientException(batch::client_exception(
+                batch::quota_share_exists_message(&input.quota_share_name, &input.job_queue),
+            ))
+            .into());
         }
         if state.quota_shares.len() >= batch::limits::MAX_QUOTA_SHARES {
             return Err(CreateQuotaShareErrorModeled::ClientException(

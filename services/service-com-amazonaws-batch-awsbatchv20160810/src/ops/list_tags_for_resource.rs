@@ -9,7 +9,7 @@
 //! [`crate::scaffolded::TAGGING_NOT_FOUND_CODE`]
 //! ([`crate::state::unknown_resource_arn`]). A `resourceArn` that is not an ARN at all
 //! never reaches that lookup — it is refused on its SYNTAX by the tag frontend, HTTP 400
-//! [`crate::scaffolded::TAGGING_REFUSAL_CODE`]
+//! [`crate::scaffolded::FRONTEND_REFUSAL_CODE`]
 //! ([`crate::state::malformed_resource_arn`]), the same layer this service answers a
 //! refusal of a tag MAP with.
 //!
@@ -80,7 +80,7 @@
 //!
 //! The model declares those two; the tagging endpoint additionally answers the tag
 //! frontend's HTTP 400 `BadRequestException` for a `resourceArn` it cannot resolve, which
-//! no Batch operation models (see [`crate::scaffolded::TAGGING_REFUSAL_CODE`]).
+//! no Batch operation models (see [`crate::scaffolded::FRONTEND_REFUSAL_CODE`]).
 
 #[allow(unused_imports)]
 use super::types::*;

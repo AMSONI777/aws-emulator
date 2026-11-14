@@ -3013,9 +3013,6 @@ mod s3_object_events_update_their_search_index;
 #[path = "all/cloudformation_cognito_identity_role_attachment_refusal.rs"]
 mod cloudformation_cognito_identity_role_attachment_refusal;
 // A suite left at the top level of `tests/` fails the build. Declare each suite exactly
-// ONCE: this is one crate root, so a second `mod` for the same name is `E0428` and fails
-// every suite in this target. `all/all_rs_declares_each_suite_once.rs` checks that for
-// this file and for every service crate's `tests/all.rs`, so check there rather than
 // leaving a note here. (These five lines are another fragment of this file's own header
 // that a merge of two appended tails landed down here; they are ordinary comments
 // because an inner doc comment may only appear before an item.)
@@ -3237,7 +3234,6 @@ mod cloudformation_bucket_handles_drive_their_owning_services;
 // reason the note above records.)
 // this file and for every service crate's `tests/all.rs`. (An ordinary comment: an inner doc
 // comment is only legal before the first item of this crate root.)
-// this file and for every service crate's `tests/all.rs`.
 // Declared at the END of this list, clear of the comment spans above, for the reason the
 // entries there record: the sorted `a…` span is a region concurrently landing suites add
 // their line to. The suite spans API Gateway, WAFv2 and CloudWatch Logs at once, so no

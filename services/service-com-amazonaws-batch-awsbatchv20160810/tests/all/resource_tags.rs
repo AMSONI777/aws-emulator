@@ -42,7 +42,7 @@ use std::collections::BTreeMap;
 use serde_json::{json, Value};
 
 use service_com_amazonaws_batch_awsbatchv20160810::scaffolded::{
-    TAGGING_NOT_FOUND_CODE, TAGGING_REFUSAL_CODE,
+    FRONTEND_REFUSAL_CODE as HANDLERS_FRONTEND_REFUSAL_CODE, TAGGING_NOT_FOUND_CODE,
 };
 use service_com_amazonaws_batch_awsbatchv20160810::state::{self, limits};
 
@@ -543,7 +543,7 @@ async fn the_tags_tagresource_writes_are_the_map_every_reader_reports() {
 ///
 /// WHICH refusal follows where the reference fails, and the tagging layer classifies the
 /// two apart. A value that is not an ARN fails that layer's own read of it, before
-/// anything is resolved: HTTP 400 `scaffolded::TAGGING_REFUSAL_CODE` with its one fixed
+/// anything is resolved: HTTP 400 `scaffolded::FRONTEND_REFUSAL_CODE` with its one fixed
 /// detail. A well-formed ARN that simply names nothing is a MISSING resource:
 /// `scaffolded::TAGGING_NOT_FOUND_CODE` with its own fixed detail. Neither detail echoes
 /// the request, so a client branches on the code, not on the text.
@@ -663,9 +663,9 @@ async fn an_arn_naming_no_resource_is_refused_by_every_tagging_operation() {
     // The wording the handlers emit is the wording asserted above, so neither can drift
     // from the other without this failing.
     assert_eq!(
-        TAGGING_REFUSAL_CODE, FRONTEND_REFUSAL_CODE,
+        HANDLERS_FRONTEND_REFUSAL_CODE, FRONTEND_REFUSAL_CODE,
         "case the code the handlers answer with: expected {FRONTEND_REFUSAL_CODE}, got \
-         {TAGGING_REFUSAL_CODE}"
+         {HANDLERS_FRONTEND_REFUSAL_CODE}"
     );
     assert_eq!(
         TAGGING_NOT_FOUND_CODE, NOT_FOUND_REFUSAL_CODE,

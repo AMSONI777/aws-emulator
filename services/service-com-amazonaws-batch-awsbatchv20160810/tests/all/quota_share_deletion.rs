@@ -196,7 +196,7 @@ fn rows() -> Vec<Row> {
                 "state": "DISABLED",
                 "tags": {"team": "research", "cost-centre": "42"},
                 "capacityLimits": [
-                    {"maxCapacity": 0, "capacityUnit": "ml.m5.large"},
+                    {"maxCapacity": 1, "capacityUnit": "ml.m5.large"},
                     {"maxCapacity": 3, "capacityUnit": "ml.m5.2xlarge"},
                     {"maxCapacity": 9, "capacityUnit": "ml.p4d.24xlarge"},
                 ],

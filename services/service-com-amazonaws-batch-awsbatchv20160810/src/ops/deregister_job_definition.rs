@@ -17,7 +17,10 @@
 //! revision `INACTIVE` and answers 200 again. A reference no stored revision answers to
 //! is the same success for the same reason — the post-state it asks for (no ACTIVE
 //! revision under that reference) already holds, which is how AWS is recorded answering a
-//! deregister of an absent definition — and nothing is written.
+//! deregister of an absent definition — and nothing is written. A reference whose NAME is
+//! outside the pattern Batch holds its resource names to is the separate, earlier refusal
+//! ([`crate::state::unsupported_identifier`]): no revision could carry that name, so there
+//! is no post-state for it to already hold.
 //!
 //! ## Shape of an operation
 //!
@@ -157,6 +160,19 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
             .into());
         };
         let mut store = state.lock();
+
+        // "The name and revision (name:revision) or full Amazon Resource Name (ARN) of the
+        // job definition to deregister" — so the NAME the reference carries
+        // ([`batch::job_definition_reference_name`]) is what the pattern governs, and a
+        // reference whose name is outside it names no revision this service could hold. It
+        // is refused before the lookup ([`batch::unsupported_identifier`]) rather than
+        // reported as an already-deregistered success.
+        if let Some(refusal) = batch::unsupported_identifier(
+            &input.job_definition,
+            batch::job_definition_reference_name(&input.job_definition),
+        ) {
+            return Err(DeregisterJobDefinitionErrorModeled::ClientException(refusal).into());
+        }
 
         // "The name and revision (name:revision) or full Amazon Resource Name (ARN)
         // of the job definition to deregister" (`jobDefinition`). Resolving straight

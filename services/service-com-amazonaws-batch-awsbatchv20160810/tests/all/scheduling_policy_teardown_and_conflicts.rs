@@ -25,8 +25,8 @@
 //!   disassociated from every job queue, as its doc requires — puts it into the
 //!   non-terminal `DELETING` the model declares, after which the CLOCK removes it from
 //!   every reader;
-//! * a `Create*` that names an object the service already holds answers Batch's CONFLICT
-//!   status with the bare `Object already exists`, whatever the resource kind;
+//! * a `Create*` whose collision the store itself reports answers Batch's CONFLICT status
+//!   with the bare `Object already exists`, whatever the resource kind;
 //! * every `Describe*` reader materialises the tag map: a resource created with no tags is
 //!   described with an EMPTY map, never with the member missing.
 
@@ -361,8 +361,11 @@ async fn every_create_answers_a_name_collision_with_the_conflict_status() {
         )
         .await;
 
-    // One row per resource kind whose create keys on a name the caller chooses, so the
-    // rule is the frontend's and not one handler's.
+    // One row per resource kind whose create keys on a name the caller chooses and whose
+    // collision the store itself reports, so the rule is the frontend's and not one
+    // handler's. The quota-share plane is NOT one of them: its create states which name
+    // collided on which queue, with the model's status, which
+    // `identifier_and_capacity_rules` asserts.
     let rows: Vec<(&str, &str, Value)> = vec![
         (
             "a compute environment",
@@ -395,17 +398,6 @@ async fn every_create_answers_a_name_collision_with_the_conflict_status() {
                 "serviceEnvironmentName": "se-conflict-row",
                 "serviceEnvironmentType": "SAGEMAKER_TRAINING",
                 "capacityLimits": [{"maxCapacity": 1, "capacityUnit": "NUM_INSTANCES"}],
-            }),
-        ),
-        (
-            "a quota share",
-            "/v1/createquotashare",
-            json!({
-                "quotaShareName": "qs-conflict-row",
-                "jobQueue": "jq-conflict-host",
-                "capacityLimits": [{"maxCapacity": 4, "capacityUnit": "ml.m5.large"}],
-                "resourceSharingConfiguration": {"strategy": "RESERVE"},
-                "preemptionConfiguration": {"inSharePreemption": "DISABLED"},
             }),
         ),
     ];

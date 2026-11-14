@@ -561,7 +561,7 @@ async fn a_created_quota_share_is_read_back_by_its_arn() {
                 "state": "ENABLED",
                 "tags": {"team": "a", "cost-centre": "42"},
                 "capacityLimits": [
-                    {"maxCapacity": 0, "capacityUnit": "ml.m5.large"},
+                    {"maxCapacity": 1, "capacityUnit": "ml.m5.large"},
                     {"maxCapacity": 3, "capacityUnit": "ml.m5.2xlarge"},
                     {"maxCapacity": 9, "capacityUnit": "ml.p4d.24xlarge"},
                 ],
@@ -736,16 +736,18 @@ async fn the_quota_share_refusals_are_distinct_client_exceptions() {
             quota_share_request("qs-taken", "jq-share-refusals", json!({})),
         )
         .await;
+    // A quota share states WHICH name collided on WHICH queue, and does so with the
+    // model's status: this plane's duplicate refusal is not the store's generic
+    // conflict that the older resource families answer.
     assert_eq!(
-        status,
-        state::CONFLICT_STATUS,
-        "case create a quota share twice: expected the conflict status {}, got {status} \
-         {refused}",
-        state::CONFLICT_STATUS
+        status, 400,
+        "case create a quota share twice: expected 400, got {status} {refused}"
     );
-    assert!(
-        error_message(&refused).contains(state::OBJECT_ALREADY_EXISTS),
-        "case create a quota share twice: expected the duplicate detail, got {refused}"
+    assert_eq!(
+        error_message(&refused),
+        "QuotaShare with name qs-taken already exists for job queue jq-share-refusals",
+        "case create a quota share twice: expected the quota-share duplicate sentence, got \
+         {refused}"
     );
 
     // A `quotaShareArn` that carries no `job-queue/<queue>/quota-share/<share>` path is

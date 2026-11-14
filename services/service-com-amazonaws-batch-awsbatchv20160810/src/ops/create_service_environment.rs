@@ -196,6 +196,18 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
                 )),
             )
         })?;
+        // Each entry's `maxCapacity` is the quantity a placement against this environment
+        // is decided by, so an entry that states a non-positive one is refused before
+        // anything is stored ([`batch::service_environment_capacity_limits_detail`]) — the
+        // refused create leaves no environment behind.
+        if let Some(detail) =
+            batch::service_environment_capacity_limits_detail(&input.capacity_limits)
+        {
+            return Err(CreateServiceEnvironmentErrorModeled::ClientException(
+                batch::client_exception_enveloped(detail),
+            )
+            .into());
+        }
         if state
             .service_environments
             .contains_key(&input.service_environment_name)

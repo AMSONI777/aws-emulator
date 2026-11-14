@@ -10,9 +10,11 @@
 //! answer alike.
 //!
 //! The `jobQueue` the listing hangs off is a reference this call resolves by name or by
-//! ARN; one that resolves to no stored queue is the modelled `ClientException` (HTTP 400),
-//! worded the way the quota-share refusals are. A `maxResults` outside the bound its doc
-//! publishes, and a `nextToken` that resumes nothing, are the same modelled 400.
+//! ARN, and it FILTERS the shares rather than gating the read: one that resolves to no
+//! stored queue answers an empty page, so a caller reconciling queue names it has not
+//! created yet can tell "no shares" from a failed call. A `maxResults` outside the bound
+//! its doc publishes, and a `nextToken` that resumes nothing, are the modelled
+//! `ClientException` (HTTP 400).
 //!
 //! ## Shape of an operation
 //!
@@ -193,28 +195,27 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
             // later caller sees exactly what this caller saw.
             state.materialize_due(now);
 
-            let Some(queue) = state.job_queue(&input.job_queue) else {
-                // The queue this listing hangs off, which the call only REFERS to: AWS is
-                // recorded echoing the reference the request gave for such a queue (a name
-                // stays a name), in the envelope the quota-share refusals carry.
-                return Err(ListQuotaSharesErrorModeled::ClientException(
-                    batch::client_exception_enveloped(batch::does_not_exist_sentence(
-                        &input.job_queue,
-                    )),
-                )
-                .into());
-            };
-            let queue_arn = queue.arn.clone();
-            // The store is keyed by a share's ARN, which nests the share's name under its
-            // queue's, so iterating it answers one queue's shares in name order — the
-            // stable order paging needs, without which a page could show a share twice or
-            // never.
-            state
-                .quota_shares
-                .values()
-                .filter(|share| share.job_queue_arn == queue_arn)
-                .cloned()
-                .collect()
+            match state.job_queue(&input.job_queue) {
+                // The queue this listing hangs off is a FILTER, not a precondition: AWS is
+                // recorded answering a `jobQueue` nothing resolves to with an empty page,
+                // so a caller sweeping queue names it has not created yet reads "no
+                // shares" rather than an exception it cannot tell from a failed call.
+                // Nothing of the store is read for it, so nothing can be reported.
+                None => Vec::new(),
+                Some(queue) => {
+                    let queue_arn = queue.arn.clone();
+                    // The store is keyed by a share's ARN, which nests the share's name
+                    // under its queue's, so iterating it answers one queue's shares in
+                    // name order — the stable order paging needs, without which a page
+                    // could show a share twice or never.
+                    state
+                        .quota_shares
+                        .values()
+                        .filter(|share| share.job_queue_arn == queue_arn)
+                        .cloned()
+                        .collect()
+                }
+            }
         };
         batch::publish_job_state_changes(ctx, &*self.engine, &batch::request_region(ctx)).await;
 
