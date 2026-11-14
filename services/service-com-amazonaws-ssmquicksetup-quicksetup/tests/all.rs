@@ -89,6 +89,8 @@ mod state_roundtrip;
 mod status_summaries;
 #[path = "all/store_bounds_after_teardown.rs"]
 mod store_bounds_after_teardown;
+#[path = "all/tag_plane_absent_resource.rs"]
+mod tag_plane_absent_resource;
 #[path = "all/target_authorization.rs"]
 mod target_authorization;
 #[path = "all/target_regions_required.rs"]
