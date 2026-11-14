@@ -2,8 +2,11 @@
 
 //! @op Logout
 //!
-//! Invalidates the server-side sign-in session the presented access token names, in
-//! [`crate::state`], so every later portal call with that token is unauthorized.
+//! Invalidates the server-side sign-in session the presented access token names: in
+//! [`crate::state`], so every later portal call with that token is unauthorized, and in the
+//! mint that issued that sign-in's tokens, so neither another token of it nor a rotation of
+//! its refresh grant serves it again. Only the role credentials already minted for it go on
+//! working, for the rest of their own duration.
 //!
 //! ## Shape of an operation
 //!
@@ -211,6 +214,14 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
             )
             .into());
         }
+        // What this operation invalidates is the sign-in SESSION, not the one token that
+        // presented it, and the tokens of a sign-in the emulator minted live in the mint
+        // that issued them — including the refresh grant that would otherwise rotate into
+        // a fresh pair for this same sign-in and serve it again. So the mint is told too,
+        // once this store's lock is released, so only one store's lock is ever held (see
+        // `crate::state::end_minted_sign_in`).
+        drop(state);
+        crate::state::end_minted_sign_in(&*self.engine, &input.access_token);
 
         Ok(LogoutOutput)
     }

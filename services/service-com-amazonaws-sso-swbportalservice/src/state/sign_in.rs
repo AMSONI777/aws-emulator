@@ -31,6 +31,11 @@
 //! [`ComAmazonawsSsoSwbportalserviceState::signed_in`] is the ONE place a record held
 //! there and a sign-in resolved here are combined — so a token whose session this store
 //! ended is never served again by resolving it afresh against the mint that made it.
+//!
+//! A sign-in session is not a token, though: it is what a whole chain of tokens belongs to,
+//! and that chain is the MINT's record. So the one event this service owns is also
+//! PROPAGATED to the mint ([`end_minted_sign_in`]), which is what keeps a logged-out
+//! sign-in ended when its holder spends a grant the mint still has.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::time::SystemTime;
@@ -103,6 +108,33 @@ pub fn federated_sign_in<Eng: Send + Sync + 'static>(
         expires_at,
         accounts: assigned_accounts(engine, now).unwrap_or_default(),
     })
+}
+
+/// Ends, in the emulator's own token mint, the sign-in session `access_token` belongs to:
+/// every token of that sign-in the mint still holds — the access token itself and the
+/// refresh grant that would rotate it into another pair — stops being one it holds.
+///
+/// This is the other half of `Logout`. Invalidating the sign-in session is what that
+/// operation does, and a sign-in session is not a token: it is what a chain of tokens
+/// belongs to, and the chain lives in the mint that issued it. A sign-in whose record is
+/// ended HERE only (by [`ComAmazonawsSsoSwbportalserviceState::invalidate_session`], keyed
+/// by the one token presented) would be usable again the moment its holder spent the
+/// refresh token beside it, because the pair that rotation mints is resolved afresh against
+/// the mint ([`minted_sign_in`]) and this store holds no record of it — the ended sign-in
+/// serving again with no further user authentication. So the mint is told, and the only
+/// thing that outlives a logout is what the model says does: the role credentials already
+/// minted, for the rest of their own duration.
+///
+/// Called by the handler AFTER it has resolved the sign-in and released this store's lock,
+/// so only one store's lock is ever held at a time. Answers whether the mint held the
+/// presented token at all; a sign-in no mint of this emulator issued (one seeded straight
+/// into this store) has no tokens there to end.
+pub fn end_minted_sign_in<Eng: Send + Sync + 'static>(engine: &Eng, access_token: &str) -> bool {
+    let Some(tokens) = oidc::state::service_state(engine) else {
+        return false;
+    };
+    let mut tokens = tokens.lock();
+    tokens.end_sign_in_session(access_token)
 }
 
 /// The sign-in the emulator's own token mint made for `access_token`: who it is attributed

@@ -406,6 +406,13 @@ impl ComAmazonawsSsoSwbportalserviceState {
     /// Answers whether a usable session was invalidated; `false` is the unauthorized
     /// case.
     ///
+    /// This is the half of that invalidation THIS store keeps, keyed by the token the
+    /// request presented. A sign-in session is what a whole chain of tokens belongs to
+    /// rather than any one of them, so the other half is the mint's
+    /// ([`end_minted_sign_in`]): without it, the refresh grant beside the presented token
+    /// would rotate into a pair this store knows nothing about and the ended sign-in would
+    /// be served again.
+    ///
     /// Only a session this store holds a record of can be ended here, which is why
     /// `Logout` records the sign-in it resolved ([`Self::remember_sign_in`]) before it
     /// calls this: a sign-in minted by the emulator's own `CreateToken` is otherwise

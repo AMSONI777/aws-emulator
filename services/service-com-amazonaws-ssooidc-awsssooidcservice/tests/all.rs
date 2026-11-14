@@ -29,5 +29,7 @@ mod device_authorization_flow;
 mod device_code_approval;
 #[path = "all/error_descriptions.rs"]
 mod error_descriptions;
+#[path = "all/sign_in_session.rs"]
+mod sign_in_session;
 #[path = "all/state_roundtrip.rs"]
 mod state_roundtrip;

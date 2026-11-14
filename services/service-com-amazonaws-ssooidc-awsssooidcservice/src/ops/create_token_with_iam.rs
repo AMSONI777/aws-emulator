@@ -576,8 +576,17 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
                 // requester asked to receive one ("Refresh Token -
                 // urn:ietf:params:oauth:token-type:refresh_token").
                 let with_refresh_token = requested_token_type == st::TOKEN_TYPE_URI_REFRESH_TOKEN;
-                let token =
-                    store.issue_token(&input.client_id, &region, scopes, with_refresh_token, now);
+                let token = store.issue_token(
+                    &input.client_id,
+                    &region,
+                    scopes,
+                    with_refresh_token,
+                    // An exchange is built on an access token of a sign-in
+                    // session already on record and authenticates no user of its
+                    // own, so what it issues is another token of that session.
+                    st::SignInSession::Continued(&subject.sign_in_session),
+                    now,
+                );
                 Issued {
                     token,
                     issued_token_type: requested_token_type,

@@ -372,6 +372,36 @@ impl std::fmt::Debug for DeviceAuthorization {
     }
 }
 
+/// Which sign-in session a token being minted belongs to.
+///
+/// A sign-in session is the server-side IAM Identity Center session a user's own
+/// authentication creates, and it is what a chain of tokens belongs to rather
+/// than any single token of it: the access token first issued for it, the refresh
+/// token beside that one, and every pair a later rotation or exchange puts in
+/// their place are all tokens OF one sign-in session. So the session is recorded
+/// on each of them ([`IssuedToken::sign_in_session`],
+/// [`RefreshGrant::sign_in_session`]) and ends for all of them at once
+/// ([`ComAmazonawsSsooidcAwsssooidcserviceState::end_sign_in_session`]).
+///
+/// Which of the two a grant is, is a question about the grant being spent: a
+/// grant the user authenticated (the device authorization they approved at the
+/// access portal) begins a session, while a grant that is itself a token of a
+/// session this service already issued — a refresh token being rotated, an
+/// access token a token exchange is built on — continues that session, because
+/// nothing in it authenticates the user again.
+///
+/// The session's identifier never leaves the store, so it is never printed: both
+/// [`IssuedToken`] and [`RefreshGrant`] withhold it from their own `Debug`, and
+/// this type carries none.
+#[derive(Clone, Copy)]
+pub enum SignInSession<'a> {
+    /// The grant being spent is the user's own authentication: a session of its
+    /// own begins with the token this mints.
+    Begun,
+    /// The grant being spent belongs to a session already on record, named here.
+    Continued(&'a str),
+}
+
 /// An access token (and its refresh token) minted by `CreateToken`.
 #[derive(Clone)]
 pub struct IssuedToken {
@@ -379,6 +409,8 @@ pub struct IssuedToken {
     pub refresh_token: Option<String>,
     pub id_token: Option<String>,
     pub client_id: String,
+    /// The sign-in session this token belongs to; see [`SignInSession`].
+    pub sign_in_session: String,
     pub scopes: Vec<String>,
     pub token_type: String,
     /// The region of the endpoint that issued this token: a token "was issued by
@@ -432,6 +464,10 @@ pub struct RefreshGrant {
     /// The access token this refresh token was issued with, dropped when the
     /// refresh token is rotated so a refresh loop leaves nothing resident.
     pub bound_access_token: String,
+    /// The sign-in session this grant belongs to — the SAME one as the access
+    /// token it was issued with, and as every token a rotation of it goes on to
+    /// mint; see [`SignInSession`].
+    pub sign_in_session: String,
 }
 
 impl RefreshGrant {
@@ -685,22 +721,33 @@ impl ComAmazonawsSsooidcAwsssooidcserviceState {
 
     /// Mints and persists an access token for `client_id`, issued by the endpoint
     /// in `region`, with a refresh token when the client may use the
-    /// refresh-token grant.
+    /// refresh-token grant, as a token of the sign-in session `sign_in` names
+    /// (see [`SignInSession`]).
     pub fn issue_token(
         &mut self,
         client_id: &str,
         region: &str,
         scopes: Vec<String>,
         with_refresh_token: bool,
+        sign_in: SignInSession<'_>,
         now: SystemTime,
     ) -> IssuedToken {
         let access_token = mint_opaque_value();
         let refresh_token = with_refresh_token.then(mint_opaque_value);
+        // A continued session keeps the session already on record; a session the
+        // user's own authentication began gets an identifier of its own, which
+        // never leaves this store — nothing is handed it and nothing resolves a
+        // record by it.
+        let sign_in_session = match sign_in {
+            SignInSession::Begun => random_uuid(),
+            SignInSession::Continued(session) => session.to_string(),
+        };
         let token = IssuedToken {
             access_token: access_token.clone(),
             refresh_token: refresh_token.clone(),
             id_token: None,
             client_id: client_id.to_string(),
+            sign_in_session,
             scopes,
             token_type: TOKEN_TYPE_BEARER.to_string(),
             region: region.to_string(),
@@ -718,11 +765,49 @@ impl ComAmazonawsSsooidcAwsssooidcserviceState {
                     issued_at: now,
                     expires_in: REFRESH_TOKEN_EXPIRES_IN,
                     bound_access_token: access_token.clone(),
+                    // The grant can only ever re-issue against the session its
+                    // own access token belongs to.
+                    sign_in_session: token.sign_in_session.clone(),
                 },
             );
         }
         self.access_tokens.insert(access_token, token.clone());
         token
+    }
+
+    /// Ends the sign-in session the access token `access_token` belongs to: every
+    /// token of that session this store still holds is dropped, so none of them
+    /// is resolvable and no grant of the session can re-issue against it.
+    ///
+    /// Invalidating a sign-in session is not an operation of this API — IAM
+    /// Identity Center's own `Logout` is what makes the call — and it is the
+    /// SESSION that ends, not the one token presented: the refresh token beside
+    /// that access token would otherwise rotate into a new pair for the same
+    /// session, which would be the ended session serving again with no further
+    /// user authentication. The tokens already issued to it stay ended: nothing
+    /// re-animates a session, only a fresh authentication begins another.
+    ///
+    /// Answers whether this store held the presented access token at all; a token
+    /// it does not hold names no session of this mint and leaves it unchanged.
+    pub fn end_sign_in_session(&mut self, access_token: &str) -> bool {
+        let Some(ended) = self
+            .access_tokens
+            .get(access_token)
+            .map(|token| token.sign_in_session.clone())
+        else {
+            return false;
+        };
+        self.access_tokens
+            .retain(|_, token| token.sign_in_session != ended);
+        self.refresh_tokens
+            .retain(|_, grant| grant.sign_in_session != ended);
+        // The one state change no response of this service carries. Neither a
+        // token nor the session identifier is recorded.
+        tracing::info!(
+            target: "sso.oidc",
+            "every token of a sign-in session was ended because the sign-in session was invalidated"
+        );
+        true
     }
 
     /// Rotates `refresh_token`: the refresh token is spent, the access token it
@@ -771,7 +856,17 @@ impl ComAmazonawsSsooidcAwsssooidcserviceState {
         };
         self.refresh_tokens.remove(refresh_token);
         self.access_tokens.remove(&grant.bound_access_token);
-        Ok(self.issue_token(client_id, region, scopes, true, now))
+        // A rotation re-issues against the grant being spent, so the pair it
+        // mints belongs to the SAME sign-in session: nothing in a refresh
+        // authenticates the user again.
+        Ok(self.issue_token(
+            client_id,
+            region,
+            scopes,
+            true,
+            SignInSession::Continued(&grant.sign_in_session),
+            now,
+        ))
     }
 }
 

@@ -445,8 +445,17 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
                     })
                     .into());
                 }
-                let token =
-                    store.issue_token(&input.client_id, &region, scopes, with_refresh_token, now);
+                let token = store.issue_token(
+                    &input.client_id,
+                    &region,
+                    scopes,
+                    with_refresh_token,
+                    // The device authorization the user approved at the access
+                    // portal IS their authentication, so this exchange begins a
+                    // sign-in session of its own.
+                    st::SignInSession::Begun,
+                    now,
+                );
                 // An authorization grant is spent by the exchange that succeeded,
                 // so the same device code cannot be redeemed twice. The record was
                 // resolved above under this same lock, so the `None` arm is

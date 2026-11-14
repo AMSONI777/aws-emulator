@@ -369,22 +369,89 @@ impl Emulator {
     /// does, and answer the access token the rotation issued. The rotation supersedes the
     /// previous access token: the mint drops it.
     async fn refreshed(&self, minted: &MintedToken) -> String {
-        let (status, body) = self
-            .oidc(
-                "/token",
-                &json!({
-                    "clientId": minted.client_id,
-                    "clientSecret": minted.client_secret,
-                    "grantType": oidc::state::GRANT_TYPE_REFRESH_TOKEN,
-                    "refreshToken": minted.refresh_token,
-                }),
-            )
-            .await;
+        self.rotated(minted).await.access_token
+    }
+
+    /// Spend `minted`'s refresh token and answer the whole PAIR the rotation issued, for a
+    /// case that goes on spending the chain the mint keeps re-issuing.
+    async fn rotated(&self, minted: &MintedToken) -> MintedToken {
+        let (status, body) = self.refresh(minted).await;
         assert_eq!(
             status, 200,
             "CreateToken on the refresh-token grant answered {status} {body}"
         );
-        text(&body, "accessToken")
+        MintedToken {
+            access_token: text(&body, "accessToken"),
+            refresh_token: text(&body, "refreshToken"),
+            client_id: minted.client_id.clone(),
+            client_secret: minted.client_secret.clone(),
+        }
+    }
+
+    /// Present `minted`'s refresh token to the mint, answering the response whatever it is
+    /// — so a case can assert the REFUSAL a grant of an ended sign-in is answered with as
+    /// well as a rotation that succeeds.
+    async fn refresh(&self, minted: &MintedToken) -> (u16, Value) {
+        self.oidc(
+            "/token",
+            &json!({
+                "clientId": minted.client_id,
+                "clientSecret": minted.client_secret,
+                "grantType": oidc::state::GRANT_TYPE_REFRESH_TOKEN,
+                "refreshToken": minted.refresh_token,
+            }),
+        )
+        .await
+    }
+
+    /// Register one more client with the mint, answering its `clientId`: what a token
+    /// exchange needs, since the exchange is only ever built on an access token issued to
+    /// ANOTHER application.
+    async fn registered_client(&self, client_name: &str) -> String {
+        let (status, body) = self
+            .oidc(
+                "/client/register",
+                &json!({"clientName": client_name, "clientType": "public"}),
+            )
+            .await;
+        assert_eq!(status, 200, "RegisterClient answered {status} {body}");
+        text(&body, "clientId")
+    }
+
+    /// Exchange `subject_token` for a token issued to `client_id`, through
+    /// `CreateTokenWithIAM`'s token-exchange grant: the other way the mint hands out a token
+    /// of a sign-in it already holds. The response is answered whatever it is.
+    async fn token_exchange(&self, client_id: &str, subject_token: &str) -> (u16, Value) {
+        self.oidc(
+            "/token?aws_iam=t",
+            &json!({
+                "clientId": client_id,
+                "grantType": oidc::state::GRANT_TYPE_TOKEN_EXCHANGE,
+                "subjectToken": subject_token,
+                "subjectTokenType": oidc::state::TOKEN_TYPE_URI_ACCESS_TOKEN,
+            }),
+        )
+        .await
+    }
+
+    /// Whether the emulator's own token mint still holds `access_token` — the record that
+    /// makes a token name a sign-in at all.
+    fn mint_holds_access_token(&self, access_token: &str) -> bool {
+        oidc::state::service_state(&*self.engine)
+            .expect("the OIDC store is reachable")
+            .lock()
+            .access_tokens
+            .contains_key(access_token)
+    }
+
+    /// Whether the emulator's own token mint still holds `refresh_token` — the grant a
+    /// rotation would re-issue against.
+    fn mint_holds_refresh_token(&self, refresh_token: &str) -> bool {
+        oidc::state::service_state(&*self.engine)
+            .expect("the OIDC store is reachable")
+            .lock()
+            .refresh_tokens
+            .contains_key(refresh_token)
     }
 
     /// Age the emulator's record of `access_token` past its own advertised lifetime, which
@@ -1139,5 +1206,245 @@ async fn a_spent_sign_in_record_is_reclaimed() {
     assert!(
         emulator.signed_in_subject(&access_key_id).is_none(),
         "a spent credential resolves no identity"
+    );
+}
+
+/// Assert that every portal route refuses `token` with the one authentication refusal this
+/// service words for a token naming no usable sign-in.
+async fn assert_portal_refuses(
+    emulator: &Emulator,
+    case: &str,
+    token: &str,
+    account_id: &str,
+    role: &str,
+) {
+    for (operation, status, body) in [
+        ("ListAccounts", emulator.list_accounts(token).await),
+        (
+            "ListAccountRoles",
+            emulator.list_account_roles(token, account_id).await,
+        ),
+        (
+            "GetRoleCredentials",
+            emulator.role_credentials(token, account_id, role).await,
+        ),
+        ("Logout", emulator.logout(token).await),
+    ]
+    .map(|(operation, (status, body))| (operation, status, body))
+    {
+        assert_eq!(
+            (
+                status,
+                error_code(&body),
+                body["message"].as_str().unwrap_or_default().to_string()
+            ),
+            (
+                StatusCode::UNAUTHORIZED,
+                "UnauthorizedException".to_string(),
+                INVALID_SESSION_MESSAGE.to_string()
+            ),
+            "case {case:?}: {operation} must be unauthorized, got {status} {body}"
+        );
+    }
+}
+
+/// RULE: `Logout` invalidates the server-side sign-in SESSION the presented token names,
+/// which is what a whole chain of tokens belongs to and not the one token string presented:
+/// every token of that sign-in the emulator's own mint still holds — the access token itself
+/// and the refresh grant that would rotate it into a fresh pair — stops being held, so no
+/// grant of a logged-out sign-in serves the portal or mints role credentials again, while
+/// the role credentials ALREADY minted for it go on working for the rest of their own
+/// duration and a sign-in nobody logged out of is untouched.
+///
+/// The rows differ in where in that chain the logout falls — the pair the device flow
+/// minted, and the pair one and two refresh-token rotations later — because the session is
+/// the same one throughout and the logout ends it wherever it is presented.
+#[tokio::test]
+async fn logout_ends_every_token_of_the_sign_in_session() {
+    let rows = granted();
+    let assigned = assigned_emulator(&rows).await;
+    let emulator = &assigned.emulator;
+    let account_id = &rows[0].account_id;
+    let assigned_role = role_name(rows[0].permission_sets[0], account_id);
+
+    // A second sign-in of the same registration that nobody logs out of: what a `Logout`
+    // ends is ONE sign-in session, not the registration and not the mint.
+    let mut untouched = emulator.minted_sign_in(&assigned.identity_store_id).await;
+
+    for refreshes in [0_usize, 1, 2] {
+        let case = format!("{refreshes} refresh-token rotation(s) before the logout");
+        let mut sign_in = emulator.minted_sign_in(&assigned.identity_store_id).await;
+        let mut superseded: Vec<MintedToken> = Vec::new();
+        for _ in 0..refreshes {
+            let spent = emulator.rotated(&sign_in).await;
+            superseded.push(std::mem::replace(&mut sign_in, spent));
+        }
+
+        // The sign-in works, and a role credential is minted for it: the one thing the
+        // model says outlives the logout.
+        let (status, body) = emulator.list_accounts(&sign_in.access_token).await;
+        assert_eq!(
+            status,
+            StatusCode::OK,
+            "case {case:?}: the sign-in must be served before the logout, got {status} {body}"
+        );
+        let (status, body) = emulator
+            .role_credentials(&sign_in.access_token, account_id, &assigned_role)
+            .await;
+        assert_eq!(
+            status,
+            StatusCode::OK,
+            "case {case:?}: GetRoleCredentials must succeed before the logout, got {status} {body}"
+        );
+        let access_key_id = text(&body["roleCredentials"], "accessKeyId");
+
+        let (status, body) = emulator.logout(&sign_in.access_token).await;
+        assert_eq!(
+            status,
+            StatusCode::OK,
+            "case {case:?}: Logout answered {status} {body}"
+        );
+
+        // Nothing of the sign-in is served again: not the token presented, and not the
+        // grant beside it.
+        assert_portal_refuses(
+            emulator,
+            &case,
+            &sign_in.access_token,
+            account_id,
+            &assigned_role,
+        )
+        .await;
+        let (status, body) = emulator.refresh(&sign_in).await;
+        assert_eq!(
+            (
+                status,
+                error_code(&body),
+                body["error"].as_str().unwrap_or_default().to_string(),
+                body["error_description"]
+                    .as_str()
+                    .unwrap_or_default()
+                    .to_string()
+            ),
+            (
+                400,
+                "InvalidGrantException".to_string(),
+                "invalid_grant".to_string(),
+                oidc::state::DESCRIPTION_INVALID_REFRESH_TOKEN.to_string()
+            ),
+            "case {case:?}: spending the refresh token of a logged-out sign-in must be an \
+             invalid grant, got {status} {body}"
+        );
+
+        // The mint holds no token of the ended sign-in — neither the pair presented nor any
+        // the rotations superseded — so there is nothing left to re-issue against.
+        for (label, token) in std::iter::once(("the pair presented", &sign_in))
+            .chain(superseded.iter().map(|spent| ("a superseded pair", spent)))
+        {
+            assert_eq!(
+                (
+                    emulator.mint_holds_access_token(&token.access_token),
+                    emulator.mint_holds_refresh_token(&token.refresh_token)
+                ),
+                (false, false),
+                "case {case:?}: the mint must hold neither token of {label}"
+            );
+        }
+
+        assert!(
+            emulator.signed_in_subject(&access_key_id).is_some(),
+            "case {case:?}: a credential minted before the logout still speaks for that \
+             sign-in for the rest of its own duration"
+        );
+
+        // The other sign-in is untouched: it is served, and its own grant still rotates.
+        let (status, body) = emulator.list_accounts(&untouched.access_token).await;
+        assert_eq!(
+            status,
+            StatusCode::OK,
+            "case {case:?}: a sign-in nobody logged out of must still be served, got \
+             {status} {body}"
+        );
+        untouched = emulator.rotated(&untouched).await;
+        let (status, body) = emulator.list_accounts(&untouched.access_token).await;
+        assert_eq!(
+            status,
+            StatusCode::OK,
+            "case {case:?}: the pair a rotation of that sign-in issued must be served, got \
+             {status} {body}"
+        );
+    }
+}
+
+/// RULE: the same for the OTHER way the mint hands out a token of a sign-in it already
+/// holds — `CreateTokenWithIAM`'s token exchange, which authenticates no user of its own and
+/// so issues another token OF the subject token's sign-in: a token exchanged before the
+/// logout stops being served by it, and no exchange of a logged-out sign-in's token
+/// succeeds afterwards.
+#[tokio::test]
+async fn logout_ends_a_token_the_exchange_issued_for_the_same_sign_in() {
+    let rows = granted();
+    let assigned = assigned_emulator(&rows).await;
+    let emulator = &assigned.emulator;
+    let account_id = &rows[0].account_id;
+    let assigned_role = role_name(rows[0].permission_sets[0], account_id);
+
+    let sign_in = emulator.minted_sign_in(&assigned.identity_store_id).await;
+    // "The value of the subject token must be an access token issued by IAM Identity Center
+    // to a different client or application", so the exchange is made by another
+    // registration.
+    let other_application = emulator.registered_client("emulator-test-exchange").await;
+    let (status, body) = emulator
+        .token_exchange(&other_application, &sign_in.access_token)
+        .await;
+    assert_eq!(
+        status, 200,
+        "the token exchange answered {status} {body}"
+    );
+    let exchanged = text(&body, "accessToken");
+    let (status, body) = emulator.list_accounts(&exchanged).await;
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "the exchanged token must be served before the logout, got {status} {body}"
+    );
+
+    let (status, body) = emulator.logout(&sign_in.access_token).await;
+    assert_eq!(status, StatusCode::OK, "Logout answered {status} {body}");
+
+    assert_portal_refuses(
+        emulator,
+        "a token the exchange issued for the logged-out sign-in",
+        &exchanged,
+        account_id,
+        &assigned_role,
+    )
+    .await;
+    assert!(
+        !emulator.mint_holds_access_token(&exchanged),
+        "the mint must hold no token of the ended sign-in, the exchanged one included"
+    );
+
+    let (status, body) = emulator
+        .token_exchange(&other_application, &sign_in.access_token)
+        .await;
+    assert_eq!(
+        (
+            status,
+            error_code(&body),
+            body["error"].as_str().unwrap_or_default().to_string(),
+            body["error_description"]
+                .as_str()
+                .unwrap_or_default()
+                .to_string()
+        ),
+        (
+            400,
+            "InvalidGrantException".to_string(),
+            "invalid_grant".to_string(),
+            oidc::state::DESCRIPTION_INVALID_SUBJECT_TOKEN.to_string()
+        ),
+        "exchanging the token of a logged-out sign-in must be an invalid grant, got \
+         {status} {body}"
     );
 }
