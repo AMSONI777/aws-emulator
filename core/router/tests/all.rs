@@ -3401,3 +3401,4 @@ mod cloudformation_s3tables_table_bucket_maintenance;
 // note stands as ordinary comments where it was appended.)
 // this file and for every service crate's `tests/all.rs`. (Ordinary comment: an inner doc
 // comment appended after an item is `E0753`.)
+// first item, so a `//!` line in this appended tail is `E0753` and compiles no suite.)

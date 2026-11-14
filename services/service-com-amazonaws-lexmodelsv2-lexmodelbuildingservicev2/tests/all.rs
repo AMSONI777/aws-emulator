@@ -23,6 +23,8 @@ mod bot_versions;
 mod export_archive;
 #[path = "all/exports.rs"]
 mod exports;
+#[path = "all/intent_context_lists.rs"]
+mod intent_context_lists;
 #[path = "all/intents_and_builds.rs"]
 mod intents_and_builds;
 #[path = "all/locale_build_outcome.rs"]

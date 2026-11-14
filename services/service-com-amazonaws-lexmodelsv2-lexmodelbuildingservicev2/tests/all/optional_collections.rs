@@ -38,14 +38,20 @@ const INTENT_COLLECTIONS: [&str; 4] = [
 /// Is `name` a key of this JSON document at all? A member with no value is not
 /// serialized, so this — and not whether the value is empty — is what a presence test
 /// against the response reads.
-fn has_key(body: &Value, name: &str) -> bool {
+pub(crate) fn has_key(body: &Value, name: &str) -> bool {
     body.as_object()
         .is_some_and(|object| object.contains_key(name))
 }
 
 /// Assert `response` echoes `name` exactly as `request` supplied it: present and equal
 /// when the request named it, and absent from the document when it did not.
-fn assert_echoed(case: &str, operation: &str, request: &Value, response: &Value, name: &str) {
+pub(crate) fn assert_echoed(
+    case: &str,
+    operation: &str,
+    request: &Value,
+    response: &Value,
+    name: &str,
+) {
     match request.get(name) {
         Some(supplied) => {
             assert!(
@@ -70,7 +76,7 @@ fn assert_echoed(case: &str, operation: &str, request: &Value, response: &Value,
 
 /// One `outputContexts` entry: the context a fulfilled intent activates, with the
 /// lifetime the modelled `OutputContext` carries.
-fn output_context(name: &str) -> Value {
+pub(crate) fn output_context(name: &str) -> Value {
     json!({ "name": name, "timeToLiveInSeconds": 60, "turnsToLive": 2 })
 }
 
