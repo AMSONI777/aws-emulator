@@ -35,7 +35,6 @@ use std::sync::Arc;
 use serde_json::{json, Value};
 use service_com_amazonaws_neptunegraph_amazonneptunegraph::state::{
     service_state, GraphEdge, GraphNode, FINAL_SNAPSHOT_SUFFIX, PROVISIONING_SPAN,
-    SERVICE_OWNED_KMS_KEY,
 };
 use service_com_amazonaws_neptunegraph_amazonneptunegraph::EmulatedService;
 use smithy_server_runtime::MultiServiceRouter;
@@ -493,7 +492,7 @@ async fn a_reset_empties_the_graphs_data_and_keeps_everything_else() {
             );
             assert_eq!(
                 snapshot["kmsKeyIdentifier"],
-                kms_key.map_or_else(|| json!(SERVICE_OWNED_KMS_KEY), |key| json!(key)),
+                kms_key.map_or(Value::Null, |key| json!(key)),
                 "case {case:?}: expected the graph's own key on the snapshot, got {}",
                 snapshot["kmsKeyIdentifier"]
             );

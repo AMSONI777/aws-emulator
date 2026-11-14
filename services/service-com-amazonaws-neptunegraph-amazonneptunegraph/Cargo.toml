@@ -71,6 +71,10 @@ emulator-core-build-support = { workspace = true }
 [dev-dependencies]
 sha2 = { workspace = true }
 hex = { workspace = true }
+# Compiles the modelled `KmsKeyArn` pattern so the encryption-key suite asserts every
+# reported key ARN against the model's own expression rather than a hand-rolled matcher.
+# DEV-ONLY.
+regex = "1"
 # The import-run suite mounts Amazon S3 beside this service on ONE engine, exactly as
 # the assembled router mounts them, and stages the objects a load reads through that
 # service's OWN `PutObject` — so what an import reads is what Amazon S3 really holds.

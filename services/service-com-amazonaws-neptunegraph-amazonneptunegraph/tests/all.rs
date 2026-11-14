@@ -25,6 +25,8 @@ mod documented_member_defaults;
 mod duplicate_name_conflicts;
 #[path = "all/duplicate_private_graph_endpoint_conflict.rs"]
 mod duplicate_private_graph_endpoint_conflict;
+#[path = "all/encryption_key_is_an_arn_or_absent.rs"]
+mod encryption_key_is_an_arn_or_absent;
 #[path = "all/error_message_rendering.rs"]
 mod error_message_rendering;
 #[path = "all/execute_query_data_plane.rs"]

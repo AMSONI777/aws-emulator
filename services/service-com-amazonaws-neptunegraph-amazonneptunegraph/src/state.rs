@@ -92,27 +92,6 @@ pub const DEFAULT_QUERY_TIMEOUT: Duration = Duration::from_millis(120_000);
 /// stored and compared on read.
 pub const ENDPOINT_DELETION_SPAN: Duration = Duration::from_millis(500);
 
-/// The key a graph (and a snapshot of one) reports when its data is encrypted with a
-/// key the service owns rather than one the caller named.
-///
-/// Every graph of this service is encrypted, so the reported key is never genuinely
-/// unknown: a create request that names no `kmsKeyIdentifier` gets a service-owned key,
-/// which has no ARN a caller may name, so the record reports this sentinel instead of
-/// omitting the member. The model itself says the reported value need not be an ARN:
-/// `GraphSummary$kmsKeyIdentifier` targets a plain `String`
-/// (`smithy_query(query="shape",shape="GraphSummary")`) where every create INPUT member
-/// targets the ARN-patterned `KmsKeyArn`.
-pub const SERVICE_OWNED_KMS_KEY: &str = "AWS_OWNED_KEY";
-
-/// The key a graph's data is encrypted with, from the key its create request named:
-/// that key, or [`SERVICE_OWNED_KMS_KEY`] when the request named none.
-///
-/// Stated once here because every operation that mints a graph answers the same
-/// question, and a graph record's key member is never absent.
-pub fn graph_encryption_key(requested: Option<String>) -> String {
-    requested.unwrap_or_else(|| SERVICE_OWNED_KMS_KEY.to_string())
-}
-
 /// The number of replicas a graph gets when the request that mints it supplies no
 /// `replicaCount`, from the member's own documentation: "The number of replicas in
 /// other AZs. Min =0, Max = 2, Default = 1."
@@ -486,10 +465,16 @@ pub struct Graph {
     pub endpoint: String,
     pub public_connectivity: bool,
     pub replica_count: i32,
-    /// The key this graph's data is encrypted with. Every graph is encrypted, so this
-    /// is always a key: the customer managed key the create request named, or
-    /// [`SERVICE_OWNED_KMS_KEY`] when it named none (see [`graph_encryption_key`]).
-    pub kms_key_identifier: String,
+    /// The customer managed key this graph's data is encrypted with: the key the
+    /// request that minted the graph named, and `None` when it named none.
+    ///
+    /// A graph the caller named no key for is encrypted with a key the service owns,
+    /// and such a key has no ARN a caller may name, so there is no value to report:
+    /// every member this is reported through is an optional one targeting `KmsKeyArn`,
+    /// which the model constrains to a KMS key ARN
+    /// (`smithy_query(query="shape",shape="KmsKeyArn")`), so the member is left out
+    /// rather than filled with a stand-in no `KmsKeyArn` can hold.
+    pub kms_key_identifier: Option<String>,
     pub vector_search_configuration: Option<VectorSearchConfiguration>,
     pub deletion_protection: bool,
     pub source_snapshot_id: Option<String>,
@@ -658,10 +643,11 @@ pub struct Snapshot {
     pub source_graph_id: String,
     pub status: SnapshotStatus,
     pub snapshot_create_time: SystemTime,
-    /// The key the source graph's data is encrypted with: a snapshot of an
-    /// encrypted graph is encrypted with the same key. Always a key, for the reason
+    /// The customer managed key the source graph's data is encrypted with: a snapshot
+    /// of a graph encrypted with a caller-named key is encrypted with the same key, and
+    /// is `None` for a snapshot of a graph that named none, for the reason
     /// [`Graph::kms_key_identifier`] is.
-    pub kms_key_identifier: String,
+    pub kms_key_identifier: Option<String>,
     pub tags: BTreeMap<String, String>,
     /// When the transition the clock owes this snapshot falls due: the move from
     /// `CREATING` to `AVAILABLE`, or the removal of a `DELETING` snapshot. `None` once
@@ -4331,7 +4317,7 @@ macro_rules! graph_record_output {
                     public_connectivity: Some(graph.public_connectivity),
                     vector_search_configuration: graph.vector_search_configuration.clone(),
                     replica_count: Some(graph.replica_count),
-                    kms_key_identifier: Some(graph.kms_key_identifier.clone()),
+                    kms_key_identifier: graph.kms_key_identifier.clone(),
                     source_snapshot_id: graph.source_snapshot_id.clone(),
                     deletion_protection: Some(graph.deletion_protection),
                     build_number: Some(graph.build_number.clone()),
@@ -4366,7 +4352,7 @@ impl From<&Graph> for crate::ops::types::GraphSummary {
             public_connectivity: Some(graph.public_connectivity),
             endpoint: Some(graph.endpoint.clone()),
             replica_count: Some(graph.replica_count),
-            kms_key_identifier: Some(graph.kms_key_identifier.clone()),
+            kms_key_identifier: graph.kms_key_identifier.clone(),
             deletion_protection: Some(graph.deletion_protection),
         }
     }
@@ -4390,7 +4376,7 @@ macro_rules! snapshot_record_output {
                         snapshot.snapshot_create_time,
                     )),
                     status: Some(snapshot.status.as_wire().to_string()),
-                    kms_key_identifier: Some(snapshot.kms_key_identifier.clone()),
+                    kms_key_identifier: snapshot.kms_key_identifier.clone(),
                 }
             }
         }

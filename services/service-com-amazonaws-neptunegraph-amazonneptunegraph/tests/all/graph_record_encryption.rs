@@ -6,10 +6,11 @@
 //!
 //! The rules under test, asserted over a SET of inputs rather than one request:
 //!
-//! * every graph of this service is encrypted, so a graph record always names a key —
-//!   the customer managed key the create request supplied, or, when it supplied none,
-//!   the sentinel that names the service-owned key (which has no ARN a caller could
-//!   name);
+//! * a graph record reports the customer managed key the create request supplied, and
+//!   reports no key at all when it supplied none: such a graph is encrypted with a key
+//!   the service owns, which has no ARN a caller could name, and every member the key
+//!   is reported through is modelled as a KMS key ARN
+//!   (`smithy_query(query="shape",shape="KmsKeyArn")`), so there is no value to report;
 //! * every graph record names the build of the graph software serving the graph, which
 //!   is one value for every graph this emulator holds and does not change between reads.
 //!
@@ -22,7 +23,7 @@ use std::sync::Arc;
 
 use serde_json::{json, Value};
 use service_com_amazonaws_neptunegraph_amazonneptunegraph::state::{
-    GRAPH_SOFTWARE_BUILD_NUMBER, PROVISIONING_SPAN, SERVICE_OWNED_KMS_KEY,
+    GRAPH_SOFTWARE_BUILD_NUMBER, PROVISIONING_SPAN,
 };
 use service_com_amazonaws_neptunegraph_amazonneptunegraph::EmulatedService;
 use smithy_server_runtime::MultiServiceRouter;
@@ -47,11 +48,12 @@ const KEY_ID_WITHOUT_HYPHENS: &str =
 const MIN_PROVISIONED_MEMORY: i64 = 16;
 
 /// One row of the table: the key a `CreateGraph` request supplies (or none) and the key
-/// every projection of the resulting record must report.
+/// every projection of the resulting record must report — `None` for a row that supplies
+/// none, where the member is absent rather than carrying a value no `KmsKeyArn` holds.
 struct KeyCase {
     case: &'static str,
     supplied: Option<&'static str>,
-    expected: &'static str,
+    expected: Option<&'static str>,
 }
 
 /// An emulator holding only this service, on its own engine, so each test starts from
@@ -168,12 +170,18 @@ async fn summary_of(router: &MultiServiceRouter, case: &str, id: &str) -> Value 
         .unwrap_or_else(|| panic!("case {case:?}: no summary for {id} in {listed}"))
 }
 
+/// The JSON a projection of a row's record must carry at `kmsKeyIdentifier`: the
+/// supplied key, or `null` — an absent member — for the row that supplied none.
+fn expected_key(case: &KeyCase) -> Value {
+    case.expected.map_or(Value::Null, |key| json!(key))
+}
+
 /// Assert one projection of a graph record reports the row's key and this emulator's
 /// software build.
 fn assert_key_and_build(case: &KeyCase, step: &str, record: &Value) {
     assert_eq!(
         record["kmsKeyIdentifier"],
-        json!(case.expected),
+        expected_key(case),
         "case {:?} ({step}): expected kmsKeyIdentifier {:?}, got {}",
         case.case,
         case.expected,
@@ -200,24 +208,24 @@ async fn every_graph_record_names_its_encryption_key_and_software_build() {
 
     let cases = [
         KeyCase {
-            case: "no key supplied: the service-owned key the sentinel names",
+            case: "no key supplied: a service-owned key, so no key is reported",
             supplied: None,
-            expected: SERVICE_OWNED_KMS_KEY,
+            expected: None,
         },
         KeyCase {
             case: "a customer managed key in the default partition",
             supplied: Some(KEY_DEFAULT_PARTITION),
-            expected: KEY_DEFAULT_PARTITION,
+            expected: Some(KEY_DEFAULT_PARTITION),
         },
         KeyCase {
             case: "a customer managed key in another partition and Region",
             supplied: Some(KEY_OTHER_PARTITION),
-            expected: KEY_OTHER_PARTITION,
+            expected: Some(KEY_OTHER_PARTITION),
         },
         KeyCase {
             case: "a customer managed key whose id carries no hyphens",
             supplied: Some(KEY_ID_WITHOUT_HYPHENS),
-            expected: KEY_ID_WITHOUT_HYPHENS,
+            expected: Some(KEY_ID_WITHOUT_HYPHENS),
         },
     ];
 
@@ -247,7 +255,7 @@ async fn every_graph_record_names_its_encryption_key_and_software_build() {
         let summary = summary_of(&router, case.case, &id).await;
         assert_eq!(
             summary["kmsKeyIdentifier"],
-            json!(case.expected),
+            expected_key(case),
             "case {:?} (ListGraphs): expected kmsKeyIdentifier {:?}, got {}",
             case.case,
             case.expected,

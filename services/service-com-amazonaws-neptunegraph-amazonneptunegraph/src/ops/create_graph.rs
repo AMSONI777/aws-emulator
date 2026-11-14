@@ -322,9 +322,10 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
             replica_count: input
                 .replica_count
                 .unwrap_or(crate::state::DEFAULT_REPLICA_COUNT),
-            // The graph's data is encrypted either way: with the key the request named,
-            // or with the service-owned key the sentinel names when it named none.
-            kms_key_identifier: crate::state::graph_encryption_key(input.kms_key_identifier),
+            // The key the request named, if it named one. A request that names none
+            // gets a service-owned key, which has no ARN to report, so the record
+            // holds no key (see `crate::state::Graph::kms_key_identifier`).
+            kms_key_identifier: input.kms_key_identifier,
             vector_search_configuration: input.vector_search_configuration,
             // Only `RestoreGraphFromSnapshot` / `CreateGraphUsingImportTask` give a
             // graph a source snapshot.

@@ -32,9 +32,7 @@ use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use serde_json::{json, Value};
-use service_com_amazonaws_neptunegraph_amazonneptunegraph::state::{
-    ARN_NAMESPACE, PROVISIONING_SPAN, SERVICE_OWNED_KMS_KEY,
-};
+use service_com_amazonaws_neptunegraph_amazonneptunegraph::state::{ARN_NAMESPACE, PROVISIONING_SPAN};
 use service_com_amazonaws_neptunegraph_amazonneptunegraph::EmulatedService;
 use smithy_server_runtime::MultiServiceRouter;
 
@@ -364,12 +362,12 @@ async fn a_restore_reports_the_capture_with_the_requests_overrides() {
             restored["sourceSnapshotId"]
         );
         // The restored data is encrypted with the key the snapshotted data is
-        // encrypted with; a graph created without a customer managed key is encrypted
-        // with the service-owned key its sentinel names.
+        // encrypted with, and reports no key when the snapshotted graph named none: a
+        // service-owned key has no ARN to report.
         let expected_key = source_body
             .get("kmsKeyIdentifier")
             .cloned()
-            .unwrap_or_else(|| json!(SERVICE_OWNED_KMS_KEY));
+            .unwrap_or(Value::Null);
         assert_eq!(
             restored["kmsKeyIdentifier"], expected_key,
             "case {case:?}: a restore carries the snapshot's key, expected \

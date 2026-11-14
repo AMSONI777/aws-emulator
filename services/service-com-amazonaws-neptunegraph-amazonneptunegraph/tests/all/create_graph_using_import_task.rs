@@ -40,7 +40,7 @@ use std::sync::Arc;
 use serde_json::{json, Value};
 use service_com_amazonaws_neptunegraph_amazonneptunegraph::state::{
     ARN_NAMESPACE, DEFAULT_MIN_PROVISIONED_MEMORY, MAX_IMPORT_SOURCE_CHARS, PROVISIONING_SPAN,
-    SERVICE_OWNED_KMS_KEY, UNBOUNDED_IMPORT_PROVISIONED_MEMORY,
+    UNBOUNDED_IMPORT_PROVISIONED_MEMORY,
 };
 use service_com_amazonaws_neptunegraph_amazonneptunegraph::EmulatedService;
 use smithy_server_runtime::MultiServiceRouter;
@@ -531,11 +531,10 @@ async fn create_graph_using_import_task_persists_both_records_and_reads_them_bac
                 json!(row.deletion_protection.unwrap_or(false)),
             ),
             (
-                // The graph is encrypted either way: with the key the request named, or
-                // with the service-owned key its sentinel names.
+                // The graph reports the key the request named; one that named none is
+                // encrypted with a service-owned key, which has no ARN to report.
                 "kmsKeyIdentifier",
-                row.kms_key_identifier
-                    .map_or_else(|| json!(SERVICE_OWNED_KMS_KEY), |v| json!(v)),
+                row.kms_key_identifier.map_or(Value::Null, |v| json!(v)),
             ),
             (
                 "vectorSearchConfiguration",

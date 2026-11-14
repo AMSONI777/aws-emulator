@@ -3011,6 +3011,13 @@ mod s3_object_events_update_their_search_index;
 // service crate's test target can deploy the stack and then read the pool's roles back.
 #[path = "all/cloudformation_cognito_identity_role_attachment_refusal.rs"]
 mod cloudformation_cognito_identity_role_attachment_refusal;
+// leaving a note here. (These five lines are another fragment of this file's own header
+// that a merge of two appended tails landed down here; they are ordinary comments
+// because an inner doc comment may only appear before an item.)
+// A suite left at the top level of `tests/` fails the build. Declare each suite exactly
+// leaving a note here. (Another fragment of this file's own header that a merge of two
+// appended tails landed down here: ordinary comments, because an inner doc comment may
+// only appear before an item.)
 // suite left at the top level of `tests/` fails the build. (A plain comment: an inner doc
 // comment is only accepted before the first item of a module, so a `//!` line in this tail
 // is `E0753` and compiles no suite of this target.)
@@ -3065,6 +3072,8 @@ mod cloudformation_task_definition_runs_an_ecs_service;
 // this file and for every service crate's `tests/all.rs`. It is a LINE comment here: an
 // inner doc comment is only legal before the first item, so landing it in this tail failed
 // every suite in this target.)
+// this file and for every service crate's `tests/all.rs`. (The tail end of that same
+// header fragment, as an ordinary comment for the reason the lines above it record.)
 // this file and for every service crate's `tests/all.rs`. (Plain comment: see above.)
 // this file and for every service crate's `tests/all.rs`.
 // (A module doc comment belongs at the head of this file, before any item: these lines were

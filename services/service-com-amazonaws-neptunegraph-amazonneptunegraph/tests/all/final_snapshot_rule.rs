@@ -34,7 +34,6 @@ use std::time::Instant;
 use serde_json::{json, Value};
 use service_com_amazonaws_neptunegraph_amazonneptunegraph::state::{
     service_state, GraphEdge, GraphNode, FINAL_SNAPSHOT_SUFFIX, MAX_SNAPSHOTS, PROVISIONING_SPAN,
-    SERVICE_OWNED_KMS_KEY,
 };
 use service_com_amazonaws_neptunegraph_amazonneptunegraph::EmulatedService;
 use smithy_server_runtime::MultiServiceRouter;
@@ -534,9 +533,7 @@ async fn both_final_snapshot_paths_capture_the_graph_the_same_way() {
         // Every member each snapshot carries of the graph it was taken of: its id, the
         // name derived from the graph's, the graph's own encryption key, and an ARN that
         // is the graph's with the snapshot as the resource.
-        let expected_key = row
-            .kms_key
-            .map_or_else(|| json!(SERVICE_OWNED_KMS_KEY), |key| json!(key));
+        let expected_key = row.kms_key.map_or(Value::Null, |key| json!(key));
         for (operation, graph, graph_name, snapshot_id, snapshot) in [
             (
                 "ResetGraph",

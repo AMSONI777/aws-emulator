@@ -48,7 +48,7 @@ use service_com_amazonaws_neptunegraph_amazonneptunegraph::state::{
     ImportTaskStatus, PrivateGraphEndpoint, PrivateGraphEndpointStatus, Snapshot, SnapshotStatus,
     ARN_NAMESPACE, DEFAULT_REPLICA_COUNT, GRAPH_SOFTWARE_BUILD_NUMBER, MAX_GRAPHS,
     MAX_IMPORT_TASKS, MAX_PRIVATE_GRAPH_ENDPOINTS, MAX_SNAPSHOTS, PROVISIONING_SPAN,
-    SERVICE_OWNED_KMS_KEY, SOURCE_UNREADABLE_REASON,
+    SOURCE_UNREADABLE_REASON,
 };
 use service_com_amazonaws_neptunegraph_amazonneptunegraph::EmulatedService;
 use smithy_server_runtime::MultiServiceRouter;
@@ -357,7 +357,7 @@ fn fill_to(
                     public_connectivity: false,
                     deletion_protection: false,
                     replica_count: DEFAULT_REPLICA_COUNT,
-                    kms_key_identifier: SERVICE_OWNED_KMS_KEY.to_string(),
+                    kms_key_identifier: None,
                     vector_search_configuration: None,
                     source_snapshot_id: None,
                     build_number: GRAPH_SOFTWARE_BUILD_NUMBER.to_string(),
@@ -380,7 +380,7 @@ fn fill_to(
                     source_graph_id: graph_id.to_string(),
                     status: SnapshotStatus::Available,
                     snapshot_create_time: SystemTime::now(),
-                    kms_key_identifier: SERVICE_OWNED_KMS_KEY.to_string(),
+                    kms_key_identifier: None,
                     tags: BTreeMap::new(),
                     settles_at: None,
                     source_configuration: GraphConfiguration {
