@@ -56,7 +56,7 @@ const DELIVERED_TYPES: &[&str] = &["OnDeploymentStart", "OnDeploymentComplete"];
 /// deployment events sent to an Amazon SQS queue, and the parameter that association
 /// supplies the queue's ARN for. Discovered from `ListExtensions` below rather than passed
 /// from here, exactly as a client that does not know the catalogue would.
-const QUEUE_PARAMETER: &str = "queueArn";
+pub(crate) const QUEUE_PARAMETER: &str = "queueArn";
 
 /// The ARN field an extension AppConfig itself authors leaves empty, because no account
 /// owns it: the marker a client picks the authored entries out of a listing by.
@@ -65,7 +65,7 @@ const AUTHORED_ARN_MARKER: &str = "::extension/";
 /// The authored extension in the account's catalogue whose published name says it sends
 /// deployment events to Amazon SQS, as `(identifier, name)` — found the way a client finds
 /// it: by walking `ListExtensions` and keeping the entries no account owns.
-async fn discover_sqs_extension(router: &MultiServiceRouter) -> (String, String) {
+pub(crate) async fn discover_sqs_extension(router: &MultiServiceRouter) -> (String, String) {
     let listed = items("the account's catalogue", &list(router, "max_results=50").await);
     let authored: Vec<&Value> = listed
         .iter()
