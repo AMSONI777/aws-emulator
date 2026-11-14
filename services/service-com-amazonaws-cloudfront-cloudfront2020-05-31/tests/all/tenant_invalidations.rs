@@ -19,9 +19,8 @@
 //! * a page size that names no page, a `Marker` that is no resume point this service handed
 //!   out, and a tenant or an invalidation that does not exist are refused with the errors the
 //!   operations model (`InvalidArgument` 400, `EntityNotFound` 404);
-//! * a batch over the published per-request object quota is refused with
-//!   `TooManyInvalidationsInProgress` (400) and persists nothing, so the listing after it
-//!   is the listing before it;
+//! * a batch over the published per-request object bound is refused with `BatchTooLarge`
+//!   (413) and persists nothing, so the listing after it is the listing before it;
 //! * a repeated `CallerReference` carrying the same batch returns the invalidation already
 //!   created rather than a second one;
 //! * a list and a read are READS: the status they report is the one the clock owes the
@@ -40,8 +39,8 @@
 use std::time::Duration;
 
 use service_com_amazonaws_cloudfront_cloudfront2020_05_31::state::{
-    id_format_invalid_message, MAX_INVALIDATION_PATHS, MAX_ITEMS, PROPAGATION_DELAY,
-    TOO_MANY_INVALIDATIONS_MESSAGE,
+    id_format_invalid_message, BATCH_TOO_LARGE_MESSAGE, MAX_INVALIDATION_PATHS, MAX_ITEMS,
+    PROPAGATION_DELAY,
 };
 use smithy_server_runtime::MultiServiceRouter;
 
@@ -673,10 +672,9 @@ async fn unusable_arguments_and_unknown_tenants_are_refused() {
     }
 }
 
-/// The published per-request object quota: a batch AT the bound is accepted, one PAST it is
-/// refused with `TooManyInvalidationsInProgress` (400) and persists nothing — the code this
-/// surface answers the per-batch object quota under, where the distribution-scoped create
-/// answers `BatchTooLarge`.
+/// The published per-request object bound: a batch AT the bound is accepted, one PAST it is
+/// refused with `BatchTooLarge` (413) and persists nothing — the size of the batch submitted,
+/// which every create that takes an invalidation batch answers under that code.
 #[tokio::test]
 async fn a_batch_past_the_object_quota_is_refused_and_persists_nothing() {
     let router = emulator();
@@ -730,26 +728,25 @@ async fn a_batch_past_the_object_quota_is_refused_and_persists_nothing() {
                 before.len()
             );
         } else {
-            // "You have exceeded the maximum number of allowable InProgress invalidation
-            // batch requests, or invalidation objects."
+            // "Invalidation batch specified is too large."
             assert_eq!(
-                answer.status, 400,
-                "case {case}: expected HTTP 400 for {count} paths, got {} with {}",
+                answer.status, 413,
+                "case {case}: expected HTTP 413 for {count} paths, got {} with {}",
                 answer.status,
                 answer.raw.chars().take(400).collect::<String>()
             );
             assert_eq!(
                 answer.error_code(),
-                "TooManyInvalidationsInProgress",
-                "case {case}: expected TooManyInvalidationsInProgress, got {:?}",
+                "BatchTooLarge",
+                "case {case}: expected BatchTooLarge, got {:?}",
                 answer.error_code()
             );
             // The sentence CloudFront states for this refusal: fixed service text, naming
             // nothing the request carried.
             assert_eq!(
                 answer.root().find_text("Message"),
-                Some(TOO_MANY_INVALIDATIONS_MESSAGE),
-                "case {case}: expected the quota sentence the service states, got {:?}",
+                Some(BATCH_TOO_LARGE_MESSAGE),
+                "case {case}: expected the batch-size sentence the service states, got {:?}",
                 answer.root().find_text("Message")
             );
             assert_eq!(

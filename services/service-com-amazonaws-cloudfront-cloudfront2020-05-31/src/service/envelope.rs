@@ -69,6 +69,14 @@
 //! All of them leave every other refusal exactly as the layer that made it rendered it: a
 //! request the boundary read, and an operation's refusal that reports another rule, are
 //! never second-guessed here.
+//!
+//! One refusal is made HERE rather than reworded: a request whose DOCUMENT is larger than
+//! this API reads is answered with the transport's `413` and no document at all
+//! ([`MAX_REQUEST_BODY_BYTES`]). Nothing parsed such a request far enough to name an
+//! operation, so there is no modelled error to state it in, and an SDK has only the status to
+//! classify it by. The emulator's shared serve path has a ceiling of its own, larger and for
+//! every service alike, which is what bounds what the host buffers; this one is this API's
+//! own, and decides the ANSWER.
 
 use aws_smithy_runtime_api::http::{Request as RtRequest, Response as RtResponse, StatusCode};
 use aws_smithy_schema_server::{missing_member_message, xml_escape};
@@ -121,6 +129,45 @@ const MALFORMED_XML: &str = "MalformedXML";
 /// (`@httpQuery("MaxItems")` over an `integer`, from the model's list operations).
 const MAX_ITEMS_PARAM: &str = "MaxItems";
 
+/// The status a request whose payload is larger than this API reads answers with: the
+/// transport's own "payload too large".
+const PAYLOAD_TOO_LARGE: u16 = 413;
+
+/// The bytes one invalidation path spends on the value it carries, at most: an invalidation
+/// path names an object of the distribution, and an object key carries at most 1,024 bytes
+/// (Amazon S3's documented key length, which is what an origin object is named by), plus the
+/// leading slash the path begins with.
+const LONGEST_INVALIDATION_PATH_BYTES: usize = 1 + 1024;
+
+/// The bytes one `<Path>` element spends on its own tags, beside the value inside them.
+const PATH_ELEMENT_BYTES: usize = "<Path></Path>".len();
+
+/// The most bytes a request DOCUMENT this API reads may carry.
+///
+/// A document past it is refused with the transport's `413` and NOTHING else — no error
+/// document, because nothing parsed the request far enough to name an operation or one of its
+/// modelled errors, so an SDK has only the HTTP status to classify it by. That is the answer
+/// this API gives a request document far over the ceiling, and it is a DIFFERENT condition
+/// from a modelled refusal that a document the service DID read describes something it cannot
+/// serve (an invalidation batch naming more objects than one request may, which is
+/// `BatchTooLarge` carrying its own `Code` under the same status).
+///
+/// This is a fidelity rule about WHICH answer the API gives, not the bound that protects the
+/// host: that one is the emulator's shared serve path, which buffers no more than its own
+/// ceiling and answers the same bare `413` past it, for every service alike. This ceiling is
+/// SMALLER because it is this API's own, and it is read off the document the request already
+/// carries rather than off anything the request states about itself.
+///
+/// AWS publishes no request-document ceiling for this API, so the number is DERIVED from this
+/// service's own published quotas instead of chosen: the largest document any of them admits
+/// is the biggest invalidation batch — [`crate::state::MAX_INVALIDATION_PATHS`] paths, each at
+/// its longest — and every other document the quotas admit is orders of magnitude under that
+/// (a function's code is 10 KiB, a tag set 50 pairs, a tenant 5 domains). So a document whose
+/// elements all sit inside the published bounds is always readable, and only one far past them
+/// is refused unread.
+pub const MAX_REQUEST_BODY_BYTES: usize =
+    crate::state::MAX_INVALIDATION_PATHS * (LONGEST_INVALIDATION_PATH_BYTES + PATH_ELEMENT_BYTES);
+
 /// How the request boundary states the constraint an ENUM member carries (`Member must
 /// satisfy enum value set: [...]`), the one refusal that says the request named a value the
 /// model's enum does not admit.
@@ -153,6 +200,25 @@ fn new_request_id() -> String {
 /// The body of `resp` as text, when it is in memory and valid UTF-8.
 fn body_text(resp: &RtResponse) -> Option<&str> {
     std::str::from_utf8(resp.body().bytes()?).ok()
+}
+
+/// How many bytes the request DOCUMENT carries, or `None` when this layer holds no document
+/// to measure.
+///
+/// The bytes the request already carries are the only evidence read: what a request SAYS
+/// about its own length is not evidence of what it sent, and a body this layer was handed
+/// nothing of is one the shared serve path's own ceiling is what bounds.
+fn request_document_bytes(req: &RtRequest) -> Option<usize> {
+    req.body().bytes().map(<[u8]>::len)
+}
+
+/// The transport-level refusal of a document past [`MAX_REQUEST_BODY_BYTES`]: the status and
+/// nothing else, which is all an API that never read the request has to say about it.
+fn payload_too_large() -> RtResponse {
+    RtResponse::new(
+        StatusCode::try_from(PAYLOAD_TOO_LARGE).expect("413 is a valid status code"),
+        SdkBody::empty(),
+    )
 }
 
 /// The text of the first `<name>` element of `document`.
@@ -633,6 +699,13 @@ impl ErasedOperation for ErrorEnvelope {
         ctx: &'r OperationContext<'r>,
     ) -> BoxFuture<'r, RtResponse> {
         Box::pin(async move {
+            // A document past what this API reads is refused on its SIZE, in the
+            // transport's own vocabulary ([`payload_too_large`]), before an operation is
+            // named: nothing read it, so there is no modelled error to state it in.
+            if request_document_bytes(req).is_some_and(|carried| carried > MAX_REQUEST_BODY_BYTES)
+            {
+                return payload_too_large();
+            }
             // The generated deserialize -> validate -> handle -> serialize walk, run
             // exactly as the router would have run it. A request that names no modelled
             // operation never reaches here: the service claims only the ones its routing

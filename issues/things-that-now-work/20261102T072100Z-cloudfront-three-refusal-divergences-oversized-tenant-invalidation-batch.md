@@ -84,3 +84,28 @@ Cause 3:
 4. GetAnycastIpList(Id=<id>) and confirm IpAddressType and ETag are unchanged by the rejected update.
 
 Replay command: run the behavioral suite and re-run the three check ids in trace_ids.
+
+## Resolution
+
+Causes 1 and 2 are fixed; cause 3 is DECLINED as not a defect, so its check
+(`cloudfront.update-anycast-ip-list-invalid-argument-rejected`) still fails and is the one key
+of the three that remains open.
+
+- Cause 1 FIXED: the per-batch object bound is refused with the modelled `BatchTooLarge`
+  (HTTP 413) on every create that takes an invalidation batch, independently of the
+  invalidations the resource already holds, and a request document larger than this API reads
+  is refused on its bytes alone with a bare 413 carrying no error document — which is why
+  botocore reports the recorded refusal's `Error.Code` as the status string "413".
+- Cause 2 FIXED: `ListDomainConflicts` resolves and checks `DomainControlValidationResource`
+  for a covering certificate before the `Domain` string's own shape, so a certificate-less
+  validation resource is refused with the certificate sentence whatever the domain spells.
+- Cause 3 DECLINED: this corpus's own recorded CloudFront responses for the same condition
+  carry `MalformedXML` with the parameter-validation sentence — the
+  `cloudfront.origin-access-control-unknown-signing-behavior-rejected` check records that
+  message verbatim, value set and all, and
+  `cloudfront.list-connection-functions-invalid-stage-malformed-xml-rejected` asserts that
+  code — while this cause's own check notes its condition is unreachable on a live account, so
+  its `InvalidArgument` expectation is derived from the modelled error list rather than
+  observed. The emulator's answer is left as it stands, pinned by
+  `tests/all/refusal_contract.rs::a_value_outside_a_modelled_enum_is_a_request_that_cannot_be_read`,
+  which drives this very request and also checks that the refused update persists nothing.

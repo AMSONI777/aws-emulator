@@ -86,8 +86,11 @@ const TENANT_NOT_FOUND: &str = "The specified distribution tenant doesn't exist.
 // ---------------------------------------------------------------------------
 
 /// The `DomainControlValidationResource` a request names.
+///
+/// `pub(crate)` so a sibling suite drives this surface through these helpers rather than
+/// through a second copy of them.
 #[derive(Debug, Clone, Copy)]
-enum Resource<'a> {
+pub(crate) enum Resource<'a> {
     /// `DistributionId` alone.
     Distribution(&'a str),
     /// `DistributionTenantId` alone.
@@ -121,7 +124,7 @@ impl Resource<'_> {
 }
 
 /// `POST /2020-05-31/domain-conflicts` with the request document the arguments describe.
-async fn list_domain_conflicts(
+pub(crate) async fn list_domain_conflicts(
     router: &MultiServiceRouter,
     domain: &str,
     resource: Resource<'_>,
@@ -269,7 +272,7 @@ async fn create_tenant(
 /// (the harness' `Config` supplies it), and one that declares none is served on
 /// CloudFront's own default certificate — the two certificate cases a validation resource
 /// of this kind can be in.
-async fn create_standard_distribution(
+pub(crate) async fn create_standard_distribution(
     router: &MultiServiceRouter,
     reference: &str,
     aliases: &[&str],

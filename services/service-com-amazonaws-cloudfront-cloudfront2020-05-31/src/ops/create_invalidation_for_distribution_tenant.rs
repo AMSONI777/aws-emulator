@@ -8,10 +8,14 @@
 //! answers from this record. Repeating a `CallerReference` with the same batch returns the
 //! invalidation it already created rather than creating a second one.
 //!
-//! A batch the invalidation quota cannot admit — one naming more invalidation objects than
-//! a request may — is refused with `TooManyInvalidationsInProgress` ("You have exceeded
-//! the maximum number of allowable InProgress invalidation batch requests, or invalidation
-//! objects"), and nothing is stored for it.
+//! The two bounds this surface refuses a batch under are two different conditions, told
+//! apart by what each is a property of. A batch naming more invalidation objects than ONE
+//! request may is too large for its own size: the refusal is the modelled `BatchTooLarge`
+//! (HTTP 413, "Invalidation batch specified is too large."), the permanent condition whose
+//! remedy is a smaller batch, and it is decided from the request alone — before, and
+//! independently of, the invalidations already held. The invalidations the resource ALREADY
+//! holds are the quota's own condition and keep `TooManyInvalidationsInProgress` (HTTP 400),
+//! which a caller waits out. Nothing is stored for either refusal.
 //!
 //! ## Shape of an operation
 //!
@@ -215,17 +219,16 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
             );
         }
 
-        // "You have exceeded the maximum number of allowable InProgress invalidation batch
-        // requests, or invalidation objects": the objects ONE batch names count against
-        // that quota, so a batch naming more paths than the service admits is refused
-        // under it — recorded behaviour for this operation, which answers the per-batch
-        // object quota under the SAME code as the in-flight one. The batch is stored whole,
-        // so the bound is checked before anything is stored.
+        // "Invalidation batch specified is too large." The size of the batch SUBMITTED is a
+        // property of this request alone, so it is decided here — before, and independently
+        // of, what the tenant already holds — and the batch is stored whole, so the bound is
+        // checked before anything is stored. The sentence states the condition rather than
+        // the count submitted.
         let path_count = crate::state::batch_path_count(&input.invalidation_batch);
         if path_count > crate::state::MAX_INVALIDATION_PATHS {
             return Err(
-                CreateInvalidationForDistributionTenantErrorModeled::TooManyInvalidationsInProgress(
-                    crate::state::too_many_invalidations_in_progress(),
+                CreateInvalidationForDistributionTenantErrorModeled::BatchTooLarge(
+                    crate::state::batch_too_large(),
                 )
                 .into(),
             );

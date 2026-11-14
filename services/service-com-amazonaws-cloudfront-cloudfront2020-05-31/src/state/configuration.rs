@@ -1788,10 +1788,12 @@ pub const BATCH_TOO_LARGE_MESSAGE: &str = "Invalidation batch specified is too l
 /// The modelled `BatchTooLarge` (HTTP 413) for an invalidation batch naming more objects than
 /// one request may — the per-batch bound ([`MAX_INVALIDATION_PATHS`]).
 ///
-/// The DISTRIBUTION-scoped create answers this code for that condition; the tenant-scoped one
-/// answers the invalidation quota's own code for it
-/// ([`too_many_invalidations_in_progress`]), which is what each surface's recorded behaviour
-/// carries. Do not unify them.
+/// The condition is the SIZE of the batch submitted, a property of the request alone, so every
+/// create that takes an invalidation batch answers it under this code — the distribution-scoped
+/// one and the tenant-scoped one alike. The invalidations a resource ALREADY holds are the
+/// other, concurrency-driven condition and carry the quota's own code
+/// ([`too_many_invalidations_in_progress`], HTTP 400): a client tells the two apart to decide
+/// whether retrying the same batch can ever succeed.
 pub fn batch_too_large() -> crate::ops::types::BatchTooLarge {
     crate::ops::types::BatchTooLarge {
         message: Some(BATCH_TOO_LARGE_MESSAGE.to_string()),
@@ -1810,9 +1812,9 @@ pub const TOO_MANY_INVALIDATIONS_MESSAGE: &str =
     "Processing your request will cause you to exceed the maximum number of in-progress \
      invalidations.";
 
-/// The modelled `TooManyInvalidationsInProgress` for a request the invalidation quota
-/// cannot admit: one batch naming more invalidation objects than a request may, or one that
-/// would take the invalidations held for a resource past what this emulator keeps.
+/// The modelled `TooManyInvalidationsInProgress` for a request the invalidation quota cannot
+/// admit: one that would take the invalidations held for a resource past what this emulator
+/// keeps. The SIZE of one batch is the other condition and carries [`batch_too_large`].
 pub fn too_many_invalidations_in_progress() -> crate::ops::types::TooManyInvalidationsInProgress {
     crate::ops::types::TooManyInvalidationsInProgress {
         message: Some(TOO_MANY_INVALIDATIONS_MESSAGE.to_string()),

@@ -15,7 +15,10 @@
 //!   TLS certificate covers that domain, so a resource no record answers to is
 //!   `EntityNotFound` and one that holds no such certificate — a CloudFront managed
 //!   certificate still waiting for its domains to be validated, or a distribution on
-//!   CloudFront's own default certificate — is `InvalidArgument`;
+//!   CloudFront's own default certificate — is `InvalidArgument`. That proof is evaluated
+//!   BEFORE the `Domain` string's own shape, so a validation resource carrying no covering
+//!   certificate is refused in the sentence stating what the account has to hold, whatever
+//!   the domain submitted spells;
 //! * the page is cut at `MaxItems` in the ONE order the store defines, and `NextMarker` is
 //!   the resume point the next request carries, so walking the pages enumerates every
 //!   conflict exactly once.
@@ -255,30 +258,6 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
             .into());
         };
 
-        // "The domain to check for conflicts": the member is a plain string, so the shape
-        // of a DNS name is checked here — a value that is no domain name names no
-        // association any CloudFront resource could hold, which is decided before the store
-        // is consulted at all. A wildcard alternate domain name is one of the inputs this
-        // operation documents ("if you provide *.example.com as input"), and it is a domain
-        // name of the same shape.
-        if crate::state::domain_name_refusal(&input.domain).is_some() {
-            return Err(ListDomainConflictsErrorModeled::InvalidArgument(
-                crate::state::invalid_domain_name(),
-            )
-            .into());
-        }
-
-        // "The marker for the next set of domain conflicts" is the token the previous page
-        // handed back ([`resume_token`]): a value that is not one was never a resume point
-        // this service handed out.
-        let resume = match input.marker.as_deref().filter(|marker| !marker.is_empty()) {
-            Some(marker) => match resume_point(marker) {
-                Some(resume) => Some(resume),
-                None => return Err(invalid_argument(INVALID_MARKER_MESSAGE)),
-            },
-            None => None,
-        };
-
         let mut store = state.lock();
         // Materialise the transitions the clock already owes — a managed certificate's
         // issuance above all, which is what decides whether it covers a domain yet — so
@@ -325,6 +304,35 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         if !covers_domain {
             return Err(invalid_argument(CERTIFICATE_DOES_NOT_COVER_MESSAGE));
         }
+
+        // "The domain to check for conflicts": the member is a plain string, so the shape of
+        // a DNS name is checked here — a value that is no domain name names no association
+        // any CloudFront resource could hold. It is checked AFTER the validation resource:
+        // the domain control validation is what the caller has to carry for this listing to
+        // be answered at all, so a resource that validates control of nothing is the refusal
+        // whatever the domain submitted spells, and the string's own shape is only what is
+        // left to refuse once that proof stands. A wildcard alternate domain name is one of
+        // the inputs this operation documents ("if you provide *.example.com as input"), and
+        // it is a domain name of the same shape.
+        if crate::state::domain_name_refusal(&input.domain).is_some() {
+            return Err(ListDomainConflictsErrorModeled::InvalidArgument(
+                crate::state::invalid_domain_name(),
+            )
+            .into());
+        }
+
+        // "The marker for the next set of domain conflicts" is the token the previous page
+        // handed back ([`resume_token`]): a value that is not one was never a resume point
+        // this service handed out. Checked after the domain, as it was before the validation
+        // resource moved ahead of both: the resource is the only member whose order this
+        // service states, and the rest keep the order they had.
+        let resume = match input.marker.as_deref().filter(|marker| !marker.is_empty()) {
+            Some(marker) => match resume_point(marker) {
+                Some(resume) => Some(resume),
+                None => return Err(invalid_argument(INVALID_MARKER_MESSAGE)),
+            },
+            None => None,
+        };
 
         // Every association that conflicts with the domain, in the one order the store
         // defines, cut to this page: `Marker` names where the previous page ENDED, so this

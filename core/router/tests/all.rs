@@ -4104,3 +4104,41 @@ mod lambda_in_function_cloudwatch_authorization;
 // (And one more of those fragments: an inner doc comment past the first item is `E0753`,
 // so it is a plain comment — `all/all_rs_declares_each_suite_once.rs` is what checks this
 // file and every service crate's `tests/all.rs`.)
+// (`cloudfront_edge_4xx_share_decides_the_alarm` is declared ONCE, in the sorted region
+// above beside the suite whose wiring it reuses: two branches landing in the same window
+// each appended their own copy here, and a module declared twice compiles neither.)
+// above: whether a flat-rate CloudFront subscription may be sold over a distribution needs
+// CloudFront's web-ACL association and a WAFv2 web ACL at once, which is why it is a
+// cross-service suite at all — two branches landing in the same window each appended their
+// own copy here, and a module declared twice compiles neither.)
+// above: a module may be declared only once, and two landings each appended it here.)
+// (A fragment of this file's own header that a merge of two appended tails landed down
+// here, as ordinary comments: an inner doc comment is only legal before the first item of
+// a crate root, so a `//!` line in this tail is `E0753` and compiles no suite at all. The
+// rule it repeats — declare each suite exactly ONCE, since a second `mod` for one name is
+// `E0428` — stands in the header at the top of this file, where
+// `all/all_rs_declares_each_suite_once.rs` checks it for this file and for every service
+// reason: it names this file and every service crate's `tests/all.rs`.)
+// (Ordinary `//` comments, not `//!`: these six lines are a copy of this file's own header
+// that a landing appended down here, and an inner doc comment is legal only at the TOP of a
+// crate root, so as `//!` they are `E0753` and compile none of the suites in this target.
+// The rule they repeat — declare each suite exactly ONCE, since this is one crate root and a
+// second `mod` for one name is `E0428` — stands in the header above, where
+// (And one more line of that header, a plain comment here for the same reason: a suite left
+// at the top level of `tests/` fails the build.)
+// (A last fragment of that header, a plain comment here for the same reason: it names this
+// (Plain comments: the four lines above are a fragment of this file's own header that a
+// landing appended here, and as `//!` they would be `E0753`.)
+// this file and for every service crate's `tests/all.rs`. (Two more header fragments, as
+// plain comments for the reason every note around them records.)
+// (Plain comments: the four lines above are a header fragment a landing appended here.)
+// (Another copy of that header line, a plain comment for the reason the notes above
+// record.)
+// suite left at the top level of `tests/` fails the build. (One more line of that header
+// fragment, a plain comment for the same reason.)
+// Declare each suite exactly ONCE: this is one crate root, so a second `mod` for the
+// same name is `E0428` and fails every suite in this target, and an inner doc comment
+// like these lines is legal only BEFORE the first item, so one appended into the tail is
+// `E0753` and compiles nothing. `all/all_rs_declares_each_suite_once.rs` and
+// `all/all_rs_inner_doc_comments_precede_the_first_item.rs` check both halves of that for
+// leaving a note in the tail.
