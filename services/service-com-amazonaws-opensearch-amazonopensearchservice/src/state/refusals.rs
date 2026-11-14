@@ -660,6 +660,31 @@ pub fn upgrade_already_in_progress(
     }
 }
 
+/// The most domain names ONE batch domain-describe may name.
+///
+/// The model declares no maximum on `DomainNameList`, so the bound is the service's
+/// own: a batch describe reports one `DomainStatus` per name it is given, and the
+/// service caps the batch at five rather than letting one request choose the size of
+/// its answer. Recorded behaviour of the batch describe on both this surface and the
+/// legacy one, which word the refusal in their own terms but cap at the same number.
+pub const DESCRIBE_DOMAINS_BATCH_LIMIT: usize = 5;
+
+/// The `ValidationException` payload for a batch domain-describe naming more domains
+/// than one call may describe.
+///
+/// A FIXED sentence apart from the limit itself: it states the cap the request has to
+/// stay within and quotes nothing of the request back — neither how many names it
+/// carried nor which they were — so a caller is told the rule rather than its own
+/// input. The surfaces word the subject in their own terms (this one describes
+/// domains), so each states its own sentence.
+pub fn too_many_domain_names() -> ValidationException {
+    ValidationException {
+        message: Some(format!(
+            "Please provide a maximum of {DESCRIBE_DOMAINS_BATCH_LIMIT} domain names to describe."
+        )),
+    }
+}
+
 /// The `ValidationException` payload for a pagination token that does not name a
 /// place in the listing it was sent to.
 ///

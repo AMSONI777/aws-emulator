@@ -6,6 +6,9 @@
 //! reports one at a time: one `DomainStatus` per requested name that names a stored
 //! domain. Unlike `DescribeDomain` this operation models NO not-found error, so a name
 //! that names no domain is simply absent from the answer and the call still succeeds.
+//! What it does refuse is a batch LARGER than the service describes in one call: the
+//! request's `DomainNames` is capped at [`crate::state::DESCRIBE_DOMAINS_BATCH_LIMIT`]
+//! before any name is resolved.
 //!
 //! ## Shape of an operation
 //!
@@ -139,6 +142,19 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         input: Self::Input,
         _ctx: &smithy_server_runtime::OperationContext<'_>,
     ) -> Result<Self::Output, Self::Error> {
+        // The batch is CAPPED before any name is resolved: the answer carries one
+        // entry per name the request lists, so without a bound the request chooses
+        // the size of the response. A request naming more domains than one call may
+        // describe is refused as a whole — not trimmed, and not answered for the
+        // first few names — so a caller learns the rule instead of silently losing
+        // the rest of its batch.
+        if input.domain_names.len() > crate::state::DESCRIBE_DOMAINS_BATCH_LIMIT {
+            return Err(DescribeDomainsErrorModeled::ValidationException(
+                crate::state::too_many_domain_names(),
+            )
+            .into());
+        }
+
         let state =
             crate::state::service_state(&*self.engine).ok_or_else(crate::state::state_unavailable)?;
 

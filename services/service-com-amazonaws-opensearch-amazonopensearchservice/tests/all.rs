@@ -113,6 +113,8 @@ mod domain_analysis;
 mod domain_auto_tunes;
 #[path = "all/domain_batch_describe.rs"]
 mod domain_batch_describe;
+#[path = "all/domain_batch_describe_cap.rs"]
+mod domain_batch_describe_cap;
 #[path = "all/domain_configuration_rules.rs"]
 mod domain_configuration_rules;
 #[path = "all/domain_descriptor_projection.rs"]

@@ -84,6 +84,33 @@ pub const MAX_DOMAINS_PER_REGION: usize = 100;
 /// by it.
 pub const MAX_DOMAINS_TOTAL: usize = 1_000;
 
+/// The most domain names ONE batch domain-describe may name.
+///
+/// `DomainNameList` declares no maximum, so the bound is the service's own: the
+/// batch describe reports one `ElasticsearchDomainStatus` per name it is given, and
+/// the service caps the batch at five rather than letting one request choose the size
+/// of its answer. Recorded behaviour of the batch describe on this surface and on the
+/// 2021-01-01 one, which word the refusal in their own terms but cap at the same
+/// number.
+pub const DESCRIBE_DOMAINS_BATCH_LIMIT: usize = 5;
+
+/// `ValidationException` for a batch domain-describe naming more domains than one
+/// call may describe.
+///
+/// A FIXED sentence apart from the limit itself: it states the cap the request has to
+/// stay within and quotes nothing of the request back — neither how many names it
+/// carried nor which they were — so a caller is told the rule rather than its own
+/// input. This surface describes ELASTICSEARCH domains and says so, which is how the
+/// sentence differs from the 2021-01-01 surface's.
+pub fn too_many_elasticsearch_domain_names() -> ValidationException {
+    ValidationException {
+        message: Some(format!(
+            "Please provide a maximum of {DESCRIBE_DOMAINS_BATCH_LIMIT} Elasticsearch domain \
+             names to describe."
+        )),
+    }
+}
+
 /// The largest access-policy document a domain may carry, in bytes.
 ///
 /// AWS documents a maximum domain access policy size of 100 KB. It is also the

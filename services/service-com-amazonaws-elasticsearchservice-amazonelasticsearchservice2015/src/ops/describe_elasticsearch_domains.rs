@@ -8,6 +8,10 @@
 //! `DescribeElasticsearchDomain` answers from, so the two agree and neither
 //! changes what a later caller sees.
 //!
+//! What it does refuse is a batch LARGER than the service describes in one call: the
+//! request's `DomainNames` is capped at
+//! [`crate::state::DESCRIBE_DOMAINS_BATCH_LIMIT`] before any name is resolved.
+//!
 //! ## Shape of an operation
 //!
 //! Each operation is a struct that owns the shared engine and implements
@@ -141,6 +145,19 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         input: Self::Input,
         ctx: &smithy_server_runtime::OperationContext<'_>,
     ) -> Result<Self::Output, Self::Error> {
+        // The batch is CAPPED before any name is resolved: the answer carries one
+        // entry per name the request lists, so without a bound the request chooses
+        // the size of the response. A request naming more domains than one call may
+        // describe is refused as a whole — not trimmed, and not answered for the
+        // first few names — so a caller learns the rule instead of silently losing
+        // the rest of its batch.
+        if input.domain_names.len() > crate::state::DESCRIBE_DOMAINS_BATCH_LIMIT {
+            return Err(DescribeElasticsearchDomainsErrorModeled::ValidationException(
+                crate::state::too_many_elasticsearch_domain_names(),
+            )
+            .into());
+        }
+
         let Some(state) = crate::state::service_state(&*self.engine) else {
             return Err(DescribeElasticsearchDomainsErrorModeled::InternalException(
                 InternalException {
