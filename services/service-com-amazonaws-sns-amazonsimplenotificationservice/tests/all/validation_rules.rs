@@ -732,8 +732,8 @@ async fn a_subscription_is_refused_where_its_topology_could_not_deliver() {
         400,
         "InvalidParameter",
         Some(
-            "Invalid parameter: Attributes Reason: SubscriptionRoleArn is required for \
-             the firehose protocol",
+            "Invalid parameter: Delivery protocol firehose can only be subscribed with \
+             subscription role arn",
         ),
     );
     let with = sns
@@ -767,8 +767,8 @@ async fn a_subscription_is_refused_where_its_topology_could_not_deliver() {
         400,
         "InvalidParameter",
         Some(
-            "Invalid parameter: SubscriptionRoleArn is required for the firehose \
-             protocol",
+            "Invalid parameter: Delivery protocol firehose can only be subscribed with \
+             subscription role arn",
         ),
     );
 
@@ -826,15 +826,19 @@ async fn a_subscription_is_refused_where_its_topology_could_not_deliver() {
                 answer.status, answer.body
             );
         } else {
-            let kind = if topic == &fifo { "FIFO" } else { "standard" };
+            let reason = if topic == &fifo {
+                "must use a FIFO queue as DLQ for a FIFO Subscription to a FIFO Topic."
+            } else {
+                "must use a standard queue as DLQ for a Standard Subscription to a \
+                 Standard Topic."
+            };
             assert_refused(
                 case,
                 &answer,
                 400,
                 "InvalidParameter",
                 Some(&format!(
-                    "Invalid parameter: Attributes Reason: RedrivePolicy: \
-                     deadLetterTargetArn must be a {kind} SQS queue"
+                    "Invalid parameter: Attributes Reason: RedrivePolicy: {reason}"
                 )),
             );
         }
@@ -1266,10 +1270,10 @@ async fn a_message_attribute_is_refused_outside_the_rules_its_parts_carry() {
     let too_long_name = "n".repeat(257);
     let at_precision = "1".repeat(38);
     let past_precision = "1".repeat(39);
-    // The scale: where the decimal point may fall, on each side of the span the
+    // The scale: the power of ten the value stands at, on each side of the span the
     // documented powers of ten give it.
-    let in_scale = "1e-129".to_string();
-    let past_scale = "1e-130".to_string();
+    let in_scale = "1e-128".to_string();
+    let past_scale = "1e-129".to_string();
 
     // The NAME rules, each with the accepted neighbour of the refused case and the
     // sentence the service states for that rule.
@@ -1283,22 +1287,22 @@ async fn a_message_attribute_is_refused_outside_the_rules_its_parts_carry() {
         (
             "a name one character past it",
             too_long_name.as_str(),
-            Some("Message attribute name must be shorter than 256 bytes."),
+            Some("Length of message attribute name must be less than 256 bytes."),
         ),
         (
             "a leading period",
             ".lead",
-            Some("Message attribute name must not begin with character '.'."),
+            Some("Invalid message attribute name starting with character '.' was found."),
         ),
         (
             "a trailing period",
             "trail.",
-            Some("Message attribute name must not end with character '.'."),
+            Some("Invalid message attribute name ending with character '.' was found."),
         ),
         (
             "successive periods",
             "two..periods",
-            Some("Message attribute name must not have successive '.' characters."),
+            Some("Message attribute name can not have successive '.' character."),
         ),
         (
             "a character a name may not carry",
@@ -1367,7 +1371,7 @@ async fn a_message_attribute_is_refused_outside_the_rules_its_parts_carry() {
             "a number at the largest power the type holds",
             "n",
             "Number",
-            "1e126",
+            "1e125",
             None,
         ),
         (
@@ -1384,7 +1388,7 @@ async fn a_message_attribute_is_refused_outside_the_rules_its_parts_carry() {
             "a number past the documented scale",
             "n",
             "Number",
-            "1e127",
+            "1e126",
             Some(("ParameterValueInvalid", "scale must be 10^-128 and 10^126.")),
         ),
         (

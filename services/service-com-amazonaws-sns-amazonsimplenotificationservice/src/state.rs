@@ -2256,21 +2256,21 @@ pub fn subscription_topology_refusal(
 pub fn subscription_required_attribute_refusal(
     protocol: &str,
     attributes: &HashMap<String, String>,
-    member: AttributeMember,
 ) -> Option<String> {
     (SUBSCRIPTION_ROLE_ARN_PROTOCOLS.contains(&protocol)
         && !attributes.contains_key(SUBSCRIPTION_ROLE_ARN_ATTRIBUTE))
     .then(|| {
-        // The attribute the subscription cannot be created without, and the protocol
-        // that requires it, under the member the attributes arrived in.
-        let reason =
-            format!("{SUBSCRIPTION_ROLE_ARN_ATTRIBUTE} is required for the {protocol} protocol");
-        match member {
-            AttributeMember::Map => {
-                format!("Invalid parameter: {ATTRIBUTES_MEMBER} Reason: {reason}")
-            }
-            AttributeMember::Named => format!("Invalid parameter: {reason}"),
-        }
+        // SNS states the condition as a sentence about the DELIVERY PROTOCOL — the
+        // protocol is the only value of the request in it, and the attribute it cannot
+        // be subscribed without is named in the service's own words — so no member
+        // frames it: the request that carried no attributes at all is refused by the
+        // same sentence as the one that took the role away. Recorded evidence: a
+        // `Subscribe` over `firehose` with no `SubscriptionRoleArn` answers `400
+        // InvalidParameter` with exactly this sentence.
+        format!(
+            "Invalid parameter: Delivery protocol {protocol} can only be subscribed \
+             with subscription role arn"
+        )
     })
 }
 
@@ -2307,11 +2307,18 @@ pub fn subscription_attribute_topic_refusal(
         })
         .unwrap_or_default();
     (is_fifo_queue_arn(&target) != topic.is_fifo).then(|| {
-        let kind = if topic.is_fifo { "FIFO" } else { "standard" };
-        member.refusal(
-            REDRIVE_POLICY_ATTRIBUTE,
-            &format!("{DEAD_LETTER_TARGET_ARN} must be a {kind} SQS queue"),
-        )
+        // SNS states the requirement as a sentence of its own — which queue kind the
+        // subscription has to use as its DLQ, and the subscription and topic kind that
+        // require it — with no value of the request in it. Recorded evidence: a standard
+        // queue as the `deadLetterTargetArn` of a FIFO subscription to a FIFO topic
+        // answers `400 InvalidParameter` with exactly the FIFO sentence below.
+        let reason = if topic.is_fifo {
+            "must use a FIFO queue as DLQ for a FIFO Subscription to a FIFO Topic."
+        } else {
+            "must use a standard queue as DLQ for a Standard Subscription to a Standard \
+             Topic."
+        };
+        member.refusal(REDRIVE_POLICY_ATTRIBUTE, reason)
     })
 }
 

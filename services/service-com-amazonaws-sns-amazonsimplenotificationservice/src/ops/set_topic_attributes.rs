@@ -250,11 +250,22 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
                     .into_iter()
                     .map(|sub| sub.protocol.clone())
                     .collect();
-                if let Some(refusal) = state::topic_attributes::topic_attribute_refusal(
+                let refused = state::topic_attributes::topic_attribute_refusal(
                     &input.attribute_name,
                     value,
                     state::topic_attributes::TopicSubject::of(&topic, &protocols),
-                ) {
+                )
+                // …and against the value the topic already holds, since an attribute
+                // whose value SNS only moves one way takes a value the domain admits
+                // only from the values it can still be reached from.
+                .or_else(|| {
+                    state::topic_attributes::topic_attribute_change_refusal(
+                        &input.attribute_name,
+                        value,
+                        &topic.attributes,
+                    )
+                });
+                if let Some(refusal) = refused {
                     return Err(match refusal {
                         state::topic_attributes::TopicAttributeRefusal::InvalidParameter(
                             message,

@@ -14,9 +14,10 @@
 //!
 //! The rows differ along what the rule generalises over: the IP version of the address and of
 //! the block, the prefix length, an address on each edge of the block and one past it, the
-//! scope the policy is matched under, the exclusion of a network (`anything-but`), and the
-//! values that name no address and the blocks that name no network. Every row is asserted
-//! where a client observes the decision: on the subscribed queue.
+//! scope the policy is matched under, and the values that name no address and the blocks that
+//! name no network. (A network is not one of the patterns `anything-but` negates — the write
+//! path refuses that condition, see `filter_policy_grammar_refusals`.) Every row is
+//! asserted where a client observes the decision: on the subscribed queue.
 
 use serde_json::{json, Value};
 
@@ -197,20 +198,6 @@ async fn an_address_condition_delivers_exactly_the_addresses_inside_its_network(
             policy: json!({"source": [{"cidr": "198.51.100.0/24"}, {"cidr": "10.0.0.0/24"}]}),
             value: "203.0.113.5",
             delivered: false,
-        },
-        Row {
-            case: "an address the policy excludes by its network",
-            scope: None,
-            policy: json!({"source": [{"anything-but": {"cidr": "10.0.0.0/24"}}]}),
-            value: "10.0.0.7",
-            delivered: false,
-        },
-        Row {
-            case: "an address outside the network the policy excludes",
-            scope: None,
-            policy: json!({"source": [{"anything-but": {"cidr": "10.0.0.0/24"}}]}),
-            value: "203.0.113.5",
-            delivered: true,
         },
         Row {
             case: "an address inside the block, matched on the message body",

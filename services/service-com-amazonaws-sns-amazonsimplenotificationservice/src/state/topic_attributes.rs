@@ -13,13 +13,15 @@
 //! attribute value `CreateTopic` accepts cannot be one `SetTopicAttributes` refuses, and
 //! both calls therefore state the same sentence for the same condition.
 
+use std::collections::HashMap;
+
 use super::{
     delivery_policy_refusal, flag_attribute_refusal, flag_attribute_value, json_object,
     AttributeMember, TopicRecord, ARCHIVE_POLICY_ATTRIBUTE, CONTENT_BASED_DEDUPLICATION_ATTRIBUTE,
     DEFAULT_MAXIMUM_MESSAGE_SIZE, DELIVERY_POLICY_ATTRIBUTE, DISPLAY_NAME_ATTRIBUTE,
-    FEEDBACK_ROLE_ARN_SUFFIX, FIFO_THROUGHPUT_SCOPE_ATTRIBUTE, FIFO_TOPIC_ATTRIBUTE,
-    KMS_MASTER_KEY_ID_ATTRIBUTE, MAXIMUM_MESSAGE_SIZE_ATTRIBUTE, MAX_MAXIMUM_MESSAGE_SIZE,
-    MIN_MAXIMUM_MESSAGE_SIZE, POLICY_ATTRIBUTE, TopicPolicyDocument,
+    FEEDBACK_ROLE_ARN_SUFFIX, FIFO_THROUGHPUT_SCOPE_ATTRIBUTE, FIFO_THROUGHPUT_SCOPE_MESSAGE_GROUP,
+    FIFO_TOPIC_ATTRIBUTE, KMS_MASTER_KEY_ID_ATTRIBUTE, MAXIMUM_MESSAGE_SIZE_ATTRIBUTE,
+    MAX_MAXIMUM_MESSAGE_SIZE, MIN_MAXIMUM_MESSAGE_SIZE, POLICY_ATTRIBUTE, TopicPolicyDocument,
 };
 
 /// The longest display name SNS accepts: a topic's display name is at most 100
@@ -42,7 +44,27 @@ const SIGNATURE_VERSION_VALUES: &[&str] = &["1", "2"];
 /// message deduplication is across the entire topic … `MessageGroup` – The scope of
 /// deduplication is within each individual message group"
 /// (`SetTopicAttributesInput$AttributeName` doc).
-const FIFO_THROUGHPUT_SCOPE_VALUES: &[&str] = &["Topic", "MessageGroup"];
+const FIFO_THROUGHPUT_SCOPE_TOPIC: &str = "Topic";
+const FIFO_THROUGHPUT_SCOPE_VALUES: &[&str] = &[
+    FIFO_THROUGHPUT_SCOPE_TOPIC,
+    FIFO_THROUGHPUT_SCOPE_MESSAGE_GROUP,
+];
+
+/// The value changes SNS does not perform: `(attribute, from, to)` triples a write is
+/// refused for, whatever the value's own domain says.
+///
+/// Some attribute values are one-way. The throughput scope is one: moving a FIFO topic's
+/// deduplication (and its throughput) from the whole topic down into each message group
+/// is a change SNS makes, and moving it back up is not — the message groups the topic has
+/// been publishing under cannot be re-gathered into one scope. Recorded evidence:
+/// `FifoThroughputScope` written back to `Topic` after `MessageGroup` answers `400
+/// InvalidParameter` with [`unsupported_change_refusal`]'s sentence, and the topic keeps
+/// the scope it held.
+const UNSUPPORTED_VALUE_CHANGES: &[(&str, &str, &str)] = &[(
+    FIFO_THROUGHPUT_SCOPE_ATTRIBUTE,
+    FIFO_THROUGHPUT_SCOPE_MESSAGE_GROUP,
+    FIFO_THROUGHPUT_SCOPE_TOPIC,
+)];
 
 /// The bounds of a delivery-status sample rate: "the sample rate percentage (0-100)"
 /// (`SetTopicAttributesInput$AttributeName` doc).
@@ -152,6 +174,38 @@ pub fn topic_attribute_refusal(
         return feedback_role_refusal(name, value);
     }
     value_refusal(name, value, subject).map(TopicAttributeRefusal::InvalidParameter)
+}
+
+/// The sentence SNS refuses a value CHANGE it does not perform with: the attribute, the
+/// value it holds and the value the write asks for.
+///
+/// Fixed text around the three names, all of them the service's own: the attribute and
+/// the two values are what a caller has to act on, and nothing else of the request is
+/// echoed.
+fn unsupported_change_refusal(name: &str, from: &str, to: &str) -> String {
+    format!("Invalid parameter: Modifying {name} from {from} to {to} is not supported")
+}
+
+/// The refusal a write of the topic attribute `name` to `value` answers because of the
+/// value the topic ALREADY holds for it, or `None` when the change is one SNS performs.
+///
+/// A value's own domain is not the whole rule: a one-way attribute
+/// ([`UNSUPPORTED_VALUE_CHANGES`]) takes a value the domain admits only from the values
+/// it can still be reached from, so the write is judged against the attribute map the
+/// topic holds now. A write that lands the value the attribute already holds changes
+/// nothing and is not a transition at all.
+pub fn topic_attribute_change_refusal(
+    name: &str,
+    value: &str,
+    held: &HashMap<String, String>,
+) -> Option<TopicAttributeRefusal> {
+    let holds = held.get(name)?.as_str();
+    UNSUPPORTED_VALUE_CHANGES
+        .iter()
+        .find(|(attribute, from, to)| *attribute == name && *from == holds && *to == value)
+        .map(|(attribute, from, to)| {
+            TopicAttributeRefusal::InvalidParameter(unsupported_change_refusal(attribute, from, to))
+        })
 }
 
 /// The sentence a value outside the attribute's own documented domain is refused with,

@@ -671,11 +671,9 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> Subscribe<Eng> {
         }
         // And an attribute the PROTOCOL requires has to be there at all: a subscription
         // missing it is one SNS has no way to deliver over.
-        if let Some(message) = state::subscription_required_attribute_refusal(
-            &protocol,
-            &attributes,
-            state::AttributeMember::Map,
-        ) {
+        if let Some(message) =
+            state::subscription_required_attribute_refusal(&protocol, &attributes)
+        {
             return Err(SubscribeErrorModeled::InvalidParameterException(
                 InvalidParameterException {
                     message: Some(message),

@@ -169,7 +169,7 @@ async fn a_number_attribute_whose_value_is_a_number_is_published() {
         ("a leading-point fraction", ".5"),
         ("a lowercase exponent", "1e3"),
         ("an uppercase signed exponent", "1E-3"),
-        ("the largest power the type holds", "1e126"),
+        ("the largest power the type holds", "1e125"),
         ("the smallest power the type holds", "1e-128"),
         ("zero", "0"),
     ];

@@ -22,10 +22,7 @@ use std::collections::HashMap;
 
 use crate::ops::types::MessageAttributeValue;
 
-use super::{
-    attribute_data_type, BINARY_DATA_TYPE, NUMBER_DATA_TYPE, STRING_ARRAY_DATA_TYPE,
-    STRING_DATA_TYPE,
-};
+use super::{attribute_data_type, BINARY_DATA_TYPE, NUMBER_DATA_TYPE, STRING_DATA_TYPE};
 
 /// The longest message attribute name SNS accepts, in characters — the same bound the
 /// service publishes for a message attribute's name in the Amazon SNS Developer Guide
@@ -41,7 +38,10 @@ pub const RESERVED_NAME_PREFIXES: &[&str] = &["AWS.", "Amazon."];
 /// exponents its scale lies between: "a number can have up to 38 digits of precision,
 /// and it can be between 10^-128 to 10^+126" (the Amazon SNS Developer Guide, "Amazon
 /// SNS message attributes", of the `Number` data type) — so a value is held to 38
-/// significant digits, and its decimal point to the span those powers of ten give it.
+/// significant digits, and its magnitude to the span those powers of ten give it: from
+/// the smaller power, which is a magnitude the type holds, UP TO the larger, which is the
+/// first magnitude it does not. Recorded evidence: a value at 10^-128 is published, and
+/// one at 10^126 is refused for its scale.
 pub const MAX_NUMBER_PRECISION: usize = 38;
 pub const MIN_NUMBER_EXPONENT: i32 = -128;
 pub const MAX_NUMBER_EXPONENT: i32 = 126;
@@ -88,7 +88,8 @@ fn invalid_name_message(name: &str) -> Option<String> {
     }
     if length > MAX_ATTRIBUTE_NAME_CHARS {
         return Some(format!(
-            "Message attribute name must be shorter than {MAX_ATTRIBUTE_NAME_CHARS} bytes."
+            "Length of message attribute name must be less than \
+             {MAX_ATTRIBUTE_NAME_CHARS} bytes."
         ));
     }
     if let Some(character) = name.chars().find(|c| !is_attribute_name_character(*c)) {
@@ -102,15 +103,17 @@ fn invalid_name_message(name: &str) -> Option<String> {
         ));
     }
     if name.starts_with('.') {
-        return Some("Message attribute name must not begin with character '.'.".to_string());
+        return Some(
+            "Invalid message attribute name starting with character '.' was found.".to_string(),
+        );
     }
     if name.ends_with('.') {
-        return Some("Message attribute name must not end with character '.'.".to_string());
+        return Some(
+            "Invalid message attribute name ending with character '.' was found.".to_string(),
+        );
     }
     if name.contains("..") {
-        return Some(
-            "Message attribute name must not have successive '.' characters.".to_string(),
-        );
+        return Some("Message attribute name can not have successive '.' character.".to_string());
     }
     None
 }
@@ -247,20 +250,14 @@ fn attribute_value_refusal(
     if data_type == NUMBER_DATA_TYPE {
         return number_value_refusal(name, text).map(MessageAttributeRefusal::ParameterValue);
     }
-    // "String.Array – Strings, numbers, true, false and null" (the service's own label
-    // on the string type): the value is a JSON array of those, so a value that is not
-    // one holds no element to match or deliver.
-    if value.data_type == STRING_ARRAY_DATA_TYPE
-        && !matches!(
-            serde_json::from_str::<serde_json::Value>(text),
-            Ok(serde_json::Value::Array(_))
-        )
-    {
-        return Some(MessageAttributeRefusal::ParameterValue(format!(
-            "The message attribute '{name}' with type '{STRING_ARRAY_DATA_TYPE}' must \
-             carry a JSON array of strings, numbers, true, false and null."
-        )));
-    }
+    // Every other type carries TEXT, and `String.Array` is one of them: the service's
+    // own label on the string type says what a matcher reads a value of it as ("a JSON
+    // array of strings, numbers, true, false and null"), and the model puts no
+    // constraint on the value itself (`smithy_query(query="shape",
+    // shape="MessageAttributeValue")` reports a plain string `DataType` and a plain
+    // string `StringValue`), so the value is opaque here: a labelled value SNS does not
+    // read as a list is still carried verbatim to every subscriber, and the matching
+    // reads it as the one text it is ([`super::filter_policy`]).
     None
 }
 
@@ -272,9 +269,9 @@ fn attribute_value_refusal(
 /// own and the sentence does not echo it back. The two BOUNDS are refused by sentences
 /// that do name the value in brackets, beside the bound it crossed — the precision in
 /// digits, the scale in powers of ten — because there the value is a number and what the
-/// publisher has to change is its size. The two bounds are independent: the PRECISION is
-/// how many significant digits the value carries ("a number can have up to 38 digits of
-/// precision"), and the SCALE is where its decimal point falls among them, so a value can
+/// publisher has to change is its size. The two bounds are independent: the PRECISION
+/// is how many significant digits the value carries ("a number can have up to 38 digits of
+/// precision"), and the SCALE is which power of ten its magnitude stands at, so a value can
 /// cross either without crossing the other.
 fn number_value_refusal(name: &str, text: &str) -> Option<String> {
     let Some(number) = DecimalNumber::read(text) else {
@@ -288,13 +285,15 @@ fn number_value_refusal(name: &str, text: &str) -> Option<String> {
              {MAX_NUMBER_PRECISION} precision digits."
         ));
     }
-    // Where the decimal POINT falls once the exponent has moved it: the point stands at
-    // most one digit past the largest power the type holds and at most as many digits
-    // before the first as the smallest admits, which is the same reading the tree's
-    // other `Number` attribute reader takes of the same bound, and which also bounds how
-    // many digits writing the value out plainly takes.
-    let point_in_range = (MIN_NUMBER_EXPONENT..=MAX_NUMBER_EXPONENT + 1).contains(&number.point);
-    (!point_in_range).then(|| {
+    // The SCALE is the power of ten the value's magnitude stands at — the exponent of
+    // its leading significant digit, however the caller spelled the value — and the two
+    // documented powers span it HALF OPEN: a value at the smaller power is one the type
+    // holds, and the larger power is the first magnitude it does not. Zero stands at no
+    // power of ten, so no bound excludes it.
+    let in_scale = number
+        .exponent
+        .is_none_or(|exponent| (MIN_NUMBER_EXPONENT..MAX_NUMBER_EXPONENT).contains(&exponent));
+    (!in_scale).then(|| {
         format!(
             "Message attribute '{name}' number value [{text}] scale must be \
              10^{MIN_NUMBER_EXPONENT} and 10^{MAX_NUMBER_EXPONENT}."
@@ -303,13 +302,15 @@ fn number_value_refusal(name: &str, text: &str) -> Option<String> {
 }
 
 /// A decimal number as a `Number` attribute spells it, read for the properties SNS
-/// bounds: how many significant digits it carries and where its decimal point falls.
+/// bounds: how many significant digits it carries and which power of ten it stands at.
 struct DecimalNumber {
     /// The significant digits of the value — its digits with the leading zeros dropped,
     /// which stand for no precision.
     precision: usize,
-    /// How many digits stand before the decimal point once the exponent has moved it.
-    point: i32,
+    /// The power of ten the value's leading significant digit stands at, so the value is
+    /// at least that power and less than the next one up — `None` for a value of zero,
+    /// which stands at no power of ten at all.
+    exponent: Option<i32>,
 }
 
 impl DecimalNumber {
@@ -340,13 +341,28 @@ impl DecimalNumber {
         }
         let digits: String = format!("{whole}{fraction}");
         let significant = digits.trim_start_matches('0');
-        // Where the point stands among the digits, which the suffix moves.
-        let point = i32::try_from(whole.len()).ok()?.checked_add(suffix)?;
+        // Where the leading significant digit stands: the digits before the point, less
+        // the leading zeros that stand for no magnitude, less one for the digit itself —
+        // and then moved by the power-of-ten suffix. Read this way, a value's exponent
+        // is a property of the NUMBER rather than of its spelling, so `5e-1`, `0.5` and
+        // `.5` all stand at the same power.
+        let leading_zeros = digits.len() - significant.len();
+        let exponent = if significant.is_empty() {
+            None
+        } else {
+            Some(
+                i32::try_from(whole.len())
+                    .ok()?
+                    .checked_sub(i32::try_from(leading_zeros).ok()?)?
+                    .checked_sub(1)?
+                    .checked_add(suffix)?,
+            )
+        };
         Some(Self {
             // A leading zero carries no precision, whichever side of the point it falls
             // on: `0.5` and `5` are both written to one digit, and `0.00` to none.
             precision: significant.len(),
-            point,
+            exponent,
         })
     }
 }

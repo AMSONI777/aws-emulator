@@ -552,9 +552,17 @@ fn condition_refusal(
     argument_refusal(name, argument, source, &at, field)
 }
 
-/// The operators `anything-but` may negate: every one the matching reads inside it,
-/// which is the one place the grammar admits an operator inside an operator.
-const NEGATABLE_OPERATORS: &[&str] = OPERATORS;
+/// The operators `anything-but` may negate: the STRING match types, which are the ones
+/// the service negates — a negated condition excludes the values a string pattern picks
+/// out, and the match types that are not string patterns (a network, a numeric range, a
+/// property's presence, another negation) name nothing `anything-but` excludes. This is
+/// the one place the grammar admits an operator inside an operator, so it is also the
+/// one place a name of the vocabulary can still be unsupported.
+///
+/// The set is the tree's one reading of that grammar
+/// ([`::service_common::event_pattern::NEGATABLE_FILTERS`]), which the same negation in an
+/// EventBridge event pattern is read by, so the two cannot drift.
+const NEGATABLE_OPERATORS: &[&str] = ::service_common::event_pattern::NEGATABLE_FILTERS;
 
 /// A policy value as a refusal spells it back: a string as its own text, and anything
 /// else as the JSON it is.

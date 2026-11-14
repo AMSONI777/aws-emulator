@@ -352,11 +352,9 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> SetSubscriptionAt
         // afterwards: a write that would take it away leaves a subscription SNS has no
         // way to deliver over, under the rule every write of a subscription attribute
         // shares.
-        if let Some(message) = state::subscription_required_attribute_refusal(
-            &subscription.protocol,
-            &would_hold,
-            state::AttributeMember::Named,
-        ) {
+        if let Some(message) =
+            state::subscription_required_attribute_refusal(&subscription.protocol, &would_hold)
+        {
             return Err(invalid_parameter(message));
         }
 

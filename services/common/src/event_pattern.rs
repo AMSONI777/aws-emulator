@@ -42,7 +42,12 @@ const IGNORE_CASE: &str = "equals-ignore-case";
 const NUMERIC_OPERATORS: &[&str] = &["=", "<", "<=", ">", ">="];
 
 /// The filters `{"anything-but": {...}}` may negate.
-const NEGATABLE_FILTERS: &[&str] = &["prefix", "suffix", "wildcard", IGNORE_CASE];
+///
+/// `pub` because this is the one reading of that grammar in the tree: Amazon SNS's
+/// subscription filter policies admit the same negation, so its own reader
+/// (`crate::state::filter_policy` of the SNS service crate) holds a condition to this
+/// same set rather than to a second copy of it.
+pub const NEGATABLE_FILTERS: &[&str] = &["prefix", "suffix", "wildcard", IGNORE_CASE];
 
 /// The largest event pattern this matcher accepts, in bytes.
 ///

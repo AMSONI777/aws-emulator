@@ -77,6 +77,9 @@ mod firehose_subscription_delivery;
 #[path = "all/filter_policy_delivery.rs"]
 mod filter_policy_delivery;
 
+#[path = "all/filter_policy_grammar_refusals.rs"]
+mod filter_policy_grammar_refusals;
+
 #[path = "all/filter_policy_match_budget.rs"]
 mod filter_policy_match_budget;
 
@@ -108,6 +111,12 @@ mod lambda_subscription_grants;
 
 #[path = "all/list_subscriptions.rs"]
 mod list_subscriptions;
+
+#[path = "all/message_attribute_custom_type_labels.rs"]
+mod message_attribute_custom_type_labels;
+
+#[path = "all/message_attribute_name_and_number_bounds.rs"]
+mod message_attribute_name_and_number_bounds;
 
 #[path = "all/message_attribute_name_charset.rs"]
 mod message_attribute_name_charset;
@@ -180,6 +189,9 @@ mod regional_listings;
 
 #[path = "all/resource_tags.rs"]
 mod resource_tags;
+
+#[path = "all/resource_scoped_write_refusals.rs"]
+mod resource_scoped_write_refusals;
 
 #[path = "all/set_endpoint_attributes.rs"]
 mod set_endpoint_attributes;
