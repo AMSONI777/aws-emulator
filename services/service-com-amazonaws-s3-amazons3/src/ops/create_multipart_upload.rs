@@ -685,16 +685,22 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         };
         // The bucket's own policy, copied out under a guard taken and released here: the
         // decision itself reads no state of this service, and a bucket this emulator does not
-        // hold is answered by the initiation below rather than by this gate.
-        let bucket_policy = {
+        // hold is answered by the initiation below rather than by this gate. The tags it
+        // answers the ABAC condition keys with are copied out under that same guard.
+        let (bucket_policy, addressed_tags) = {
             let store = state.lock();
-            store
-                .bucket(&input.bucket)
-                .and_then(|bucket| bucket.policy.clone())
+            let bucket = store.bucket(&input.bucket);
+            (
+                bucket.and_then(|bucket| bucket.policy.clone()),
+                bucket
+                    .map(crate::service::request_authorization::AddressedBucketTags::of)
+                    .unwrap_or_default(),
+            )
         };
         if let Some(message) = crate::service::request_authorization::denial(
             &caller,
             bucket_policy.as_deref(),
+            &addressed_tags,
             PUT_OBJECT_ACTION,
             &crate::state::object_arn(&input.bucket, &input.key),
             &write_context.conditions(),

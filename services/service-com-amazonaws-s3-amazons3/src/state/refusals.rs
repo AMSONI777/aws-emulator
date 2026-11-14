@@ -564,6 +564,14 @@ pub fn request_region(parts: &::http::request::Parts) -> String {
 /// never-configured bucket is in is the other one.
 pub const DEFAULT_BUCKET_ABAC_STATUS: &str = "Disabled";
 
+/// The other `BucketAbacStatus` value: the state in which the bucket's TAGS are in force as
+/// access control — "when you enable ABAC, you can use tags for access control on your
+/// buckets" (`PutBucketAbac`'s own documentation).
+///
+/// Which is what makes a request addressed to such a bucket answer the condition keys naming
+/// its tags ([`crate::service::request_authorization::AddressedBucketTags`]).
+pub const ENABLED_BUCKET_ABAC_STATUS: &str = "Enabled";
+
 /// How many ownership control rules this emulator records for one bucket.
 ///
 /// NOT a fidelity claim: `OwnershipControlsRules` carries no `@length` in the model
@@ -1929,6 +1937,17 @@ pub(super) const SECURE_TRANSPORT_VALUE: &str = "true";
 /// — the keys whose absence from a policy's clause is decided rather than unknown. Every
 /// other key keeps the fail-closed reading ([`Bucket::caller_is_denied`]).
 pub(super) const REQUEST_CONDITION_KEYS: &[&str] = &[SECURE_TRANSPORT_KEY];
+
+/// The condition-key FAMILY the TAGS of the bucket a request addressed are named in, each
+/// member after the tag key it carries: `aws:ResourceTag/Team` holds the value of the bucket
+/// tag `Team` (AWS General Reference, *Global condition context keys*, `aws:ResourceTag/` —
+/// "the tags attached to the resource").
+///
+/// A bucket answers it only while ABAC is enabled on it ([`Bucket::resource_tag_conditions`]
+/// is the one reading of that), since S3 decides access by a bucket's tags only then: "if
+/// ABAC is enabled on your bucket, you can use tags on the bucket for access control"
+/// (`GetBucketAbac`'s own documentation).
+pub const RESOURCE_TAG_CONDITION_KEY_FAMILY: &str = "aws:ResourceTag/";
 
 /// The `Payer` value under which the REQUESTER, rather than the bucket owner, pays for a
 /// download — one of the two values `Payer` takes (`PAYER_VALUES`), the other being

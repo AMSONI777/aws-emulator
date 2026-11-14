@@ -510,6 +510,9 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
             if let Some(message) = crate::service::request_authorization::denial(
                 &caller,
                 None,
+                // A create addresses a bucket that does not exist yet, so nothing carries
+                // tags for the ABAC condition keys to be answered from.
+                &crate::service::request_authorization::AddressedBucketTags::default(),
                 action,
                 &resource,
                 &conditions,

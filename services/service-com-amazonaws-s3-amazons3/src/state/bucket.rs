@@ -684,7 +684,9 @@ impl Bucket {
     /// over one of them is DECIDED: the guardrail clause AWS publishes for a bucket policy —
     /// a `Deny` of everything that did not arrive over a secure transport — holds for no
     /// request this emulator serves, and the same clause stated the other way holds for
-    /// every one.
+    /// every one. A bucket under ABAC answers the keys naming its own tags beside them
+    /// ([`Bucket::resource_tag_conditions`]), so a `Deny` conditioned on one of those is
+    /// decided here too.
     ///
     /// Only a deny this evaluation could decide refuses: a clause over a key this service
     /// does not answer leaves the statement UNDECIDED, and the evaluation's reading of an
@@ -707,15 +709,23 @@ impl Bucket {
         principals.extend(::service_common::iam_authorization::account_principals(
             &caller,
         ));
-        let context = [(
+        let mut context = vec![(
             SECURE_TRANSPORT_KEY.to_string(),
             SECURE_TRANSPORT_VALUE.to_string(),
         )];
+        // The bucket's own TAGS, which a clause over the resource-tag family is decided
+        // against while ABAC is enabled on it ([`Bucket::resource_tag_conditions`]) — the
+        // same keys the full authorization gate answers for a request addressed here.
+        let mut published: Vec<&str> = REQUEST_CONDITION_KEYS.to_vec();
+        if let Some(tags) = self.resource_tag_conditions() {
+            context.extend(tags);
+            published.push(RESOURCE_TAG_CONDITION_KEY_FAMILY);
+        }
         let outcome = ::service_common::iam_authorization::resource_outcome_prepared(
             &::service_common::iam_authorization::PreparedDocument::read(policy),
             &::service_common::iam_authorization::Request::new(action, resource, &principals)
                 .with_context(&context)
-                .with_published_keys(REQUEST_CONDITION_KEYS),
+                .with_published_keys(&published),
         );
         outcome.decision == ::service_common::iam_authorization::Decision::Denied
             && outcome.required_context_keys.is_empty()
@@ -786,6 +796,47 @@ impl Bucket {
     /// writes nothing and a later caller sees exactly what this one saw.
     pub fn abac_status(&self) -> &str {
         self.abac.as_deref().unwrap_or(DEFAULT_BUCKET_ABAC_STATUS)
+    }
+
+    /// Whether the bucket's TAG SET is in force as access control: it is a GENERAL PURPOSE
+    /// bucket whose ABAC status is [`ENABLED_BUCKET_ABAC_STATUS`].
+    ///
+    /// "If ABAC is enabled on your bucket, you can use tags on the bucket for access control"
+    /// (`GetBucketAbac`'s own documentation), so this is what decides whether a request
+    /// addressed to the bucket answers the condition keys naming those tags
+    /// ([`crate::service::request_authorization::AddressedBucketTags`]). ABAC is a property of
+    /// a general purpose bucket — "sets the attribute-based access control (ABAC) property of
+    /// the general purpose bucket" (`PutBucketAbac`'s own documentation) — so a DIRECTORY
+    /// bucket's tags are not in force as access control whatever status a put recorded on it,
+    /// which is decided HERE rather than per operation, so one document decides alike on every
+    /// path. A pure read, like [`Bucket::abac_status`] it derives from.
+    pub fn abac_enabled(&self) -> bool {
+        !self.is_directory() && self.abac_status() == ENABLED_BUCKET_ABAC_STATUS
+    }
+
+    /// The condition keys naming this bucket's own TAGS, which a statement conditioned on
+    /// [`RESOURCE_TAG_CONDITION_KEY_FAMILY`] is decided against: one pair per tag the bucket
+    /// holds while ABAC is enabled on it, and `None` for a bucket whose tags decide nothing,
+    /// where a clause over one of those keys stays undecided and so grants nothing.
+    ///
+    /// ONE reading, so the full authorization gate
+    /// ([`crate::service::request_authorization::AddressedBucketTags`]) and the bucket-policy
+    /// deny this module decides ([`Bucket::caller_is_denied`]) answer the family alike. A
+    /// bucket under ABAC that holds NO tag answers the family with no pair at all, which is
+    /// not the same as not answering it: a clause over a tag key it does not carry is then
+    /// decided as absent.
+    pub fn resource_tag_conditions(&self) -> Option<Vec<(String, String)>> {
+        self.abac_enabled().then(|| {
+            self.tags()
+                .iter()
+                .map(|tag| {
+                    (
+                        format!("{RESOURCE_TAG_CONDITION_KEY_FAMILY}{}", tag.key),
+                        tag.value.clone(),
+                    )
+                })
+                .collect()
+        })
     }
 
     /// Set the bucket's ABAC status from the `AbacStatus` a `PutBucketAbac` request

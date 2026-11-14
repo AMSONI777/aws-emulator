@@ -844,6 +844,7 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> PutObject<Eng> {
         if let Some(message) = crate::service::request_authorization::denial(
             &caller,
             bucket_record.policy.as_deref(),
+            &crate::service::request_authorization::AddressedBucketTags::of(bucket_record),
             PUT_OBJECT_ACTION,
             &crate::state::object_arn(&input.bucket, &input.key),
             &write_context.conditions(),

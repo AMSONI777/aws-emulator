@@ -63,7 +63,11 @@
 //! belongs to was issued ([`authorization::token_issue_time_conditions`]), which is what a
 //! statement revoking every session issued before a cut-off is written over. Both are read
 //! from the credential rather than decided here, and a long-term access key carries a value
-//! for neither.
+//! for neither. Two more come from the TAGS in play: the session tags the credential carries
+//! (`aws:PrincipalTag/<key>`) and the tags of the bucket the request addressed while ABAC is
+//! enabled on it (`aws:ResourceTag/<key>`, [`AddressedBucketTags`]) — the pair an
+//! attribute-based grant is written over, where the policy states the principal's tag as a
+//! VARIABLE and the evaluator substitutes it from this same context.
 //!
 //! A credential whose PRINCIPAL no longer exists is not judged here at all: its access key id
 //! resolves to nobody, so the request is refused at credential resolution — before any policy
@@ -525,10 +529,18 @@ pub fn request_caller<Eng: Send + Sync + 'static>(
 /// connections from the specified VPC ID" (`VpcConfiguration$VpcId`), so a request that
 /// reached it from outside that VPC is refused for the NETWORK it came over, in the sentence
 /// an explicit resource-policy deny is worded in — and no grant in any document lifts it.
+///
+/// ## The ADDRESSED bucket's own tags
+///
+/// `addressed_tags` is what the bucket the request addressed answers the
+/// `aws:ResourceTag/<key>` family with ([`AddressedBucketTags`]), which is how a statement
+/// conditioned on the resource's own tags — the ABAC shape, where the grant holds only for a
+/// principal whose session tag matches the bucket's — is decided at all.
 #[must_use]
 pub fn denial(
     caller: &Caller,
     policy: Option<&str>,
+    addressed_tags: &AddressedBucketTags,
     action: &str,
     resource: &str,
     conditions: &[(String, String)],
@@ -576,21 +588,33 @@ pub fn denial(
     if let Some(route) = &through {
         context.extend(authorization::access_point_conditions(route));
     }
-    // The keys this decision PUBLISHES: a service principal's call knows two more than any
-    // other request does (the resource it acts for and that resource's account), and every
-    // other request is judged against the list as it stands — borrowed rather than copied,
-    // since that is the common case.
-    let published: ::std::borrow::Cow<'_, [&str]> = match &caller.service_principal {
-        None => published_keys(caller),
-        Some(call) => {
-            context.extend(authorization::service_principal_conditions(
-                &call.source_arn,
-                &call.source_account,
-            ));
-            let mut published = published_keys(caller).to_vec();
-            published.extend(authorization::SERVICE_PRINCIPAL_CONDITION_KEYS);
-            ::std::borrow::Cow::Owned(published)
-        }
+    // The keys this decision PUBLISHES beside the list every request is judged against: a
+    // service principal's call knows two more (the resource it acts for and that resource's
+    // account), and a request addressed to a bucket under ABAC knows the whole family naming
+    // that bucket's tags.
+    let mut also_published: Vec<&'static str> = Vec::new();
+    if let Some(call) = &caller.service_principal {
+        context.extend(authorization::service_principal_conditions(
+            &call.source_arn,
+            &call.source_account,
+        ));
+        also_published.extend(authorization::SERVICE_PRINCIPAL_CONDITION_KEYS);
+    }
+    // The tags of the bucket the request ADDRESSED, which is what a statement conditioned on
+    // `aws:ResourceTag/<key>` is decided against. The family is published only where the
+    // bucket answers it, so a clause over a tag key such a bucket does not carry is decided
+    // as absent while the same clause about a bucket outside ABAC stays undecided.
+    if let Some(tags) = addressed_tags.answered() {
+        context.extend(tags.iter().cloned());
+        also_published.push(state::RESOURCE_TAG_CONDITION_KEY_FAMILY);
+    }
+    // Borrowed rather than copied where nothing is added, since that is the common case.
+    let published: ::std::borrow::Cow<'_, [&str]> = if also_published.is_empty() {
+        published_keys(caller)
+    } else {
+        let mut published = published_keys(caller).to_vec();
+        published.extend(also_published);
+        ::std::borrow::Cow::Owned(published)
     };
     let conditions: &[(String, String)] = &context;
     let published: &[&str] = &published;
@@ -763,6 +787,39 @@ const IDENTITY_POLICY_DENY_REASON: &str = "with an explicit deny in an identity-
 /// tag `tenant`.
 const PRINCIPAL_TAG_CONDITION_KEY_FAMILY: &str = "aws:PrincipalTag/";
 
+/// What the bucket a request addressed answers the condition-key family naming a bucket's
+/// tags ([`state::RESOURCE_TAG_CONDITION_KEY_FAMILY`]) with, for the decision taken on that
+/// request.
+///
+/// S3 decides access by a bucket's own tags only while ABAC is ENABLED on it — "if ABAC is
+/// enabled on your bucket, you can use tags on the bucket for access control"
+/// (`GetBucketAbac`'s own documentation) — so a bucket under ABAC answers one key per tag it
+/// holds, and the family is PUBLISHED for that decision, which is what lets a clause over a
+/// tag key the bucket does not carry be decided as absent. Every other decision answers the
+/// family not at all: a clause over one of its members stays undecided there, which grants
+/// nothing while a `Deny` carrying it still refuses.
+///
+/// The tags are the BUCKET's for an object resource too: ABAC on a general purpose bucket is
+/// the bucket's property, and the objects it holds are reached under it.
+#[derive(Debug, Clone, Default)]
+pub struct AddressedBucketTags(Option<Vec<(String, String)>>);
+
+impl AddressedBucketTags {
+    /// What `bucket` answers the family with, through the store's one reading of that
+    /// ([`Bucket::resource_tag_conditions`]).
+    #[must_use]
+    pub fn of(bucket: &Bucket) -> Self {
+        Self(bucket.resource_tag_conditions())
+    }
+
+    /// The pairs the family is answered with, or `None` for a decision that does not answer
+    /// it — a request addressed to a bucket outside ABAC, or to no bucket this emulator holds
+    /// (which is what [`AddressedBucketTags::default`] states).
+    fn answered(&self) -> Option<&[(String, String)]> {
+        self.0.as_deref()
+    }
+}
+
 /// The condition context every decision of this gate is taken over: the keys the REQUEST
 /// itself carried (`conditions`), plus the keys this gate holds for EVERY request — who the
 /// caller is and which account it belongs to, whether the credential that signed was
@@ -844,6 +901,7 @@ fn request_over<'a>(
 pub fn policy_operation_denial(
     caller: &Caller,
     policy: Option<&str>,
+    addressed_tags: &AddressedBucketTags,
     action: &str,
     resource: &str,
     conditions: &[(String, String)],
@@ -851,7 +909,7 @@ pub fn policy_operation_denial(
     if caller.account_credential {
         return None;
     }
-    denial(caller, policy, action, resource, conditions)
+    denial(caller, policy, addressed_tags, action, resource, conditions)
 }
 
 /// Why S3 refuses a read of `key` — the bytes or the metadata of the version the request
@@ -884,10 +942,14 @@ pub fn object_read_denial(
 ) -> Option<String> {
     let conditions = authorization::read_conditions();
     let policy = bucket.policy.as_deref();
+    // The bucket's own tags are in force on a read of it and on a read of anything it holds
+    // alike, while ABAC is enabled on it ([`AddressedBucketTags`]).
+    let addressed_tags = AddressedBucketTags::of(bucket);
     if addressed.is_some() {
         return denial(
             caller,
             policy,
+            &addressed_tags,
             get_object_action(version_id),
             &state::object_arn(name, key),
             &conditions,
@@ -896,6 +958,7 @@ pub fn object_read_denial(
     denial(
         caller,
         policy,
+        &addressed_tags,
         LIST_BUCKET_ACTION,
         &bucket.arn(name),
         &conditions,
@@ -1020,7 +1083,14 @@ mod tests {
                 documents,
                 ..caller.clone()
             };
-            let answer = denial(&caller, policy, action, object, &[]);
+            let answer = denial(
+                &caller,
+                policy,
+                &AddressedBucketTags::default(),
+                action,
+                object,
+                &[],
+            );
             assert_eq!(
                 answer.is_some(),
                 refused,
@@ -1075,7 +1145,14 @@ mod tests {
                 documents,
                 ..caller.clone()
             };
-            let answer = denial(&caller, policy, "s3:GetObject", object, &[]);
+            let answer = denial(
+                &caller,
+                policy,
+                &AddressedBucketTags::default(),
+                "s3:GetObject",
+                object,
+                &[],
+            );
             match clause {
                 Some(clause) => {
                     let message = answer.unwrap_or_default();
@@ -1117,13 +1194,27 @@ mod tests {
             ),
         ];
         for (case, caller) in unbounded {
-            let admitted = denial(&caller, None, "s3:GetObject", object, &[]);
+            let admitted = denial(
+                &caller,
+                None,
+                &AddressedBucketTags::default(),
+                "s3:GetObject",
+                object,
+                &[],
+            );
             assert!(
                 admitted.is_none(),
                 "case {case:?}: expected no refusal, got {admitted:?}"
             );
             let deny = document("Deny", "s3:GetObject", object, Some("*"));
-            let refused = denial(&caller, Some(&deny), "s3:GetObject", object, &[]);
+            let refused = denial(
+                &caller,
+                Some(&deny),
+                &AddressedBucketTags::default(),
+                "s3:GetObject",
+                object,
+                &[],
+            );
             assert!(
                 refused.is_some(),
                 "case {case:?}: expected the explicit deny to refuse, got {refused:?}"

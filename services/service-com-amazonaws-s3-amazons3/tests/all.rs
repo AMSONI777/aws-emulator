@@ -25,6 +25,8 @@ mod announced_response_urls;
 mod aws_published_sample_data;
 #[path = "all/bucket_abac.rs"]
 mod bucket_abac;
+#[path = "all/bucket_abac_tag_authorization.rs"]
+mod bucket_abac_tag_authorization;
 #[path = "all/bucket_accelerate_configuration.rs"]
 mod bucket_accelerate_configuration;
 #[path = "all/bucket_acl.rs"]

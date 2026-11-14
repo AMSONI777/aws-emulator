@@ -115,18 +115,25 @@ impl<Eng: Send + Sync + 'static> SelectObjectContent<Eng> {
     ) -> Option<String> {
         let (bucket, key) = self.addressed_object(req)?;
         let caller = super::request_authorization::request_caller(&*self.engine, ctx);
-        // The policy of the bucket the address reaches, or `None` for one carrying none and
-        // for an address this emulator holds no bucket for — the documents in force on the
-        // principal decide the request either way.
-        let policy = crate::state::service_state(&*self.engine).and_then(|state| {
-            state
-                .lock()
-                .bucket(&bucket)
-                .and_then(|held| held.policy.clone())
-        });
+        // The policy of the bucket the address reaches, and what that bucket answers the ABAC
+        // condition keys with, copied out together under one guard — `None`/unanswered for a
+        // bucket carrying none and for an address this emulator holds no bucket for, where the
+        // documents in force on the principal decide the request either way.
+        let (policy, addressed_tags) = crate::state::service_state(&*self.engine)
+            .map(|state| {
+                let store = state.lock();
+                let held = store.bucket(&bucket);
+                (
+                    held.and_then(|held| held.policy.clone()),
+                    held.map(super::request_authorization::AddressedBucketTags::of)
+                        .unwrap_or_default(),
+                )
+            })
+            .unwrap_or_default();
         super::request_authorization::denial(
             &caller,
             policy.as_deref(),
+            &addressed_tags,
             crate::state::GET_OBJECT_ACTION,
             &crate::state::object_arn(&bucket, &key),
             &super::authorization::read_conditions(),

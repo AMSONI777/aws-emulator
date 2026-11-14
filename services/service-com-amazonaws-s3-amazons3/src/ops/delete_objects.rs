@@ -367,6 +367,14 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> DeleteObjects<Eng
         // `MAX_REPLICATION_RULES` rules, so asking per key what a bucket carrying no
         // configuration owes would multiply the two for nothing.
         let replicates = store.replicates_objects(&input.bucket);
+        // What the addressed bucket answers the ABAC condition keys with, read ONCE for the
+        // whole request: a batch may name up to `MAX_KEYS_PER_DELETE` identifiers and the
+        // bucket's tag set is the same for every one of them, so every identifier is judged
+        // against the same answer.
+        let addressed_tags = store
+            .bucket(&input.bucket)
+            .map(crate::service::request_authorization::AddressedBucketTags::of)
+            .unwrap_or_default();
         // Whether this request asks to bypass governance-mode restrictions, and the one
         // instant every Object Lock judgement in the batch is made at — so two identifiers
         // of one request cannot disagree about whether a period is still running.
@@ -386,6 +394,7 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> DeleteObjects<Eng
                 store
                     .bucket(&input.bucket)
                     .and_then(|bucket| bucket.policy.as_deref()),
+                &addressed_tags,
                 crate::service::request_authorization::delete_object_action(
                     identifier.version_id.as_deref(),
                 ),
