@@ -29,13 +29,13 @@ use super::harness::{expected_bucket_arn, Emulator};
 const NAMESPACE: &str = "warehouse";
 
 /// A `storageClassConfiguration` naming `storage_class`.
-fn configuration(storage_class: &str) -> Value {
+pub fn configuration(storage_class: &str) -> Value {
     json!({ "storageClass": storage_class })
 }
 
 /// Create the table bucket `name` in `region`, with a storage class of its own
 /// when the case names one, and answer its ARN.
-async fn bucket(
+pub async fn bucket(
     emulator: &Emulator,
     region: &str,
     name: &str,
@@ -68,7 +68,7 @@ async fn bucket(
 
 /// Create the table `name`, with a storage class of its own when the case names
 /// one.
-async fn table(
+pub async fn table(
     emulator: &Emulator,
     region: &str,
     arn: &str,
@@ -94,7 +94,7 @@ async fn table(
 }
 
 /// The storage class `GetTableBucketStorageClass` reports for `arn`.
-async fn bucket_storage_class(emulator: &Emulator, region: &str, arn: &str, case: &str) -> String {
+pub async fn bucket_storage_class(emulator: &Emulator, region: &str, arn: &str, case: &str) -> String {
     let read = emulator.get_table_bucket_storage_class(region, arn).await;
     assert_eq!(
         read.status, 200,
@@ -116,7 +116,7 @@ async fn bucket_storage_class(emulator: &Emulator, region: &str, arn: &str, case
 }
 
 /// The storage class `GetTableStorageClass` reports for one table.
-async fn table_storage_class(
+pub async fn table_storage_class(
     emulator: &Emulator,
     region: &str,
     arn: &str,
