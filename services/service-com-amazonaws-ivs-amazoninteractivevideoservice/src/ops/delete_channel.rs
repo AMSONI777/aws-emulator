@@ -189,9 +189,11 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
             .stream_keys
             .retain(|_, key| key.channel_arn.as_deref() != Some(input.arn.as_str()));
         // The stream a channel carries is part of the channel: with the channel
-        // gone there is nothing left to ingest on or report about, so the entry
-        // goes too rather than lingering as unreachable state.
-        store.streams.remove(&input.arn);
+        // gone there is nothing left to ingest on or report about, so the broadcast
+        // ends here rather than lingering as unreachable state — through the same
+        // `end_stream` a stopped ingest goes through, so everything that belongs to
+        // the broadcast (its ad marker included) goes with it.
+        crate::state::end_stream(&mut store, &input.arn);
 
         Ok(DeleteChannelOutput)
     }

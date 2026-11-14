@@ -25,6 +25,12 @@ use smithy_server_runtime::{Violation, ViolationKind};
 /// reaches them where it reaches the rest of this service's rules.
 mod channel_endpoints;
 
+/// The ad marker a broadcasting channel's playlist carries, and the rule
+/// `InsertAdBreak` writes it by — one concern, one file, re-exported here so a handler
+/// reaches it where it reaches the rest of this service's rules.
+mod ad_breaks;
+
+pub use ad_breaks::*;
 pub use channel_endpoints::*;
 
 use crate::ops::types::{
@@ -82,6 +88,11 @@ pub struct ComAmazonawsIvsAmazoninteractivevideoserviceState {
     /// same reason as [`Self::channels`]: one stable order for
     /// `ListRecordingConfigurations` to page over.
     pub recording_configurations: BTreeMap<String, RecordingConfigurationRecord>,
+    /// The ad break each broadcasting channel's playlist currently carries, keyed
+    /// by the ARN of that channel: an ad marker belongs to the stream it was
+    /// inserted into, so an entry lives exactly as long as that broadcast does and
+    /// [`end_stream`] drops it with the stream. See [`insert_ad_break`].
+    pub ad_breaks: BTreeMap<String, AdBreakRecord>,
     /// How many ids this store has minted. Part of every id's seed, so no two
     /// minted ids collide even when two calls land in the same nanosecond.
     pub minted: u64,
@@ -1673,12 +1684,15 @@ pub fn is_broadcasting(
 /// `StopStream` disconnects the ingest session, after which the channel has no active
 /// stream: `GetStream` answers `ChannelNotBroadcasting` again and so do the operations
 /// that need one. The record is dropped rather than left behind in another state —
-/// `GetStream` reports the ACTIVE stream, and a stream that has ended is not one.
+/// `GetStream` reports the ACTIVE stream, and a stream that has ended is not one — and
+/// everything that belonged to that broadcast goes with it: the playlist an ad break
+/// was marked in is the ended stream's, so the marker does not outlive it.
 pub fn end_stream(
     state: &mut ComAmazonawsIvsAmazoninteractivevideoserviceState,
     channel_arn: &str,
 ) {
     state.streams.remove(channel_arn);
+    state.ad_breaks.remove(channel_arn);
 }
 
 /// Whether this store holds the channel `channel_arn` names.

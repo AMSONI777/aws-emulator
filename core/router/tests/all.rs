@@ -3417,3 +3417,4 @@ mod eks_kubernetes_api_rbac_audit;
 // leaving a note here. (Ordinary comments, not `//!`: an inner doc comment is legal only
 // at the top of a crate root, and these five lines are a fragment of this file's own
 // header that a merge of two appended tails landed down here.)
+// this file and for every service crate's `tests/all.rs`. (A line comment: an inner doc
