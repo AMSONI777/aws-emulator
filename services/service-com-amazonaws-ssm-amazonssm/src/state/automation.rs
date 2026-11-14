@@ -30,16 +30,21 @@
 //!   that service reports every named instance at a state the step accepts
 //!   ([`instance_state`]);
 //! * `aws:pause` stops the walk with the step `Waiting`, which is what the action does:
-//!   the execution resumes on the `Resume` signal a caller sends, and
-//!   `SendAutomationSignal` is a separate scaffold, so it stays `Waiting` until that
-//!   operation is implemented. An `Interactive` execution waits the same way, before its
-//!   first step, for the `StartStep` signal that mode requires.
+//!   the execution resumes on the `Resume` signal a caller sends
+//!   (`crate::ops::send_automation_signal`), and `aws:approve` waits the same way for the
+//!   `Approve` or `Reject` signal its approvers send. An `Interactive` execution waits the
+//!   same way, before each step, for the `StartStep` signal that mode requires;
+//! * `aws:executeAwsApi` and `aws:executeScript` are RUN, but not here: the walk resolves
+//!   their inputs and PARKS at the step, because one of them dispatches a call into this
+//!   emulator and the other runs caller-supplied code, and neither can be done under this
+//!   store's lock. The step is reported `InProgress` until the host has run it
+//!   ([`actions`]), which is what records its `Outputs` and moves the walk on.
 //!
-//! Every other action runs somewhere this emulator does not reach — a script runtime, a
-//! managed node's agent, another service's API — so the walk runs NOTHING for it and
-//! reports the step `Failed` with a failure message naming the action it did not run.
-//! Nothing here reports a step as having succeeded, produced output or taken time unless
-//! the walk above did that work.
+//! Every other action runs somewhere this emulator does not reach — a managed node's agent,
+//! another orchestration service — so the walk runs NOTHING for it and reports the step
+//! `Failed` with a failure message naming the action it did not run. Nothing here reports a
+//! step as having succeeded, produced output or taken time unless the walk above, or the
+//! host run it parked for, did that work.
 //!
 //! # Rate control
 //!
@@ -85,6 +90,11 @@ pub mod runbook;
 /// The report of the executions a Region holds: which of them a request's filters select,
 /// and the metadata each is reported as.
 pub mod report;
+
+/// The step actions a HOST run performs: the API call an `aws:executeAwsApi` step makes and
+/// the script an `aws:executeScript` step runs, neither of which can happen under this
+/// store's lock.
+pub mod actions;
 
 /// The `aws:changeInstanceState` action: the step that changes the state of the Amazon EC2
 /// instances it names, in that service itself.
@@ -190,6 +200,41 @@ pub const ACTION_SLEEP: &str = "aws:sleep";
 /// The `aws:pause` action: it pauses the automation until a caller resumes it (same
 /// reference).
 pub const ACTION_PAUSE: &str = "aws:pause";
+
+/// The `aws:approve` action: it "temporarily pauses an automation until designated
+/// principals either approve or reject the action" (same reference) — so, like
+/// [`ACTION_PAUSE`], the walk stops at it with the step waiting for a caller's signal.
+pub const ACTION_APPROVE: &str = "aws:approve";
+
+/// The `aws:executeAwsApi` action: it "calls and runs a single Amazon Web Services API
+/// action" (same reference), which is what [`actions`] dispatches for it.
+pub const ACTION_EXECUTE_AWS_API: &str = "aws:executeAwsApi";
+
+/// The `aws:executeScript` action: it "runs the Python or PowerShell script provided using
+/// the specified runtime and handler" (same reference), which is what [`actions`] runs for
+/// it.
+pub const ACTION_EXECUTE_SCRIPT: &str = "aws:executeScript";
+
+/// The actions whose work a HOST run performs rather than the walk: the walk resolves the
+/// step's inputs and parks at it ([`Walked::Pending`]), and [`actions`] runs it.
+pub const HOST_RUN_ACTIONS: &[&str] = &[ACTION_EXECUTE_AWS_API, ACTION_EXECUTE_SCRIPT];
+
+/// The runbook parameter an automation names the role its steps act as: "The ARN of the
+/// role that allows Automation to perform the actions on your behalf" is the
+/// `AutomationAssumeRole` parameter every AWS-published Automation runbook declares, and
+/// the one an `aws:executeAwsApi` call and an `aws:executeScript` script are performed as.
+pub const ASSUME_ROLE_PARAMETER: &str = "AutomationAssumeRole";
+
+/// How long a step a caller took to run is left to that caller before another call may take
+/// it again.
+///
+/// A host run happens outside this store's lock, so the call that took the step marks it
+/// taken ([`StepExecutionRecord::host_action`]) and no other call runs it meanwhile. A
+/// caller that never comes back — a request whose client went away mid-call — would
+/// otherwise leave the execution parked for the life of the process, so the claim lapses
+/// after this span and the next call to reach the execution runs the step. It is well past
+/// the ceiling one run of either action may take ([`actions::ACTION_CEILING`]).
+pub const ACTION_CLAIM_LEASE: Duration = Duration::from_secs(120);
 
 /// How many step entries one walk makes before this emulator gives up on it.
 ///
@@ -300,6 +345,10 @@ enum Walked {
     /// The step is running and has not ended: the walk stops here and the execution stays
     /// `InProgress` (an `aws:sleep` whose instant has not passed).
     Running,
+    /// The step's action is one a HOST run performs ([`HOST_RUN_ACTIONS`]): the walk stops
+    /// here with the step `InProgress` and its inputs resolved, and the execution stays
+    /// `InProgress` until that run has been performed ([`actions`]).
+    Pending,
     /// The step is waiting for a caller's signal: the execution is `Waiting`.
     Waiting,
     /// The step ended; the walk goes to the step this names, or ends when it names none.
@@ -335,10 +384,38 @@ pub struct StepExecutionRecord {
     /// "If a step failed, this message explains why the execution failed"
     /// (`StepExecution$FailureMessage`).
     pub failure_message: Option<String>,
+    /// "Returned values from the execution of the step" (`StepExecution$Outputs`): the
+    /// outputs the step DECLARED, each selected out of what its action answered
+    /// ([`actions`]). Empty for a step that declared none and for one whose action produced
+    /// nothing.
+    pub outputs: BTreeMap<String, Vec<String>>,
+    /// The action a HOST run still owes this step, for the two actions the walk parks at
+    /// ([`HOST_RUN_ACTIONS`]): the step's own resolved inputs, and whether a call has
+    /// already taken it to run. `None` for every step the walk runs itself, and for one
+    /// whose host run has been recorded.
+    pub host_action: Option<HostAction>,
+    /// Whether a caller has signalled this step to start, which is what an `Interactive`
+    /// execution's `StartStep` signal does: such an execution waits before each step until
+    /// the signal that names it arrives.
+    pub signalled: bool,
     /// What this step asked Amazon EC2 for, for the one action whose work is that service's
     /// ([`instance_state`]); `None` for every other step. The step is running until that
     /// service reports the instances at the state it asked for.
     pub instance_state: Option<instance_state::InstanceStateChange>,
+}
+
+/// The host run one step is parked for: what to run it with, and whether a call is running
+/// it.
+#[derive(Debug, Clone)]
+pub struct HostAction {
+    /// The step's `inputs` as the walk resolved them, which is what the action is run with:
+    /// the JSON the content declared with this execution's own values substituted in, kept
+    /// as the document the action takes rather than as the text a step reports.
+    pub inputs: Map<String, Value>,
+    /// When a call TOOK this step to run it, so no second call runs the same step beside
+    /// it. The claim lapses after [`ACTION_CLAIM_LEASE`], so a caller that never came back
+    /// does not park the execution for good.
+    pub claimed_at: Option<SystemTime>,
 }
 
 impl StepExecutionRecord {
@@ -354,6 +431,9 @@ impl StepExecutionRecord {
             ended_at: None,
             due_at: None,
             failure_message: None,
+            outputs: BTreeMap::new(),
+            host_action: None,
+            signalled: false,
             instance_state: None,
         }
     }
@@ -424,7 +504,12 @@ impl StepExecutionRecord {
                     .map(|(name, value)| (name.clone(), value.clone()))
                     .collect()
             }),
-            outputs: None,
+            outputs: (!self.outputs.is_empty()).then(|| {
+                self.outputs
+                    .iter()
+                    .map(|(name, values)| (name.clone(), values.clone()))
+                    .collect()
+            }),
             response: None,
             failure_message: self.failure_message.clone(),
             warning_message: None,
@@ -519,6 +604,11 @@ pub struct AutomationExecutionRecord {
     /// "A message describing why an execution has failed, if the status is set to Failed",
     /// written by the walk from the step that failed it.
     pub failure_message: Option<String>,
+    /// The outputs the RUNBOOK declares at document level, read out of the version this
+    /// execution runs when it started ([`runbook::declared_outputs`]): each names one
+    /// step's output as `<step>.<output>`, and what the steps produced for them is what
+    /// `AutomationExecution$Outputs` reports ([`Self::projected_outputs`]).
+    pub declared_outputs: Vec<String>,
     /// One record per step the runbook declares, in the runbook's own order. Empty for a
     /// rate-controlled parent, which runs its children rather than steps of its own.
     pub steps: Vec<StepExecutionRecord>,
@@ -626,6 +716,15 @@ impl AutomationExecutionRecord {
         if self.status == STATUS_WAITING || self.steps.is_empty() {
             return;
         }
+        self.walk(now);
+    }
+
+    /// Walk the steps from where the walk stands, as far as `now` allows, and come to rest.
+    ///
+    /// The one loop over the runbook's steps: both the walk the clock owes
+    /// ([`Self::materialize_due`]) and the one a host run or a caller's signal carries on
+    /// run it, so where an execution comes to rest is decided in one place.
+    fn walk(&mut self, now: SystemTime) {
         let mut entries = 0usize;
         while let Some(index) = self.current {
             entries += 1;
@@ -637,7 +736,7 @@ impl AutomationExecutionRecord {
                 break;
             }
             match self.enter_step(index, now) {
-                Walked::Running => return,
+                Walked::Running | Walked::Pending => return,
                 Walked::Waiting => {
                     self.status = STATUS_WAITING.to_string();
                     return;
@@ -675,6 +774,11 @@ impl AutomationExecutionRecord {
         if step.status == STATUS_PENDING {
             return self.start_step(index, now);
         }
+        // A step whose action a host run performs is parked until that run has been
+        // recorded: nothing about it is decided here.
+        if step.host_action.is_some() {
+            return Walked::Pending;
+        }
         // A step whose work is another service's is running until that service answers: what
         // it asked for is recorded on the step, and the answer is fed back into it
         // ([`Self::record_instance_state`]), so the walk reads the outcome here rather than
@@ -710,8 +814,11 @@ impl AutomationExecutionRecord {
     /// Resolve the step's inputs and run its action, as far as `now` allows.
     fn start_step(&mut self, index: usize, now: SystemTime) -> Walked {
         // "Interactive … you must manually start each step": a step of an interactive
-        // execution runs when the caller signals it, so the walk waits here.
-        if self.mode == EXECUTION_MODE_INTERACTIVE {
+        // execution runs when the caller signals it, so the walk waits here until the
+        // `StartStep` signal that names this step has arrived.
+        if self.mode == EXECUTION_MODE_INTERACTIVE
+            && !self.steps.get(index).is_some_and(|step| step.signalled)
+        {
             return Walked::Waiting;
         }
         let variables = self.variables(now);
@@ -739,12 +846,24 @@ impl AutomationExecutionRecord {
                 self.run_change_instance_state(index, now, &definition.name, &resolved)
             }
             // "aws:pause … pauses the automation": the execution waits for the caller's
-            // signal, which is exactly what the action does.
-            ACTION_PAUSE => {
+            // signal, which is exactly what the action does. `aws:approve` waits the same
+            // way, for the approval or the rejection its approvers send.
+            ACTION_PAUSE | ACTION_APPROVE => {
                 if let Some(step) = self.steps.get_mut(index) {
                     step.status = STATUS_WAITING.to_string();
                 }
                 Walked::Waiting
+            }
+            // The two actions whose work happens outside this store's lock: the step keeps
+            // the inputs the walk just resolved and the host runs it ([`actions`]).
+            action if HOST_RUN_ACTIONS.contains(&action) => {
+                if let Some(step) = self.steps.get_mut(index) {
+                    step.host_action = Some(HostAction {
+                        inputs: resolved,
+                        claimed_at: None,
+                    });
+                }
+                Walked::Pending
             }
             action => self.fail_step(
                 index,
@@ -1003,6 +1122,215 @@ impl AutomationExecutionRecord {
             .filter(|step| !is_terminal(&step.status) && step.started_at.is_some())
     }
 
+    /// The step execution the walk is PARKED at for a host run, if any: the step whose
+    /// action [`actions`] performs, with the inputs the walk resolved for it.
+    pub fn host_action_step(&self) -> Option<&StepExecutionRecord> {
+        self.current
+            .and_then(|index| self.steps.get(index))
+            .filter(|step| step.host_action.is_some())
+    }
+
+    /// TAKE the host run this execution is parked for, so this caller runs it and no other
+    /// does: the step's index and everything running its action takes.
+    ///
+    /// `None` when the execution is parked for nothing, and when another call took the step
+    /// less than [`ACTION_CLAIM_LEASE`] ago — that call is running it.
+    pub fn claim_host_action(&mut self, now: SystemTime) -> Option<actions::ClaimedAction> {
+        let index = self.current?;
+        let execution_id = self.execution_id.clone();
+        let region = self.region.clone();
+        let assume_role = self.assume_role();
+        let step = self.steps.get_mut(index)?;
+        let definition = step.definition.clone();
+        let pending = step.host_action.as_mut()?;
+        if pending
+            .claimed_at
+            .is_some_and(|claimed| now < claimed + ACTION_CLAIM_LEASE)
+        {
+            return None;
+        }
+        pending.claimed_at = Some(now);
+        Some(actions::ClaimedAction {
+            execution_id,
+            region,
+            step_index: index,
+            step_name: definition.name,
+            action: definition.action,
+            inputs: pending.inputs.clone(),
+            outputs: definition.outputs,
+            assume_role,
+        })
+    }
+
+    /// The role this execution's steps act as: the `AutomationAssumeRole` its parameters
+    /// resolved to ([`ASSUME_ROLE_PARAMETER`]), or `None` where the runbook declares none.
+    fn assume_role(&self) -> Option<String> {
+        self.resolved_parameters
+            .get(ASSUME_ROLE_PARAMETER)
+            .and_then(|values| values.first())
+            .filter(|role| !role.is_empty())
+            .cloned()
+    }
+
+    /// Record what a host run of the step at `index` came to, and carry the walk on from
+    /// there.
+    ///
+    /// Does nothing when that step is no longer parked for a run — another call already
+    /// recorded one, or the execution was stopped meanwhile — so one step's action is
+    /// recorded once however many callers reached it.
+    pub fn record_host_action(
+        &mut self,
+        index: usize,
+        outcome: actions::ActionOutcome,
+        now: SystemTime,
+    ) {
+        if self.ended() {
+            return;
+        }
+        // Nothing was established about the step, so nothing is recorded for it: the claim
+        // is given back and the step stays parked for the next call to run.
+        if let actions::ActionOutcome::NotRun(_) = outcome {
+            if let Some(pending) = self
+                .steps
+                .get_mut(index)
+                .and_then(|step| step.host_action.as_mut())
+            {
+                pending.claimed_at = None;
+            }
+            return;
+        }
+        // The step is parked for exactly one run: taking the claim here is what makes the
+        // record the FIRST caller's, so a second one that answers later records nothing.
+        let claimed = self
+            .steps
+            .get_mut(index)
+            .and_then(|step| step.host_action.take());
+        if claimed.is_none() {
+            return;
+        }
+        let walked = match outcome {
+            actions::ActionOutcome::Succeeded(outputs) => {
+                if let Some(step) = self.steps.get_mut(index) {
+                    step.outputs = outputs;
+                }
+                self.succeed_step(index, now, None)
+            }
+            actions::ActionOutcome::Failed(why) => self.fail_step(index, now, why),
+            // Answered above.
+            actions::ActionOutcome::NotRun(_) => return,
+        };
+        self.carry_on(walked, now);
+    }
+
+    /// The step this execution is WAITING at, if any: the step a caller's signal is about.
+    pub fn waiting_step(&self) -> Option<&StepExecutionRecord> {
+        self.current
+            .and_then(|index| self.steps.get(index))
+            .filter(|_| self.status == STATUS_WAITING)
+    }
+
+    /// The caller's signal resumed the waiting step: it ENDED, and the walk carries on from
+    /// it.
+    ///
+    /// What `aws:pause` and `aws:approve` wait for is exactly this, so the step the
+    /// execution is parked at succeeds and the walk goes where its flow members say — which
+    /// is how a paused automation reaches its own end rather than being moved there.
+    pub fn resume_waiting_step(&mut self, now: SystemTime) {
+        let Some(index) = self.current.filter(|_| self.status == STATUS_WAITING) else {
+            return;
+        };
+        self.status = STATUS_IN_PROGRESS.to_string();
+        // A step of an `Interactive` execution has not STARTED yet when the execution waits
+        // at it: the signal releases it, and the walk runs it.
+        if self.steps.get(index).is_some_and(|step| step.status == STATUS_PENDING) {
+            if let Some(step) = self.steps.get_mut(index) {
+                step.signalled = true;
+            }
+            self.walk(now);
+            return;
+        }
+        let walked = self.succeed_step(index, now, None);
+        self.carry_on(walked, now);
+    }
+
+    /// The caller's signal REJECTED the waiting step: the step failed with `why`, and the
+    /// walk does what its `onFailure` says.
+    pub fn reject_waiting_step(&mut self, why: String, now: SystemTime) {
+        let Some(index) = self.current.filter(|_| self.status == STATUS_WAITING) else {
+            return;
+        };
+        self.status = STATUS_IN_PROGRESS.to_string();
+        let walked = self.fail_step(index, now, why);
+        self.carry_on(walked, now);
+    }
+
+    /// STOP the step execution `step_execution_id` names, which stops the automation with
+    /// it: `true` when that id names the step this execution STANDS at and that step has
+    /// not ended.
+    ///
+    /// "For the StopStep signal type, you must send the step execution ID as the payload",
+    /// and stopping the step the automation stands at is stopping the automation — there is
+    /// no later step to go to once the one it stands at has been cancelled. A step the walk
+    /// has not reached is running nothing to stop, so its id names no step this signal
+    /// applies to.
+    pub fn stop_step(&mut self, step_execution_id: &str, now: SystemTime) -> bool {
+        let Some(index) = self.current.filter(|index| {
+            self.steps.get(*index).is_some_and(|step| {
+                step.step_execution_id == step_execution_id && !is_terminal(&step.status)
+            })
+        }) else {
+            return false;
+        };
+        self.end_step(index, now, STATUS_CANCELLED);
+        if let Some(step) = self.steps.get_mut(index) {
+            step.host_action = None;
+        }
+        self.current = None;
+        self.status = STATUS_CANCELLED.to_string();
+        self.ended_at = Some(now);
+        true
+    }
+
+    /// Carry the walk on from what one step came to.
+    fn carry_on(&mut self, walked: Walked, now: SystemTime) {
+        match walked {
+            Walked::Running | Walked::Pending => {}
+            Walked::Waiting => self.status = STATUS_WAITING.to_string(),
+            Walked::Moved(next) => {
+                self.current = next;
+                self.walk(now);
+            }
+        }
+    }
+
+    /// "The list of execution outputs as defined in the Automation runbook"
+    /// (`AutomationExecution$Outputs`): each output the runbook declares at document level,
+    /// under the `<step>.<output>` name it declares it by, carrying what that step's own
+    /// outputs hold for it.
+    ///
+    /// An output whose step has not produced it — a step that has not run, or one whose
+    /// action produced no such value — is reported for nothing, so what this answers is
+    /// exactly what the steps have produced so far.
+    pub fn projected_outputs(&self) -> BTreeMap<String, Vec<String>> {
+        let mut projected: BTreeMap<String, Vec<String>> = BTreeMap::new();
+        for declared in &self.declared_outputs {
+            let Some((step_name, output)) = declared.split_once('.') else {
+                continue;
+            };
+            let Some(step) = self
+                .steps
+                .iter()
+                .find(|step| step.definition.name == step_name)
+            else {
+                continue;
+            };
+            if let Some(values) = step.outputs.get(output) {
+                projected.insert(declared.clone(), values.clone());
+            }
+        }
+        projected
+    }
+
     /// The values a step's `{{ … }}` references resolve to: this execution's parameters,
     /// and the system variables Automation defines for every execution.
     ///
@@ -1014,6 +1342,20 @@ impl AutomationExecutionRecord {
             .iter()
             .map(|(name, values)| (name.clone(), values.join(",")))
             .collect();
+        // A step's own outputs are what the rest of the runbook references as
+        // `{{ <step>.<output> }}`: the values an earlier step produced resolve into a later
+        // step's inputs exactly as the execution's parameters do, which is what makes one
+        // step's answer the next step's input. A step that has produced nothing yet
+        // resolves nothing, so a reference to it fails the step that carries it rather than
+        // passing on an empty value.
+        for step in &self.steps {
+            for (output, values) in &step.outputs {
+                variables.insert(
+                    format!("{}.{output}", step.definition.name),
+                    values.join(","),
+                );
+            }
+        }
         variables.insert(
             "automation:EXECUTION_ID".to_string(),
             self.execution_id.clone(),
@@ -1061,10 +1403,12 @@ impl AutomationExecutionRecord {
                     .map(|(name, values)| (name.clone(), values.clone()))
                     .collect()
             }),
-            // "The list of execution outputs as defined in the Automation runbook": an
-            // output is a value a step produced, and the actions this emulator runs
-            // produce none.
-            outputs: None,
+            // "The list of execution outputs as defined in the Automation runbook": the
+            // outputs the runbook declares, carrying what the steps that produced them
+            // selected out of their own actions' answers.
+            outputs: Some(self.projected_outputs())
+                .filter(|projected| !projected.is_empty())
+                .map(|projected| projected.into_iter().collect()),
             failure_message: self.failure_message.clone(),
             warning_message: None,
             mode: Some(self.mode.clone()),
@@ -1410,6 +1754,66 @@ impl ComAmazonawsSsmAmazonssmState {
         parent.ended_at = Some(now);
     }
 
+    /// TAKE one host run `region`'s automation executions are parked for, so the caller
+    /// runs it ([`AutomationExecutionRecord::claim_host_action`]).
+    ///
+    /// `about` narrows the search to ONE execution and the children a rate-controlled one
+    /// runs — whose outcome is that parent's own status, so they are part of what a read of
+    /// it is about; `None` searches every execution of the Region.
+    ///
+    /// `None` when no execution in that scope is parked for a run another caller is not
+    /// already performing, which is what ends [`actions::advance_automation_actions`]'s
+    /// loop.
+    pub fn claim_automation_action(
+        &mut self,
+        region: &str,
+        about: Option<&str>,
+        now: SystemTime,
+    ) -> Option<actions::ClaimedAction> {
+        let keys: Vec<(String, String)> = self
+            .automation_executions
+            .iter()
+            .filter(|((held, _), execution)| {
+                held == region
+                    && execution.host_action_step().is_some()
+                    && about.is_none_or(|about| {
+                        execution.execution_id == about
+                            || execution.parent_execution_id.as_deref() == Some(about)
+                    })
+            })
+            .map(|(key, _)| key.clone())
+            .collect();
+        for key in keys {
+            let claimed = self
+                .automation_executions
+                .get_mut(&key)
+                .and_then(|execution| execution.claim_host_action(now));
+            if claimed.is_some() {
+                return claimed;
+            }
+        }
+        None
+    }
+
+    /// Record what a host run of one execution's step came to, and carry that execution's
+    /// walk on from there ([`AutomationExecutionRecord::record_host_action`]).
+    ///
+    /// The rate control a parent exercises is run after it, because a child that has just
+    /// ended is what releases the next one.
+    pub fn record_automation_action(
+        &mut self,
+        claimed: &actions::ClaimedAction,
+        outcome: actions::ActionOutcome,
+        now: SystemTime,
+    ) {
+        if let Some(execution) =
+            self.automation_execution_mut(&claimed.region, &claimed.execution_id)
+        {
+            execution.record_host_action(claimed.step_index, outcome, now);
+        }
+        self.advance_automations(now);
+    }
+
     /// The values a rate-controlled start's targets resolve to, or `Err(key)` when the
     /// target's key is not one an automation targets by.
     ///
@@ -1459,6 +1863,50 @@ pub fn resolved_parameters(
     }
     resolved
 }
+
+/// The refusal `SendAutomationSignal` answers for an execution id this endpoint holds no
+/// execution for: a FIXED sentence with no variable parts, which is how Systems Manager
+/// words this one — the id a caller sent is not repeated back to it.
+pub const SIGNAL_EXECUTION_NOT_FOUND_MESSAGE: &str =
+    "The input automation execution does not exist.";
+
+/// The refusal it answers for a signal naming a step the runbook does not declare.
+///
+/// The signal type, the step name the payload carried, and the document and version the
+/// EXECUTION runs are what vary; everything else is the fixed text Systems Manager words
+/// this refusal with.
+pub fn signal_step_not_defined_message(
+    signal_type: &str,
+    step_name: &str,
+    document_name: &str,
+    document_version: &str,
+) -> String {
+    format!(
+        "Failed to process signal {signal_type}. Step {step_name} is not defined in document: \
+         {document_name} (version {document_version})."
+    )
+}
+
+/// The refusal it answers for a signal the execution's own state does not admit: the same
+/// leading text as [`signal_step_not_defined_message`], because it is the same refusal of
+/// the same signal, followed by the modelled error's own sentence — "The signal isn't valid
+/// for the current Automation execution" (`InvalidAutomationSignalException`).
+///
+/// The signal type is the only variable part, and it comes from the request.
+pub fn signal_not_valid_message(signal_type: &str) -> String {
+    format!("Failed to process signal {signal_type}. {SIGNAL_NOT_VALID}.")
+}
+
+/// The fixed sentence every invalid-signal refusal carries, as the modelled
+/// `InvalidAutomationSignalException` words it.
+pub const SIGNAL_NOT_VALID: &str =
+    "The signal isn't valid for the current Automation execution";
+
+/// The refusal a signal naming a step execution this execution does not hold is answered
+/// with, as the modelled `AutomationStepNotFoundException` words it ("The specified step name
+/// and execution ID don't exist. Verify the information and try again.").
+pub const SIGNAL_STEP_EXECUTION_NOT_FOUND_MESSAGE: &str =
+    "The specified step name and execution ID don't exist. Verify the information and try again.";
 
 /// How an operation that runs or previews an Automation runbook words the miss of a
 /// runbook name: a name no document of this Region carries, and a document of that name

@@ -1,15 +1,12 @@
 // SPDX-License-Identifier: CC0-1.0
 
 //! @op SendAutomationSignal
-//! SCAFFOLDED, NOT IMPLEMENTED: this operation answers HTTP 501 `NotImplemented` and
-//! asserts NOTHING about `SendAutomationSignal`'s real behaviour. Implement it here — this is
-//! the ONLY file to touch for this operation.
-//!
-//! A 501 from this operation means "nobody has written it yet", never "the emulator is
-//! broken". Replace the `Err(..)` in [`SendAutomationSignal::handle`] with real behaviour and
-//! delete the SCAFFOLDED marker line above; that line is the machine-readable record of
-//! which operations are still stubs (`grep -rl '^//! SCAFFOLDED, NOT IMPLEMENTED:' */src/ops/`),
-//! so leaving it on an implemented operation under-reports progress.
+//! Sends a signal to an Automation execution to change the current behavior or status of
+//! the execution: the execution the signal names is resolved against this endpoint's own
+//! Automation state ([`crate::state::automation`]), and the signal is APPLIED to it — a
+//! `Resume` or `StartStep` carries the walk on from the step it is parked at, an `Approve`
+//! or `Reject` answers the approval a step is waiting for, and a `StopStep` stops the step
+//! the automation stands at and the automation with it.
 //!
 //! ## Shape of an operation
 //!
@@ -150,18 +147,267 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         input: Self::Input,
         ctx: &smithy_server_runtime::OperationContext<'_>,
     ) -> Result<Self::Output, Self::Error> {
-        // The engine is reachable from `&self` (constructor-injected); `ctx` carries
-        // request metadata. Both are bound here so an implementer has them in scope.
-        let _ = (&input, ctx, &self.engine);
-        // Implement `SendAutomationSignal` here, then delete the SCAFFOLDED marker at the top of
-        // this file. Return modeled failures as
-        // `Err(SendAutomationSignalErrorModeled::Variant(..).into())` — the `From` impl above lifts it.
-        //
-        // To refuse a bad request this operation models no error for, return
-        // `Err(crate::scaffolded::Scaffolded::validation("..."))` — a 400
-        // `ValidationException`. Do NOT answer 501 for it: 501 means "not written yet",
-        // not "bad request". Modeled constraints are already refused BEFORE this
-        // handler runs, so reaching here means the input satisfies every one of them.
-        Err(crate::scaffolded::Scaffolded::not_implemented("SendAutomationSignal"))
+        // `AutomationExecutionId`'s length, `SignalType`'s value set and `Payload`'s size
+        // are MODELLED constraints, so the centralized walk has already refused anything
+        // outside them. What is left is what the model cannot say: whether this endpoint
+        // holds that execution, whether the runbook declares the step the payload names,
+        // and whether the execution's own state admits this signal.
+        let state = crate::state::service_state(&*self.engine).ok_or_else(|| {
+            SendAutomationSignalErrorModeled::InternalServerError(InternalServerError {
+                message: Some("the automation execution store is unavailable".to_string()),
+            })
+        })?;
+        let region = crate::state::request_region(ctx.parts());
+        // Everything the execution was already owed is performed before the signal is
+        // judged, so the state the signal is applied to is the state the clock had already
+        // brought it to — a step the walk parked at runs whether or not anybody polled
+        // (`crate::state::automation::actions`).
+        crate::state::automation::actions::advance_automation_actions(
+            &*self.engine,
+            ctx,
+            &region,
+            Some(&input.automation_execution_id),
+        )
+        .await;
+
+        let signal_type = input.signal_type.as_str();
+        let payload = input.payload.clone().unwrap_or_default();
+        let named = |member: &str| {
+            payload
+                .get(member)
+                .and_then(|values| values.first())
+                .filter(|value| !value.is_empty())
+                .cloned()
+        };
+        // "The signal isn't valid for the current Automation execution": every refusal of
+        // this class carries that sentence, with the signal the request named in front of
+        // it (`crate::state::automation::signal_not_valid_message`). WHY it is not valid —
+        // the status the execution is in, the step it waits at, the payload member the
+        // signal needs — is not worded into the message, because the wording of this class
+        // is the service's and not this emulator's; it is recorded beside the refusal
+        // instead.
+        let not_valid = |why: &str| {
+            ::tracing::debug!(
+                operation = "SendAutomationSignal",
+                region = %region,
+                execution = %input.automation_execution_id,
+                signal = %signal_type,
+                refused = why,
+                "an automation signal is not valid for the execution it named"
+            );
+            SendAutomationSignalError::from(
+                SendAutomationSignalErrorModeled::InvalidAutomationSignalException(
+                    InvalidAutomationSignalException {
+                        message: Some(crate::state::automation::signal_not_valid_message(
+                            signal_type,
+                        )),
+                    },
+                ),
+            )
+        };
+
+        let now = ::std::time::SystemTime::now();
+        {
+            let mut store = state.lock();
+            store.materialize_due(now);
+            // "There is no automation execution information for the requested automation
+            // execution ID": an id this endpoint holds no execution for names nothing to
+            // signal, and nothing is created for it.
+            let Some(execution) =
+                store.automation_execution(&region, &input.automation_execution_id)
+            else {
+                return Err(
+                    SendAutomationSignalErrorModeled::AutomationExecutionNotFoundException(
+                        AutomationExecutionNotFoundException {
+                            message: Some(
+                                crate::state::automation::SIGNAL_EXECUTION_NOT_FOUND_MESSAGE
+                                    .to_string(),
+                            ),
+                        },
+                    )
+                    .into(),
+                );
+            };
+            let document_name = execution.document_name.clone();
+            let document_version = execution.document_version.clone();
+
+            match signal_type {
+                // "For StartStep and Resume signal types, you must send the name of the
+                // Automation step to start or resume as the payload": the step the signal
+                // names has to be one the runbook DECLARES, which is a fact of the document
+                // rather than of how far the walk has got.
+                SIGNAL_RESUME | SIGNAL_START_STEP => {
+                    let Some(step_name) = named(STEP_NAME_PAYLOAD) else {
+                        return Err(not_valid("the payload names no step"));
+                    };
+                    if !execution
+                        .steps
+                        .iter()
+                        .any(|step| step.definition.name == step_name)
+                    {
+                        return Err(
+                            SendAutomationSignalErrorModeled::AutomationStepNotFoundException(
+                                AutomationStepNotFoundException {
+                                    message: Some(
+                                        crate::state::automation::signal_step_not_defined_message(
+                                            signal_type,
+                                            &step_name,
+                                            &document_name,
+                                            &document_version,
+                                        ),
+                                    ),
+                                },
+                            )
+                            .into(),
+                        );
+                    }
+                    // "The signal isn't valid for the current Automation execution": an
+                    // execution that is not waiting for a signal has nothing to carry on
+                    // from, and one waiting at another step is not waiting at this one.
+                    let Some(waiting) = execution.waiting_step() else {
+                        return Err(not_valid("the execution is waiting for no signal"));
+                    };
+                    if waiting.definition.name != step_name {
+                        return Err(not_valid("the execution waits at another step"));
+                    }
+                    let Some(execution) =
+                        store.automation_execution_mut(&region, &input.automation_execution_id)
+                    else {
+                        return Err(not_valid(NO_LONGER_HELD));
+                    };
+                    execution.resume_waiting_step(now);
+                }
+                // "aws:approve … temporarily pauses an automation until designated
+                // principals either approve or reject the action", so these two signals are
+                // the answer to an approval step and to nothing else.
+                SIGNAL_APPROVE | SIGNAL_REJECT => {
+                    let waiting = execution.waiting_step().filter(|step| {
+                        step.definition.action == crate::state::automation::ACTION_APPROVE
+                    });
+                    let Some(waiting) = waiting else {
+                        return Err(not_valid("the execution is waiting for no approval"));
+                    };
+                    let step_name = waiting.definition.name.clone();
+                    // "For Approve and Reject signal types, the payload is an optional
+                    // comment that you can send with the signal type."
+                    let comment = named(COMMENT_PAYLOAD);
+                    let Some(execution) =
+                        store.automation_execution_mut(&region, &input.automation_execution_id)
+                    else {
+                        return Err(not_valid(NO_LONGER_HELD));
+                    };
+                    if signal_type == SIGNAL_APPROVE {
+                        execution.resume_waiting_step(now);
+                    } else {
+                        let comment = comment
+                            .map(|comment| format!(": {comment}"))
+                            .unwrap_or_default();
+                        execution.reject_waiting_step(
+                            format!("Step {step_name} was rejected{comment}"),
+                            now,
+                        );
+                    }
+                }
+                // "For the StopStep signal type, you must send the step execution ID as the
+                // payload", and stopping the step the automation stands at stops the
+                // automation with it.
+                SIGNAL_STOP_STEP => {
+                    let Some(step_execution_id) = named(STEP_EXECUTION_ID_PAYLOAD) else {
+                        return Err(not_valid("the payload names no step execution"));
+                    };
+                    // "The signal isn't valid for the current Automation execution": an
+                    // execution that has ended is running no step for a stop to reach.
+                    if execution.ended() {
+                        return Err(not_valid("the execution has ended"));
+                    }
+                    let Some(execution) =
+                        store.automation_execution_mut(&region, &input.automation_execution_id)
+                    else {
+                        return Err(not_valid(NO_LONGER_HELD));
+                    };
+                    if !execution.stop_step(&step_execution_id, now) {
+                        return Err(
+                            SendAutomationSignalErrorModeled::AutomationStepNotFoundException(
+                                AutomationStepNotFoundException {
+                                    message: Some(
+                                        crate::state::automation::SIGNAL_STEP_EXECUTION_NOT_FOUND_MESSAGE
+                                            .to_string(),
+                                    ),
+                                },
+                            )
+                            .into(),
+                        );
+                    }
+                }
+                // `Revoke` withdraws the approval of a CHANGE REQUEST, which is an
+                // automation of a Change Manager subtype; an automation started through
+                // `StartAutomationExecution` is no change request
+                // (`AutomationExecution$AutomationSubtype` is unset for it), so there is no
+                // approval of one to withdraw.
+                _ => return Err(not_valid("the execution is no change request")),
+            }
+        }
+
+        // The one record of a signal having been APPLIED to an execution: the operation, the
+        // Region it was served in, the execution it changed and the signal type the model's
+        // own enum admits — the ids and the enum, and nothing of the payload's free text.
+        ::tracing::debug!(
+            operation = "SendAutomationSignal",
+            region = %region,
+            execution = %input.automation_execution_id,
+            signal = %signal_type,
+            "an automation signal was applied"
+        );
+
+        // A signal that carried the walk on may have reached a step whose action a host run
+        // performs, and that run was owed from the instant the walk reached it — so it is
+        // performed here rather than left for whoever reads the execution next.
+        crate::state::automation::actions::advance_automation_actions(
+            &*self.engine,
+            ctx,
+            &region,
+            Some(&input.automation_execution_id),
+        )
+        .await;
+
+        // "Sends a signal to an Automation execution": the answer carries nothing but the
+        // success itself.
+        Ok(SendAutomationSignalOutput {})
     }
 }
+
+/// The `SignalType` that carries a waiting execution on from the step it is parked at, from
+/// the modelled enum (`crate::ops::types::SIGNAL_TYPE_VALUES`).
+const SIGNAL_RESUME: &str = "Resume";
+
+/// The `SignalType` that starts the step an `Interactive` execution is waiting at (same
+/// enum).
+const SIGNAL_START_STEP: &str = "StartStep";
+
+/// The `SignalType` that answers an approval step with an approval (same enum).
+const SIGNAL_APPROVE: &str = "Approve";
+
+/// The `SignalType` that answers an approval step with a rejection (same enum).
+const SIGNAL_REJECT: &str = "Reject";
+
+/// The `SignalType` that stops the step execution its payload names (same enum).
+const SIGNAL_STOP_STEP: &str = "StopStep";
+
+/// The payload member naming the step a `Resume` or `StartStep` signal is about: "you must
+/// send the name of the Automation step to start or resume as the payload. For example:
+/// StepName="step1"" (`SendAutomationSignalRequest$Payload`).
+const STEP_NAME_PAYLOAD: &str = "StepName";
+
+/// The payload member naming the step execution a `StopStep` signal is about: "you must send
+/// the step execution ID as the payload" (same member).
+const STEP_EXECUTION_ID_PAYLOAD: &str = "StepExecutionId";
+
+/// The payload member carrying the comment an `Approve` or `Reject` signal may send: "the
+/// payload is an optional comment that you can send with the signal type. For example:
+/// Comment="Looks good"" (same member).
+const COMMENT_PAYLOAD: &str = "Comment";
+
+/// Why a signal that got past every check still applies to nothing: the execution it named
+/// is no longer held, which is what an eviction of the oldest execution does to the one this
+/// call read a moment ago (`crate::state::automation::MAX_EXECUTIONS_RETAINED`).
+const NO_LONGER_HELD: &str = "the automation execution is no longer held";

@@ -498,6 +498,13 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
             status: crate::state::automation::STATUS_PENDING.to_string(),
             failure_message: None,
             current: (!own_steps.is_empty()).then_some(0),
+            // "The list of execution outputs as defined in the Automation runbook": read out
+            // of the content of the version this start resolved, beside the steps that
+            // produce them, so the outputs this execution projects are the ones the runbook
+            // declared when it started.
+            declared_outputs: crate::state::automation::runbook::declared_outputs(
+                &version.content,
+            ),
             steps: own_steps,
             resolved_input_budget:
                 crate::state::automation::runbook::MAX_RESOLVED_INPUT_BYTES,

@@ -144,9 +144,21 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
             })
         })?;
         let region = crate::state::request_region(ctx.parts());
+        // Every step the walk has parked at was owed a run from the instant it reached it,
+        // whoever called next, so what is owed is performed before this read reports
+        // anything — with no store guard held, because an `aws:executeAwsApi` step
+        // dispatches a call into this emulator and an `aws:executeScript` step runs a
+        // script (`crate::state::automation::actions`).
+        crate::state::automation::actions::advance_automation_actions(
+            &*self.engine,
+            ctx,
+            &region,
+            Some(&input.automation_execution_id),
+        )
+        .await;
         // What a step whose work is Amazon EC2's has reached in that service is owed at the
         // same instant whether or not anybody called, and only a CALL can learn it — so it
-        // is driven here, off the store lock, before anything is read
+        // is driven here too, off the store lock
         // (`crate::state::automation::instance_state`).
         crate::state::automation::instance_state::drive_due(&*self.engine, ctx).await;
         let now = ::std::time::SystemTime::now();

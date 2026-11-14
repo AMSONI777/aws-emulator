@@ -524,23 +524,18 @@ async fn an_execution_reports_what_the_start_supplied_and_what_it_resolved() {
 
 /// A step whose action runs where this emulator does not reach runs NOTHING: the step is
 /// reported failed, naming the action, and the execution fails with it.
+///
+/// The two actions this emulator DOES perform — `aws:executeAwsApi` and `aws:executeScript`
+/// — are the subject of their own suite (`tests/all/automation_step_actions.rs`), so the
+/// rows here are the actions that still run nowhere: a managed node's agent, a function
+/// invocation, another orchestration service and a loop over other steps.
 #[tokio::test]
 async fn a_step_whose_action_this_emulator_does_not_run_fails_the_execution() {
     let (router, engine) = service();
 
-    // One row per action of a different kind: a script runtime, another service's API, a
-    // managed node's agent and a function invocation.
+    // One row per action of a different kind, each one whose work happens outside anything
+    // this emulator holds.
     let rows = [
-        (
-            "a script runtime",
-            "aws:executeScript",
-            json!({"Runtime": "python3.11", "Handler": "main", "Script": "def main(e, c): return {}"}),
-        ),
-        (
-            "another service's API",
-            "aws:executeAwsApi",
-            json!({"Service": "ssm", "Api": "GetParameter", "Name": "/a"}),
-        ),
         (
             "a managed node's agent",
             "aws:runCommand",
@@ -550,6 +545,16 @@ async fn a_step_whose_action_this_emulator_does_not_run_fails_the_execution() {
             "a function invocation",
             "aws:invokeLambdaFunction",
             json!({"FunctionName": "handler"}),
+        ),
+        (
+            "another orchestration service",
+            "aws:executeStateMachine",
+            json!({"stateMachineArn": "arn:aws:states:us-west-2:000000000000:stateMachine:s"}),
+        ),
+        (
+            "a loop over other steps",
+            "aws:loop",
+            json!({"Iterators": ["first", "second"], "Steps": []}),
         ),
     ];
 

@@ -16,7 +16,7 @@ emulator-server = { workspace = true }
 emulator-telemetry = { workspace = true }
 aws-smithy-runtime-api = { workspace = true }
 aws-smithy-types = { workspace = true }
-tokio = { workspace = true }
+tokio = { workspace = true, features = ["time", "sync"] }
 bytes = { workspace = true }
 http = { workspace = true }
 serde_json = { workspace = true }
@@ -64,6 +64,25 @@ chrono = { version = "0.4", default-features = false, features = ["std"] }
 # A window's schedule is evaluated "in Internet Assigned Numbers Authority (IANA) format"
 # time zone, whose database this crate carries.
 chrono-tz = { version = "0.10", default-features = false, features = ["std"] }
+# The CONTAINED Python interpreter an `aws:executeScript` step's own script is executed by,
+# and the generic in-process AWS API seam an `aws:executeAwsApi` step's call is dispatched
+# through — both reached through the Lambda service crate, which is where this workspace's
+# ONE embedded execution substrate and its ONE in-process AWS API dispatcher live
+# (`state::execution::python`, `state::execution::aws_api`). Reused rather than stood up a
+# second time here, so a runbook's script runs under exactly the containment and the bounds
+# that engine already enforces, and this crate adds no execution surface of its own: it
+# supplies the script's source, the handler to call, the input payload and the ceilings
+# (`crate::state::automation::actions`) and nothing else.
+#
+# Capability class: an execution substrate. What it re-opens is answered by that engine and
+# by this crate's own module docs — the interpreter is built with the engine crate's
+# host-reaching features compiled out, its native modules are an allow-list that leaves
+# every socket, subprocess, memory-map and host-library module unregistered, the
+# operating-system modules a script can import are the workspace's own in-memory ones, and
+# every bound (wall clock, steps, memory, recursion, output size) lives in host code no
+# script can reach. It brings no build-time code of its own beyond the generated service
+# scaffolding every service crate here builds.
+service-com-amazonaws-lambda-awsgirapiservice = { workspace = true }
 # The `aws:changeInstanceState` step of an Automation runbook brings the instances it names
 # to the desired state by calling Amazon EC2 itself, whose awsQuery answers are XML
 # documents; roxmltree is the pure-Rust XML reader this tree already uses for them.

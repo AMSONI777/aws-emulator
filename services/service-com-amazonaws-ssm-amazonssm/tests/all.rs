@@ -25,6 +25,8 @@ mod automation_execution_reports;
 mod automation_executions;
 #[path = "all/automation_instance_state.rs"]
 mod automation_instance_state;
+#[path = "all/automation_step_actions.rs"]
+mod automation_step_actions;
 #[path = "all/automation_step_executions.rs"]
 mod automation_step_executions;
 #[path = "all/boundary_refusal_wording.rs"]

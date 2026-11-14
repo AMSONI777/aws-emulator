@@ -73,7 +73,52 @@ pub struct RunbookStep {
     pub max_attempts: Option<i32>,
     /// "The timeout seconds of the step" (`StepExecution$TimeoutSeconds`).
     pub timeout_seconds: Option<i64>,
+    /// The values the step DECLARES it produces, in the content's own order: the `outputs`
+    /// of a step whose action answers a document ([`StepOutput`]). Empty for a step that
+    /// declares none, which produces nothing to select.
+    pub outputs: Vec<StepOutput>,
 }
+
+/// ONE value a step declares it produces: the name it is known by inside the execution, the
+/// place in the action's own answer it is taken from, and the type it is read as.
+///
+/// A step's `outputs` entry carries exactly those three members — `Name`, `Selector` and
+/// `Type` — and a step's outputs are what the rest of the runbook references as
+/// `{{ <step>.<Name> }}` and what the document's own `outputs` project.
+#[derive(Debug, Clone)]
+pub struct StepOutput {
+    /// The name the output is known by within the execution.
+    pub name: String,
+    /// The reference path into the action's answer the value is taken from, as the content
+    /// declares it (`$.Parameter.Value`).
+    pub selector: String,
+    /// The type the value is read as, from the set a runbook's outputs declare
+    /// ([`OUTPUT_TYPE_STRING`] and its siblings). Empty where the content declares none.
+    pub output_type: String,
+}
+
+/// The declared output type of a single text value.
+///
+/// SOURCE: the `Type` values the Systems Manager Automation documentation publishes for a
+/// step's `outputs` — `String`, `Integer`, `Boolean`, `StringList`, `StringMap` and
+/// `MapList` — which are the same type names a runbook's own `parameters` are declared
+/// with.
+pub const OUTPUT_TYPE_STRING: &str = "String";
+
+/// The declared output type of a whole number (same source).
+pub const OUTPUT_TYPE_INTEGER: &str = "Integer";
+
+/// The declared output type of a boolean (same source).
+pub const OUTPUT_TYPE_BOOLEAN: &str = "Boolean";
+
+/// The declared output type of a list of text values (same source).
+pub const OUTPUT_TYPE_STRING_LIST: &str = "StringList";
+
+/// The declared output type of one mapping (same source).
+pub const OUTPUT_TYPE_STRING_MAP: &str = "StringMap";
+
+/// The declared output type of a list of mappings (same source).
+pub const OUTPUT_TYPE_MAP_LIST: &str = "MapList";
 
 impl RunbookStep {
     /// Whether a failure of this step fails the whole execution: `isCritical` as the step
@@ -148,12 +193,86 @@ pub fn steps_of(content: &str) -> Result<Vec<RunbookStep>, String> {
                 .and_then(Value::as_i64)
                 .and_then(|attempts| i32::try_from(attempts).ok()),
             timeout_seconds: declaration.get("timeoutSeconds").and_then(Value::as_i64),
+            outputs: step_outputs(declaration),
         });
     }
     if steps.is_empty() {
         return Err("Content declares no steps to run".to_string());
     }
     Ok(steps)
+}
+
+/// The outputs one step declares, in the content's own order.
+///
+/// An entry that names no `Name` or no `Selector` declares no output a value could be taken
+/// from or referenced by, so it is left out rather than guessed at — the step still runs,
+/// and selects the outputs it did declare.
+fn step_outputs(declaration: &Map<String, Value>) -> Vec<StepOutput> {
+    let declared = declaration
+        .get("outputs")
+        .and_then(Value::as_array)
+        .map(Vec::as_slice)
+        .unwrap_or_default();
+    let mut outputs: Vec<StepOutput> = Vec::new();
+    for output in declared.iter().take(MAX_STEP_OUTPUTS) {
+        let Some(output) = output.as_object() else {
+            continue;
+        };
+        let (Some(name), Some(selector)) = (text_of(output, "Name"), text_of(output, "Selector"))
+        else {
+            continue;
+        };
+        outputs.push(StepOutput {
+            name,
+            selector,
+            output_type: text_of(output, "Type").unwrap_or_default(),
+        });
+    }
+    outputs
+}
+
+/// How many outputs of one step this emulator selects.
+///
+/// A step's outputs are reported as `StepExecution$Outputs`, an `AutomationParameterMap`,
+/// which the model admits at most [`MAX_AUTOMATION_PARAMETER_MAP_ENTRIES`] entries of — so a
+/// step that declares more than one map may hold declares more than this emulator selects.
+pub const MAX_STEP_OUTPUTS: usize = MAX_AUTOMATION_PARAMETER_MAP_ENTRIES;
+
+/// How many outputs the DOCUMENT may declare, read for the same reason: the execution's own
+/// `AutomationExecution$Outputs` is an `AutomationParameterMap` too.
+pub const MAX_DECLARED_OUTPUTS: usize = MAX_AUTOMATION_PARAMETER_MAP_ENTRIES;
+
+/// How many entries an `AutomationParameterMap` carries, from the modelled shape's own
+/// length constraint (`smithy_query(query="shape",shape="AutomationParameterMap")`:
+/// `length {min: 1, max: 200}`).
+pub const MAX_AUTOMATION_PARAMETER_MAP_ENTRIES: usize = 200;
+
+/// The outputs the DOCUMENT declares, in the content's own order: the `outputs` member of an
+/// Automation runbook, each entry naming one step's output as `<step>.<output>`.
+///
+/// "The list of execution outputs as defined in the Automation runbook"
+/// (`AutomationExecution$Outputs`) is this list projected over what the steps produced, so
+/// what a runbook declares here is read once, when the execution starts, out of the same
+/// content its steps are read from. Content that declares none projects nothing.
+pub fn declared_outputs(content: &str) -> Vec<String> {
+    let Ok(tree) = super::super::load_single_document(content) else {
+        return Vec::new();
+    };
+    let Some(document) = super::super::document_as_json(&tree, super::super::MAX_DOCUMENT_DEPTH)
+    else {
+        return Vec::new();
+    };
+    document
+        .get("outputs")
+        .and_then(Value::as_array)
+        .map(Vec::as_slice)
+        .unwrap_or_default()
+        .iter()
+        .take(MAX_DECLARED_OUTPUTS)
+        .filter_map(Value::as_str)
+        .filter(|declared| !declared.is_empty())
+        .map(str::to_string)
+        .collect()
 }
 
 /// A non-empty string member of a declaration.
