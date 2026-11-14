@@ -4048,3 +4048,5 @@ mod cloudformation_cloudfront_fronted_rest_api;
 // this tail is `E0753` and compiles nothing in this target.)
 // (Another line of that same appended header fragment, an ordinary comment for the same
 // (One more line of that same appended header fragment, an ordinary comment for the same
+// appended tail is `E0753` and compiles no suite of this target. The rule it repeats stands
+// in the header at the head of this file.)

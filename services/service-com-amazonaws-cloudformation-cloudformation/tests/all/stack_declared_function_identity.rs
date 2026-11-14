@@ -42,8 +42,13 @@ use service_com_amazonaws_cloudformation_cloudformation::state::status;
 /// How often a poll looks again, and how many times it looks: 400 looks 25 ms apart is ten
 /// seconds, far past the span any transition here is owed, so the deadline is generous on a
 /// loaded host while the loop still notices the settled state as soon as it holds.
-const LOOK_AGAIN: Duration = Duration::from_millis(25);
-const LOOKS: usize = 400;
+///
+/// `pub(crate)` with [`settled_stack`], [`trust_policy`], [`MANAGED_POLICY_ARN`] and
+/// [`STATE_ACTIVE`]: the suite over the log group a declared function's first invocation opens
+/// (`declared_function_logs_on_first_invoke.rs`) deploys the same shape and waits on the same
+/// two conditions, so the two cannot drift about what settling is or how long it is given.
+pub(crate) const LOOK_AGAIN: Duration = Duration::from_millis(25);
+pub(crate) const LOOKS: usize = 400;
 
 /// The logical ids every template below declares its shared resources under.
 const ROLE_LOGICAL_ID: &str = "ExecutionRole";
@@ -55,12 +60,13 @@ const ROLE_ARN_OUTPUT: &str = "RoleArn";
 /// An AWS-managed policy ARN: its account segment is `aws`, so it is AWS's own resource and
 /// IAM's `AttachRolePolicy` takes it as present — the policy a Lambda execution role is
 /// normally given.
-const MANAGED_POLICY_ARN: &str = "arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole";
+pub(crate) const MANAGED_POLICY_ARN: &str =
+    "arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole";
 
 /// The `State` AWS Lambda reports for a function it takes calls on. Source: the model's
 /// `State` enum (`Pending | Active | Inactive | Failed`) and its documentation — "the
 /// function is ready to be invoked" only in `Active`.
-const STATE_ACTIVE: &str = "Active";
+pub(crate) const STATE_ACTIVE: &str = "Active";
 
 /// What AWS Lambda reports for the two members a declaration may leave out. Source: the
 /// members' own documentation on `CreateFunction` — `MemorySize` "The default value is 128
@@ -70,7 +76,7 @@ const DEFAULT_TIMEOUT_SECONDS: i64 = 3;
 
 /// The trust policy a function's execution role is declared with: the service principal AWS
 /// Lambda assumes the role as.
-fn trust_policy() -> Value {
+pub(crate) fn trust_policy() -> Value {
     json!({
         "Version": "2012-10-17",
         "Statement": [{
@@ -192,7 +198,11 @@ fn template(case: &Case<'_>) -> String {
 /// The stack's body once the operation in flight on it is no longer in progress: looked for
 /// again until it settles or the budget above runs out, so nothing here depends on how fast
 /// the host runs.
-async fn settled_stack(router: &MultiServiceRouter, case: &str, stack: &str) -> (String, String) {
+pub(crate) async fn settled_stack(
+    router: &MultiServiceRouter,
+    case: &str,
+    stack: &str,
+) -> (String, String) {
     let mut last = (String::new(), String::new());
     for _ in 0..LOOKS {
         let (code, body) = describe_stack(router, stack).await;

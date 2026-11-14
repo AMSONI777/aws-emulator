@@ -86,7 +86,11 @@ async fn subscription_filters(
 
 /// The names of the streams CloudWatch Logs holds in the group `group`, in the order that
 /// service reports them.
-async fn stream_names(router: &MultiServiceRouter, group: &str) -> Vec<String> {
+///
+/// `pub(crate)` for the reason [`logs`] is: the suite over the log group a stack-declared
+/// function's first invocation opens (`declared_function_logs_on_first_invoke.rs`) reads the
+/// streams of that group through this one reader rather than a second copy of it.
+pub(crate) async fn stream_names(router: &MultiServiceRouter, group: &str) -> Vec<String> {
     let (status, document) = logs(
         router,
         "DescribeLogStreams",
