@@ -328,6 +328,7 @@ fn expand_at(
                 processed: &stack.processed_template,
                 parameters: &stack.parameters,
                 deployed: &stack.resources,
+                status: &stack.status,
                 imports: &stack.imports,
                 notification_arns: &stack.notification_arns,
             }),

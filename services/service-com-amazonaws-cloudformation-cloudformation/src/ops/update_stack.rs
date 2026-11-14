@@ -277,8 +277,10 @@ struct PreviousValues {
     deployed: Vec<crate::state::DeployedResource>,
     imports: ::std::collections::BTreeMap<String, String>,
     /// The status the stack's last operation left it in: what decides whether this update
-    /// has to ask for the failed state to be preserved ([`fix_forward_refusal`]) and whether
-    /// resubmitting the same configuration is a no-op at all.
+    /// has to ask for the failed state to be preserved
+    /// ([`crate::state::fix_forward_refusal`]), whether resubmitting the same configuration
+    /// is a no-op at all, and which of its resources carry the configuration the template in
+    /// force declares ([`crate::state::change_plan`]).
     status: String,
 }
 
@@ -324,31 +326,6 @@ fn disables_rollback(input: &UpdateStackInput) -> Option<bool> {
             )
             .then_some(true)
         })
-}
-
-/// The refusal for an update of a stack whose own UPDATE FAILED and left what it had
-/// provisioned standing, where this update does not ask for that state to be preserved — or
-/// `None` where the update is one the stack takes.
-///
-/// Such a stack holds resources whose configuration is not the one its template declares:
-/// the update that failed stopped where it was. What the two members that disable the
-/// rollback ask for is that such a state be KEPT —
-/// `UpdateStackInput$DisableRollback`: "preserve the state of previously provisioned
-/// resources when an operation fails" — so correcting the template and asking again is an
-/// update CloudFormation carries out only while the caller goes on asking for it; a caller
-/// that does not has the stack's own rollback to resolve the failure with (`RollbackStack`,
-/// `ContinueUpdateRollback`). The refusal says exactly that
-/// ([`crate::state::stack_is_in_a_non_terminal_state`]): the status is not a terminal one,
-/// and the two ways on from it are the member this request did not state and that call.
-///
-/// `asked` is what THIS request states about it ([`disables_rollback`]); a request stating
-/// nothing asks for nothing, which is that member's own documented default ("Default:
-/// False") and not the setting the FAILING operation ran under.
-fn fix_forward_refusal(stack: &StoredStack, asked: Option<bool>) -> Option<String> {
-    if !crate::state::status_preserved_a_failure(&stack.status) || asked.unwrap_or(false) {
-        return None;
-    }
-    Some(crate::state::stack_is_in_a_non_terminal_state(&stack.status))
 }
 
 /// The logical ids the template this update submits declares: what the stored stack policy
@@ -406,6 +383,7 @@ fn planned_actions(
             processed: &previous.processed_template,
             parameters: &previous.parameters,
             deployed: &previous.deployed,
+            status: &previous.status,
             imports: &previous.imports,
             notification_arns: &previous.notification_arns,
         }),
@@ -697,9 +675,12 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
                 ));
             }
             // ...and a stack whose own update FAILED and was left standing takes one only
-            // from a caller that asks for that state to be preserved again
-            // ([`fix_forward_refusal`]).
-            if let Some(message) = fix_forward_refusal(previous, disables_rollback(&input)) {
+            // from a caller that asks for that state to be preserved again — the gate every
+            // call that deploys onto such a stack goes through
+            // ([`crate::state::fix_forward_refusal`]).
+            if let Some(message) =
+                crate::state::fix_forward_refusal(&previous.status, disables_rollback(&input))
+            {
                 return Err(crate::scaffolded::Scaffolded::validation_error(message));
             }
             let values = PreviousValues::of(previous);

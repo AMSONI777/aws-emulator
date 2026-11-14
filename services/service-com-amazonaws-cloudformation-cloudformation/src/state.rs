@@ -4107,6 +4107,34 @@ pub fn stack_is_in_a_non_terminal_state(status: &str) -> String {
     )
 }
 
+/// The refusal every operation that DEPLOYS a configuration onto a stack answers when the
+/// stack's own last operation FAILED and left what it had provisioned standing, and the
+/// request does not ask for that state to go on being preserved — or `None` where the stack
+/// takes the call.
+///
+/// ONE gate for the two calls that deploy onto such a stack — `UpdateStack`, and the
+/// EXECUTION of a change set, which is an update of the stack as it stands — so the two
+/// cannot disagree about which stack takes one, or about what the refusal says.
+///
+/// A status [`status_preserved_a_failure`] names is the state the members that disable a
+/// rollback ask to be KEPT (`UpdateStackInput$DisableRollback`: "preserve the state of
+/// previously provisioned resources when an operation fails"), so deploying onto it is
+/// carried out only while the caller goes on asking for that state; a caller that does not
+/// has the stack's own rollback to resolve the failure with (`RollbackStack`,
+/// `ContinueUpdateRollback`), and the sentence states exactly that
+/// ([`stack_is_in_a_non_terminal_state`]).
+///
+/// `asked` is what THIS request states about it — `DisableRollback`, or the equivalent the
+/// change set it executes was created with; a request stating nothing asks for nothing,
+/// which is that member's own documented default ("Default: False") and not the setting the
+/// FAILING operation ran under.
+pub fn fix_forward_refusal(status: &str, asked: Option<bool>) -> Option<String> {
+    if !status_preserved_a_failure(status) || asked.unwrap_or(false) {
+        return None;
+    }
+    Some(stack_is_in_a_non_terminal_state(status))
+}
+
 /// The statuses a stack can be ROLLED BACK from on request, in the order `RollbackStack`'s
 /// own refusal states them ([`stack_cannot_be_rolled_back`]).
 ///

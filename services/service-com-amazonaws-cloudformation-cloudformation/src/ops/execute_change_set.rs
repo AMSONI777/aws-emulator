@@ -509,6 +509,21 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
                     .into(),
                 );
             }
+            // ...and a stack whose own last operation FAILED and was left standing takes an
+            // execution only from a caller that asks for that state to go on being
+            // preserved: executing a change set DEPLOYS its configuration onto the stack, so
+            // it answers the same gate `UpdateStack` does, through the one place that words
+            // it ([`crate::state::fix_forward_refusal`]). The call is refused before
+            // anything is applied, so the stack keeps its status and the change set stays
+            // available for the caller that comes back asking for the failed state to be
+            // kept. A CREATE change set's stack is in review rather than in a failed status,
+            // so it never meets this gate.
+            if let Some(message) =
+                crate::state::fix_forward_refusal(&stack.status, disable_rollback)
+            {
+                return Err(crate::scaffolded::Scaffolded::validation_error(message));
+            }
+
             // The stack policy in force governs an UPDATE change set's execution exactly
             // as it governs `UpdateStack`: the plan the change set STORED is what this
             // execution would do to each of the stack's resources, so an action the policy

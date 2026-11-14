@@ -222,7 +222,7 @@ fn rows() -> Vec<Row<'static>> {
 /// `change_set_lifecycle::execute_change_set` is the shared caller for an execution that
 /// states nothing else; the member this suite's rows vary (`DisableRollback`) is stated on
 /// THIS call, which that helper takes no room for.
-async fn execute_change_set(
+pub(crate) async fn execute_change_set(
     router: &MultiServiceRouter,
     change_set: &str,
     stack: &str,
@@ -659,8 +659,17 @@ async fn a_parked_change_set_create_takes_the_next_operation() {
                     row.case
                 );
                 wait_for_the_transition().await;
-                let (http_status, body) =
-                    execute_change_set(&router, "the-correction", row.stack, &[]).await;
+                let (http_status, body) = execute_change_set(
+                    &router,
+                    "the-correction",
+                    row.stack,
+                    // The parked stack is mid-change, so this execution goes on asking for
+                    // the failed state to be kept, exactly as the fix-forward update above
+                    // does: executing a change set deploys its configuration onto the stack,
+                    // so it answers the same gate that update answers.
+                    &[member("DisableRollback", "true")],
+                )
+                .await;
                 assert_eq!(
                     http_status, 200,
                     "case {:?}: expected the correction to be executable, got {http_status} \

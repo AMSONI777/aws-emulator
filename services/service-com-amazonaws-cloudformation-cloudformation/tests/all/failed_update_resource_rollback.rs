@@ -53,7 +53,7 @@ const ALIAS_NAME: &str = "live";
 
 /// The version every alias invokes while the stack is healthy: the function's unpublished
 /// version, which a function always has.
-const HEALTHY_VERSION: &str = "$LATEST";
+pub(crate) const HEALTHY_VERSION: &str = "$LATEST";
 
 /// The wrapper CloudFormation reports a provider's own refusal inside, on the failed
 /// resource's own event: `ResourceStatusReason` is the "success/failure message associated
@@ -118,7 +118,7 @@ const ROWS: &[Row] = &[
 ///
 /// `description` is the function `Description` this revision declares, which is what a row
 /// changes to carry an update the owning service applies beside the aliases it breaks.
-fn template(stack: &str, aliased: &[&str], description: &str) -> String {
+pub(crate) fn template(stack: &str, aliased: &[&str], description: &str) -> String {
     let mut resources = serde_json::Map::new();
     resources.insert(
         "Role".to_string(),
@@ -176,13 +176,13 @@ fn function_logical_id(index: usize) -> String {
     format!("Fn{index}")
 }
 
-fn alias_logical_id(index: usize) -> String {
+pub(crate) fn alias_logical_id(index: usize) -> String {
     format!("Fn{index}Alias")
 }
 
 /// The function name the `index`-th function declares, and so the physical id the stack
 /// publishes for it.
-fn function_name(stack: &str, index: usize) -> String {
+pub(crate) fn function_name(stack: &str, index: usize) -> String {
     format!("{stack}-fn{index}")
 }
 
@@ -247,7 +247,7 @@ async fn resource_event_sequence(
 
 /// The version AWS Lambda itself reports the alias of `function` invokes, or `None` where that
 /// service holds no such alias.
-async fn alias_version(router: &MultiServiceRouter, function: &str) -> Option<String> {
+pub(crate) async fn alias_version(router: &MultiServiceRouter, function: &str) -> Option<String> {
     let answered = lambda(
         router,
         "GET",
@@ -268,7 +268,10 @@ async fn alias_version(router: &MultiServiceRouter, function: &str) -> Option<St
 
 /// The `Description` AWS Lambda reports for `function`, or `None` where it holds no such
 /// function.
-async fn function_description(router: &MultiServiceRouter, function: &str) -> Option<String> {
+pub(crate) async fn function_description(
+    router: &MultiServiceRouter,
+    function: &str,
+) -> Option<String> {
     let answered = lambda(
         router,
         "GET",
@@ -289,8 +292,8 @@ async fn function_description(router: &MultiServiceRouter, function: &str) -> Op
 
 /// The `Description` the healthy revision declares, and the one the broken update declares
 /// instead for a row that carries a change beside the aliases it breaks.
-const CREATED_DESCRIPTION: &str = "the deployed revision";
-const UPDATED_DESCRIPTION: &str = "the revision the update declares";
+pub(crate) const CREATED_DESCRIPTION: &str = "the deployed revision";
+pub(crate) const UPDATED_DESCRIPTION: &str = "the revision the update declares";
 
 /// RULE: an update attempts every resource whose dependencies allow it, names the whole failed
 /// set in the stack-level reason, carries each provider's own refusal on that resource's own

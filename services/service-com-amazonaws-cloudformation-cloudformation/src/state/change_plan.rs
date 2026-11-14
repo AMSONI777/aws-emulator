@@ -216,6 +216,10 @@ pub struct StackRevision<'a> {
     pub template: &'a template::Template,
     pub parameters: &'a [StoredParameter],
     pub deployed: &'a [DeployedResource],
+    /// The status the stack's last operation left it in: what says whether the stack's
+    /// resources carry the configuration its template declares, or whether some of them
+    /// carry the one they were PUT BACK to ([`carried_configurations`]).
+    pub status: &'a str,
     /// The exported output values the stack's `Fn::ImportValue` references resolved to
     /// when its template was deployed. Both sides of the comparison resolve imports
     /// against the SAME map, for the reason both resolve references against the same
@@ -245,6 +249,8 @@ pub struct DeployedStack<'a> {
     pub processed: &'a template::Processed,
     pub parameters: &'a [StoredParameter],
     pub deployed: &'a [DeployedResource],
+    /// The status the stack's last operation left it in ([`StackRevision::status`]).
+    pub status: &'a str,
     pub imports: &'a BTreeMap<String, String>,
     /// The Amazon SNS topic ARNs in force on the stack — what `AWS::NotificationARNs`
     /// resolves to on both sides of the comparison, the way the deployed resources are.
@@ -281,11 +287,47 @@ pub fn changes_against(
             template: &declared,
             parameters: current.parameters,
             deployed: current.deployed,
+            status: current.status,
             imports: current.imports,
         }),
         submitted,
         submitted_parameters,
     )
+}
+
+/// The configuration the stack's resources CARRY where it is not the one the template in
+/// force declares, keyed by logical id — the live state the comparison's `before` side is
+/// taken from for those resources ([`property_details`]).
+///
+/// A change set is "a list of changes that will be applied to a stack", so what it compares
+/// a submitted revision with is the configuration the stack's resources really hold. For
+/// almost every stack that IS the template in force: the operation that installed the
+/// template carried it through. The exception is a stack whose last operation FAILED and was
+/// left standing ([`super::status_preserved_a_failure`]): a resource whose change that
+/// operation could not carry through was PUT BACK to the configuration in force before it
+/// ([`super::provisioning`]), which the template in force does not declare — so comparing
+/// that resource's declarations would report work the stack does not need, and a revision
+/// restating what the resource already holds would never read as the no-op it is.
+///
+/// The resources that were put back are the ones their own rollback COMPLETED for, and the
+/// configuration each of them holds is its record's resolved `Properties`. A resource whose
+/// revert the owning service refused still holds what the failed operation left there, so
+/// the template in force is what declares it, and so this names none of them.
+fn carried_configurations(current: &StackRevision<'_>) -> BTreeMap<String, Value> {
+    if !super::status_preserved_a_failure(current.status) {
+        return BTreeMap::new();
+    }
+    current
+        .deployed
+        .iter()
+        .filter(|deployed| deployed.status == super::resource_status::UPDATE_ROLLBACK_COMPLETE)
+        .map(|deployed| {
+            (
+                deployed.resource.logical_id.clone(),
+                deployed.resource.properties.clone(),
+            )
+        })
+        .collect()
 }
 
 /// The resource-level changes that applying `submitted` with `submitted_parameters` to the
@@ -319,6 +361,9 @@ pub fn computed_changes(
         .iter()
         .map(|deployed| (deployed.resource.logical_id.clone(), deployed.resource.clone()))
         .collect();
+    // What those resources CARRY where the template in force does not declare it: the
+    // comparison's `before` side for each of them ([`carried_configurations`]).
+    let carried = carried_configurations(&current);
     let physical_id = |logical_id: &str| {
         deployed
             .get(logical_id)
@@ -414,7 +459,13 @@ pub fn computed_changes(
             }
             Some(previous) => Planned::Modified {
                 resource,
-                details: change_details(previous, resource, comparison, &mut budget),
+                details: change_details(
+                    previous,
+                    resource,
+                    carried.get(&resource.logical_id),
+                    comparison,
+                    &mut budget,
+                ),
             },
         });
     }
@@ -654,19 +705,26 @@ struct Comparison<'a> {
 /// One detail per resource attribute, and per `Properties` property, the two declarations
 /// of one resource would deploy differently.
 ///
+/// `carried` is the configuration the resource HOLDS where that is not what `previous`
+/// declares ([`carried_configurations`]), which is then what the properties are compared
+/// against.
+///
 /// The attributes are walked in the order the model's `ResourceAttribute` enum lists them
 /// and the properties of each in sorted order, so one change set reports its details — and
 /// the scope read off them — in one order however the bodies were written.
 fn change_details(
     previous: &template::DeclaredResource,
     submitted: &template::DeclaredResource,
+    carried: Option<&Value>,
     comparison: Comparison<'_>,
     budget: &mut template::Budget,
 ) -> Vec<StoredChangeDetail> {
     let mut details = Vec::new();
     for attribute in RESOURCE_ATTRIBUTE_VALUES {
         if *attribute == PROPERTIES_ATTRIBUTE {
-            details.extend(property_details(previous, submitted, comparison, budget));
+            details.extend(property_details(
+                previous, submitted, carried, comparison, budget,
+            ));
             continue;
         }
         // Every other `ResourceAttribute` is the resource attribute of that name, declared
@@ -692,15 +750,24 @@ fn change_details(
 }
 
 /// One detail per property the two declarations of one resource would deploy differently.
+///
+/// `carried` is the resolved `Properties` the resource HOLDS, for a resource whose live
+/// configuration is not the one `previous` declares ([`carried_configurations`]). It is
+/// already evaluated, so each property is compared with the value the submitted declaration
+/// RESOLVES to rather than with the text either side is written as: what the deployment
+/// would change is the value, and a declaration that spells the value the resource already
+/// holds through an intrinsic changes nothing.
 fn property_details(
     previous: &template::DeclaredResource,
     submitted: &template::DeclaredResource,
+    carried: Option<&Value>,
     comparison: Comparison<'_>,
     budget: &mut template::Budget,
 ) -> Vec<StoredChangeDetail> {
     let properties: BTreeSet<&str> = property_names(&previous.properties)
         .into_iter()
         .chain(property_names(&submitted.properties))
+        .chain(carried.map(property_names).unwrap_or_default())
         .collect();
     // What a change to each property would do to the resource: the properties either
     // revision states that are the type's replacement ones ([`template::replacing_properties`]
@@ -717,8 +784,14 @@ fn property_details(
     for property in properties {
         let declared_before = previous.properties.get(property);
         let declared_after = submitted.properties.get(property);
-        let resolved_before = declared_before
-            .and_then(|value| template::resolve(value, &comparison.before, budget));
+        // The value the resource CARRIES, for a resource whose live configuration the
+        // template in force no longer declares; otherwise what the previous declaration
+        // resolves to.
+        let resolved_before = match carried {
+            Some(carried) => carried.get(property).cloned(),
+            None => declared_before
+                .and_then(|value| template::resolve(value, &comparison.before, budget)),
+        };
         let resolved_after = declared_after
             .and_then(|value| template::resolve(value, &comparison.after, budget));
         // The property changes when the template STATES it differently, and also when the
@@ -726,7 +799,11 @@ fn property_details(
         // parameter the change set revalues. A value this reader cannot evaluate at all is
         // judged by what it is built from instead: it changes when it reads a parameter the
         // change set revalues, which is the one thing known about it.
-        let edited = declared_before != declared_after;
+        //
+        // Against a configuration the resource CARRIES there is no declaration to have been
+        // edited: the two sides are a value and a declaration, so only the value each would
+        // deploy can be compared.
+        let edited = carried.is_none() && declared_before != declared_after;
         let revalued = resolved_before != resolved_after;
         let referenced = template::references(declared_after.unwrap_or(&Value::Null));
         let unevaluated = declared_after.is_some() && resolved_after.is_none()

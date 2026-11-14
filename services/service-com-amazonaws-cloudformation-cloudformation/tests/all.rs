@@ -637,6 +637,8 @@ mod unschedulable_update_leaves_the_deployment_alone;
 mod unsignalled_gate_hold;
 #[path = "all/update_after_a_refused_delete.rs"]
 mod update_after_a_refused_delete;
+#[path = "all/update_failed_stack_operations.rs"]
+mod update_failed_stack_operations;
 #[path = "all/update_rollback_of_a_refused_update.rs"]
 mod update_rollback_of_a_refused_update;
 #[path = "all/update_rollback_recovery.rs"]

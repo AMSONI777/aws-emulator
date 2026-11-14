@@ -186,6 +186,18 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
             })?;
             let stack_id = stack.stack_id.clone();
             let stack_region = stack.region.clone();
+            // "CloudFormation compares the actual configuration of the resource with its
+            // expected template configuration": a stack whose last operation did not carry
+            // its configuration through has no such configuration for the detection to
+            // compare against, so the call is refused rather than answered with a report
+            // over a half-applied stack
+            // ([`crate::state::drift::status_takes_a_detection`]). The refusal names the
+            // stack by its id and the status that refuses it.
+            if !crate::state::drift::status_takes_a_detection(&stack.status) {
+                return Err(crate::scaffolded::Scaffolded::validation_error(
+                    crate::state::drift::cannot_be_performed(&stack_id, &stack.status),
+                ));
+            }
             // "The logical names of any resources you want to use as filters": a filter
             // over the stack's own resources, so the detection covers exactly the ones it
             // names and a name the stack has not deployed selects nothing to check. This

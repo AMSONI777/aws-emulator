@@ -177,6 +177,16 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
             // The refusal names the stack by its own ID rather than as the request spelled
             // it, which is how a drift record addresses the stack it belongs to.
             let stack_id = stack.stack_id.clone();
+            // "CloudFormation compares the actual configuration of the resource with its
+            // expected template configuration": a stack whose last operation did not carry
+            // its configuration through has no such configuration for the detection to
+            // compare this resource against, so the call is refused exactly as a
+            // whole-stack detection is ([`crate::state::drift::status_takes_a_detection`]).
+            if !crate::state::drift::status_takes_a_detection(&stack.status) {
+                return Err(crate::scaffolded::Scaffolded::validation_error(
+                    crate::state::drift::cannot_be_performed(&stack_id, &stack.status),
+                ));
+            }
             let deployed = stack
                 .resources
                 .iter()

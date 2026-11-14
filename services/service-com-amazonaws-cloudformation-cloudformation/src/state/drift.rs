@@ -613,6 +613,38 @@ fn scalar_text(value: &Value) -> Option<String> {
     crate::state::scalar_text(value)
 }
 
+/// Whether a stack whose last operation left it in `status` takes a DRIFT DETECTION, as
+/// `DetectStackDrift` and `DetectStackResourceDrift` both gate on it.
+///
+/// A detection "compares the actual configuration of the resource with its expected
+/// template configuration", so it needs a stack whose resources ARE the configuration its
+/// template declares — which is the STABLE state the stack's last operation settled it in
+/// ([`super::is_stable_status`], the statuses `RollbackStack` lists as "a last known stable
+/// state").
+///
+/// Every other status is a stack with no such configuration to compare against: one with an
+/// operation still in flight, one whose last operation FAILED and left resources carrying a
+/// configuration its template does not declare (resolved by `RollbackStack`,
+/// `ContinueUpdateRollback` or an update that corrects the template), one a `CREATE` change
+/// set brought into existence with no template at all, and one whose create was rolled back
+/// or deleted, whose resources are gone.
+pub fn status_takes_a_detection(status: &str) -> bool {
+    super::is_stable_status(status)
+}
+
+/// The message CloudFormation answers a drift detection asked for on a stack whose current
+/// status is not one it can be carried out in.
+///
+/// The model declares no error of its own for either detection operation, so the refusal is
+/// the service-common `ValidationError`. The sentence names the stack by the id it is
+/// addressed by and the status that refuses the call; the rest is fixed text.
+pub fn cannot_be_performed(stack_id: &str, status: &str) -> String {
+    format!(
+        "Drift detection cannot be performed on stack [{stack_id}] while it is in [{status}] \
+         state"
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

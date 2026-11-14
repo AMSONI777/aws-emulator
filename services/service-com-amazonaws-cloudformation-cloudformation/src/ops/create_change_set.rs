@@ -770,30 +770,40 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         // none of them — and so does a stack id that resolves to nothing in the Region the
         // request is signed for, which is the same case: there is nothing to compare
         // against, and the arm below is the one a new stack takes.
-        let (previous_template, previous_processed, previous_parameters, deployed, stack_identity) =
-            match target_stack_id
-                .as_deref()
-                .and_then(|stack_id| store.resolve(&region, stack_id))
-            {
-                None => (
-                    None,
-                    crate::state::template::Processed::Same,
-                    Vec::new(),
-                    Vec::new(),
-                    None,
-                ),
-                Some(stack) => (
-                    stack.template_body.clone(),
-                    stack.processed_template.clone(),
-                    stack.parameters.clone(),
-                    stack.resources.clone(),
-                    Some((
-                        stack.region.clone(),
-                        stack.stack_name.clone(),
-                        stack.stack_id.clone(),
-                    )),
-                ),
-            };
+        let (
+            previous_template,
+            previous_processed,
+            previous_parameters,
+            deployed,
+            previous_status,
+            stack_identity,
+        ) = match target_stack_id
+            .as_deref()
+            .and_then(|stack_id| store.resolve(&region, stack_id))
+        {
+            None => (
+                None,
+                crate::state::template::Processed::Same,
+                Vec::new(),
+                Vec::new(),
+                String::new(),
+                None,
+            ),
+            Some(stack) => (
+                stack.template_body.clone(),
+                stack.processed_template.clone(),
+                stack.parameters.clone(),
+                stack.resources.clone(),
+                // What says which of those resources carry the configuration the
+                // template in force declares ([`crate::state::change_plan`]).
+                stack.status.clone(),
+                Some((
+                    stack.region.clone(),
+                    stack.stack_name.clone(),
+                    stack.stack_id.clone(),
+                )),
+            ),
+        };
         // What a `Fn::ImportValue` in the stack's template resolved to: the plan's two
         // sides resolve imports against it, the way they resolve references against the
         // resources the stack has deployed.
@@ -955,6 +965,7 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
                         processed: &previous_processed,
                         parameters: &previous_parameters,
                         deployed: &deployed,
+                        status: &previous_status,
                         imports: &previous_imports,
                         notification_arns: &previous_notification_arns,
                     }
