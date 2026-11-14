@@ -290,7 +290,7 @@ async fn a_missing_terminology_refusal_names_the_resource_the_operation_addresse
         };
         let (status, answered) = call(&router, row.operation, &body).await;
         assert_eq!(
-            status, 404,
+            status, 400,
             "case {:?}: got {status} {answered}",
             row.case
         );
@@ -318,7 +318,7 @@ async fn a_missing_terminology_refusal_names_the_resource_the_operation_addresse
 
     let (status, gone) =
         call(&router, "GetTerminology", &json!({"Name": "short-lived-terms"})).await;
-    assert_eq!(status, 404, "GetTerminology answered {gone}");
+    assert_eq!(status, 400, "GetTerminology answered {gone}");
     assert_eq!(
         message(&gone),
         format!("The Terminology for {ACCOUNT} short-lived-terms was not found"),
@@ -327,7 +327,7 @@ async fn a_missing_terminology_refusal_names_the_resource_the_operation_addresse
 
     let (status, again) =
         call(&router, "DeleteTerminology", &json!({"Name": "short-lived-terms"})).await;
-    assert_eq!(status, 404, "the second delete answered {again}");
+    assert_eq!(status, 400, "the second delete answered {again}");
     assert_eq!(
         message(&again),
         format!("The TerminologyMetadata for {ACCOUNT} short-lived-terms was not found"),
@@ -543,7 +543,7 @@ async fn the_tag_limit_is_enforced_over_the_resulting_tag_set() {
         )
         .await;
         assert_eq!(
-            status, 404,
+            status, 400,
             "case {operation:?}: got {status} {answered}"
         );
         assert_eq!(

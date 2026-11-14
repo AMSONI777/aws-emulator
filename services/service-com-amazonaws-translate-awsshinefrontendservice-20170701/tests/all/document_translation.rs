@@ -748,7 +748,7 @@ async fn brevity_is_not_applied_to_a_document_translation() {
 }
 
 /// A terminology a document translation names is resolved against stored state:
-/// a name nothing imported is a 404 naming it, a second terminology in one
+/// a name nothing imported is a refusal naming it, a second terminology in one
 /// request is refused, and a deleted terminology stops being resolvable.
 #[tokio::test]
 async fn a_document_translation_resolves_its_terminologies_from_state() {
@@ -764,7 +764,7 @@ async fn a_document_translation_resolves_its_terminologies_from_state() {
         &document_body(b"hello world", CONTENT_TYPE_PLAIN, "en", "fr", &["absent-terms"]),
     )
     .await;
-    assert_eq!(status, 404, "TranslateDocument answered {body}");
+    assert_eq!(status, 400, "TranslateDocument answered {body}");
     assert_eq!(error_code(&body), "ResourceNotFoundException", "got {body}");
     assert_eq!(
         message(&body),
@@ -796,8 +796,8 @@ async fn a_document_translation_resolves_its_terminologies_from_state() {
     )
     .await;
     assert_eq!(
-        status, 404,
-        "a translation naming a deleted terminology 404s, got {body}"
+        status, 400,
+        "a translation naming a deleted terminology is refused, got {body}"
     );
 }
 

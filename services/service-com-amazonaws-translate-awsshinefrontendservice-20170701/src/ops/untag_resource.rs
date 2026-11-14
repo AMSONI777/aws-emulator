@@ -53,7 +53,7 @@
 #[allow(unused_imports)]
 use super::types::*;
 
-use crate::state::{resource_not_found, service_state};
+use crate::state::{resource_not_found, service_state, WireRefusal};
 
 // `#[operation_error]` below expands to an invocation of the LOCAL declarative
 // `smithy!` macro, which this line is what emits into the module. Without it the
@@ -76,9 +76,10 @@ pub enum UntagResourceErrorModeled {
 }
 
 /// This operation's error channel, as the generated `impl Operation` names it
-/// (`crate::ops::untag_resource::UntagResourceError`). Wrapping the modeled enum is what
-/// lets a scaffolded operation answer 501 for one whose model declares no errors at all.
-pub type UntagResourceError = crate::scaffolded::Scaffolded<UntagResourceErrorModeled>;
+/// (`crate::ops::untag_resource::UntagResourceError`): the modelled enum, the scaffold
+/// wrapper around it, and this service's own refusal of a resource that is not there
+/// ([`crate::state::WireRefusal`]), whose status the model does not state.
+pub type UntagResourceError = crate::state::Refusable<UntagResourceErrorModeled>;
 
 /// Lets `?` and `.into()` lift a modeled failure into the error channel, so an
 /// implemented handler writes `Err(SomeModeledError.into())` rather than naming the
@@ -86,7 +87,7 @@ pub type UntagResourceError = crate::scaffolded::Scaffolded<UntagResourceErrorMo
 /// this operation is implemented.
 impl From<UntagResourceErrorModeled> for UntagResourceError {
     fn from(modeled: UntagResourceErrorModeled) -> Self {
-        crate::scaffolded::Scaffolded::Modeled(modeled)
+        crate::state::Refusable::Channel(crate::scaffolded::Scaffolded::Modeled(modeled))
     }
 }
 
@@ -138,9 +139,7 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         // untags is the stored one carrying that ARN.
         let name = store
             .terminology_name_for_arn(&input.resource_arn)
-            .ok_or_else(|| {
-                UntagResourceErrorModeled::ResourceNotFoundException(resource_not_found())
-            })?;
+            .ok_or_else(|| WireRefusal::not_found(resource_not_found()))?;
         let record = store.terminologies.get_mut(&name).ok_or_else(|| {
             UntagResourceErrorModeled::InternalServerException(InternalServerException {
                 message: Some("the untagged terminology could not be read back".to_string()),

@@ -50,7 +50,7 @@
 #[allow(unused_imports)]
 use super::types::*;
 
-use crate::state::{resource_not_found, service_state};
+use crate::state::{resource_not_found, service_state, WireRefusal};
 
 // `#[operation_error]` below expands to an invocation of the LOCAL declarative
 // `smithy!` macro, which this line is what emits into the module. Without it the
@@ -72,9 +72,10 @@ pub enum ListTagsForResourceErrorModeled {
 }
 
 /// This operation's error channel, as the generated `impl Operation` names it
-/// (`crate::ops::list_tags_for_resource::ListTagsForResourceError`). Wrapping the modeled enum is what
-/// lets a scaffolded operation answer 501 for one whose model declares no errors at all.
-pub type ListTagsForResourceError = crate::scaffolded::Scaffolded<ListTagsForResourceErrorModeled>;
+/// (`crate::ops::list_tags_for_resource::ListTagsForResourceError`): the modelled enum, the
+/// scaffold wrapper around it, and this service's own refusal of a resource that is not
+/// there ([`crate::state::WireRefusal`]), whose status the model does not state.
+pub type ListTagsForResourceError = crate::state::Refusable<ListTagsForResourceErrorModeled>;
 
 /// Lets `?` and `.into()` lift a modeled failure into the error channel, so an
 /// implemented handler writes `Err(SomeModeledError.into())` rather than naming the
@@ -82,7 +83,7 @@ pub type ListTagsForResourceError = crate::scaffolded::Scaffolded<ListTagsForRes
 /// this operation is implemented.
 impl From<ListTagsForResourceErrorModeled> for ListTagsForResourceError {
     fn from(modeled: ListTagsForResourceErrorModeled) -> Self {
-        crate::scaffolded::Scaffolded::Modeled(modeled)
+        crate::state::Refusable::Channel(crate::scaffolded::Scaffolded::Modeled(modeled))
     }
 }
 
@@ -132,9 +133,7 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         let store = state.lock();
         let record = store
             .terminology_for_arn(&input.resource_arn)
-            .ok_or_else(|| {
-                ListTagsForResourceErrorModeled::ResourceNotFoundException(resource_not_found())
-            })?;
+            .ok_or_else(|| WireRefusal::not_found(resource_not_found()))?;
 
         // Reported from the stored record, so a resource carrying no tags
         // answers with an empty list rather than with no member at all.

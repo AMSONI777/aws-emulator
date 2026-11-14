@@ -299,7 +299,7 @@ async fn untag_resource_refuses_an_arn_naming_no_resource() {
         )
         .await;
         assert_eq!(
-            status, 404,
+            status, 400,
             "case {case:?}: expected a not-found refusal, got {status} {answered}"
         );
         assert_eq!(

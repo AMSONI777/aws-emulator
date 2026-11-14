@@ -53,7 +53,7 @@ use super::types::*;
 
 use std::time::SystemTime;
 
-use crate::state::{resource_not_found, service_state};
+use crate::state::{resource_not_found, service_state, WireRefusal};
 
 // `#[operation_error]` below expands to an invocation of the LOCAL declarative
 // `smithy!` macro, which this line is what emits into the module. Without it the
@@ -75,9 +75,12 @@ pub enum DescribeTextTranslationJobErrorModeled {
 }
 
 /// This operation's error channel, as the generated `impl Operation` names it
-/// (`crate::ops::describe_text_translation_job::DescribeTextTranslationJobError`). Wrapping the modeled enum is what
-/// lets a scaffolded operation answer 501 for one whose model declares no errors at all.
-pub type DescribeTextTranslationJobError = crate::scaffolded::Scaffolded<DescribeTextTranslationJobErrorModeled>;
+/// (`crate::ops::describe_text_translation_job::DescribeTextTranslationJobError`): the
+/// modelled enum, the scaffold wrapper around it, and this service's own refusal of a
+/// resource that is not there ([`crate::state::WireRefusal`]), whose status the model does
+/// not state.
+pub type DescribeTextTranslationJobError =
+    crate::state::Refusable<DescribeTextTranslationJobErrorModeled>;
 
 /// Lets `?` and `.into()` lift a modeled failure into the error channel, so an
 /// implemented handler writes `Err(SomeModeledError.into())` rather than naming the
@@ -85,7 +88,7 @@ pub type DescribeTextTranslationJobError = crate::scaffolded::Scaffolded<Describ
 /// this operation is implemented.
 impl From<DescribeTextTranslationJobErrorModeled> for DescribeTextTranslationJobError {
     fn from(modeled: DescribeTextTranslationJobErrorModeled) -> Self {
-        crate::scaffolded::Scaffolded::Modeled(modeled)
+        crate::state::Refusable::Channel(crate::scaffolded::Scaffolded::Modeled(modeled))
     }
 }
 
@@ -139,12 +142,7 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
 
         let store = state.lock();
         let Some(job) = store.jobs.get(&input.job_id) else {
-            return Err(
-                DescribeTextTranslationJobErrorModeled::ResourceNotFoundException(
-                    resource_not_found(),
-                )
-                .into(),
-            );
+            return Err(WireRefusal::not_found(resource_not_found()).into());
         };
         Ok(DescribeTextTranslationJobOutput {
             text_translation_job_properties: Some(job.properties(now)),

@@ -40,7 +40,13 @@ use crate::ops::types::{
 /// writes the documents.
 pub mod batch_translation;
 
+/// The refusals this service answers whose wire status its own model does not
+/// express, and the error channel every operation that answers one carries.
+pub mod wire_refusals;
+
 use batch_translation::TranslationJob;
+
+pub use wire_refusals::{Refusable, WireRefusal};
 
 /// The ARN namespace this service stamps into every resource ARN: `translate`
 /// (`awsService.arnNamespace`, `smithy_query query=service_info`).

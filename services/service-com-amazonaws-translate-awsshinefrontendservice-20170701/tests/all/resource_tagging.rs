@@ -419,7 +419,7 @@ async fn a_refused_merge_leaves_the_stored_tags_as_they_were() {
         )
         .await;
         assert_eq!(
-            status, 404,
+            status, 400,
             "case {case:?}: expected a not-found refusal, got {status} {answered}"
         );
         assert_eq!(

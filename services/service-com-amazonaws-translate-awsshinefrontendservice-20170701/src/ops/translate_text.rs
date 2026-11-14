@@ -100,9 +100,9 @@ use super::types::*;
 use crate::state::{
     applied_term, invalid_request, is_supported_language, language_for_detector_code,
     resolve_terminologies, service_state, substitute, terminology_not_found,
-    text_size_limit_exceeded, translation_marker, unsupported_language_pair, AUTO_LANGUAGE_CODE,
-    MAX_TERMINOLOGIES_PER_TRANSLATION, MAX_TEXT_BYTES, MAX_TRANSLATED_TEXT_CHARS,
-    TERMINOLOGY_RESOURCE,
+    text_size_limit_exceeded, translation_marker, unsupported_language_pair, WireRefusal,
+    AUTO_LANGUAGE_CODE, MAX_TERMINOLOGIES_PER_TRANSLATION, MAX_TEXT_BYTES,
+    MAX_TRANSLATED_TEXT_CHARS, TERMINOLOGY_RESOURCE,
 };
 
 /// The source language of `text`, for a request that asked for `auto`.
@@ -165,9 +165,10 @@ pub enum TranslateTextErrorModeled {
 }
 
 /// This operation's error channel, as the generated `impl Operation` names it
-/// (`crate::ops::translate_text::TranslateTextError`). Wrapping the modeled enum is what
-/// lets a scaffolded operation answer 501 for one whose model declares no errors at all.
-pub type TranslateTextError = crate::scaffolded::Scaffolded<TranslateTextErrorModeled>;
+/// (`crate::ops::translate_text::TranslateTextError`): the modelled enum, the scaffold
+/// wrapper around it, and this service's own refusal of a resource that is not there
+/// ([`crate::state::WireRefusal`]), whose status the model does not state.
+pub type TranslateTextError = crate::state::Refusable<TranslateTextErrorModeled>;
 
 /// Lets `?` and `.into()` lift a modeled failure into the error channel, so an
 /// implemented handler writes `Err(SomeModeledError.into())` rather than naming the
@@ -175,7 +176,7 @@ pub type TranslateTextError = crate::scaffolded::Scaffolded<TranslateTextErrorMo
 /// this operation is implemented.
 impl From<TranslateTextErrorModeled> for TranslateTextError {
     fn from(modeled: TranslateTextErrorModeled) -> Self {
-        crate::scaffolded::Scaffolded::Modeled(modeled)
+        crate::state::Refusable::Channel(crate::scaffolded::Scaffolded::Modeled(modeled))
     }
 }
 
@@ -273,10 +274,7 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
                 &target_language_code,
             )
             .map_err(|name| {
-                TranslateTextErrorModeled::ResourceNotFoundException(terminology_not_found(
-                    TERMINOLOGY_RESOURCE,
-                    &name,
-                ))
+                WireRefusal::not_found(terminology_not_found(TERMINOLOGY_RESOURCE, &name))
             })?
         };
 

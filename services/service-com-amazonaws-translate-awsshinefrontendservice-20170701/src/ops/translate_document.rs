@@ -107,8 +107,9 @@ use std::io::{Cursor, Read, Write};
 use crate::state::{
     applied_term, invalid_request, is_supported_language, language_for_detector_code,
     limit_exceeded, resolve_terminologies, service_state, substitute, terminology_not_found,
-    translation_marker, unsupported_language_pair, AUTO_LANGUAGE_CODE, MAX_APPLIED_TERMS,
-    MAX_DOCUMENT_BYTES, MAX_TERMINOLOGIES_PER_TRANSLATION, TERMINOLOGY_RESOURCE,
+    translation_marker, unsupported_language_pair, WireRefusal, AUTO_LANGUAGE_CODE,
+    MAX_APPLIED_TERMS, MAX_DOCUMENT_BYTES, MAX_TERMINOLOGIES_PER_TRANSLATION,
+    TERMINOLOGY_RESOURCE,
 };
 
 /// The language code a document translation carries on one side of its pair:
@@ -556,9 +557,10 @@ pub enum TranslateDocumentErrorModeled {
 }
 
 /// This operation's error channel, as the generated `impl Operation` names it
-/// (`crate::ops::translate_document::TranslateDocumentError`). Wrapping the modeled enum is what
-/// lets a scaffolded operation answer 501 for one whose model declares no errors at all.
-pub type TranslateDocumentError = crate::scaffolded::Scaffolded<TranslateDocumentErrorModeled>;
+/// (`crate::ops::translate_document::TranslateDocumentError`): the modelled enum, the
+/// scaffold wrapper around it, and this service's own refusal of a resource that is not
+/// there ([`crate::state::WireRefusal`]), whose status the model does not state.
+pub type TranslateDocumentError = crate::state::Refusable<TranslateDocumentErrorModeled>;
 
 /// Lets `?` and `.into()` lift a modeled failure into the error channel, so an
 /// implemented handler writes `Err(SomeModeledError.into())` rather than naming the
@@ -566,7 +568,7 @@ pub type TranslateDocumentError = crate::scaffolded::Scaffolded<TranslateDocumen
 /// this operation is implemented.
 impl From<TranslateDocumentErrorModeled> for TranslateDocumentError {
     fn from(modeled: TranslateDocumentErrorModeled) -> Self {
-        crate::scaffolded::Scaffolded::Modeled(modeled)
+        crate::state::Refusable::Channel(crate::scaffolded::Scaffolded::Modeled(modeled))
     }
 }
 
@@ -682,10 +684,7 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
                 &target_language_code,
             )
             .map_err(|name| {
-                TranslateDocumentErrorModeled::ResourceNotFoundException(terminology_not_found(
-                    TERMINOLOGY_RESOURCE,
-                    &name,
-                ))
+                WireRefusal::not_found(terminology_not_found(TERMINOLOGY_RESOURCE, &name))
             })?
         };
 

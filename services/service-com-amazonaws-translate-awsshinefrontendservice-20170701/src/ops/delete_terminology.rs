@@ -44,7 +44,9 @@
 #[allow(unused_imports)]
 use super::types::*;
 
-use crate::state::{service_state, terminology_not_found, TERMINOLOGY_METADATA_RESOURCE};
+use crate::state::{
+    service_state, terminology_not_found, WireRefusal, TERMINOLOGY_METADATA_RESOURCE,
+};
 
 // `#[operation_error]` below expands to an invocation of the LOCAL declarative
 // `smithy!` macro, which this line is what emits into the module. Without it the
@@ -86,9 +88,10 @@ pub enum DeleteTerminologyErrorModeled {
 }
 
 /// This operation's error channel, as the generated `impl Operation` names it
-/// (`crate::ops::delete_terminology::DeleteTerminologyError`). Wrapping the modeled enum is what
-/// lets a scaffolded operation answer 501 for one whose model declares no errors at all.
-pub type DeleteTerminologyError = crate::scaffolded::Scaffolded<DeleteTerminologyErrorModeled>;
+/// (`crate::ops::delete_terminology::DeleteTerminologyError`): the modelled enum, the
+/// scaffold wrapper around it, and this service's own refusal of a resource that is not
+/// there ([`crate::state::WireRefusal`]), whose status the model does not state.
+pub type DeleteTerminologyError = crate::state::Refusable<DeleteTerminologyErrorModeled>;
 
 /// Lets `?` and `.into()` lift a modeled failure into the error channel, so an
 /// implemented handler writes `Err(SomeModeledError.into())` rather than naming the
@@ -96,7 +99,7 @@ pub type DeleteTerminologyError = crate::scaffolded::Scaffolded<DeleteTerminolog
 /// this operation is implemented.
 impl From<DeleteTerminologyErrorModeled> for DeleteTerminologyError {
     fn from(modeled: DeleteTerminologyErrorModeled) -> Self {
-        crate::scaffolded::Scaffolded::Modeled(modeled)
+        crate::state::Refusable::Channel(crate::scaffolded::Scaffolded::Modeled(modeled))
     }
 }
 
@@ -147,9 +150,10 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         if store.terminologies.remove(&input.name).is_none() {
             // A delete addresses the resource's metadata record, which is the
             // resource this refusal names.
-            return Err(DeleteTerminologyErrorModeled::ResourceNotFoundException(
-                terminology_not_found(TERMINOLOGY_METADATA_RESOURCE, &input.name),
-            )
+            return Err(WireRefusal::not_found(terminology_not_found(
+                TERMINOLOGY_METADATA_RESOURCE,
+                &input.name,
+            ))
             .into());
         }
         Ok(DeleteTerminologyOutput)

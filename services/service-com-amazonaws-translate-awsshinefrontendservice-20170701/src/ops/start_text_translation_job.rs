@@ -128,8 +128,8 @@ use crate::state::batch_translation::{
 };
 use crate::state::{
     invalid_parameter_value, is_supported_language, request_region, resource_not_found,
-    service_state, terminology_not_found, unsupported_language_pair, AUTO_LANGUAGE_CODE,
-    MAX_TERMINOLOGIES_PER_TRANSLATION, TERMINOLOGY_RESOURCE,
+    service_state, terminology_not_found, unsupported_language_pair, WireRefusal,
+    AUTO_LANGUAGE_CODE, MAX_TERMINOLOGIES_PER_TRANSLATION, TERMINOLOGY_RESOURCE,
 };
 
 /// The member a refusal names when the job's target languages are what is
@@ -169,9 +169,11 @@ pub enum StartTextTranslationJobErrorModeled {
 }
 
 /// This operation's error channel, as the generated `impl Operation` names it
-/// (`crate::ops::start_text_translation_job::StartTextTranslationJobError`). Wrapping the modeled enum is what
-/// lets a scaffolded operation answer 501 for one whose model declares no errors at all.
-pub type StartTextTranslationJobError = crate::scaffolded::Scaffolded<StartTextTranslationJobErrorModeled>;
+/// (`crate::ops::start_text_translation_job::StartTextTranslationJobError`): the modelled
+/// enum, the scaffold wrapper around it, and this service's own refusal of a resource that
+/// is not there ([`crate::state::WireRefusal`]), whose status the model does not state.
+pub type StartTextTranslationJobError =
+    crate::state::Refusable<StartTextTranslationJobErrorModeled>;
 
 /// Lets `?` and `.into()` lift a modeled failure into the error channel, so an
 /// implemented handler writes `Err(SomeModeledError.into())` rather than naming the
@@ -179,7 +181,7 @@ pub type StartTextTranslationJobError = crate::scaffolded::Scaffolded<StartTextT
 /// this operation is implemented.
 impl From<StartTextTranslationJobErrorModeled> for StartTextTranslationJobError {
     fn from(modeled: StartTextTranslationJobErrorModeled) -> Self {
-        crate::scaffolded::Scaffolded::Modeled(modeled)
+        crate::state::Refusable::Channel(crate::scaffolded::Scaffolded::Modeled(modeled))
     }
 }
 
@@ -325,20 +327,16 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
             // this job could apply. Nothing creates one in this store yet, so
             // every name a request gives is one no resource answers to.
             if !parallel_data_names.is_empty() {
-                return Err(StartTextTranslationJobErrorModeled::ResourceNotFoundException(
-                    resource_not_found(),
-                )
-                .into());
+                return Err(WireRefusal::not_found(resource_not_found()).into());
             }
             let mut records = Vec::with_capacity(terminology_names.len());
             for name in &terminology_names {
                 let Some(record) = store.terminologies.get(name) else {
-                    return Err(
-                        StartTextTranslationJobErrorModeled::ResourceNotFoundException(
-                            terminology_not_found(TERMINOLOGY_RESOURCE, name),
-                        )
-                        .into(),
-                    );
+                    return Err(WireRefusal::not_found(terminology_not_found(
+                        TERMINOLOGY_RESOURCE,
+                        name,
+                    ))
+                    .into());
                 };
                 // Copied out of the store, so the documents below are
                 // translated with no lock held.

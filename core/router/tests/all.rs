@@ -3135,3 +3135,8 @@ mod ecr_scan_on_push_event_reaches_its_queue_target;
 // above: two branches landing at once appended it here as well, and a module declared twice
 // (`cloudformation_kms_encrypted_sns_sqs_pipeline` is declared ONCE, further up this tail:
 // two landings each appended their own copy, and a module declared twice compiles neither.)
+// (The declaration rule these appended tails kept restating — one `mod` per suite, in this
+// one crate root — is stated once in this file's header and checked by
+// `all/all_rs_declares_each_suite_once.rs`; the fragments of that header which successive
+// merges landed down here, one of them as an inner doc comment that no item follows, are
+// removed.)

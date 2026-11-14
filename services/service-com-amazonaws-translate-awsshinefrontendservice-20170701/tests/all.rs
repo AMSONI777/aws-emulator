@@ -15,6 +15,8 @@
 mod batch_translation_jobs;
 #[path = "all/document_translation.rs"]
 mod document_translation;
+#[path = "all/not_found_status.rs"]
+mod not_found_status;
 #[path = "all/rejection_paths.rs"]
 mod rejection_paths;
 #[path = "all/resource_tag_listing.rs"]

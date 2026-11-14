@@ -351,7 +351,7 @@ async fn terminology_lifecycle_is_served_from_stored_state() {
         "got {translated}"
     );
 
-    // A terminology nothing imported is a 404, on the translate path too.
+    // A terminology nothing imported is refused, on the translate path too.
     let (status, missing) = call(
         &router,
         "TranslateText",
@@ -363,7 +363,7 @@ async fn terminology_lifecycle_is_served_from_stored_state() {
         }),
     )
     .await;
-    assert_eq!(status, 404, "TranslateText answered {missing}");
+    assert_eq!(status, 400, "TranslateText answered {missing}");
     assert_eq!(error_code(&missing), "ResourceNotFoundException");
     assert_eq!(
         message(&missing),
@@ -377,7 +377,7 @@ async fn terminology_lifecycle_is_served_from_stored_state() {
     assert_eq!(status, 200, "DeleteTerminology answered {deleted}");
 
     let (status, gone) = call(&router, "GetTerminology", &json!({"Name": "demo-terms"})).await;
-    assert_eq!(status, 404, "GetTerminology answered {gone}");
+    assert_eq!(status, 400, "GetTerminology answered {gone}");
     assert_eq!(error_code(&gone), "ResourceNotFoundException");
 
     let (_, listed) = call(&router, "ListTerminologies", &json!({})).await;
@@ -399,13 +399,13 @@ async fn terminology_lifecycle_is_served_from_stored_state() {
     )
     .await;
     assert_eq!(
-        status, 404,
-        "a translation naming a deleted terminology 404s, got {translated}"
+        status, 400,
+        "a translation naming a deleted terminology is refused, got {translated}"
     );
 
     let (status, again) =
         call(&router, "DeleteTerminology", &json!({"Name": "demo-terms"})).await;
-    assert_eq!(status, 404, "a second delete answered {again}");
+    assert_eq!(status, 400, "a second delete answered {again}");
     assert_eq!(error_code(&again), "ResourceNotFoundException");
 }
 
@@ -1108,7 +1108,7 @@ async fn unusable_terminology_files_are_refused_and_partial_ones_counted() {
         let (status, fetched) =
             call(&router, "GetTerminology", &json!({"Name": "refused-terms"})).await;
         assert_eq!(
-            status, 404,
+            status, 400,
             "case {case:?}: a refused import must store nothing, got {fetched}"
         );
     }
@@ -1225,7 +1225,7 @@ async fn the_terminology_store_is_bounded_by_the_account_quota() {
     let (status, fetched) =
         call(&router, "GetTerminology", &json!({"Name": "terms-over"})).await;
     assert_eq!(
-        status, 404,
+        status, 400,
         "a refused import must store nothing, got {fetched}"
     );
 

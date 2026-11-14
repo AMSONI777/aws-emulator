@@ -61,7 +61,7 @@ use super::types::*;
 
 use std::time::SystemTime;
 
-use crate::state::{resource_not_found, service_state};
+use crate::state::{resource_not_found, service_state, WireRefusal};
 
 // `#[operation_error]` below expands to an invocation of the LOCAL declarative
 // `smithy!` macro, which this line is what emits into the module. Without it the
@@ -83,9 +83,10 @@ pub enum StopTextTranslationJobErrorModeled {
 }
 
 /// This operation's error channel, as the generated `impl Operation` names it
-/// (`crate::ops::stop_text_translation_job::StopTextTranslationJobError`). Wrapping the modeled enum is what
-/// lets a scaffolded operation answer 501 for one whose model declares no errors at all.
-pub type StopTextTranslationJobError = crate::scaffolded::Scaffolded<StopTextTranslationJobErrorModeled>;
+/// (`crate::ops::stop_text_translation_job::StopTextTranslationJobError`): the modelled
+/// enum, the scaffold wrapper around it, and this service's own refusal of a resource that
+/// is not there ([`crate::state::WireRefusal`]), whose status the model does not state.
+pub type StopTextTranslationJobError = crate::state::Refusable<StopTextTranslationJobErrorModeled>;
 
 /// Lets `?` and `.into()` lift a modeled failure into the error channel, so an
 /// implemented handler writes `Err(SomeModeledError.into())` rather than naming the
@@ -93,7 +94,7 @@ pub type StopTextTranslationJobError = crate::scaffolded::Scaffolded<StopTextTra
 /// this operation is implemented.
 impl From<StopTextTranslationJobErrorModeled> for StopTextTranslationJobError {
     fn from(modeled: StopTextTranslationJobErrorModeled) -> Self {
-        crate::scaffolded::Scaffolded::Modeled(modeled)
+        crate::state::Refusable::Channel(crate::scaffolded::Scaffolded::Modeled(modeled))
     }
 }
 
@@ -143,10 +144,7 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
 
         let mut store = state.lock();
         let Some(job) = store.jobs.get_mut(&input.job_id) else {
-            return Err(StopTextTranslationJobErrorModeled::ResourceNotFoundException(
-                resource_not_found(),
-            )
-            .into());
+            return Err(WireRefusal::not_found(resource_not_found()).into());
         };
         // A job that has already reached a status it never leaves keeps it: the
         // stop has nothing left to mark for termination. A job that has not is

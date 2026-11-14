@@ -70,7 +70,7 @@ use super::types::*;
 
 use crate::state::{
     auxiliary_data_location, invalid_parameter_value, request_region, service_state,
-    terminology_data_location, terminology_not_found, terminology_properties,
+    terminology_data_location, terminology_not_found, terminology_properties, WireRefusal,
     TERMINOLOGY_RESOURCE,
 };
 
@@ -98,9 +98,10 @@ pub enum GetTerminologyErrorModeled {
 }
 
 /// This operation's error channel, as the generated `impl Operation` names it
-/// (`crate::ops::get_terminology::GetTerminologyError`). Wrapping the modeled enum is what
-/// lets a scaffolded operation answer 501 for one whose model declares no errors at all.
-pub type GetTerminologyError = crate::scaffolded::Scaffolded<GetTerminologyErrorModeled>;
+/// (`crate::ops::get_terminology::GetTerminologyError`): the modelled enum, the scaffold
+/// wrapper around it, and this service's own refusal of a resource that is not there
+/// ([`crate::state::WireRefusal`]), whose status the model does not state.
+pub type GetTerminologyError = crate::state::Refusable<GetTerminologyErrorModeled>;
 
 /// Lets `?` and `.into()` lift a modeled failure into the error channel, so an
 /// implemented handler writes `Err(SomeModeledError.into())` rather than naming the
@@ -108,7 +109,7 @@ pub type GetTerminologyError = crate::scaffolded::Scaffolded<GetTerminologyError
 /// this operation is implemented.
 impl From<GetTerminologyErrorModeled> for GetTerminologyError {
     fn from(modeled: GetTerminologyErrorModeled) -> Self {
-        crate::scaffolded::Scaffolded::Modeled(modeled)
+        crate::state::Refusable::Channel(crate::scaffolded::Scaffolded::Modeled(modeled))
     }
 }
 
@@ -157,10 +158,7 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
 
         let store = state.lock();
         let record = store.terminologies.get(&input.name).ok_or_else(|| {
-            GetTerminologyErrorModeled::ResourceNotFoundException(terminology_not_found(
-                TERMINOLOGY_RESOURCE,
-                &input.name,
-            ))
+            WireRefusal::not_found(terminology_not_found(TERMINOLOGY_RESOURCE, &input.name))
         })?;
 
         // "If you don't specify this parameter, Amazon Translate returns a file
