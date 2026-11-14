@@ -2822,3 +2822,5 @@ mod cloudformation_provisions_lambda_event_invoke_configs;
 // the same file twice, which does not compile.)
 // (`lambda_signed_write_to_an_aoss_collection_endpoint` is declared once, a little above this
 // line: a module may be declared only once.)
+// (`cloudtrail_read_only_api_calls` is declared in the SORTED CloudTrail span above, and
+// `zz_probe` further up this tail: two landings each appended their own copy here as well,

@@ -55,6 +55,8 @@ mod off_enum_member_refusals;
 mod plan_version_member_validation;
 #[path = "all/plan_version_selects_a_plan.rs"]
 mod plan_version_selects_a_plan;
+#[path = "all/plan_version_selector_across_the_lifecycle.rs"]
+mod plan_version_selector_across_the_lifecycle;
 #[path = "all/policy_name_identity.rs"]
 mod policy_name_identity;
 #[path = "all/predefined_metric_resource_label_identity.rs"]

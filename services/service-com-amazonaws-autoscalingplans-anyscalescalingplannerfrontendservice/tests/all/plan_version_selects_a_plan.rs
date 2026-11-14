@@ -64,7 +64,10 @@ async fn with_one_stored_plan() -> Emulator {
 }
 
 /// The not-found sentence AWS builds from the requested name and version.
-fn expected_not_found(name: &str, version: i64) -> String {
+///
+/// `pub(crate)` so every suite driving the write half of this coordinate expects the one
+/// sentence rather than spelling it a second way.
+pub(crate) fn expected_not_found(name: &str, version: i64) -> String {
     format!("No scaling plan found for scaling plan name: {name}, version: {version}")
 }
 
