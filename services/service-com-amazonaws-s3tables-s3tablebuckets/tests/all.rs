@@ -37,6 +37,8 @@ mod record_expiration_configuration_reads;
 mod rename_table;
 #[path = "all/replication_put_outcome.rs"]
 mod replication_put_outcome;
+#[path = "all/replication_version_token_preconditions.rs"]
+mod replication_version_token_preconditions;
 #[path = "all/state_roundtrip.rs"]
 mod state_roundtrip;
 #[path = "all/table_bucket_encryption.rs"]
