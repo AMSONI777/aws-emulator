@@ -821,10 +821,11 @@ enum Reference {
 }
 
 #[tokio::test]
-async fn an_asset_model_a_definition_merely_references_is_deleted() {
+async fn a_delete_is_accepted_whatever_a_definition_references_and_settles_on_what_it_finds() {
     // Rows: the two references another model's DEFINITION can make to a model,
     // plus the row where nothing references it. None of them holds the delete
-    // back, so each is accepted 202 with the model reported DELETING.
+    // back, so each is accepted 202 with the model reported DELETING — what
+    // differs is what the accepted delete then SETTLES at.
     let rows = [
         ("a hierarchy naming it as the child model", Reference::Hierarchy),
         ("a metric reading through a hierarchy over it", Reference::Formula),
@@ -891,6 +892,10 @@ async fn an_asset_model_a_definition_merely_references_is_deleted() {
             );
         }
 
+        // A write is accepted before the transition it owes falls due, and only a
+        // model that has settled may be modified at all, so the delete goes in
+        // once the create has settled.
+        crate::support::settled_asset_model_status(&router, &child).await;
         let (status, deleted) =
             call(&router, "DELETE", &format!("/asset-models/{child}"), None).await;
         assert_eq!(
@@ -907,6 +912,42 @@ async fn an_asset_model_a_definition_merely_references_is_deleted() {
             Some("DELETING"),
             "case {case:?}: the accepted delete reports DELETING, got {deleted}"
         );
+        // A hierarchy of ANOTHER model still naming this one is a reference the
+        // caller has to remove first: the delete settles the model FAILED and the
+        // model stays. A model nothing names is gone.
+        match reference {
+            Reference::Hierarchy | Reference::Formula => {
+                let settled =
+                    crate::support::settled_asset_model_status(&router, &child).await;
+                assert_eq!(
+                    settled["state"].as_str(),
+                    Some("FAILED"),
+                    "case {case:?}: a referenced child settles FAILED, got {settled}"
+                );
+                assert_eq!(
+                    settled["error"]["code"].as_str(),
+                    Some("VALIDATION_ERROR"),
+                    "case {case:?}: expected a VALIDATION_ERROR diagnosis, got {settled}"
+                );
+                assert_eq!(
+                    settled["error"]["message"].as_str(),
+                    Some(
+                        "Attempted to delete an asset model that is referenced by a hierarchy \
+                         in a parent asset model. You must remove hierarchy references before \
+                         you can delete the asset model."
+                    ),
+                    "case {case:?}: unexpected diagnosis in {settled}"
+                );
+            }
+            Reference::None => {
+                let (status, gone) =
+                    call(&router, "GET", &format!("/asset-models/{child}"), None).await;
+                assert_eq!(
+                    status, 404,
+                    "case {case:?}: a model nothing references is removed, got {status} {gone}"
+                );
+            }
+        }
     }
 
     // And the reference that DOES hold a delete back, so the rule is about the
@@ -918,6 +959,7 @@ async fn an_asset_model_a_definition_merely_references_is_deleted() {
         json!({"assetName": "Turbine 1", "assetModelId": child}),
     )
     .await;
+    crate::support::settled_asset_model_status(&router, &child).await;
     let (status, refused) = call(&router, "DELETE", &format!("/asset-models/{child}"), None).await;
     assert_eq!(
         status, 400,

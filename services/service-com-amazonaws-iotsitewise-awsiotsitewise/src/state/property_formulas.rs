@@ -17,11 +17,14 @@
 //!   variable names a `hierarchyId`, the child model of THAT hierarchy
 //!   (`VariableValue.hierarchyId`: "The ID of the hierarchy to query for the
 //!   property ID") — so a hierarchy the model does not declare and a property the
-//!   scope does not hold both name nothing; and the NAME spelling of a
-//!   `propertyId` is one the model being written accepts alone, because it is
+//!   model being written does not hold both name nothing; and the NAME spelling of
+//!   a `propertyId` is one the model being written accepts alone, because it is
 //!   documented for a property "from the same asset model", so a reference
 //!   through a hierarchy has to be an identifier and a name there is an id
-//!   invalid for that variable;
+//!   invalid for that variable. What a reference through a hierarchy resolves to
+//!   in the CHILD model is not decided here: that scope is another asset model's
+//!   definition, which the service settles the write on rather than answering the
+//!   call with (`asset_model_settle`);
 //! * a formula is PARSED: every identifier in it is a declared variable or a
 //!   function applied to arguments, and every declared variable appears in it
 //!   (`Metric.expression` / `Transform.expression` are the expressions, and
@@ -477,7 +480,11 @@ fn property_labels<'a>(
 /// Whether `label` names the hierarchy `hierarchy`: its id, its `externalId:`
 /// alias or its name ("You can use the hierarchy's name instead of the
 /// hierarchy's ID").
-fn names_hierarchy(hierarchy: &AssetModelHierarchy, label: &str) -> bool {
+///
+/// Shared with the settle-time half of a definition's validation
+/// ([`super::asset_model_settle`]), so both planes resolve a `hierarchyId` to the
+/// same declared hierarchy.
+pub fn names_hierarchy(hierarchy: &AssetModelHierarchy, label: &str) -> bool {
     matches_id_label(
         hierarchy.id.as_deref(),
         hierarchy.external_id.as_deref(),
@@ -519,14 +526,6 @@ impl DefinitionUnderWrite {
     /// `property_label` names.
     fn holds_property(&self, property_label: &str) -> bool {
         self.scope.contains_key(property_label)
-    }
-
-    /// Whether the child model of `hierarchy` exposes a property the label
-    /// `property_label` names.
-    fn child_holds_property(&self, hierarchy: &AssetModelHierarchy, property_label: &str) -> bool {
-        self.hierarchy_scopes
-            .get(&hierarchy.child_asset_model_id)
-            .is_some_and(|labels| labels.contains_key(property_label))
     }
 
     /// The id of the property the label `property_label` names in the model being
@@ -790,10 +789,15 @@ impl ComAmazonawsIotsitewiseAwsiotsitewiseState {
         exposed
     }
 
-    /// Refuse an asset-model definition the service would not accept: a
-    /// duplicated property name, a variable that resolves to nothing, a formula
-    /// that does not parse against its declared variables, or a window outside
-    /// the published limits.
+    /// Refuse an asset-model definition the service would not ACCEPT: a
+    /// duplicated property name, a variable the request itself puts out of reach,
+    /// a formula that does not parse against its declared variables, or a window
+    /// outside the published limits.
+    ///
+    /// The synchronous half of a definition's validation; the graph-scoped half —
+    /// what the write SETTLES at — is
+    /// [`ComAmazonawsIotsitewiseAwsiotsitewiseState::asset_model_settle_failure`],
+    /// asked of this same definition.
     ///
     /// Shared by every operation that writes property definitions onto an asset
     /// model, so one rule is enforced in one place and a model cannot be created
@@ -904,20 +908,25 @@ impl ComAmazonawsIotsitewiseAwsiotsitewiseState {
         Ok(())
     }
 
-    /// Refuse a variable that resolves to nothing: a `hierarchyId` the definition
-    /// declares no hierarchy for, a `propertyId` spelled in a form its scope does
-    /// not accept, or one its scope does not hold.
+    /// Refuse a variable the REQUEST itself puts out of reach: a `hierarchyId` the
+    /// definition declares no hierarchy for, a `propertyId` spelled in a form its
+    /// scope does not accept, or one the model being written does not hold.
     ///
     /// The scope is the one `VariableValue` documents: with no `hierarchyId` the
     /// model being written (its own properties and the ones its composite models
-    /// contribute), with one the CHILD model of that hierarchy. Both were indexed
-    /// when the definition was built, so this is a set lookup — and the child
-    /// scope was indexed under the spellings it accepts, which do not include a
-    /// property NAME ([`Spellings`]): a reference reaching it has to be an
-    /// identifier, so one that is not is refused as an id invalid for the variable
-    /// rather than as a property the scope lacks. A variable carrying no
-    /// `propertyId` names no property to resolve — it addresses the property
-    /// through its `propertyPath` instead — so there is nothing to refuse.
+    /// contribute), with one the CHILD model of that hierarchy. The first was
+    /// indexed when the definition was built, so this is a set lookup — and a
+    /// reference scoped to a child model has to be an IDENTIFIER, because the name
+    /// spelling is documented for a property "from the same asset model"
+    /// ([`Spellings`]), so one that is not is refused as an id invalid for the
+    /// variable. A variable carrying no `propertyId` names no property to resolve —
+    /// it addresses the property through its `propertyPath` instead — so there is
+    /// nothing to refuse.
+    ///
+    /// What a reference reaching a child model RESOLVES TO there is not decided
+    /// here: that scope is another asset model's definition, which the service
+    /// settles the write on rather than answering the call with (see
+    /// [`super::asset_model_settle`]).
     ///
     /// `formula` is the formula member the variable belongs to, which the
     /// invalid-spelling refusal names.
@@ -931,21 +940,20 @@ impl ComAmazonawsIotsitewiseAwsiotsitewiseState {
             Some(hierarchy_label) => {
                 // A model declares at most `MAX_HIERARCHIES_PER_ASSET_MODEL` of
                 // them, so the label is resolved over a list of that size.
-                let hierarchy = definition
+                if !definition
                     .hierarchies
                     .iter()
-                    .find(|hierarchy| names_hierarchy(hierarchy, hierarchy_label))
-                    .ok_or_else(|| hierarchy_does_not_exist_message(hierarchy_label))?;
+                    .any(|hierarchy| names_hierarchy(hierarchy, hierarchy_label))
+                {
+                    return Err(hierarchy_does_not_exist_message(hierarchy_label));
+                }
                 let Some(property_label) = value.property_id.as_deref() else {
                     return Ok(());
                 };
                 if !spelled_as_property_id(property_label) {
                     return Err(invalid_property_id_message(property_label, formula));
                 }
-                if definition.child_holds_property(hierarchy, property_label) {
-                    return Ok(());
-                }
-                Err(property_does_not_exist_message(property_label))
+                Ok(())
             }
             None => {
                 let Some(property_label) = value.property_id.as_deref() else {

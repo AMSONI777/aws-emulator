@@ -309,23 +309,33 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
             ));
         }
 
+        // A model whose own owed transition is still pending is mid-write, so a
+        // delete of it is refused before any transition is written: only a model
+        // that has settled — ACTIVE, or FAILED on an earlier write — may be
+        // modified at all. The in-flight write is left exactly where it was, and
+        // the identical delete goes through once the model settles. The gate is
+        // [`crate::state::check_asset_model_modifiable`], shared with every other
+        // operation that holds a model to it.
+        if let Err(message) = crate::state::check_asset_model_modifiable(record, now) {
+            return Err(DeleteAssetModelError::Modeled(
+                DeleteAssetModelErrorModeled::InvalidRequestException(InvalidRequestException {
+                    message,
+                }),
+            ));
+        }
+
         // A model still in use cannot go away, and WHAT counts as still in use is
         // what the service checks when the delete is CALLED: the assets created
         // from the model, which the operation documents first ("You must delete
         // all assets created from an asset model before you can delete the
-        // model"). A reference from another model's DEFINITION is not that: a
-        // hierarchy naming this model as its `childAssetModelId`, and a metric or
-        // transform of that model reading a property of this one through such a
-        // hierarchy, both leave the delete accepted — the model goes, and the
-        // definition that named it keeps naming an id this store no longer holds.
+        // model"). That dependency is a TERMINAL request error — the caller has to
+        // delete the dependent resource first, and no retry of this call can
+        // succeed — so it is `InvalidRequestException` (400) and not the retryable
+        // `ConflictingOperationException` (409), which states a transient conflict
+        // between two operations on one resource.
         // (The operation's documentation also states a formula dependency as a
         // reason a delete cannot go through; the recorded service accepts such a
         // delete when it is called, so that is not a refusal this handler makes.)
-        // The dependency that does block is a TERMINAL request error — the caller
-        // has to delete the dependent resource first, and no retry of this call
-        // can succeed — so it is `InvalidRequestException` (400) and not the
-        // retryable `ConflictingOperationException` (409), which states a
-        // transient conflict between two operations on one resource.
         let referencing_asset = store
             .assets
             .values()
@@ -360,6 +370,46 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
                     ),
                 }),
             ));
+        }
+
+        // A hierarchy of ANOTHER asset model naming this one as its
+        // `childAssetModelId` is a reference the caller has to remove first — the
+        // parent's definition would otherwise name a model this service no longer
+        // holds — but it is NOT a refusal of the call: the delete is accepted,
+        // reports DELETING like any other, and the model then settles at FAILED
+        // carrying that diagnosis while staying exactly where it is, listed and
+        // describable under the definition it already had. Nothing of the model
+        // changes but the transition it now owes, so its version, its definition
+        // and its entity tag stay as they were.
+        if store.referenced_by_parent_hierarchy(&id) {
+            let record = store.asset_models.get_mut(&id).ok_or_else(|| {
+                DeleteAssetModelError::Modeled(
+                    DeleteAssetModelErrorModeled::InternalFailureException(
+                        InternalFailureException {
+                            message: "the IoT SiteWise store is unavailable".to_string(),
+                        },
+                    ),
+                )
+            })?;
+            record.settling_state = crate::state::STATE_DELETING.to_string();
+            record.active_at = now + crate::state::ACTIVATION_DELAY;
+            record.settle_failure = Some(crate::state::validation_failure(
+                crate::state::REFERENCED_BY_PARENT_HIERARCHY_FAILURE,
+            ));
+            let output = DeleteAssetModelOutput {
+                asset_model_id: Some(id.clone()),
+                asset_model_status: record.status(now),
+            };
+            // The token is spent on the call that was accepted, so a retry of it
+            // replays this answer rather than starting the transition again.
+            store.record_idempotent_call(
+                Self::NAME,
+                input.client_token.as_deref(),
+                fingerprint,
+                &id,
+                now,
+            );
+            return Ok(output);
         }
 
         // Removing the model removes every application of an interface it stood on

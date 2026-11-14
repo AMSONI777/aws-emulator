@@ -792,14 +792,44 @@ async fn delete_asset_model_evaluates_its_conditional_headers_before_deleting() 
 async fn if_none_match_deletes_a_model_whose_targeted_version_does_not_exist_yet() {
     let router = router();
     // `If-None-Match: *` asks for the delete only if the version
-    // `Match-For-Version-Type` names does NOT exist. Straight after the create the
-    // owed CREATING -> ACTIVE transition has not fallen due, so there is no ACTIVE
-    // version for the guard to protect and the delete goes through.
-    let model_id = create_model(
+    // `Match-For-Version-Type` names does NOT exist. A model whose create SETTLED
+    // AT FAILED is in a state it can be modified in while NO version of it has
+    // ever been active, so there is no ACTIVE version for the guard to protect and
+    // the delete goes through. What it settled on is a formula variable reaching
+    // through its hierarchy at a property the child model does not expose: a scope
+    // in another model's definition, which the service settles the create at FAILED
+    // on rather than refusing the call with.
+    let child = create_model(
         &router,
-        json!({ "assetModelName": "StillCreating", "assetModelProperties": [] }),
+        json!({ "assetModelName": "IfNoneMatchChild", "assetModelProperties": [] }),
     )
     .await;
+    let model_id = create_model(
+        &router,
+        json!({
+            "assetModelName": "SettledFailed",
+            "assetModelProperties": [{
+                "name": "Average",
+                "dataType": "DOUBLE",
+                "type": {"metric": {
+                    "expression": "avg(v)",
+                    "variables": [{"name": "v", "value": {
+                        "propertyId": "11111111-2222-3333-4444-555555555555",
+                        "hierarchyId": "Children",
+                    }}],
+                    "window": {"tumbling": {"interval": "1h"}},
+                }},
+            }],
+            "assetModelHierarchies": [{"name": "Children", "childAssetModelId": child}],
+        }),
+    )
+    .await;
+    let settled = crate::support::settled_asset_model_status(&router, &model_id).await;
+    assert_eq!(
+        settled["state"].as_str(),
+        Some("FAILED"),
+        "the illegal definition must settle FAILED, got {settled}"
+    );
     let (status, _, answered) = call_with_headers(
         &router,
         "DELETE",
@@ -810,7 +840,7 @@ async fn if_none_match_deletes_a_model_whose_targeted_version_does_not_exist_yet
     .await;
     assert_eq!(
         status, 202,
-        "no ACTIVE version exists yet, so the conditional delete proceeds: got {status} {answered}"
+        "no ACTIVE version exists, so the conditional delete proceeds: got {status} {answered}"
     );
     assert_eq!(
         answered["assetModelStatus"]["state"], "DELETING",
@@ -823,12 +853,13 @@ async fn a_delete_blocked_by_a_dependent_resource_is_a_terminal_request_error() 
     let router = router();
 
     // The one way a model is still in use when the delete is called, and the two
-    // ways it is not. The rule: a model is held back by the assets created from it
-    // ("You must delete all assets created from an asset model before you can
-    // delete the model"), and NOT by a reference another model's definition makes
-    // to it — a hierarchy naming it as its child model is a grouping, not a
-    // dependant. The refusal is terminal — the caller must delete the assets first
-    // — so it is 400 InvalidRequestException and never the retryable 409.
+    // ways it is not. The rule: a model is held back AT CALL TIME by the assets
+    // created from it ("You must delete all assets created from an asset model
+    // before you can delete the model"), and NOT by a hierarchy of another model
+    // naming it as its child — that reference leaves the call accepted and is what
+    // the accepted delete SETTLES at. The refusal is terminal — the caller must
+    // delete the assets first — so it is 400 InvalidRequestException and never the
+    // retryable 409.
     let with_asset = create_model(
         &router,
         json!({
@@ -880,6 +911,10 @@ async fn a_delete_blocked_by_a_dependent_resource_is_a_terminal_request_error() 
         ("nothing depends on it", unused.as_str(), 202),
     ];
     for (case, model_id, expected) in &cases {
+        // Only a model that has settled may be modified, so each row's model has
+        // reached its settled state before the delete: what every row is about is
+        // the dependant the delete finds.
+        crate::support::settled_asset_model_status(&router, model_id).await;
         let (status, answered) =
             call(&router, "DELETE", &format!("/asset-models/{model_id}"), None).await;
         assert_eq!(
@@ -905,6 +940,7 @@ async fn a_delete_blocked_by_a_dependent_resource_is_a_terminal_request_error() 
     )
     .await;
     assert_eq!(status, 202, "DeleteAsset: got {status} {answered}");
+    crate::support::settled_asset_model_status(&router, &with_asset).await;
     let (status, answered) = call(
         &router,
         "DELETE",

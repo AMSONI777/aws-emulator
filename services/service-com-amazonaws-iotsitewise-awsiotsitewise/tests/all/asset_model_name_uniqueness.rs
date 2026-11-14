@@ -311,6 +311,9 @@ async fn deleting_the_holder_frees_its_name() {
         &holder_arn,
     );
 
+    // Only a model that has settled may be modified, so the delete goes in once
+    // the create's own owed transition has fallen due.
+    crate::support::settled_asset_model_status(&router, &holder_id).await;
     let (status, deleted) = call(
         &router,
         "DELETE",

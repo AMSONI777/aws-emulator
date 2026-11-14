@@ -485,6 +485,13 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         store
             .check_asset_model_definition(&definition)
             .map_err(invalid_request)?;
+        // The other plane of that validation: a definition the MODEL GRAPH does
+        // not accept — a formula variable reaching through a hierarchy at a
+        // property the child model does not expose or at a raw one, hierarchies
+        // that lead back to this model — does not refuse the call. The create is
+        // accepted, reports CREATING like any other, and settles the model at
+        // FAILED carrying this diagnosis when the transition it owes falls due.
+        let settle_failure = store.asset_model_settle_failure(&definition, &asset_model_id);
         // Every variable reference that resolved is stored as the ID it resolved
         // to: a property name and an `externalId:` alias are input spellings of an
         // id, and the properties and hierarchies this create mints ids for are the
@@ -514,6 +521,9 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
             // until the transition above falls due, so the model has no ACTIVE
             // version at all for that span.
             superseded_active: None,
+            // What that transition settles at: ACTIVE, or FAILED with the
+            // diagnosis the definition earned above.
+            settle_failure,
             tags: input.tags.clone().unwrap_or_default(),
         };
 

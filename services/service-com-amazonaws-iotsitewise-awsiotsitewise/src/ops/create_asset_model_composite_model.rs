@@ -513,6 +513,10 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         store
             .check_asset_model_definition(&definition)
             .map_err(invalid_request)?;
+        // And the other plane of that validation, as the model's own writes ask
+        // it: a definition the MODEL GRAPH does not accept settles the asset model
+        // at FAILED instead of ACTIVE rather than refusing this call.
+        let settle_failure = store.asset_model_settle_failure(&definition, &asset_model_id);
         // Every variable reference that resolved is stored as the ID it resolved
         // to, exactly as it is on the asset model's own writes.
         if let Some(properties) = properties.as_mut() {
@@ -547,6 +551,7 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         // owes a transition back to ACTIVE — the rule every mutating call on a
         // record follows, kept on the record itself.
         record.begin_update(superseded, now);
+        record.settle_failure = settle_failure;
         let output = CreateAssetModelCompositeModelOutput {
             asset_model_composite_model_id: composite_model_id.clone(),
             asset_model_composite_model_path: record.composite_model_path(&composite_model_id),

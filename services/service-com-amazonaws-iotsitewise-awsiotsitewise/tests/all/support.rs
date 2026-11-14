@@ -65,8 +65,57 @@ pub(crate) async fn named_by_stored_id(
     Value::Array(named)
 }
 
-/// Open workspace `name` unless this router already holds it.
+/// How long [`settled_asset_model_status`] keeps looking before it gives up.
 ///
+/// Generous on purpose: it bounds a condition that is already due, so a loaded or
+/// slow host must not turn a settled model into a failed assertion. Nothing
+/// asserts on how much of it was used.
+const SETTLE_DEADLINE: std::time::Duration = std::time::Duration::from_secs(30);
+
+/// How long [`settled_asset_model_status`] waits between two looks.
+const SETTLE_POLL: std::time::Duration = std::time::Duration::from_millis(10);
+
+/// The `assetModelStatus` of asset model `label` once it has SETTLED — `ACTIVE`,
+/// or `FAILED` with the diagnosis the accepted write settled at.
+///
+/// An asset-model write is accepted before the transition it owes falls due, and
+/// a model may only be modified once it has settled, so a suite that writes to a
+/// model again — or that reads what its last write settled at — waits for the
+/// CONDITION rather than for a span: this looks again until the model settles or
+/// a generous deadline passes, so it holds on a host of any speed.
+pub(crate) async fn settled_asset_model_status(
+    router: &MultiServiceRouter,
+    label: &str,
+) -> Value {
+    let deadline = std::time::Instant::now() + SETTLE_DEADLINE;
+    loop {
+        let (status, described) = crate::asset_lifecycle::call(
+            router,
+            "GET",
+            &format!("/asset-models/{label}"),
+            None,
+        )
+        .await;
+        assert_eq!(
+            status, 200,
+            "DescribeAssetModel({label}): got {status} {described}"
+        );
+        let state = described["assetModelStatus"]["state"]
+            .as_str()
+            .unwrap_or_default()
+            .to_string();
+        if state == "ACTIVE" || state == "FAILED" {
+            return described["assetModelStatus"].clone();
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "asset model {label} never settled: it reports {state:?}"
+        );
+        tokio::time::sleep(SETTLE_POLL).await;
+    }
+}
+
+/// Open workspace `name` unless this router already holds it.///
 /// `CreateWorkspace` is what puts a workspace in the registry every
 /// workspace-scoped create resolves against, so a suite that creates a pipeline,
 /// task, dataset or export job inside a workspace calls this first. A second call

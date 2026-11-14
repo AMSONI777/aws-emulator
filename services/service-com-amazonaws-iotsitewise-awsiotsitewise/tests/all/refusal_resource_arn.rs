@@ -484,6 +484,9 @@ async fn rows(router: &MultiServiceRouter) -> Vec<Row> {
 
     let deleted_model = create_model(router, "RefusalArnModelDeleted", json!([])).await;
     let model_delete_token = token_for("spent on DeleteAssetModel");
+    // Only a model that has settled may be modified, so the delete whose token
+    // this fixture spends goes in once the create has settled.
+    crate::support::settled_asset_model_status(router, &deleted_model).await;
     let (status, body) = call(
         router,
         "DELETE",

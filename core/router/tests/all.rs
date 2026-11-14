@@ -3594,3 +3594,8 @@ mod cloudformation_provisions_appsync_resources;
 // suite left at the top level of `tests/` fails the build. (An ordinary comment: such a
 // line is a fragment of this file's own header, and an inner doc comment is legal only
 // before the first item, so a `//!` here is `E0753` and compiles nothing.)
+// comment past the first item of this file annotates nothing, which `unused_doc_comments`
+// refuses — the guidance it repeats stands at the head of this file.)
+// this file and for every service crate's `tests/all.rs`. (A plain comment: an inner doc
+// comment past the first item is `E0753`, and as a doc comment on the next item it
+// annotates nothing, which `unused_doc_comments` refuses.)

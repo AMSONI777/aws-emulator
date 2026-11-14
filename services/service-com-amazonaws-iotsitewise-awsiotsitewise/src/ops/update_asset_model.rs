@@ -603,6 +603,15 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         store
             .check_asset_model_definition(&definition)
             .map_err(invalid_request)?;
+        // The other plane of that validation, exactly as the create asks it: a
+        // definition the MODEL GRAPH does not accept — a formula variable
+        // reaching through a hierarchy at a property the child model does not
+        // expose or at a raw one, hierarchies that lead back to this model — does
+        // not refuse the call. The update is accepted, reports UPDATING, and
+        // settles the model at FAILED carrying this diagnosis. `None` here is
+        // what moves a model that HAD failed back to ACTIVE: the definition this
+        // call states replaces the one the earlier diagnosis was made on.
+        let settle_failure = store.asset_model_settle_failure(&definition, &id);
         // Every variable reference that resolved is stored as the ID it resolved
         // to, exactly as it is on the create: a property name and an `externalId:`
         // alias are input spellings of an id, so what the new definition stores is
@@ -633,6 +642,7 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         // The model reports UPDATING until the transition this call owes falls due,
         // and the new definition carries a new version — hence a new ETag.
         record.begin_update(superseded, now);
+        record.settle_failure = settle_failure;
         let output = UpdateAssetModelOutput {
             asset_model_id: Some(record.id.clone()),
             asset_model_status: record.status(now),

@@ -255,8 +255,14 @@ async fn create_composite(
     );
 }
 
-/// `DELETE /asset-models/{label}`.
+/// `DELETE /asset-models/{label}`, once that model has SETTLED.
+///
+/// An asset-model write is accepted before the transition it owes falls due, and
+/// only a model that has settled may be modified at all, so every delete this
+/// suite makes waits for the model's own owed transition first — what each row is
+/// about is the DEPENDENT it finds, not the state gate.
 async fn delete_model(router: &MultiServiceRouter, label: &str) -> (u16, Value) {
+    crate::support::settled_asset_model_status(router, label).await;
     call(router, "DELETE", &format!("/asset-models/{label}"), None).await
 }
 
@@ -565,6 +571,8 @@ async fn a_component_model_nothing_reuses_is_deleted() {
             } else {
                 format!("/asset-models/{holder}")
             };
+            // The holder has to have settled before it can be written to again.
+            crate::support::settled_asset_model_status(&router, &holder).await;
             let (status, removed) = call(&router, "DELETE", &path, None).await;
             assert_eq!(
                 status, 202,

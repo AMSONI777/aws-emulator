@@ -509,7 +509,10 @@ async fn the_asset_model_asset_and_property_value_slice_round_trips() {
 
     // --- DeleteAssetModel is refused while the asset references it --------
     // A dependant the caller must remove first is a TERMINAL request error, not
-    // the retryable operation conflict: 400 InvalidRequestException.
+    // the retryable operation conflict: 400 InvalidRequestException. The model has
+    // settled first, so what is refused here is the dependant and not the state
+    // gate every modification of a model goes through.
+    crate::support::settled_asset_model_status(&router, &model_id).await;
     let (status, conflict) =
         call(&router, "DELETE", &format!("/asset-models/{model_id}"), None).await;
     assert_eq!(
@@ -1401,9 +1404,11 @@ async fn a_hierarchy_definition_must_name_a_stored_child_model() {
         }
     }
 
-    // And the child model CAN be deleted while a hierarchy still merely names it:
-    // what holds a delete back is the ASSETS created from the model, and a
-    // reference another model's definition makes to it is not that.
+    // And the delete of the child model a hierarchy still names IS accepted — what
+    // the accepted delete settles at is the diagnosis that the reference has to be
+    // removed first, so the model stays where it is rather than being refused at
+    // call time. The state gate every modification goes through is satisfied first.
+    crate::support::settled_asset_model_status(&router, &child_id).await;
     let (status, body) = call(&router, "DELETE", &format!("/asset-models/{child_id}"), None).await;
     assert_eq!(
         status, 202,
@@ -1413,6 +1418,12 @@ async fn a_hierarchy_definition_must_name_a_stored_child_model() {
         body["assetModelStatus"]["state"].as_str(),
         Some("DELETING"),
         "deleting a model a hierarchy merely names: expected DELETING, got {body}"
+    );
+    let settled = crate::support::settled_asset_model_status(&router, &child_id).await;
+    assert_eq!(
+        settled["state"].as_str(),
+        Some("FAILED"),
+        "a delete a parent hierarchy holds back settles FAILED, got {settled}"
     );
 }
 

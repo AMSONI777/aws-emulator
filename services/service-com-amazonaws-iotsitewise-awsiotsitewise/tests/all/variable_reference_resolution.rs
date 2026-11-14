@@ -313,6 +313,8 @@ enum Spelled {
     /// variable: the refusal names the label and the formula member carrying it.
     Invalid(&'static str),
     /// The label IS an identifier, but the child model holds no such property.
+    /// That scope is ANOTHER asset model's definition, so the write is accepted
+    /// and the model settles FAILED carrying the service's diagnosis.
     Absent(&'static str),
 }
 
@@ -371,7 +373,9 @@ async fn a_reference_through_a_hierarchy_must_be_spelled_as_an_identifier() {
                 "propertyId": "11111111-2222-3333-4444-555555555555",
                 "hierarchyId": "Turbines",
             }),
-            Spelled::Absent("Property 11111111-2222-3333-4444-555555555555 does not exist."),
+            Spelled::Absent(
+                "A formula property references a child asset model property that doesn't exist.",
+            ),
         ),
         (
             // The one value the modelled `ID` pattern's negative lookahead
@@ -428,7 +432,7 @@ async fn a_reference_through_a_hierarchy_must_be_spelled_as_an_identifier() {
                     "case {case:?}: expected propertyId {child_power:?}, got {property:?}"
                 );
             }
-            Spelled::Invalid(message) | Spelled::Absent(message) => {
+            Spelled::Invalid(message) => {
                 assert_eq!(
                     status, 400,
                     "case {case:?}: expected 400, got {status} {body}"
@@ -437,6 +441,33 @@ async fn a_reference_through_a_hierarchy_must_be_spelled_as_an_identifier() {
                     body["message"].as_str(),
                     Some(message),
                     "case {case:?}: expected {message:?}, got {body}"
+                );
+            }
+            Spelled::Absent(message) => {
+                assert_eq!(
+                    status, 202,
+                    "case {case:?}: a reference into another model's definition is accepted, \
+                     got {status} {body}"
+                );
+                let settled = crate::support::settled_asset_model_status(
+                    &router,
+                    body["assetModelId"].as_str().unwrap_or_default(),
+                )
+                .await;
+                assert_eq!(
+                    settled["state"].as_str(),
+                    Some("FAILED"),
+                    "case {case:?}: expected the model to settle FAILED, got {settled}"
+                );
+                assert_eq!(
+                    settled["error"]["code"].as_str(),
+                    Some("VALIDATION_ERROR"),
+                    "case {case:?}: expected a VALIDATION_ERROR diagnosis, got {settled}"
+                );
+                assert_eq!(
+                    settled["error"]["message"].as_str(),
+                    Some(message),
+                    "case {case:?}: expected {message:?}, got {settled}"
                 );
             }
         }

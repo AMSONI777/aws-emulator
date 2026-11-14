@@ -16,10 +16,13 @@
 //!   (`VariableValue.hierarchyId`: "You can use the hierarchy's name instead of
 //!   the hierarchy's ID");
 //! * a variable names a `hierarchyId` the definition declares no hierarchy for,
-//!   or a `propertyId` its resolution scope does not hold — the scope being the
-//!   model being written, or the CHILD model of the hierarchy the variable names
-//!   (`VariableValue.hierarchyId`: "The ID of the hierarchy to query for the
-//!   property ID");
+//!   or a `propertyId` the MODEL BEING WRITTEN does not hold — the scope being
+//!   the model being written, or the CHILD model of the hierarchy the variable
+//!   names (`VariableValue.hierarchyId`: "The ID of the hierarchy to query for
+//!   the property ID"); what a reference through a hierarchy resolves to in that
+//!   CHILD model is a scope in another asset model's definition, which the
+//!   service settles the write on rather than answering the call with, so it is
+//!   pinned here as the FAILED state it settles at;
 //! * a formula names an identifier that is neither a declared variable nor a
 //!   function applied to arguments, or declares a variable the formula never
 //!   names (`Metric.variables` / `Transform.variables`: "The list of variables
@@ -409,8 +412,10 @@ async fn child_model(router: &MultiServiceRouter, name: &str) -> (String, String
 
 /// RULE: a variable resolves in ONE scope — the model being written, or the child
 /// model of the hierarchy the variable names — so a `hierarchyId` the definition
-/// declares no hierarchy for and a `propertyId` the scope does not hold are both
-/// refused, naming the label the request sent. The NAME spelling of a
+/// declares no hierarchy for and a `propertyId` the model being written does not
+/// hold are both refused, naming the label the request sent, while a reference
+/// into the CHILD model's definition is accepted and settles the model FAILED
+/// with the service's own diagnosis. The NAME spelling of a
 /// `propertyId` is accepted by the model being written ALONE, since it is
 /// documented for a property "from the same asset model", so a reference through
 /// a hierarchy has to be an identifier and anything else is an id invalid for
@@ -428,6 +433,10 @@ async fn a_variable_resolves_only_inside_its_scope() {
         /// The label is not an identifier at all, in a scope that accepts only
         /// those: the refusal names the label and the formula member carrying it.
         InvalidId(String),
+        /// The label IS an identifier, and the scope it reaches is the CHILD
+        /// model's definition: the write is accepted and the model settles FAILED
+        /// carrying the diagnosis this row names.
+        SettlesFailed(&'static str),
     }
 
     // Rows differ along HOW the variable addresses its property (by id, by name,
@@ -496,7 +505,9 @@ async fn a_variable_resolves_only_inside_its_scope() {
                 "propertyId": "11111111-2222-3333-4444-555555555555",
                 "hierarchyId": "Turbines",
             }),
-            Expected::NoProperty("11111111-2222-3333-4444-555555555555".to_string()),
+            Expected::SettlesFailed(
+                "A formula property references a child asset model property that doesn't exist.",
+            ),
         ),
         (
             "the child model's own property externalId through the hierarchy",
@@ -566,6 +577,37 @@ async fn a_variable_resolves_only_inside_its_scope() {
                 assert!(
                     !holds_name(&router, &name).await,
                     "case {case:?}: a refused create must leave no asset model behind"
+                );
+            }
+            Expected::SettlesFailed(diagnosis) => {
+                assert_eq!(
+                    status, 202,
+                    "case {case:?}: a reference into the child model's definition is accepted, \
+                     got {status} {body}"
+                );
+                let settled = crate::support::settled_asset_model_status(
+                    &router,
+                    body["assetModelId"].as_str().unwrap_or_default(),
+                )
+                .await;
+                assert_eq!(
+                    settled["state"].as_str(),
+                    Some("FAILED"),
+                    "case {case:?}: expected the model to settle FAILED, got {settled}"
+                );
+                assert_eq!(
+                    settled["error"]["code"].as_str(),
+                    Some("VALIDATION_ERROR"),
+                    "case {case:?}: expected a VALIDATION_ERROR diagnosis, got {settled}"
+                );
+                assert_eq!(
+                    settled["error"]["message"].as_str(),
+                    Some(diagnosis),
+                    "case {case:?}: expected {diagnosis:?}, got {settled}"
+                );
+                assert!(
+                    holds_name(&router, &name).await,
+                    "case {case:?}: a model that settled FAILED stays in the listing"
                 );
             }
         }

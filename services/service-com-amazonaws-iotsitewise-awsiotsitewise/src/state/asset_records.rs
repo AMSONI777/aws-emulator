@@ -282,6 +282,16 @@ pub struct AssetModelRecord {
     /// and INERT — [`Self::version_view`] consults it only while the stored
     /// definition is not the active one — so nothing clears it on a read.
     pub superseded_active: Option<AssetModelDefinition>,
+    /// The diagnosis the write this model last accepted SETTLES at, for a write
+    /// the model graph does not accept: from [`Self::active_at`] on the model
+    /// reports [`STATE_FAILED`] carrying these details rather than `ACTIVE`.
+    ///
+    /// `None` for a write that settles — which is every write whose definition
+    /// the graph accepts. Decided by the call that was accepted (see
+    /// [`crate::state::ComAmazonawsIotsitewiseAwsiotsitewiseState::asset_model_settle_failure`]),
+    /// never by a read, and replaced by the next accepted write to the model, so
+    /// a corrective write moves a failed model back to `ACTIVE`.
+    pub settle_failure: Option<ErrorDetails>,
     pub tags: HashMap<String, String>,
 }
 
@@ -322,17 +332,30 @@ pub struct CompositeModelLink {
 
 impl AssetModelRecord {
     /// The model's status as of `now`: its [`Self::settling_state`] until the
-    /// owed transition falls due, `ACTIVE` from then on. Derived, so a read
-    /// never has to write.
+    /// owed transition falls due, then `ACTIVE` — or [`STATE_FAILED`] carrying
+    /// the diagnosis the accepted write settled at. Derived, so a read never has
+    /// to write.
     pub fn status(&self, now: SystemTime) -> AssetModelStatus {
+        let state = self.state(now);
         AssetModelStatus {
-            state: self.state(now).to_string(),
-            error: None,
+            error: (state == STATE_FAILED)
+                .then(|| self.settle_failure.clone())
+                .flatten(),
+            state: state.to_string(),
         }
     }
 
     /// The model's `AssetModelState` as of `now`.
+    ///
+    /// The state the owed transition settles at is `ACTIVE` for a write the model
+    /// graph accepted and [`STATE_FAILED`] for one it did not
+    /// ([`Self::settle_failure`]); until that transition falls due the model
+    /// reports the state the write put it in, so a caller acting straight after
+    /// the call still sees `CREATING`, `UPDATING` or `DELETING`.
     pub fn state(&self, now: SystemTime) -> &str {
+        if self.settle_failure.is_some() && now >= self.active_at {
+            return STATE_FAILED;
+        }
         state_at(&self.settling_state, self.active_at, now)
     }
 
@@ -379,6 +402,9 @@ impl AssetModelRecord {
             settling_state: STATE_ACTIVE.to_string(),
             active_at: definition.last_update_date,
             superseded_active: None,
+            // A version kept here is one that REACHED the active state, so it
+            // settled: nothing about it failed.
+            settle_failure: None,
             // The members a version of the definition does not carry: this is
             // the same resource, read as an earlier version of itself.
             id: self.id.clone(),

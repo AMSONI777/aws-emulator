@@ -112,7 +112,7 @@ use crate::ops::types::{
     ComputeNodeExecutionDetails,
     ComputeNodeExecutionStatus, ConfigurationStatus, CustomerManagedS3Storage,
     DataSegmentEnrichment, DatasetConfig, DatasetEnrichment, DatasetEnrichmentEntry,
-    DatasetSource, DatasetStatus, EnrichmentJobConfiguration, EnrichmentJobSummary,
+    DatasetSource, DatasetStatus, EnrichmentJobConfiguration, EnrichmentJobSummary, ErrorDetails,
     ErrorReportLocation,
     ExecutionEnvironmentVariables, ExecutionStatus, ExecutionSummary, ExportErrorReportLocation,
     ExpressionVariable, File, FileFormat, GatewayCapabilitySummary, GatewayPlatform,
@@ -148,6 +148,9 @@ use crate::ops::types::{
 //   import, export and enrichment job records.
 // * `property_formulas` — what a write holds a property definition to before
 //   anything is stored: its name, its variables, its formula and its window.
+// * `asset_model_settle` — the other plane of that validation: what an accepted
+//   asset-model write SETTLES at, and the state a model has to be in before a
+//   write to it is accepted at all.
 // * `property_computation` — what the series of a `transform` or `metric`
 //   property IS: the values its formula computes from the properties its
 //   variables name, over the tumbling-window grid and the formula language its
@@ -158,6 +161,7 @@ use crate::ops::types::{
 // * `assistant` — the SiteWise Assistant conversations `InvokeAssistant` records,
 //   the retrieval one turn runs over this account's datasets and the answer it
 //   is composed into.
+mod asset_model_settle;
 mod assistant;
 mod asset_records;
 mod capture_ingest;
@@ -172,6 +176,7 @@ mod storage_configuration;
 mod store;
 mod workspace_records;
 
+pub use asset_model_settle::*;
 pub use asset_records::*;
 pub use assistant::*;
 pub use capture_ingest::*;

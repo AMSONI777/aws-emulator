@@ -306,7 +306,9 @@ async fn the_list_is_scoped_to_one_interface_and_follows_the_store() {
     }
 
     // The list follows the store both ways: deleting an applied-to model drops
-    // its relationship, so the list no longer reports it.
+    // its relationship, so the list no longer reports it. Only a model that has
+    // settled may be modified, so the delete goes in once beta has settled.
+    crate::support::settled_asset_model_status(&router, &beta).await;
     let (status, deleted) = call(&router, "DELETE", &format!("/asset-models/{beta}"), None).await;
     assert_eq!(status, 202, "case {case}: deleting {beta} got {status} {deleted}");
     let walked = walk(&router, case, &first, Some(250)).await;

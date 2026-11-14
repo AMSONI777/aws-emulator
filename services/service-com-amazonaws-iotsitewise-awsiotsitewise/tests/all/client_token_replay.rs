@@ -639,6 +639,10 @@ async fn delete_rows(router: &MultiServiceRouter) -> Vec<DeleteRow> {
     create_workspace(router, "replay-delete-workspace").await;
     ingest(router, FIRST_ALIAS, SAMPLES).await;
 
+    // Only an asset model that has settled may be modified, so the model whose
+    // delete a row replays has reached its settled state before that row runs.
+    crate::support::settled_asset_model_status(router, &doomed_model).await;
+
     vec![
         DeleteRow {
             case: "DeleteAsset",
