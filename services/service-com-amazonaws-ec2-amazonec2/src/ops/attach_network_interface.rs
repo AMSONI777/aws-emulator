@@ -31,7 +31,7 @@
 //! * `InvalidNetworkInterfaceID.NotFound` / `InvalidInstanceID.NotFound` (400) — a well-formed
 //!   id the account holds no such resource for.
 //! * `IncorrectInstanceState` (400) — an instance on its way to, or already in, `terminated`.
-//! * `InvalidNetworkInterface.InUse` (400) — "The specified interface is currently in use and
+//! * `InvalidParameterValue` (400) — "The specified interface is currently in use and
 //!   cannot be deleted or attached to another instance", so an interface something already
 //!   holds is refused.
 //! * `InvalidParameterValue` (400) — an interface in another Availability Zone than the
@@ -247,8 +247,9 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
             ));
         }
         // "The specified interface is currently in use and cannot be deleted or attached to
-        // another instance" (EC2 API error codes, `InvalidNetworkInterface.InUse`): an
-        // interface something already holds is refused and stays exactly where it was.
+        // another instance" (EC2 API error codes): an interface something already holds is
+        // refused — in the one wording this service answers that with
+        // (`state::network_interface_in_use`) — and stays exactly where it was.
         if store
             .network_interface_attachment(network_interface_id)
             .is_some()

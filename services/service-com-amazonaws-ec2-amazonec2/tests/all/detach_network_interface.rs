@@ -1062,7 +1062,7 @@ async fn attach_refuses_what_it_cannot_attach_and_writes_nothing() {
             &held,
             &instance_id,
             4,
-            "InvalidNetworkInterface.InUse",
+            "InvalidParameterValue",
         ),
         AttachRefusal::new(
             "a device index the instance already has an interface at",

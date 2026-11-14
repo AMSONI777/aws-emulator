@@ -19,7 +19,7 @@
 //!    already holds, and whether the request named the network card index or left it to its
 //!    documented default.
 //! 2. AN INTERFACE ONE INSTANCE HOLDS IS NOT GIVEN TO ANOTHER: an attach of an interface
-//!    something already holds is refused `InvalidNetworkInterface.InUse` and writes nothing —
+//!    something already holds is refused `InvalidParameterValue` and writes nothing —
 //!    neither instance's index moves — while an interface the clock has finished detaching
 //!    holds nothing and so can be given to a different instance, at which point the index of
 //!    the instance that held it no longer reports it and the new one does.
@@ -30,7 +30,7 @@ use ec2::state::TRANSITION_DELAY;
 use service_com_amazonaws_ec2_amazonec2 as ec2;
 use smithy_server_runtime::MultiServiceRouter;
 
-use super::ec2_query::{as_timestamp, call, element, error_code, indexed};
+use super::ec2_query::{as_timestamp, call, element, error_code, error_message, indexed};
 use super::wire::{Param, child, child_text, document, is_long_id, param};
 
 /// The Region every call here is signed for: the emulator's own default Region, whose default
@@ -51,9 +51,10 @@ const INSTANCE_TYPE: &str = "m5.4xlarge";
 const ATTACHMENT_ID_PREFIX: &str = "eni-attach";
 
 /// The error code EC2 answers for an action asked of a network interface something still
-/// holds. EC2's model declares no error shapes at all, so the code is matched as the wire
-/// string the service answers with rather than through the service's own constant.
-const INVALID_NETWORK_INTERFACE_IN_USE: &str = "InvalidNetworkInterface.InUse";
+/// holds: a parameter-value refusal about the `NetworkInterfaceId` the request carried. EC2's
+/// model declares no error shapes at all, so the code is matched as the wire string the
+/// service answers with rather than through the service's own constant.
+const INVALID_PARAMETER_VALUE: &str = "InvalidParameterValue";
 
 /// Long enough past [`TRANSITION_DELAY`] that a move the clock owes is certainly due, with a
 /// margin so a slow machine fails nothing.
@@ -485,9 +486,15 @@ async fn an_interface_one_instance_holds_is_not_given_to_another() {
         );
         assert_eq!(
             error_code(&body),
-            INVALID_NETWORK_INTERFACE_IN_USE,
-            "case {case:?}: expected {INVALID_NETWORK_INTERFACE_IN_USE} for an interface \
+            INVALID_PARAMETER_VALUE,
+            "case {case:?}: expected {INVALID_PARAMETER_VALUE} for an interface \
              something already holds, got {body}"
+        );
+        assert_eq!(
+            error_message(&body),
+            format!("Network interface '{network_interface_id}' is currently in use."),
+            "case {case:?}: expected the in-use sentence naming {network_interface_id}, \
+             got {body}"
         );
     }
 

@@ -1303,7 +1303,7 @@ async fn a_launch_that_asks_for_what_an_interface_cannot_be_given_is_refused() {
             count: 1,
             fields: primary(&[("DeviceIndex", "0"), ("NetworkInterfaceId", &attached_interface)]),
             status: 400,
-            code: "InvalidNetworkInterface.InUse",
+            code: "InvalidParameterValue",
         },
         RefusalRow {
             case: "an address outside the subnet's range",

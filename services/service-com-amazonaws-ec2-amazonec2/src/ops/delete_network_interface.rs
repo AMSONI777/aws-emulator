@@ -18,8 +18,10 @@
 //!   ([`crate::state::network_interface_id_is_well_formed`]).
 //! * `InvalidNetworkInterfaceID.NotFound` (400) — a well-formed id the account holds no
 //!   interface for.
-//! * `InvalidNetworkInterface.InUse` (400) — "You must detach the network interface before
-//!   you can delete it" (below), so an interface something still holds is refused.
+//! * `InvalidParameterValue` (400) — "You must detach the network interface before you can
+//!   delete it" (below), so an interface something still holds is refused, naming the
+//!   interface the request asked for
+//!   ([`crate::state::network_interface_in_use`]).
 //! * `DryRunOperation` (412) — a request that would have succeeded, with `DryRun` set.
 //!
 //! ## Shape of an operation

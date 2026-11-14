@@ -13,7 +13,7 @@
 //! answering as a no-op — while a value that is not an interface id at all is refused
 //! `InvalidNetworkInterfaceId.Malformed`, a well-formed id the account holds no interface
 //! for `InvalidNetworkInterfaceID.NotFound`, and an interface an attachment still holds
-//! `InvalidNetworkInterface.InUse` ("You must detach the network interface before you can
+//! `InvalidParameterValue` ("You must detach the network interface before you can
 //! delete it" — `DeleteNetworkInterface`). A `DryRun` of a call that would have succeeded
 //! stops at `DryRunOperation` and removes nothing.
 //!
@@ -36,7 +36,7 @@ use ec2::state::{
 use service_com_amazonaws_ec2_amazonec2 as ec2;
 use smithy_server_runtime::MultiServiceRouter;
 
-use super::ec2_query::{element, error_code};
+use super::ec2_query::{element, error_code, error_message};
 use super::wire::{param, Param};
 
 /// The Region every call here is signed for.
@@ -411,8 +411,8 @@ async fn an_id_that_names_no_interface_of_the_account_deletes_nothing() {
 
 /// The rule: "You must detach the network interface before you can delete it"
 /// (`DeleteNetworkInterface`) — an interface an attachment still holds is refused
-/// `InvalidNetworkInterface.InUse` and stays exactly where it was, and only an attachment
-/// that has reached `detached` lets the delete through.
+/// `InvalidParameterValue`, naming the interface the request asked for, and stays exactly
+/// where it was, and only an attachment that has reached `detached` lets the delete through.
 ///
 /// The rows differ in the `AttachmentStatus` of the attachment
 /// (`smithy_query(query="shape",shape="AttachmentStatus")`), plus an attachment that reports
@@ -472,8 +472,14 @@ async fn an_interface_an_attachment_still_holds_is_refused() {
             );
             assert_eq!(
                 error_code(&body),
-                "InvalidNetworkInterface.InUse",
-                "case {case:?}: expected InvalidNetworkInterface.InUse, got {body}"
+                "InvalidParameterValue",
+                "case {case:?}: expected InvalidParameterValue, got {body}"
+            );
+            assert_eq!(
+                error_message(&body),
+                format!("Network interface '{network_interface_id}' is currently in use."),
+                "case {case:?}: expected the in-use sentence naming \
+                 {network_interface_id}, got {body}"
             );
             assert!(
                 stored(&engine, &network_interface_id),
@@ -520,7 +526,7 @@ async fn a_dry_run_reports_the_permission_check_and_removes_nothing() {
             "an interface an attachment still holds",
             &held,
             400,
-            "InvalidNetworkInterface.InUse",
+            "InvalidParameterValue",
         ),
         (
             "an id the account holds no interface for",

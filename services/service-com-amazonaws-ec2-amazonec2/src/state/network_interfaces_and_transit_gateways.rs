@@ -103,25 +103,20 @@ pub const ATTACHMENT_STATUS_DETACHING: &str = "detaching";
 /// constant.
 pub const PRIMARY_NETWORK_INTERFACE_DEVICE_INDEX: i32 = 0;
 
-/// `InvalidNetworkInterface.InUse` (HTTP 400): the request asked for something that cannot
-/// be done to a network interface while it is still attached. "The specified interface is
-/// currently in use and cannot be deleted or attached to another instance. Ensure that you
-/// have detached the network interface first" (EC2 API error codes,
-/// "InvalidNetworkInterface.InUse").
-pub const INVALID_NETWORK_INTERFACE_IN_USE: &str = "InvalidNetworkInterface.InUse";
-
-/// Refuse an action on a network interface something still holds: HTTP 400
-/// `InvalidNetworkInterface.InUse`. "You must detach the network interface before you can
-/// delete it" (`DeleteNetworkInterface`).
+/// Refuse an action on a network interface something still holds — a delete of one, or an
+/// attach of one to another instance: HTTP 400 `InvalidParameterValue`, the class EC2 was
+/// recorded answering for it, with the one sentence that class carries — `Network interface
+/// '<id>' is currently in use.` The one variable part is the interface the REQUEST named.
+///
+/// The CLASS is a parameter-value one rather than a resource-level code of the interface's
+/// own: what the caller got wrong is the `NetworkInterfaceId` it passed, and EC2 reports that
+/// the same way whichever operation of this service refuses it — so the three that do (the
+/// delete, the attach, and a launch that names an interface to attach) word it HERE, once,
+/// and cannot drift apart.
 pub fn network_interface_in_use<E>(network_interface_id: &str) -> Scaffolded<E> {
-    Scaffolded::service_error(
-        INVALID_NETWORK_INTERFACE_IN_USE,
-        400,
-        format!(
-            "The network interface '{network_interface_id}' is currently in use and must be \
-             detached first"
-        ),
-    )
+    invalid_parameter_value(format!(
+        "Network interface '{network_interface_id}' is currently in use."
+    ))
 }
 
 /// `InvalidNetworkInterfaceAttachmentId.Malformed` (HTTP 400): the request named a value that

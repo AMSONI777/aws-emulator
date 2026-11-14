@@ -1193,6 +1193,9 @@ mod network_insights_access_scope_analyses;
 mod network_insights_access_scopes;
 #[path = "all/network_interface_attributes.rs"]
 mod network_interface_attributes;
+// The ONE in-use refusal every operation that resolves a `NetworkInterfaceId` answers.
+#[path = "all/network_interface_in_use_refusal.rs"]
+mod network_interface_in_use_refusal;
 #[path = "all/network_interfaces.rs"]
 mod network_interfaces;
 #[path = "all/network_interface_permissions.rs"]
