@@ -192,9 +192,7 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
             // value, and the message names what was not found.
             None => Err(GetProtectedQueryErrorModeled::ResourceNotFoundException(
                 ResourceNotFoundException {
-                    message: format!(
-                        "membership {membership_id} holds no protected query {query_id}"
-                    ),
+                    message: st::protected_query_not_found_message(&membership_id, &query_id),
                     resource_id: query_id,
                     resource_type: st::RESOURCE_TYPE_MEMBERSHIP.to_string(),
                 },

@@ -36,7 +36,7 @@ use super::cleanrooms_collaboration_lifecycle::{
 /// call ever created, so only state decides the answer.
 const ABSENT_UUID: &str = "0f1e2d3c-4b5a-6978-8796-a5b4c3d2e1f0";
 /// A second one, for the rows that need two ids the store does not hold.
-const OTHER_ABSENT_UUID: &str = "1a2b3c4d-5e6f-4a7b-8c9d-0e1f2a3b4c5d";
+pub(crate) const OTHER_ABSENT_UUID: &str = "1a2b3c4d-5e6f-4a7b-8c9d-0e1f2a3b4c5d";
 
 /// The published bounds of `WorkerComputeConfiguration$number` (model member
 /// `number`, `range 2..1024`).
@@ -44,7 +44,11 @@ const WORKER_NUMBER_MIN: i64 = 2;
 const WORKER_NUMBER_MAX: i64 = 1024;
 
 /// Start a protected query against `membership_id`.
-async fn start_query(emulator: &Emulator, membership_id: &str, body: Value) -> (u16, Value) {
+pub(crate) async fn start_query(
+    emulator: &Emulator,
+    membership_id: &str,
+    body: Value,
+) -> (u16, Value) {
     emulator
         .call(
             "POST",
@@ -55,7 +59,11 @@ async fn start_query(emulator: &Emulator, membership_id: &str, body: Value) -> (
 }
 
 /// Read a protected query back under the membership that started it.
-async fn get_query(emulator: &Emulator, membership_id: &str, query_id: &str) -> (u16, Value) {
+pub(crate) async fn get_query(
+    emulator: &Emulator,
+    membership_id: &str,
+    query_id: &str,
+) -> (u16, Value) {
     emulator
         .call(
             "GET",
@@ -91,12 +99,12 @@ async fn join(emulator: &Emulator, collaboration: Value, membership_body: Value)
 
 /// The membership of a collaboration whose creator holds every declared ability, with
 /// no default result configuration.
-async fn simple_membership(emulator: &Emulator, name: &str) -> Value {
+pub(crate) async fn simple_membership(emulator: &Emulator, name: &str) -> Value {
     join(emulator, minimal_collaboration(name), json!({})).await
 }
 
 /// A minimal valid `StartProtectedQuery` body: the required `type` plus inline SQL.
-fn minimal_query() -> Value {
+pub(crate) fn minimal_query() -> Value {
     json!({
         "type": "SQL",
         "sqlParameters": { "queryString": "SELECT COUNT(*) FROM orders" },
@@ -114,7 +122,7 @@ fn analysis_template_arn(membership_id: &str) -> String {
 
 /// The protected query without the two members the clock moves, so a round-trip
 /// comparison is not a race against the owed transition.
-fn without_settled_members(query: &Value) -> Value {
+pub(crate) fn without_settled_members(query: &Value) -> Value {
     let mut copy = query.clone();
     let members = copy
         .as_object_mut()

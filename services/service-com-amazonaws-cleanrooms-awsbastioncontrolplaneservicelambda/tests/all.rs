@@ -71,6 +71,8 @@ mod membership_updates;
 mod privacy_budget_template_listing;
 #[path = "all/protected_queries.rs"]
 mod protected_queries;
+#[path = "all/protected_query_cancellation.rs"]
+mod protected_query_cancellation;
 #[path = "all/resource_tags.rs"]
 mod resource_tags;
 #[path = "all/state_roundtrip.rs"]

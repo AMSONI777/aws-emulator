@@ -358,6 +358,9 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
             st::ProtectedQueryRecord {
                 query,
                 terminal_due: Some(started_at + st::PROTECTED_QUERY_SETTLE_DELAY),
+                // Nothing can run the query, so the status the clock owes it is the
+                // modelled failure state (`st::PROTECTED_QUERY_FAILURE_CODE` says why).
+                terminal_status: st::PROTECTED_QUERY_STATUS_FAILED.to_string(),
             },
         );
         store.protected_query_order.push(id.clone());

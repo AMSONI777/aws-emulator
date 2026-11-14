@@ -165,13 +165,43 @@ pub const DEFAULT_ML_IS_RESPONSIBLE: bool = false;
 pub const PROTECTED_QUERY_STATUS_SUBMITTED: &str = "SUBMITTED";
 /// See [`PROTECTED_QUERY_STATUS_SUBMITTED`].
 pub const PROTECTED_QUERY_STATUS_FAILED: &str = "FAILED";
+/// See [`PROTECTED_QUERY_STATUS_SUBMITTED`]. A query a caller asked to cancel is
+/// CANCELLING — the catalog's non-terminal cancellation status — until the clock settles
+/// it in [`PROTECTED_QUERY_STATUS_CANCELLED`].
+pub const PROTECTED_QUERY_STATUS_CANCELLING: &str = "CANCELLING";
+/// See [`PROTECTED_QUERY_STATUS_CANCELLING`].
+pub const PROTECTED_QUERY_STATUS_CANCELLED: &str = "CANCELLED";
+/// See [`PROTECTED_QUERY_STATUS_SUBMITTED`]. No protected query of this emulator reaches
+/// these two: there is no analytics data plane to run one to SUCCESS, and none is left
+/// running long enough to TIME_OUT. They are named so every value of the catalog this
+/// slice reasons about is referenced the same way.
+pub const PROTECTED_QUERY_STATUS_SUCCESS: &str = "SUCCESS";
+/// See [`PROTECTED_QUERY_STATUS_SUCCESS`].
+pub const PROTECTED_QUERY_STATUS_TIMED_OUT: &str = "TIMED_OUT";
 
-/// How long after `StartProtectedQuery` the clock owes the query its terminal status.
+/// The `ProtectedQueryStatus` values a query can no longer leave: the run is over, so
+/// nothing the clock or a caller does moves it again.
+///
+/// The catalog (SUBMITTED | STARTED | CANCELLED | CANCELLING | FAILED | SUCCESS |
+/// TIMED_OUT) splits into the three statuses a query is still being processed in
+/// (SUBMITTED, STARTED and CANCELLING, which is "the query is being cancelled") and the
+/// four it has settled in.
+pub const PROTECTED_QUERY_TERMINAL_STATUSES: [&str; 4] = [
+    PROTECTED_QUERY_STATUS_CANCELLED,
+    PROTECTED_QUERY_STATUS_FAILED,
+    PROTECTED_QUERY_STATUS_SUCCESS,
+    PROTECTED_QUERY_STATUS_TIMED_OUT,
+];
+
+/// How long after the call that leaves a protected query in a non-terminal status the
+/// clock owes it its terminal one — the run after `StartProtectedQuery`, and the
+/// cancellation after `UpdateProtectedQuery`.
 ///
 /// AWS publishes no duration for a protected query's run, so this span is CHOSEN: 500
 /// ms, inside this project's 250-750 ms band for a transition the clock owes. It is
 /// deliberately non-zero, so a caller that reads the query straight after starting it
-/// still sees it SUBMITTED, and the due instant is stored rather than slept on.
+/// still sees it SUBMITTED, and one that reads it straight after cancelling it still
+/// sees it CANCELLING; the due instant is stored rather than slept on.
 pub const PROTECTED_QUERY_SETTLE_DELAY: Duration = Duration::from_millis(500);
 
 /// The `ProtectedQueryError.code` a settled query carries.
@@ -760,6 +790,11 @@ pub struct ProtectedQueryRecord {
     /// When the clock owes this query its terminal status, or `None` once that
     /// transition has been materialized. See [`PROTECTED_QUERY_SETTLE_DELAY`].
     pub terminal_due: Option<SystemTime>,
+    /// The `ProtectedQueryStatus` that falls due at [`Self::terminal_due`]: the status
+    /// the call that left the query in a non-terminal one is heading for — the run's
+    /// outcome for a query `StartProtectedQuery` submitted, and
+    /// [`PROTECTED_QUERY_STATUS_CANCELLED`] for one a cancellation is under way on.
+    pub terminal_status: String,
 }
 
 /// Per-service state for com-amazonaws-cleanrooms-awsbastioncontrolplaneservicelambda. A handler reaches it through [`service_state`].
@@ -1494,14 +1529,16 @@ impl ComAmazonawsCleanroomsAwsbastioncontrolplaneservicelambdaState {
                 continue;
             }
             record.terminal_due = None;
-            record.query.status = PROTECTED_QUERY_STATUS_FAILED.to_string();
-            // The run was never performed, so the query carries the failure's reason
-            // and NO statistics or result: there is no duration to report for work
-            // nothing did.
-            record.query.error = Some(ProtectedQueryError {
-                code: PROTECTED_QUERY_FAILURE_CODE.to_string(),
-                message: PROTECTED_QUERY_FAILURE_MESSAGE.to_string(),
-            });
+            record.query.status = record.terminal_status.clone();
+            // A query that settles in the failure state carries that failure's reason,
+            // and NO statistics or result either way: there is no duration to report
+            // for work nothing did, and a cancelled query failed at nothing.
+            if record.terminal_status == PROTECTED_QUERY_STATUS_FAILED {
+                record.query.error = Some(ProtectedQueryError {
+                    code: PROTECTED_QUERY_FAILURE_CODE.to_string(),
+                    message: PROTECTED_QUERY_FAILURE_MESSAGE.to_string(),
+                });
+            }
         }
     }
 
@@ -1515,6 +1552,17 @@ impl ComAmazonawsCleanroomsAwsbastioncontrolplaneservicelambdaState {
     ) -> Option<&ProtectedQueryRecord> {
         self.protected_queries
             .get(query_id)
+            .filter(|record| record.query.membership_id == membership_id)
+    }
+
+    /// [`Self::protected_query`], for a caller that goes on to move the record.
+    pub fn protected_query_mut(
+        &mut self,
+        membership_id: &str,
+        query_id: &str,
+    ) -> Option<&mut ProtectedQueryRecord> {
+        self.protected_queries
+            .get_mut(query_id)
             .filter(|record| record.query.membership_id == membership_id)
     }
 
@@ -1975,6 +2023,41 @@ pub fn authorization_denied_message(operation: &str, resource: &str) -> String {
 /// THIS account's namespace rather than that the id exists nowhere.
 pub fn membership_not_found_message(membership_id: &str, account_id: &str) -> String {
     format!("No such membership: {membership_id} for account {account_id}")
+}
+
+/// Whether a protected query has settled: its status is one of
+/// [`PROTECTED_QUERY_TERMINAL_STATUSES`], so the run is over and nothing moves it again.
+pub fn protected_query_is_terminal(status: &str) -> bool {
+    PROTECTED_QUERY_TERMINAL_STATUSES.contains(&status)
+}
+
+/// The message every operation that addresses a stored protected query reports when the
+/// identifier names none under the membership in the path.
+///
+/// A protected query is a sub-resource of ONE membership, so the membership is what says
+/// the lookup failed in that membership's namespace rather than that the query id exists
+/// nowhere. Shared by the read and the update of the same resource, so both report the
+/// same thing.
+pub fn protected_query_not_found_message(membership_id: &str, query_id: &str) -> String {
+    format!("membership {membership_id} holds no protected query {query_id}")
+}
+
+/// The message `UpdateProtectedQuery` reports when the query it addresses has already
+/// settled in a status other than the one the request asks for.
+///
+/// Stated in the frame this service states its other state refusals in
+/// ([`change_request_not_modifiable_message`]): the identifier of the resource that was
+/// refused, the status it is stored in, and the rule those two fail — only a query that
+/// is still being processed can be moved to a target status.
+pub fn protected_query_not_updatable_message(
+    query_id: &str,
+    status: &str,
+    target_status: &str,
+) -> String {
+    format!(
+        "You can't update protected query {query_id} to {target_status} status because it's in \
+         {status} status. Only a protected query that hasn't finished can be updated."
+    )
 }
 
 /// The message an analysis-template lookup reports when the identifier names no template

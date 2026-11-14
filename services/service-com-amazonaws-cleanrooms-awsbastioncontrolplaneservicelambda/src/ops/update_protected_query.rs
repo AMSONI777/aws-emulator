@@ -1,26 +1,32 @@
 // SPDX-License-Identifier: CC0-1.0
 
 //! @op UpdateProtectedQuery
-//! SCAFFOLDED, NOT IMPLEMENTED: this operation answers HTTP 501 `NotImplemented` and
-//! asserts NOTHING about `UpdateProtectedQuery`'s real behaviour. Implement it here — this is
-//! the ONLY file to touch for this operation.
 //!
-//! A 501 from this operation means "nobody has written it yet", never "the emulator is
-//! broken". Replace the `Err(..)` in [`UpdateProtectedQuery::handle`] with real behaviour and
-//! delete the SCAFFOLDED marker line above; that line is the machine-readable record of
-//! which operations are still stubs (`grep -rl '^//! SCAFFOLDED, NOT IMPLEMENTED:' */src/ops/`),
-//! so leaving it on an implemented operation under-reports progress.
+//! Moves a protected query that is still being processed to the status the request asks
+//! for, out of persisted state, and answers with the stored record, so
+//! `GetProtectedQuery` reports exactly what this call returned.
+//!
+//! `TargetProtectedQueryStatus` declares one value, CANCELLED, and the
+//! `ProtectedQueryStatus` catalog carries both CANCELLING ("being cancelled") and
+//! CANCELLED, so a cancellation is asynchronous: the accepted request moves the query to
+//! CANCELLING and the clock owes it CANCELLED a fixed span later
+//! (`crate::state::PROTECTED_QUERY_SETTLE_DELAY`), in place of whatever transition the
+//! start call owed it. A query that has already settled
+//! (`crate::state::PROTECTED_QUERY_TERMINAL_STATUSES`) has nothing left to update: one
+//! already in the status the request asks for is answered with the stored record,
+//! because the model marks this operation idempotent, and one in any other settled
+//! status is the inconsistent state `ConflictException` reports.
 //!
 //! ## Shape of an operation
 //!
 //! Each operation is a struct that owns the shared engine and implements
 //! [`smithy_server_runtime::Operation`]. The framework constructs one per service via
 //! `UpdateProtectedQuery::new(engine)` and drives it through the centralized request walk:
-//! deserialize → validate → `handle` → serialize. You write ONLY the `handle` body.
+//! deserialize -> validate -> `handle` -> serialize. You write ONLY the `handle` body.
 //!
 //! ## Reaching this service's state
 //!
-//! The engine is held on `self` (constructor-injected), NOT passed per request — so
+//! The engine is held on `self` (constructor-injected), NOT passed per request, so
 //! engine access is guaranteed by the time any request runs. Reach the store through
 //! [`crate::state::service_state`] and read and write it through the guard it hands back:
 //!
@@ -30,7 +36,7 @@
 //!     state.lock().your_field = /* ... */;
 //! ```
 //!
-//! `ctx` ([`smithy_server_runtime::OperationContext`]) carries request metadata only —
+//! `ctx` ([`smithy_server_runtime::OperationContext`]) carries request metadata only:
 //! headers, URI, method, and anything middleware placed in `ctx.parts().extensions`.
 //! The engine is NOT reached through `ctx`.
 //!
@@ -42,7 +48,7 @@
 //! # Modeled contract for `UpdateProtectedQuery`
 //!
 //! What AWS documents for this operation, from this service's Smithy model. HTML is
-//! stripped and long entries are clipped at ` …`. For the FULL text of any one item,
+//! stripped and long entries are clipped. For the FULL text of any one item,
 //! ask the model rather than reading the raw JSON:
 //!
 //! ```text
@@ -54,29 +60,29 @@
 //! ## Input
 //!
 //! * `membershipIdentifier` (MembershipIdentifier, len 36..36, pattern
-//!   ^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$) **required** — The
+//!   ^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$) **required** - The
 //!   identifier for a member of a protected query instance.
 //! * `protectedQueryIdentifier` (ProtectedQueryIdentifier, len 36..36, pattern
-//!   ^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$) **required** — The
+//!   ^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$) **required** - The
 //!   identifier for a protected query instance.
-//! * `targetStatus` (TargetProtectedQueryStatus, one of: CANCELLED) **required** — The target
+//! * `targetStatus` (TargetProtectedQueryStatus, one of: CANCELLED) **required** - The target
 //!   status of a query. Used to update the execution status of a currently running query.
 //!
 //! ## Output
 //!
-//! * `protectedQuery` (ProtectedQuery) **required** — The protected query output.
+//! * `protectedQuery` (ProtectedQuery) **required** - The protected query output.
 //!
 //! ## Errors
 //!
-//! * `AccessDeniedException` (HTTP 403) — Caller does not have sufficient access to perform
+//! * `AccessDeniedException` (HTTP 403) - Caller does not have sufficient access to perform
 //!   this action.
-//! * `ConflictException` (HTTP 409) — Updating or deleting a resource can cause an
+//! * `ConflictException` (HTTP 409) - Updating or deleting a resource can cause an
 //!   inconsistent state.
-//! * `InternalServerException` (HTTP 500) — Unexpected error during processing of request.
-//! * `ResourceNotFoundException` (HTTP 404) — Request references a resource which does not
+//! * `InternalServerException` (HTTP 500) - Unexpected error during processing of request.
+//! * `ResourceNotFoundException` (HTTP 404) - Request references a resource which does not
 //!   exist.
-//! * `ThrottlingException` (HTTP 429) — Request was denied due to request throttling.
-//! * `ValidationException` (HTTP 400) — The input fails to satisfy the specified constraints.
+//! * `ThrottlingException` (HTTP 429) - Request was denied due to request throttling.
+//! * `ValidationException` (HTTP 400) - The input fails to satisfy the specified constraints.
 
 #[allow(unused_imports)]
 use super::types::*;
@@ -89,7 +95,7 @@ smithy_macros::smithy_model!("smithy-model/com-amazonaws-cleanrooms-awsbastionco
 
 // The operation's MODELED errors. `#[operation_error]` accepts only variants the
 // model declares for this operation, so the scaffold's `NotImplemented` cannot live
-// here — hence the `UpdateProtectedQueryError` alias below. An operation that models no errors
+// here, hence the `UpdateProtectedQueryError` alias below. An operation that models no errors
 // generates an UNINHABITED enum here, which is correct and expected: there is nothing
 // to construct until the model says otherwise.
 #[smithy_macros::operation_error("com.amazonaws.cleanrooms#UpdateProtectedQuery")]
@@ -129,7 +135,7 @@ pub struct UpdateProtectedQuery<Eng> {
 }
 
 impl<Eng> UpdateProtectedQuery<Eng> {
-    /// Construct the operation from the shared engine. INFALLIBLE — the engine is a
+    /// Construct the operation from the shared engine. INFALLIBLE: the engine is a
     /// construction-time dependency, so engine access is guaranteed by the time any
     /// request runs. Called by the generated `EmulatedService::new(engine)` constructor.
     pub fn new(engine: ::std::sync::Arc<Eng>) -> Self {
@@ -152,20 +158,120 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
     async fn handle(
         &self,
         input: Self::Input,
-        ctx: &smithy_server_runtime::OperationContext<'_>,
+        _ctx: &smithy_server_runtime::OperationContext<'_>,
     ) -> Result<Self::Output, Self::Error> {
-        // The engine is reachable from `&self` (constructor-injected); `ctx` carries
-        // request metadata. Both are bound here so an implementer has them in scope.
-        let _ = (&input, ctx, &self.engine);
-        // Implement `UpdateProtectedQuery` here, then delete the SCAFFOLDED marker at the top of
-        // this file. Return modeled failures as
-        // `Err(UpdateProtectedQueryErrorModeled::Variant(..).into())` — the `From` impl above lifts it.
-        //
-        // To refuse a bad request this operation models no error for, return
-        // `Err(crate::scaffolded::Scaffolded::validation("..."))` — a 400
-        // `ValidationException`. Do NOT answer 501 for it: 501 means "not written yet",
-        // not "bad request". Modeled constraints are already refused BEFORE this
-        // handler runs, so reaching here means the input satisfies every one of them.
-        Err(crate::scaffolded::Scaffolded::not_implemented("UpdateProtectedQuery"))
+        use crate::state as st;
+
+        let Some(state) = st::service_state(&*self.engine) else {
+            return Err(UpdateProtectedQueryErrorModeled::InternalServerException(
+                InternalServerException {
+                    message: Some("cleanrooms state is unavailable".to_string()),
+                },
+            )
+            .into());
+        };
+
+        let membership_id = input.membership_identifier;
+        let query_id = input.protected_query_identifier;
+        let target_status = input.target_status;
+
+        // `TargetProtectedQueryStatus` is a modelled enum, so a value outside its
+        // catalog is refused before this handler runs; this keeps the handler total.
+        if !TARGET_PROTECTED_QUERY_STATUS_VALUES.contains(&target_status.as_str()) {
+            return Err(crate::scaffolded::Scaffolded::validation(format!(
+                "targetStatus {target_status} is not a TargetProtectedQueryStatus"
+            )));
+        }
+
+        let mut store = state.lock();
+        // The transitions the clock already owes are materialized BEFORE the decision,
+        // so a query whose span has passed is judged in the status it is already in
+        // rather than the one the call that started it left it in.
+        let now = ::std::time::SystemTime::now();
+        store.settle_protected_queries(now);
+
+        if !store.memberships.contains_key(&membership_id) {
+            return Err(UpdateProtectedQueryErrorModeled::ResourceNotFoundException(
+                ResourceNotFoundException {
+                    message: st::membership_not_found_message(
+                        &membership_id,
+                        st::caller_account_id(),
+                    ),
+                    resource_id: membership_id,
+                    resource_type: st::RESOURCE_TYPE_MEMBERSHIP.to_string(),
+                },
+            )
+            .into());
+        }
+
+        // A query is addressed under the membership that started it, exactly as the read
+        // addresses it, so one started under another membership is not found here.
+        let Some(record) = store.protected_query_mut(&membership_id, &query_id) else {
+            // `resourceId` names the protected query the request addressed and
+            // `resourceType` the MEMBERSHIP it was addressed under, because the model's
+            // `ResourceType` catalog (CONFIGURED_TABLE | COLLABORATION | MEMBERSHIP |
+            // CONFIGURED_TABLE_ASSOCIATION) declares no protected-query value; the
+            // message names what was not found.
+            return Err(UpdateProtectedQueryErrorModeled::ResourceNotFoundException(
+                ResourceNotFoundException {
+                    message: st::protected_query_not_found_message(&membership_id, &query_id),
+                    resource_id: query_id,
+                    resource_type: st::RESOURCE_TYPE_MEMBERSHIP.to_string(),
+                },
+            )
+            .into());
+        };
+
+        if st::protected_query_is_terminal(&record.query.status) {
+            // The model marks this operation idempotent, so a query that has already
+            // settled in the status the request asks for is answered with the stored
+            // record: repeating the call reports the same query it reported the first
+            // time. A query settled in any OTHER status can no longer reach the target,
+            // which is the inconsistent state `ConflictException` is for ("Updating or
+            // deleting a resource can cause an inconsistent state"), with the
+            // `ConflictExceptionReason` INVALID_STATE.
+            if record.query.status != target_status {
+                return Err(UpdateProtectedQueryErrorModeled::ConflictException(
+                    ConflictException {
+                        message: Some(st::protected_query_not_updatable_message(
+                            &query_id,
+                            &record.query.status,
+                            &target_status,
+                        )),
+                        resource_id: Some(query_id),
+                        resource_type: Some(st::RESOURCE_TYPE_MEMBERSHIP.to_string()),
+                        reason: Some(st::CONFLICT_REASON_INVALID_STATE.to_string()),
+                    },
+                )
+                .into());
+            }
+            return Ok(UpdateProtectedQueryOutput {
+                protected_query: record.query.clone(),
+            });
+        }
+
+        // A query the clock already owes the target status is already on its way there,
+        // so the repeated request reports the stored record and leaves the owed instant
+        // where it is: restarting the span would let a caller postpone a transition by
+        // asking again for the one already under way.
+        if record.terminal_due.is_some() && record.terminal_status == target_status {
+            return Ok(UpdateProtectedQueryOutput {
+                protected_query: record.query.clone(),
+            });
+        }
+
+        // The query is still being processed, so the request is accepted: it enters the
+        // catalog's cancellation status and the clock owes it the target status, in place
+        // of whatever transition it was heading for before, because the run it was
+        // waiting on is abandoned.
+        record.query.status = st::PROTECTED_QUERY_STATUS_CANCELLING.to_string();
+        record.terminal_status = target_status;
+        record.terminal_due = Some(now + st::PROTECTED_QUERY_SETTLE_DELAY);
+
+        // Answer out of the STORED record, so this response cannot differ from what
+        // GetProtectedQuery reports for the same query.
+        Ok(UpdateProtectedQueryOutput {
+            protected_query: record.query.clone(),
+        })
     }
 }
