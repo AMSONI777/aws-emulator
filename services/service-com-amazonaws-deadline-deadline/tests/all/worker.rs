@@ -28,16 +28,16 @@ use serde_json::{json, Value};
 use crate::farm_queue_job::{absent_id, error_code, is_resource_id, string_at, Emulator};
 use crate::fleet::{create_fleet, create_fleet_path, customer_managed, get_fleet_path, ROLE_ARN};
 
-fn create_worker_path(farm_id: &str, fleet_id: &str) -> String {
+pub(crate) fn create_worker_path(farm_id: &str, fleet_id: &str) -> String {
     format!("/2023-10-12/farms/{farm_id}/fleets/{fleet_id}/workers")
 }
 
-fn get_worker_path(farm_id: &str, fleet_id: &str, worker_id: &str) -> String {
+pub(crate) fn get_worker_path(farm_id: &str, fleet_id: &str, worker_id: &str) -> String {
     format!("/2023-10-12/farms/{farm_id}/fleets/{fleet_id}/workers/{worker_id}")
 }
 
 /// Create a fleet under `farm_id` whose worker-count window tops out at `max`.
-async fn create_fleet_with_max(
+pub(crate) async fn create_fleet_with_max(
     emulator: &Emulator,
     farm_id: &str,
     display_name: &str,
@@ -63,7 +63,7 @@ async fn create_fleet_with_max(
 }
 
 /// Register a worker with `fleet_id`, carrying `body`, and return the call's result.
-async fn create_worker(
+pub(crate) async fn create_worker(
     emulator: &Emulator,
     farm_id: &str,
     fleet_id: &str,
@@ -81,7 +81,7 @@ async fn create_worker(
 }
 
 /// The `workerCount` `GetFleet` reports for `fleet_id`.
-async fn fleet_worker_count(emulator: &Emulator, farm_id: &str, fleet_id: &str) -> i64 {
+pub(crate) async fn fleet_worker_count(emulator: &Emulator, farm_id: &str, fleet_id: &str) -> i64 {
     let (status, body) = emulator.get(&get_fleet_path(farm_id, fleet_id)).await;
     assert_eq!(
         status, 200,

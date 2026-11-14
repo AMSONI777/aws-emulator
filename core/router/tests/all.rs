@@ -1953,9 +1953,6 @@ mod lambda_signed_write_to_an_aoss_collection_endpoint;
 // time and compiled neither.
 // (`apigateway_cognito_authorizer_app_client_audience` is declared once, in the head region
 // above, and `cloudformation_metric_stream_estate_is_drainable` once further down this tail:
-// (`apigateway_cognito_authorizer_app_client_audience` is declared in the head region of
-// this file already: two branches landing in the same window each declared it, and a module
-// may be declared only once.)
 // above: a file loaded as a module twice compiles neither copy.)
 // (The API Gateway/Cognito authorizer suite is declared ONCE, in the head region above:
 // a module may be declared only once, and two branches landing at once appended it here
@@ -2032,16 +2029,12 @@ mod redshift_health_alarms_evaluate;
 // (`cloudformation_metric_stream_filter_update` is declared ONCE, in the sorted head region
 // the same file twice, which compiles neither.)
 // (`zz_probe` is declared ONCE, further up this tail, for the reason recorded there.)
-// (`zz_probe` is declared ONCE, further up this tail: a module may be declared only once.)
-// (`cloudwatch_alarm_ssm_ops_item_action` is declared once, in the head region above: a
 // (`cloudformation_metric_stream_filter_update` is declared once, in the sorted head region
 // above: a module may be declared only once, and two branches landing at once each appended
 // it here.)
 // module may be declared only once, and this tail re-declared it.)
 // (`cloudformation_metric_stream_filter_update` is declared ONCE, in the head region of this
 // file: a module may be declared only once.)
-// (`cloudformation_metric_stream_filter_update` is declared once, in the head region above:
-// module may be declared only once.)
 // a module may be declared only once, and two branches landing at once appended it here as
 // well.)
 // two branches landing in the same window each declared it, and a module may be declared
@@ -2481,7 +2474,6 @@ mod events_one_envelope_reaches_every_target_kind;
 // a module may be declared only once, and two branches landing at once each appended a copy
 // (`cloudformation_metric_stream_estate_is_drainable` is declared once, further up this tail:
 // (`cloudformation_domain_endpoint_is_dialled_by_consumers` is declared once, a few lines
-// above: a module may be declared only once, and two branches landing at once each appended
 // a copy of it here.)
 // (`apigateway_cognito_authorizer_app_client_audience` and
 // `cloudformation_metric_stream_estate_is_drainable` are declared in the head region above and
@@ -2726,8 +2718,6 @@ mod iam_session_tag_authorization;
 // this tail: the merge of two tails that had both edited this list declared it twice.)
 // be declared only once, and two branches landing at once each appended it here.)
 // (`apigateway_cognito_authorizer_app_client_audience` is declared in the head region above:
-// (`cloudformation_metric_stream_filter_update` is declared once, in the sorted head region
-// it here.)
 // (`zz_probe` is declared further up this tail already: a module may be declared only once.)
 // (`cloudtrail_read_only_api_calls` is declared in the sorted block above, beside the other
 // CloudTrail suites: a module may be declared only once.)
@@ -2834,3 +2824,7 @@ mod cloudformation_provisions_lambda_event_invoke_configs;
 // line: a module may be declared only once.)
 // (`cloudtrail_read_only_api_calls` is declared in the SORTED CloudTrail span above, and
 // `zz_probe` further up this tail: two landings each appended their own copy here as well,
+// (`cloudtrail_read_only_api_calls` is declared ONCE, in the sorted CloudTrail span above,
+// and `zz_probe` ONCE further up this tail: two branches landing in the same window each
+// appended their own copy here, and a module declared twice loads the same file twice,
+// which compiles neither.)

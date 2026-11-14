@@ -226,6 +226,9 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
                 host_properties: input.host_properties,
                 // The worker is registered, and nothing has reported it onward yet.
                 status: crate::state::WORKER_STATUS_CREATED.to_string(),
+                // A registration carries no capabilities: only the worker's own agent
+                // reports what the host can do, through `UpdateWorker`.
+                capabilities: None,
                 tags: input.tags.unwrap_or_default(),
                 created_at: ::std::time::SystemTime::now(),
                 created_by,

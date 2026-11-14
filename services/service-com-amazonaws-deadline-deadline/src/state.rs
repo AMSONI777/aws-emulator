@@ -583,6 +583,11 @@ pub struct Worker {
     pub farm_id: String,
     pub host_properties: Option<crate::ops::types::HostPropertiesRequest>,
     pub status: String,
+    /// What the worker's own agent last reported it is capable of, as `UpdateWorker`
+    /// carries it. A registration says nothing about the host's capabilities
+    /// (`CreateWorker` has no such member), so a worker no update has reported them for
+    /// holds none.
+    pub capabilities: Option<crate::ops::types::WorkerCapabilities>,
     pub tags: HashMap<String, String>,
     pub created_at: SystemTime,
     pub created_by: String,
