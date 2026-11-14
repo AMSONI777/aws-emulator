@@ -249,7 +249,7 @@ fn the_reader_reports_a_declaration_the_target_cannot_compile() {
     // the check owes it. `present` is this suite's own file, so the existence half has a
     // file that really is there to accept.
     let present = "all_rs_declares_each_suite_once";
-    let cases: [(&str, String, usize, usize); 9] = [
+    let cases: [(&str, String, usize, usize); 11] = [
         (
             "one declaration",
             format!("#[path = \"all/{present}.rs\"]\nmod {present};\n"),
@@ -261,6 +261,30 @@ fn the_reader_reports_a_declaration_the_target_cannot_compile() {
             format!(
                 "#[path = \"all/{present}.rs\"]\nmod {present};\n\
                  #[path = \"all/{present}.rs\"]\nmod {present};\n"
+            ),
+            2,
+            0,
+        ),
+        (
+            "the same name declared three times",
+            format!(
+                "#[path = \"all/{present}.rs\"]\nmod {present};\n\
+                 #[path = \"all/{present}.rs\"]\nmod {present};\n\
+                 #[path = \"all/{present}.rs\"]\nmod {present};\n"
+            ),
+            2,
+            0,
+        ),
+        (
+            // The shape every collision in this file has taken: one copy in the sorted span
+            // beside the suite's own name, a second appended to the tail under its own
+            // explanatory comment block.
+            "a sorted declaration repeated in the commented tail",
+            format!(
+                "// a sorted span\n#[path = \"all/{present}.rs\"]\nmod {present};\n\
+                 #[path = \"all/boot_serve.rs\"]\nmod boot_serve;\n\
+                 // Declared in the appended tail, which is where every new suite inserts\n\
+                 // its lines.\n#[path = \"all/{present}.rs\"]\nmod {present};\n"
             ),
             2,
             0,
