@@ -59,6 +59,7 @@
 //! do not write it; editing the entry would let this file drift from the model.
 
 pub mod authorization;
+pub mod body_binding;
 pub mod lenient_json;
 pub mod lenient_scalars;
 pub mod off_enum_member_contract;

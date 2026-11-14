@@ -75,6 +75,11 @@ impl<Eng: Send + Sync + 'static> RequestPipeline<Eng> {
     /// The authorization refusal this request earns, or `None` when IAM permits it (and for
     /// every operation and caller the gate does not decide — see
     /// [`super::authorization`]).
+    ///
+    /// The decision is taken on the request alone, BEFORE the body is bound to the
+    /// operation's input shapes: a request whose resource is named in a body this service
+    /// cannot bind names no resource at all, which is a refusal rather than a decision
+    /// skipped (see [`super::authorization::JudgedResource`]).
     fn authorization_refusal(
         &self,
         key: &str,
@@ -86,8 +91,8 @@ impl<Eng: Send + Sync + 'static> RequestPipeline<Eng> {
         // A resource ARN names a resource of one Region, so it is built in the Region the
         // request is signed for — the same key every handler reads.
         let region = crate::state::request_region(ctx.parts());
-        let resource = super::authorization::judged_resource(key, body, req, &region)?;
-        let denied = super::authorization::authorize(&*self.engine, ctx, key, &resource).err()?;
+        let judged = super::authorization::judged_resource(key, body, req, &region)?;
+        let denied = super::authorization::authorize(&*self.engine, ctx, key, &judged).err()?;
         Some(access_denied_response(definition, req, &denied))
     }
 

@@ -38,6 +38,20 @@
 //! because hoisting them into `service-common` would make every service depending on that
 //! crate link the IAM and STS service crates.
 //!
+//! ## The decision is taken before the body is bound
+//!
+//! Because it is taken ahead of the operation, the decision reads the request itself and
+//! never a value a handler produced — and a request whose body does not bind to the
+//! operation's input shapes at all ([`crate::service::body_binding`]) determines nothing it
+//! carried in that body. An operation whose judged resource is named there
+//! ([`resource_named_in_the_body`]) therefore reaches the decision with NO resource
+//! ([`JudgedResource::Unnamed`]), and no statement can allow an action on a resource the
+//! request never named, so the call is refused — in the sentence IAM states when it has no
+//! resource to name: the principal and the action alone (recorded behaviour of such a
+//! request; see [`not_authorized_without_a_resource`]). That is what keeps a body-shape
+//! problem from masking the access-control answer, and what keeps the codec's own
+//! diagnostic from being answered as this API's fault.
+//!
 //! ## The action and the resource
 //!
 //! The action is `eks:<OperationName>` ("Actions defined by Amazon EKS", IAM Service
@@ -99,6 +113,7 @@ use ::service_common::iam_authorization::{self as iam, Decision};
 use ::smithy_server_runtime::ServerHttpProtocol;
 
 use crate::ops::types::*;
+use crate::service::body_binding::binds_to_input_shapes;
 use crate::service::read_input;
 
 /// This service's IAM action prefix: an action is `eks:<OperationName>`, which is this
@@ -146,15 +161,76 @@ fn addressed_capability(region: &str, cluster_name: &str, capability_name: &str)
 /// expired: that credential speaks for nobody, and the key it presented is not quoted back.
 const EXPIRED_CREDENTIAL_PRINCIPAL: &str = "an expired session credential";
 
+/// What this gate judges a request against: the resource it addresses, or the fact that it
+/// addresses none this service can name.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum JudgedResource {
+    /// The ARN of the resource the request addresses.
+    Named(String),
+    /// The request addresses a resource it names only in a body that does not bind to the
+    /// operation's input shapes, so nothing the body carried was determined (see the
+    /// module docs).
+    Unnamed,
+}
+
+/// The resource this gate judges the request `operation` names against — or `None` for an
+/// operation it does not decide (see the module docs).
+///
+/// The decision is taken BEFORE the request body is bound, so an operation whose resource
+/// is named in that body is judged with no resource at all when the body cannot be bound
+/// ([`JudgedResource::Unnamed`]); every other operation names its resource in the request's
+/// own addressing and is unaffected.
+pub fn judged_resource(
+    operation: &str,
+    protocol: &dyn ServerHttpProtocol,
+    req: &RtRequest,
+    region: &str,
+) -> Option<JudgedResource> {
+    if let Some(resource) = addressed_resource(operation, protocol, req, region) {
+        return Some(JudgedResource::Named(resource));
+    }
+    resource_named_in_the_body(operation, protocol, req).then_some(JudgedResource::Unnamed)
+}
+
+/// Whether `operation` names the resource this gate judges it on in its request BODY and
+/// this request's body does not bind to that operation's input shapes — so that resource
+/// was never determined (see [`crate::service::body_binding`]).
+///
+/// The two operations here are the ones whose judged resource is built from a member the
+/// model binds to the body rather than to the URI: `CreateCluster$name` and
+/// `RegisterCluster$name` carry no `@httpLabel`
+/// (`smithy_query(query="operation",operation="CreateCluster,RegisterCluster")`), while
+/// every other operation this gate decides reads its identifiers from a path label or a
+/// query member, which a body cannot take away.
+fn resource_named_in_the_body(
+    operation: &str,
+    protocol: &dyn ServerHttpProtocol,
+    req: &RtRequest,
+) -> bool {
+    match operation {
+        "CreateCluster" => !binds_to_input_shapes::<CreateClusterInput>(
+            protocol,
+            CREATE_CLUSTER_INPUT_SCHEMA,
+            req,
+        ),
+        "RegisterCluster" => !binds_to_input_shapes::<RegisterClusterInput>(
+            protocol,
+            REGISTER_CLUSTER_INPUT_SCHEMA,
+            req,
+        ),
+        _ => false,
+    }
+}
+
 /// The ARN of the resource the request `operation` names addresses, which is what IAM
 /// judges the call against — or `None` for an operation this gate does not decide (see the
-/// module docs).
+/// module docs) and for a request that determined no resource at all.
 ///
 /// Every identifier is read out of the request through the SAME protocol and generated
 /// input schema the dispatch sequence will hand the handler ([`read_input`]), so this gate
 /// cannot judge a different value from the one the operation acts on; a body that cannot be
-/// read at all is no decision here, and the framework's own walk refuses it.
-pub fn judged_resource(
+/// read at all names nothing here, and [`judged_resource`] is what answers such a request.
+fn addressed_resource(
     operation: &str,
     protocol: &dyn ServerHttpProtocol,
     req: &RtRequest,
@@ -385,20 +461,27 @@ pub fn judged_resource(
     }
 }
 
-/// Whether IAM lets this request perform `operation`'s action on `resource`.
+/// Whether IAM lets this request perform `operation`'s action on the resource it named.
 ///
 /// `Ok(())` for a request IAM permits and for every caller this gate does not bound (see
 /// the module docs); the modelled `AccessDeniedException` otherwise. It is asked BEFORE
 /// anything the request names is resolved, so a denial says nothing about what the account
-/// holds.
+/// holds — and a request that named no resource at all cannot be granted by any statement,
+/// whoever its caller is.
 pub fn authorize<Eng: Send + Sync + 'static>(
     engine: &Eng,
     ctx: &::smithy_server_runtime::OperationContext<'_>,
     operation: &str,
-    resource: &str,
+    judged: &JudgedResource,
 ) -> Result<(), AccessDeniedException> {
     let action = format!("{ACTION_PREFIX}:{operation}");
     let caller = caller(engine, ctx);
+    // No resource: the request determined none, so there is nothing for a statement to
+    // allow the action on and nothing for the refusal to name either.
+    let JudgedResource::Named(resource) = judged else {
+        return Err(not_authorized_without_a_resource(&caller.arn, &action));
+    };
+    let resource = resource.as_str();
     // The principal spellings travel with the request because that is what a statement's
     // `Principal` element would be matched against; an identity-based document states no
     // such element, so the decision below rests on the action and the resource.
@@ -461,6 +544,20 @@ fn not_authorized(
         message: Some(format!(
             "User: {principal} is not authorized to perform: {action} on resource: {resource} \
              {reason}"
+        )),
+    }
+}
+
+/// The refusal IAM states when the request named no resource to judge the action on: who
+/// was refused and which action, and nothing more — there is no resource to name and no
+/// statement was consulted about one, so neither clause of [`not_authorized`] applies.
+///
+/// Both values come from the request: the principal from the credential it presented and
+/// the action from the operation it named.
+fn not_authorized_without_a_resource(principal: &str, action: &str) -> AccessDeniedException {
+    AccessDeniedException {
+        message: Some(format!(
+            "User: {principal} is not authorized to perform: {action}"
         )),
     }
 }

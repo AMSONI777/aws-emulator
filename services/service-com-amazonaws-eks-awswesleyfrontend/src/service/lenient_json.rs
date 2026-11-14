@@ -54,7 +54,11 @@ use super::lenient_scalars::{
 /// nested walks hand each level a `&mut dyn ShapeDeserializer`, and both have to
 /// wear the same wrapper — so the wrapper is generic over this, and the forwarding
 /// body below is written once.
-trait InnerDeserializer {
+///
+/// Visible to the rest of [`super`] because a wrapper is not always a coercing one:
+/// [`super::body_binding`] wears the same two cases to read a body's SHAPE, and one
+/// forwarding pair serves both.
+pub(super) trait InnerDeserializer {
     fn get(&mut self) -> &mut dyn ShapeDeserializer;
     fn peek(&self) -> &dyn ShapeDeserializer;
 }

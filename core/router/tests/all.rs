@@ -3395,3 +3395,9 @@ mod cloudformation_s3tables_table_bucket_maintenance;
 // build, and each suite is declared exactly ONCE, which
 // `all/all_rs_declares_each_suite_once.rs` checks for this file and for every service crate's
 // `tests/all.rs`.)
+// leaving a note here. (An inner doc comment is legal only at the head of the file, so
+// this note is an ordinary comment where it stands.)
+// leaving a note here. (An inner doc comment is legal only before the first item, so this
+// note stands as ordinary comments where it was appended.)
+// this file and for every service crate's `tests/all.rs`. (Ordinary comment: an inner doc
+// comment appended after an item is `E0753`.)

@@ -53,6 +53,8 @@ mod addon_version_records;
 mod addon_versions;
 #[path = "all/asynchronous_child_removal.rs"]
 mod asynchronous_child_removal;
+#[path = "all/authorization_before_the_body.rs"]
+mod authorization_before_the_body;
 #[path = "all/cancel_update.rs"]
 mod cancel_update;
 #[path = "all/capability_lifecycle.rs"]
