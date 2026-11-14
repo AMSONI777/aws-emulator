@@ -2790,6 +2790,12 @@ mod bedrock_agent_ingestion_populates_its_s3_vectors_index;
 // `cloudformation_scripted_queue_deploy` are each declared once in the sorted spans above: a
 // above: a module may be declared only once, and two branches landing in the same window each
 // declared it here as well.)
+// (A suite left at the top level of `tests/` fails the build. Declare each suite exactly
+// ONCE: this is one crate root, so a second `mod` for the same name is `E0428` and fails
+// every suite in this target. `all/all_rs_declares_each_suite_once.rs` checks that for
+// this file and for every service crate's `tests/all.rs`, so check there rather than
+// leaving a note here. These lines sit after the first item in this file, so they are
+// ordinary comments: an inner doc comment here is `E0753` and compiles no suite at all.)
 // suite left at the top level of `tests/` fails the build. Declare each suite exactly
 // ONCE: this is one crate root, so a second `mod` for the same name is `E0428` and fails
 // every suite in this target. `all/all_rs_declares_each_suite_once.rs` checks that for

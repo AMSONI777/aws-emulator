@@ -49,6 +49,14 @@ fn past_the_lifecycle_span() -> Duration {
     eventsv2::state::LIFECYCLE_SPAN + Duration::from_millis(250)
 }
 
+/// How long a poll for a reported lifecycle state keeps looking. Far above the
+/// service's own span, so a loaded host does not turn a waiting test into a
+/// failing one; the loop stops as soon as the condition holds.
+const POLL_DEADLINE: Duration = Duration::from_secs(60);
+
+/// How long such a poll waits before looking again.
+const POLL_INTERVAL: Duration = Duration::from_millis(20);
+
 /// A SigV4 `Authorization` header naming `region` and this service's signing
 /// name, which is how a request names both.
 fn authorization(region: &str) -> String {
@@ -196,7 +204,27 @@ impl Harness {
             .await
     }
 
-    /// Create a bus and wait out its provisioning span, so it is ACTIVE.
+    /// Wait until the bus at `arn` REPORTS `wanted`.
+    ///
+    /// Polls the condition rather than sleeping a fixed time: provisioning is
+    /// asynchronous, so the loop looks again until the bus reports that state or
+    /// [`POLL_DEADLINE`] passes.
+    async fn await_bus_state(&self, case: &str, arn: &str, wanted: &str) {
+        let deadline = std::time::Instant::now() + POLL_DEADLINE;
+        loop {
+            let reported = self.describe(arn).await.ok().and_then(|bus| bus.state);
+            if reported.as_deref() == Some(wanted) {
+                return;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "case {case:?}: the bus never reported {wanted:?}, last reported {reported:?}"
+            );
+            tokio::time::sleep(POLL_INTERVAL).await;
+        }
+    }
+
+    /// Create a bus and wait for it to report ACTIVE, so it accepts events.
     async fn active_bus(&self, name: &str) -> String {
         let created = self
             .create(CreateEventBusInput {
@@ -205,10 +233,11 @@ impl Harness {
             })
             .await
             .unwrap_or_else(|e| panic!("case {name:?}: CreateEventBus must succeed, got {e:?}"));
-        tokio::time::sleep(past_the_lifecycle_span()).await;
-        created
+        let arn = created
             .event_bus_arn
-            .unwrap_or_else(|| panic!("case {name:?}: CreateEventBus must report an EventBusArn"))
+            .unwrap_or_else(|| panic!("case {name:?}: CreateEventBus must report an EventBusArn"));
+        self.await_bus_state(name, &arn, "ACTIVE").await;
+        arn
     }
 }
 
@@ -1043,7 +1072,7 @@ async fn put_events_answers_positionally_and_counts_its_failures() {
             if source.starts_with("aws.") {
                 assert_eq!(
                     r.error_code.as_deref(),
-                    Some("InvalidArgument"),
+                    Some("ValidationError"),
                     "case {case:?}: entry {position} is reserved, so it must carry an ErrorCode, got {r:?}"
                 );
                 assert!(
@@ -1159,8 +1188,8 @@ async fn any_entry_time_either_publishes_or_is_refused_in_its_own_position() {
         } else {
             assert_eq!(
                 answered.error_code.as_deref(),
-                Some("InvalidArgument"),
-                "case {case:?}: a refused Time is an argument error, got {answered:?}"
+                Some("ValidationError"),
+                "case {case:?}: a refused Time is a value the service does not admit, got {answered:?}"
             );
         }
 
@@ -1722,7 +1751,9 @@ async fn the_stored_event_log_stays_within_retention_and_the_cap() {
         .event_bus_arn
         .clone()
         .expect("CreateEventBus must report an EventBusArn");
-    tokio::time::sleep(past_the_lifecycle_span()).await;
+    // Wait for the CONDITION the publish needs — the bus reporting ACTIVE —
+    // rather than for a duration.
+    harness.await_bus_state("retention", &arn, "ACTIVE").await;
     harness
         .put_events(PutEventsInput {
             event_bus_arn: arn.clone(),
@@ -1849,13 +1880,15 @@ async fn the_stored_event_log_stays_within_retention_and_the_cap() {
     let content_based = Some(DeduplicationConfiguration {
         deduplication_type: "CONTENT_BASED".to_string(),
     });
-    let first_detail = "{\"n\":0-0}".to_string();
+    // Each payload is a JSON document, as `Detail` documents it must be, and
+    // distinct per entry so content-based deduplication indexes every one.
+    let first_detail = "{\"n\":\"0-0\"}".to_string();
     for call in 0..calls {
         let result = harness
             .put_events(PutEventsInput {
                 event_bus_arn: indexed.clone(),
                 entries: (0..batch)
-                    .map(|i| entry("demo.app", "Indexed", Some(&format!("{{\"n\":{call}-{i}}}"))))
+                    .map(|i| entry("demo.app", "Indexed", Some(&format!("{{\"n\":\"{call}-{i}\"}}"))))
                     .collect(),
                 deduplication_configuration: content_based.clone(),
             })

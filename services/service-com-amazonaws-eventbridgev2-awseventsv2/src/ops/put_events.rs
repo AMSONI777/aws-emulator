@@ -2,7 +2,9 @@
 
 //! @op PutEvents
 //! Implemented: appends each accepted entry to the target bus's event log, and
-//! delivers it to every subscriber of that bus the entry is owed to.
+//! delivers it to every subscriber of that bus the entry is owed to. An entry
+//! that breaks a constraint its own members document is refused in its own
+//! position instead, and counted in `FailedEntryCount`.
 //!
 //! ## Shape of an operation
 //!
@@ -212,9 +214,7 @@ fn publish(
 
     let Some(bus) = state.bus(&input.event_bus_arn) else {
         return Err(PutEventsErrorModeled::ResourceNotFoundException(
-            ResourceNotFoundException {
-                message: Some(format!("event bus {} does not exist", input.event_bus_arn)),
-            },
+            crate::state::event_bus_not_found(&input.event_bus_arn),
         )
         .into());
     };
@@ -248,16 +248,26 @@ fn publish(
         // entry is reported in its own position and is NOT published, which
         // is what makes `FailedEntryCount` a count rather than a constant.
         if entry.source.starts_with(RESERVED_SOURCE_PREFIX) {
-            entries.push(PutEventsResultEntry {
-                event_id: None,
-                sequence_number: None,
-                success_code: None,
-                error_code: Some(INVALID_ARGUMENT.to_string()),
-                error_message: Some(format!(
-                    "Source must not start with the service-reserved prefix \
-                     '{RESERVED_SOURCE_PREFIX}'"
-                )),
-            });
+            entries.push(refused(
+                VALIDATION_ERROR,
+                // The prefix names itself in the message, so the sentence and
+                // the value it is about cannot drift apart.
+                &format!("Source must not start with the reserved prefix {RESERVED_SOURCE_PREFIX}"),
+            ));
+            continue;
+        }
+
+        // "The event payload, as a valid JSON string" — the `Detail` member's
+        // own documentation. The payload is read BEFORE the event is stored, so
+        // an entry whose `Detail` is not one is refused in its own position
+        // rather than admitted to the log and later delivered. An absent
+        // `Detail` is not a payload at all and carries no such constraint.
+        if entry
+            .detail
+            .as_deref()
+            .is_some_and(|detail| !is_json_payload(detail))
+        {
+            entries.push(refused(MALFORMED_DETAIL, MALFORMED_DETAIL_MESSAGE));
             continue;
         }
 
@@ -298,15 +308,10 @@ fn publish(
             Some(sent) => match crate::state::from_date_time(sent) {
                 Some(time) => time,
                 None => {
-                    entries.push(PutEventsResultEntry {
-                        event_id: None,
-                        sequence_number: None,
-                        success_code: None,
-                        error_code: Some(INVALID_ARGUMENT.to_string()),
-                        error_message: Some(
-                            "Time is outside the range of representable instants".to_string(),
-                        ),
-                    });
+                    entries.push(refused(
+                        VALIDATION_ERROR,
+                        "Time is outside the range of representable instants",
+                    ));
                     continue;
                 }
             },
@@ -374,13 +379,53 @@ const PUBLISHED: &str = "PUBLISHED";
 /// not re-published". The other entry of [`SUCCESS_CODE_VALUES`].
 const DEDUPLICATED: &str = "DEDUPLICATED";
 
-/// The `ErrorCode` a refused entry carries.
+/// The `ErrorCode` an entry refused for the VALUE of one of its members
+/// carries — `ErrorCode` is documented as "Error code identifying why a publish
+/// batch entry failed", and this is the code the service identifies a failed
+/// value constraint by.
 ///
 /// `PutEventsResultEntry$ErrorCode` is a free-form string in the model (no enum
-/// enumerates the per-entry codes), so this is named once here rather than
-/// written at each refusal, which is what keeps the two refusal paths reporting
-/// the same code.
-const INVALID_ARGUMENT: &str = "InvalidArgument";
+/// enumerates the per-entry codes), so each code is named once here rather than
+/// written at every refusal, which is what keeps the refusal paths of one class
+/// reporting the same code.
+const VALIDATION_ERROR: &str = "ValidationError";
+
+/// The `ErrorCode` of the one entry-error class that is about the FORM of the
+/// payload rather than a value constraint: a `Detail` that is not the "valid
+/// JSON string" its member documents.
+const MALFORMED_DETAIL: &str = "MalformedDetail";
+
+/// The `ErrorMessage` that goes with [`MALFORMED_DETAIL`]. Fixed text: nothing
+/// of the refused payload is interpolated into it, which also keeps the
+/// `@sensitive` `Detail` out of the response.
+const MALFORMED_DETAIL_MESSAGE: &str = "Detail is not valid JSON";
+
+/// Whether `detail` is the payload `EventDetail` documents: a JSON document,
+/// and an OBJECT.
+///
+/// An object because that is what an event payload IS here: a subscriber's
+/// `DATA`-scoped filter clause names members INSIDE the payload, and a target is
+/// handed it as a document rather than as a quoted value
+/// (`crate::state::delivered_event`), so a bare scalar or a list is not a
+/// payload a subscriber could read or filter on.
+fn is_json_payload(detail: &str) -> bool {
+    ::serde_json::from_str::<::serde_json::Value>(detail)
+        .is_ok_and(|document| document.is_object())
+}
+
+/// The result of an entry the service refuses: the error half of
+/// `PutEventsResultEntry` filled in at that entry's own position, and the
+/// success half left empty — a refused entry has no `EventId`, no
+/// `SequenceNumber` and no `SuccessCode`, and is what `FailedEntryCount` counts.
+fn refused(error_code: &str, error_message: &str) -> PutEventsResultEntry {
+    PutEventsResultEntry {
+        event_id: None,
+        sequence_number: None,
+        success_code: None,
+        error_code: Some(error_code.to_string()),
+        error_message: Some(error_message.to_string()),
+    }
+}
 
 /// The deduplication key of an entry the caller deduplicates with its own
 /// token: the token itself, in its own namespace so no caller-chosen value can

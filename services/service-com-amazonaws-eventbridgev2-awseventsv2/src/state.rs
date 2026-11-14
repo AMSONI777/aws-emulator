@@ -23,7 +23,10 @@ pub use subscribers::*;
 use std::collections::BTreeMap;
 use std::time::{Duration, SystemTime};
 
-use crate::ops::types::{EncryptionConfiguration, StorageConfiguration, StorageConfigurationOutput};
+use crate::ops::types::{
+    EncryptionConfiguration, ResourceNotFoundException, StorageConfiguration,
+    StorageConfigurationOutput,
+};
 
 /// Region used when the request carries no SigV4 credential scope to read one
 /// from (an unsigned in-process call), matching the emulator's default region.
@@ -457,12 +460,43 @@ pub fn new_bus_id(seed: u64, now: SystemTime) -> String {
     base36(spread(seed, now), BUS_ID_LEN)
 }
 
-/// The `EventId` for `seed`: the same 128 bits as 32 lowercase hex digits. The
-/// modelled type is an opaque string of 1..128 characters, so what matters is
-/// that it is stable once reported and distinct per event — which it is, for
-/// the reason [`new_bus_id`] gives.
+/// The `EventId` for `seed`: the same 128 bits rendered as a hyphenated
+/// lowercase UUID (8-4-4-4-12), which is the form EventBridge assigns an event
+/// id in and so the form a client that parses or correlates one accepts.
+///
+/// Every one of the 128 bits is kept, so the id stays distinct per event for the
+/// reason [`new_bus_id`] gives: the rendering is injective and the bits are.
 pub fn new_event_id(seed: u64, now: SystemTime) -> String {
-    format!("{:032x}", spread(seed, now))
+    ::uuid::Uuid::from_u128(spread(seed, now)).to_string()
+}
+
+/// The NAME of the bus an `EventBusArn` addresses: the first segment of the
+/// resource id the modelled pattern pins as `event-busv2/<name>/<id>`.
+///
+/// `None` for a value that is not an ARN of this service's bus resource, which
+/// the modelled `@pattern` on every `EventBusArn` member already refuses before
+/// a handler runs.
+pub fn bus_name_of_arn(event_bus_arn: &str) -> Option<&str> {
+    ::service_common::arn::resource_id_of_type(event_bus_arn, ARN_RESOURCE_TYPE)?
+        .split('/')
+        .next()
+        .filter(|name| !name.is_empty())
+}
+
+/// The `ResourceNotFoundException` every bus-addressed operation answers with
+/// when the store holds no bus at the requested ARN.
+///
+/// ONE construction, so no two operations word the same refusal differently: a
+/// fixed sentence plus a single variable part, the bus NAME the request
+/// addressed. The generated id segment and the rest of the ARN are not part of
+/// the message — what a client reads back out of it is the name it asked for. A
+/// value that names no bus resource at all (which the modelled `@pattern`
+/// refuses before a handler runs) is reported as submitted rather than dropped.
+pub fn event_bus_not_found(event_bus_arn: &str) -> ResourceNotFoundException {
+    let name = bus_name_of_arn(event_bus_arn).unwrap_or(event_bus_arn);
+    ResourceNotFoundException {
+        message: Some(format!("Event bus not found: {name}")),
+    }
 }
 
 /// 128 bits for one identifier: `seed` spread over the whole range, with the

@@ -15,6 +15,8 @@
 mod event_bus_lifecycle;
 #[path = "all/event_source_lifecycle.rs"]
 mod event_source_lifecycle;
+#[path = "all/put_events_entry_results.rs"]
+mod put_events_entry_results;
 #[path = "all/state_roundtrip.rs"]
 mod state_roundtrip;
 #[path = "all/subscriber_delivery.rs"]

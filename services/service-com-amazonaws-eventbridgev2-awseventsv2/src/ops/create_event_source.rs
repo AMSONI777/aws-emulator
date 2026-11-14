@@ -207,9 +207,7 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         // take on a new source.
         let Some(bus) = state.bus(&input.event_bus_arn) else {
             return Err(CreateEventSourceErrorModeled::ResourceNotFoundException(
-                ResourceNotFoundException {
-                    message: Some(format!("event bus {} does not exist", input.event_bus_arn)),
-                },
+                crate::state::event_bus_not_found(&input.event_bus_arn),
             )
             .into());
         };
