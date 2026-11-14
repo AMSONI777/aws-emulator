@@ -35,6 +35,8 @@ mod delete_attachment_conflict;
 mod error_envelope;
 #[path = "all/generated_ingest_secrets.rs"]
 mod generated_ingest_secrets;
+#[path = "all/list_channels_failover_projection.rs"]
+mod list_channels_failover_projection;
 #[path = "all/live_stream_reads.rs"]
 mod live_stream_reads;
 #[path = "all/not_found_envelope.rs"]

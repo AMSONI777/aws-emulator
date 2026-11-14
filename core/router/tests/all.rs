@@ -3260,3 +3260,8 @@ mod apigateway_wafv2_waf_log_destination_gate;
 // crate's test target can deploy the stage and then rewrite the grant under it.
 #[path = "all/apigateway_proxy_stage_surfaces_its_handlers_envelope.rs"]
 mod apigateway_proxy_stage_surfaces_its_handlers_envelope;
+// leaving a note here. (These lines are a fragment of this file's own header that a merge
+// of two appended tails landed down here; they are ordinary comments because an inner doc
+// comment may only appear before any item.)
+// this file and for every service crate's `tests/all.rs`. (An ordinary comment: an inner
+// doc comment is only legal before the first item of a crate root.)
