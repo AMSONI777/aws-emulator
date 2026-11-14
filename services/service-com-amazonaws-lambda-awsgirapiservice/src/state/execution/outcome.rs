@@ -122,6 +122,16 @@ pub struct Finished {
     pub log: String,
     /// How long the run took.
     pub elapsed: Duration,
+    /// The MOST memory this run was measured holding, in bytes, or `None` for a run nothing
+    /// measured because nothing ran.
+    ///
+    /// Measured, never assumed: it is the greatest reading the engine running the handler
+    /// took of what the run holds of the host, from the baseline set before a line of the
+    /// run's own code was read ([`super::python`], [`super::node`]) — so it is the same
+    /// quantity the run's memory ceiling is judged on. `Some(0)` is a run that ran and faulted
+    /// no page of its own beyond that baseline, which is what a warm environment serving a
+    /// handler that allocates nothing comes to.
+    pub max_memory_bytes: Option<u64>,
 }
 
 /// What the handler wrote to its output streams, capped at the run's log budget.

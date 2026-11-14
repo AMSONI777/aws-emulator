@@ -74,6 +74,7 @@ use rquickjs::{CatchResultExt, Context, Ctx, Function, Module, Object, Runtime, 
 use super::aws_api::{Answer, AwsAccess, Refusal, MAX_CALLS_PER_RUN};
 use super::outcome::{captured, Capture};
 use super::package::PackageModule;
+use super::run_memory::Held;
 
 // What one run may spend and what it came to are the same for every engine, so they are
 // the shared ones ([`super::outcome`]) rather than this engine's own.
@@ -213,6 +214,7 @@ pub fn run_against(request: &Run<'_>, clock: &Clock) -> Finished {
         completion,
         log,
         elapsed,
+        max_memory_bytes: Some(bounds.max_memory_bytes()),
     }
 }
 
@@ -263,7 +265,11 @@ fn evaluate(request: &Run<'_>, capture: &Arc<Mutex<Capture>>, bounds: &Arc<Bound
         // host looks a zone's offset up in ([`intl`]).
         evaluate_script(&ctx, intl::INTL_SOURCE)?;
         // The runtime is installed; from here it loads the handler's module, which is the
-        // rest of the INIT phase. The runtime itself says when that phase is over, by the
+        // rest of the INIT phase. The engine is standing and nothing of the RUN's own code
+        // has been read yet, so this is where the memory the run itself takes is measured
+        // from. The host takes this baseline, never the guest.
+        bounds.measure_memory_from_here();
+        // The runtime itself says when that phase is over, by the
         // one host call that begins the invoke phase ([`install_host`]'s
         // `__hostBeginInvocation`) — so the bounds measure the handler and not the
         // environment it runs in.
@@ -273,6 +279,10 @@ fn evaluate(request: &Run<'_>, capture: &Arc<Mutex<Capture>>, bounds: &Arc<Bound
         return Completion::Internal(error);
     }
     let completion = drive(&engine, &context, bounds);
+    // One last reading of what the run holds, taken before anything of the engine is torn
+    // down: it is the handler's own work that is being measured, and the stretch of it after
+    // the last reading the driver took is this run's too.
+    bounds.sample_memory();
     // The run is over, and nothing the engine does to tear itself down is the guest's
     // work: the interrupt handler that stopped it is taken off first, so no stop lands
     // inside the engine's own teardown.
@@ -324,7 +334,7 @@ fn drive(engine: &Runtime, context: &Context, bounds: &Arc<Bounds>) -> Completio
         }
         // Read from the engine OUTSIDE the context below: the engine's own accounting is
         // not reachable while a context of it is entered.
-        if memory_exhausted(engine) {
+        if memory_exhausted(engine, bounds) {
             // The host's own reading of the memory bound, which does not depend on what
             // the guest did with the engine's refusal of an allocation.
             return Completion::Stopped(bounds.breach(Stop::Memory));
@@ -410,7 +420,12 @@ fn milliseconds(delay: f64) -> Duration {
 /// The host's own half of the memory bound: it is read between the stretches of guest work
 /// the host drives, so a run that holds the ceiling across them is stopped by the host
 /// whatever the guest did with the engine's own refusal.
-fn memory_exhausted(engine: &Runtime) -> bool {
+///
+/// What the run HOLDS is sampled here as well ([`Bounds::sample_memory`]), because this is
+/// where the host stands between two stretches of the run's own work: the figure the run is
+/// reported to have used is that sampling's greatest reading.
+fn memory_exhausted(engine: &Runtime, bounds: &Arc<Bounds>) -> bool {
+    bounds.sample_memory();
     let usage = engine.memory_usage();
     let limit = usage.malloc_limit;
     if limit <= 0 {
@@ -1045,6 +1060,10 @@ pub struct Bounds {
     stopped: Mutex<Option<Stop>>,
     /// Whether a bound was breached at all, read without taking the lock.
     breached: AtomicBool,
+    /// What this run holds of the host, measured from the instant the HOST marked as the
+    /// run's own ([`Self::measure_memory_from_here`]), which is what the run is reported to
+    /// have used ([`Self::max_memory_bytes`]).
+    held: Held,
 }
 
 impl Bounds {
@@ -1067,7 +1086,31 @@ impl Bounds {
             response_bytes: budget.response_bytes,
             stopped: Mutex::new(None),
             breached: AtomicBool::new(false),
+            held: Held::new(),
         }
+    }
+
+    /// Measure this run's memory from HERE: what its thread has faulted in now is the
+    /// baseline every later reading of the run is taken against ([`Held`]).
+    ///
+    /// Called by the HOST only ([`evaluate`]), once the engine is standing and before a line
+    /// of the run's own code has been read, so what it measures is the memory the run itself
+    /// takes and not the environment this emulator built for it.
+    fn measure_memory_from_here(&self) {
+        self.held.measure_from_here();
+    }
+
+    /// Sample what this run holds, keeping the reading if it is the greatest taken so far.
+    ///
+    /// Taken on the run's own thread, which is where the engine drives the run and where the
+    /// host stands between its stretches of work.
+    fn sample_memory(&self) {
+        self.held.sample();
+    }
+
+    /// The MOST memory this run was measured holding, in bytes ([`Held::max_bytes`]).
+    fn max_memory_bytes(&self) -> u64 {
+        self.held.max_bytes()
     }
 
     /// Begin the INVOKE phase: the handler's deadline runs from HERE, so what the bounds
@@ -1116,6 +1159,9 @@ impl Bounds {
         if self.clock.now() >= self.deadline() {
             return Some(self.breach(Stop::Deadline));
         }
+        // What the run HOLDS, sampled at the engine's own check: the figure the run is
+        // reported to have used is the greatest of these readings.
+        self.sample_memory();
         None
     }
 

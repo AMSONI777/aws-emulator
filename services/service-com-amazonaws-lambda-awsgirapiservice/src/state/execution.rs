@@ -83,6 +83,9 @@ pub use outcome::{Budget, Completion, Finished, Stop};
 pub mod run_clock;
 pub use run_clock::Clock;
 
+/// How much memory ONE run holds, as the host measures it — the reading both engines report.
+mod run_memory;
+
 /// The Python interpreter one invocation runs in, and everything that bounds and contains
 /// it.
 pub mod python;
@@ -1228,8 +1231,9 @@ fn error_document(
 /// The LOG of one run, as Lambda writes it: the invocation's start and end lines around
 /// what the handler wrote, and the report line that states what the run spent.
 ///
-/// Every number in it is measured: the duration is the run's own, and the memory is what
-/// the run was allowed to hold (see [`python`], [`node`]).
+/// Every number in it is measured: the duration is the run's own, the memory size is what
+/// the run was allowed to hold, and the memory used is the most the engine running it
+/// measured it holding (see [`python`], [`node`]).
 ///
 /// It is kept as its LINES because that is what CloudWatch Logs holds it as — one event per
 /// line ([`log_delivery`]) — and the whole text an invocation answers a log tail from is
@@ -1258,6 +1262,7 @@ impl RunLog {
 fn run_log(request_id: &str, version: &str, memory_size: i32, finished: &Finished) -> RunLog {
     let duration_ms = finished.elapsed.as_secs_f64() * 1_000.0;
     let billed_ms = duration_ms.ceil().max(1.0);
+    let used_mb = max_memory_used_mb(finished.max_memory_bytes, memory_size);
     let mut lines = vec![format!("START RequestId: {request_id} Version: {version}")];
     let opened = lines.len();
     if !finished.log.is_empty() {
@@ -1272,9 +1277,29 @@ fn run_log(request_id: &str, version: &str, memory_size: i32, finished: &Finishe
     lines.push(format!("END RequestId: {request_id}"));
     lines.push(format!(
         "REPORT RequestId: {request_id}\tDuration: {duration_ms:.2} ms\tBilled Duration: \
-         {billed_ms:.0} ms\tMemory Size: {memory_size} MB"
+         {billed_ms:.0} ms\tMemory Size: {memory_size} MB\tMax Memory Used: {used_mb} MB"
     ));
     RunLog { lines, opened }
+}
+
+/// What the report states the run USED, in whole megabytes: the memory the engine measured
+/// this run holding ([`Finished::max_memory_bytes`]), rounded up to the unit the field is
+/// stated in and never beyond the memory the function is configured for, which is all the
+/// run was allowed to hold.
+///
+/// A run that executed code HELD memory, so the smallest figure the field can state for one
+/// is the unit itself: a reading below a megabyte — which is what a warm execution
+/// environment serving a handler that allocates nothing of its own reads — is reported as
+/// that one megabyte rather than as none. A run nothing measured because nothing ran is the
+/// one case stated as no memory at all, because a figure for a run that did not happen would
+/// be one no engine took.
+fn max_memory_used_mb(max_memory_bytes: Option<u64>, memory_size: i32) -> i64 {
+    let Some(measured) = max_memory_bytes else {
+        return 0;
+    };
+    let configured = i64::from(memory_size).clamp(MIN_MEMORY_SIZE_MB, MAX_MEMORY_SIZE_MB);
+    let used = i64::try_from(measured.div_ceil(BYTES_PER_MB)).unwrap_or(configured);
+    used.clamp(1, configured)
 }
 
 /// The event text the handler is called with, or `None` for an invocation that carried no
@@ -1621,6 +1646,61 @@ mod tests {
         }
     }
 
+    /// What the closing report states the run USED: the reading rounded UP to the megabyte
+    /// the field is stated in, floored at that megabyte for a run that executed, clamped to
+    /// the memory the function is configured for, and stated as nothing at all only for a run
+    /// nothing measured.
+    ///
+    /// One row per class the rule distinguishes — no reading, a reading under the unit, one on
+    /// it, ones over it, and ones at and past the configured size — over more than one
+    /// configured size, because the ceiling the figure is clamped to is the function's own.
+    #[test]
+    fn the_report_states_the_memory_a_run_was_measured_using() {
+        // (what it is about, the reading, the configured MemorySize, the megabytes stated)
+        let cases: &[(&str, Option<u64>, i32, i64)] = &[
+            ("a run nothing measured, because nothing ran", None, 128, 0),
+            ("a run that faulted no page of its own", Some(0), 128, 1),
+            ("a reading of a single byte", Some(1), 128, 1),
+            ("a reading just under the unit", Some(BYTES_PER_MB - 1), 128, 1),
+            ("a reading of exactly the unit", Some(BYTES_PER_MB), 128, 1),
+            ("a reading just over the unit", Some(BYTES_PER_MB + 1), 128, 2),
+            ("a reading of several megabytes", Some(32 * BYTES_PER_MB), 512, 32),
+            (
+                "a reading a byte over several megabytes",
+                Some(32 * BYTES_PER_MB + 1),
+                512,
+                33,
+            ),
+            (
+                "a reading of the whole memory the function is configured for",
+                Some(128 * BYTES_PER_MB),
+                128,
+                128,
+            ),
+            (
+                "a reading past that memory, which is all the run was allowed to hold",
+                Some(129 * BYTES_PER_MB),
+                128,
+                128,
+            ),
+            (
+                "the same reading under a larger configuration",
+                Some(129 * BYTES_PER_MB),
+                256,
+                129,
+            ),
+            ("a reading past every bound", Some(u64::MAX), 256, 256),
+        ];
+        for (case, measured, memory_size, expected) in cases {
+            let actual = max_memory_used_mb(*measured, *memory_size);
+            assert_eq!(
+                actual, *expected,
+                "case {case:?} with {memory_size} MB configured: expected {expected} MB stated, \
+                 got {actual}"
+            );
+        }
+    }
+
     /// The error document carries the handler's stack under the member the function's own
     /// runtime reports it under — one row per engine.
     #[test]
@@ -1669,6 +1749,7 @@ mod tests {
                 completion: Completion::Stopped(Stop::Deadline),
                 log: String::new(),
                 elapsed: budget.wall_clock,
+                max_memory_bytes: None,
             };
             let invoked = answered(
                 finished,
@@ -1732,6 +1813,7 @@ mod tests {
                     },
                     log: String::new(),
                     elapsed: Duration::ZERO,
+                    max_memory_bytes: None,
                 };
                 let invoked = answered(
                     finished,

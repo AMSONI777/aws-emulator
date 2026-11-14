@@ -106,6 +106,7 @@ pub use super::run_clock::Clock;
 use super::aws_api::{AwsAccess, Refusal, MAX_CALLS_PER_RUN};
 use super::outcome::{captured, Capture};
 use super::package::PackageModule;
+use super::run_memory::{faulted_bytes, Held};
 
 /// The name of the module the host functions live on, as the runtime source imports it.
 const HOST_MODULE: &str = "_lambda_host";
@@ -199,9 +200,6 @@ const SUPPLIED_MODULES: &[&str] = &[HOST_MODULE, "posix"];
 /// a process-wide growth inside one bounded stretch of work and seldom enough not to
 /// dominate the run; the RUN's own memory is sampled at every event ([`Bounds::step`]).
 const STEPS_BETWEEN_PROCESS_SAMPLES: u64 = 2_048;
-
-/// The size of a page of this process's memory, which the faulted-page count is scaled by.
-const PAGE_BYTES: u64 = 4_096;
 
 /// The resident size this WHOLE process may reach while a handler is running, whatever any
 /// one run has added.
@@ -301,6 +299,9 @@ pub(super) struct Prepared {
     /// The runtime's BIND entry point, which puts the next invocation's own request on the
     /// prepared environment.
     bind: PyObjectRef,
+    /// The two mappings this environment's invocations have their own variables written into,
+    /// captured by the HOST ([`EnvironmentSinks`]).
+    environ: EnvironmentSinks,
     /// The log and the bounds the INITIALIZATION was spent against, until the invocation it
     /// was built for has been served.
     ///
@@ -379,6 +380,7 @@ impl Prepared {
                 held,
                 invoke: entries.invoke,
                 bind: entries.bind,
+                environ: entries.environ,
                 initializing: ::std::cell::RefCell::new(Some((capture, bounds))),
                 // Taken on the environment's OWN thread, which is the one every invocation
                 // served in it runs on: what it has faulted in beyond this is what the
@@ -522,11 +524,15 @@ impl Prepared {
             held,
             invoke,
             bind,
+            environ,
             initializing: _,
             faulted_at_build: _,
         } = self;
         drop(invoke);
         drop(bind);
+        // The mappings this environment wrote every invocation's variables through are the
+        // interpreter's objects, so they go before it is finalized.
+        drop(environ);
         interpreter.finalize(None);
         // Only now: the hook and this cell hold each other, so emptying it is what lets the
         // one the environment installed go.
@@ -671,6 +677,7 @@ fn settled(
         completion,
         log: captured(capture).text.clone(),
         elapsed,
+        max_memory_bytes: Some(bounds.max_memory_bytes()),
     }
 }
 
@@ -688,6 +695,9 @@ struct Entries {
     invoke: PyObjectRef,
     /// Binding the next invocation's request onto the environment.
     bind: PyObjectRef,
+    /// Where this environment's invocations have their variables written
+    /// ([`EnvironmentSinks`]).
+    environ: EnvironmentSinks,
 }
 
 /// Install the host surface, evaluate the runtime source and run the INIT phase.
@@ -699,7 +709,7 @@ fn initialize(
     bounds: &Arc<Bounds>,
     held: &TraceCell,
 ) -> PyResult<Initialized> {
-    prepare(vm, request.environment, request.budget.recursion_limit, session)?;
+    let environ = prepare(vm, request.environment, request.budget.recursion_limit, session)?;
     let scope = vm.new_scope_with_builtins();
     let code = vm
         .compile(
@@ -714,6 +724,7 @@ fn initialize(
     let entries = Entries {
         invoke: scope.globals.get_item("__lambda_invoke", vm)?,
         bind: scope.globals.get_item("__lambda_bind", vm)?,
+        environ,
     };
     let prepared = scope.globals.get_item("__lambda_prepare", vm)?;
     install_trace_hook(vm, session, held)?;
@@ -748,7 +759,7 @@ fn initialize(
 /// by the initialization, and every later invocation's REPLACE the ones of the invocation
 /// before it, so what a handler reads out of `os.environ` is its own invocation's environment
 /// (the X-Ray trace header AWS documents as changing with each invocation included) and never
-/// a variable left behind ([`install_environment`]). What the GUEST itself left in the
+/// a variable left behind ([`EnvironmentSinks::install`]). What the GUEST itself left in the
 /// interpreter, its module-level objects and whatever it cached in them, does stand: that is
 /// the reuse AWS documents.
 ///
@@ -765,7 +776,7 @@ fn served(
     bounds: &Arc<Bounds>,
     reused: bool,
 ) -> PyResult<Completion> {
-    install_environment(vm, environment, reused)?;
+    prepared.environ.install(vm, environment, reused)?;
     let bound = prepared.bind.call((vm.ctx.new_str(input.to_owned()),), vm)?;
     let bound: String = bound.try_into_value(vm)?;
     if !bound.is_empty() {
@@ -896,7 +907,7 @@ fn prepare(
     environment: &BTreeMap<String, String>,
     recursion_limit: usize,
     session: &Arc<Session>,
-) -> PyResult<()> {
+) -> PyResult<EnvironmentSinks> {
     let modules = vm.sys_module.as_object().get_attr("modules", vm)?;
     // Every allow-listed native module is created ONCE, here, so each is the single
     // patched object `sys.modules` holds from now on. Nothing is imported from a host
@@ -914,7 +925,10 @@ fn prepare(
     // the same patched `io` and the same complete `os` every later import sees, so it can
     // hold neither an unpatched way of opening a host file nor a half-built `os`.
     install_codec_registry(vm)?;
-    install_environment(vm, environment, false)?;
+    // The mappings the invocation's environment is written into, captured by the HOST while
+    // no guest code has run ([`EnvironmentSinks`]).
+    let environ = EnvironmentSinks::capture(vm)?;
+    environ.install(vm, environment, false)?;
     refuse_guest_threads(vm)?;
     clamp_guest_sleep(vm, session)?;
     // Put the host module in `sys.modules` under the name the runtime source imports it
@@ -955,72 +969,108 @@ fn prepare(
     vm.sys_module
         .as_object()
         .set_attr("builtin_module_names", vm.ctx.new_tuple(names), vm)?;
-    clamp_recursion(vm, recursion_limit)
+    clamp_recursion(vm, recursion_limit)?;
+    Ok(environ)
 }
 
-/// Install the invocation's own environment into the module `os` builds `os.environ` out
-/// of, and — for an invocation served in an environment that is already standing — into the
-/// copy `os` built for itself.
+/// WHERE an invocation's own environment is written: the two mappings a handler reads its
+/// variables out of, each captured by the HOST.
 ///
-/// Done HERE rather than from the runtime source, so the guest's environment is the
-/// host's statement of it and no Python code of this emulator's own needs an
-/// operating-system module. The mapping is the one [`super::host_posix`] created for this
-/// interpreter and starts EMPTY, so what a handler reads is the function's own variables
-/// and nothing of this process's environment. The entries are bytes, which is the form
-/// `os` decodes a POSIX environment from.
-fn install_environment(
-    vm: &VirtualMachine,
-    variables: &BTreeMap<String, String>,
-    replacing: bool,
-) -> PyResult<()> {
-    let system = vm.import("posix", 0)?;
-    let environ = system.get_attr("environ", vm)?;
-    if replacing {
-        // The variables an invocation sees are exactly the ones of its own environment: a
-        // variable the invocation before it had — or one its guest code wrote itself — is not
-        // left in the mapping for this one to read, and the variable AWS documents as
-        // changing with each invocation (the X-Ray trace header) is this invocation's.
-        let _ = vm.call_method(&environ, "clear", ());
-    }
-    for (name, value) in variables {
-        let key: PyObjectRef = vm.ctx.new_bytes(name.as_bytes().to_vec()).into();
-        let held: PyObjectRef = vm.ctx.new_bytes(value.as_bytes().to_vec()).into();
-        environ.set_item(&*key, held, vm)?;
-    }
-    if replacing {
-        replace_imported_environment(vm, variables)?;
-    }
-    Ok(())
+/// `posix.environ` is the mapping [`super::host_posix`] created for this interpreter, and
+/// `os.environ` is the copy `os` builds from it. Both objects are taken ONCE, by [`capture`]
+/// while no guest code has run, and every invocation's variables are written through the
+/// objects held here rather than through whatever those two attribute names resolve to at the
+/// time. `posix` and `os` are modules a guest can import and whose attributes it can rebind,
+/// and what a guest leaves in a standing execution environment survives into the invocations
+/// served in it after it ([`served`]) — so a sink resolved per invocation could be an object a
+/// PREVIOUS invocation put there, and the host would then write the NEXT invocation's
+/// variables into it. Holding the host's own objects is what keeps one invocation's
+/// environment out of another's reach.
+///
+/// Each attribute is re-asserted to the captured object and read back before anything is
+/// written ([`Self::held`]), so an environment whose guest rebound either name has the host's
+/// own mapping back, and one where that cannot be restored serves no invocation at all.
+struct EnvironmentSinks {
+    /// The mapping `os` builds `os.environ` out of, which starts EMPTY, so what a handler
+    /// reads is the function's own variables and nothing of this process's environment.
+    posix: PyObjectRef,
+    /// The copy `os` keeps once it has been imported. Writing through it reaches the mapping
+    /// above ([`super::host_posix`]'s `putenv`) and nothing of this process's own environment.
+    system: PyObjectRef,
 }
 
-/// Replace the mapping `os` holds, where `os` has already been imported: what a handler
-/// reads through `os.environ` is then this invocation's own environment.
-///
-/// `os` builds `os.environ` out of the module above the first time it is imported and keeps
-/// its own copy from then on, so an environment that has already served an invocation has a
-/// copy to replace as well as the mapping it was built from. Writing through that object is
-/// what keeps the two in step: each write reaches the module above ([`super::host_posix`]'s
-/// `putenv`), and reaches nothing of this process's own environment. Nothing is imported
-/// here: an environment whose guest never imported `os` has no copy to replace.
-fn replace_imported_environment(
-    vm: &VirtualMachine,
-    variables: &BTreeMap<String, String>,
-) -> PyResult<()> {
-    let modules = vm.sys_module.as_object().get_attr("modules", vm)?;
-    let name: PyObjectRef = vm.ctx.new_str("os").into();
-    let Ok(system) = modules.get_item(&*name, vm) else {
-        return Ok(());
-    };
-    let Ok(environ) = system.get_attr("environ", vm) else {
-        return Ok(());
-    };
-    let _ = vm.call_method(&environ, "clear", ());
-    for (name, value) in variables {
-        let key: PyObjectRef = vm.ctx.new_str(name.clone()).into();
-        let held: PyObjectRef = vm.ctx.new_str(value.clone()).into();
-        let _ = environ.set_item(&*key, held, vm);
+impl EnvironmentSinks {
+    /// Take both mappings, before a line of guest code is read.
+    ///
+    /// `os` is imported HERE, by the host, for the same reason: the copy it builds is captured
+    /// while nothing of the guest's has run, so the object this environment writes through is
+    /// never one guest code chose.
+    fn capture(vm: &VirtualMachine) -> PyResult<Self> {
+        Ok(Self {
+            posix: vm.import("posix", 0)?.get_attr("environ", vm)?,
+            system: vm.import("os", 0)?.get_attr("environ", vm)?,
+        })
     }
-    Ok(())
+
+    /// Install `variables` as the environment of the invocation about to be served.
+    ///
+    /// Done HERE rather than from the runtime source, so the guest's environment is the host's
+    /// statement of it and no Python code of this emulator's own needs an operating-system
+    /// module. The entries of the POSIX mapping are bytes, which is the form `os` decodes a
+    /// POSIX environment from; the copy takes the same names and values as text, which is what
+    /// a handler reads off `os.environ`.
+    ///
+    /// `replacing` is set for an invocation served in an environment that has already served
+    /// one: both mappings are CLEARED first, so the variables an invocation sees are exactly
+    /// the ones of its own environment — a variable the invocation before it had, or one its
+    /// guest code wrote itself, is not left for this one to read, and the variable AWS
+    /// documents as changing with each invocation (the X-Ray trace header) is this
+    /// invocation's.
+    fn install(
+        &self,
+        vm: &VirtualMachine,
+        variables: &BTreeMap<String, String>,
+        replacing: bool,
+    ) -> PyResult<()> {
+        self.held(vm, "posix", &self.posix)?;
+        self.held(vm, "os", &self.system)?;
+        if replacing {
+            let _ = vm.call_method(&self.posix, "clear", ());
+            let _ = vm.call_method(&self.system, "clear", ());
+        }
+        for (name, value) in variables {
+            let key: PyObjectRef = vm.ctx.new_bytes(name.as_bytes().to_vec()).into();
+            let held: PyObjectRef = vm.ctx.new_bytes(value.as_bytes().to_vec()).into();
+            self.posix.set_item(&*key, held, vm)?;
+            let key: PyObjectRef = vm.ctx.new_str(name.clone()).into();
+            let held: PyObjectRef = vm.ctx.new_str(value.clone()).into();
+            let _ = self.system.set_item(&*key, held, vm);
+        }
+        Ok(())
+    }
+
+    /// Re-assert `<module>.environ` as the mapping the host captured and read it back: the
+    /// host's own confirmation that the sink about to be written is still its own object, in
+    /// the shape [`installed_refusal`] confirms a containment patch in.
+    ///
+    /// A name a guest rebound is restored by the assertion; a name that cannot be restored is
+    /// a sink of someone else's choosing, so no invocation is served through it.
+    fn held(
+        &self,
+        vm: &VirtualMachine,
+        module: &'static str,
+        mapping: &PyObjectRef,
+    ) -> PyResult<()> {
+        let holder = vm.import(module, 0)?;
+        holder.set_attr("environ", mapping.clone(), vm)?;
+        if holder.get_attr("environ", vm)?.is(mapping) {
+            return Ok(());
+        }
+        Err(vm.new_runtime_error(format!(
+            "the environment mapping this emulator holds for {module}.environ is no longer the \
+             one it created, so no function is run in this interpreter"
+        )))
+    }
 }
 
 /// Put the standard library's CODEC REGISTRY on its feet, the way a Python interpreter's own
@@ -1837,20 +1887,15 @@ pub struct Bounds {
     memory_bytes: u64,
     /// How large the handler's response may be.
     response_bytes: usize,
-    /// This thread's faulted bytes when the run's own code was about to run, which is what
-    /// the run's own ceiling measures its growth against. Taken by
-    /// [`Self::measure_memory_from_here`], which only the HOST calls — no guest call re-takes
-    /// it, so no guest can raise the baseline it is judged against.
-    faulted_at_start: AtomicU64,
+    /// What this run holds of the host, measured from the instant the HOST marked as the
+    /// run's own ([`Self::measure_memory_from_here`]) — which is what the run's own ceiling
+    /// is judged on and what the run is reported to have used
+    /// ([`Self::max_memory_bytes`]). Only the host marks that instant, so no guest can raise
+    /// the baseline it is judged against.
+    held: Held,
     /// What this PROCESS held resident at that same instant, which is what the process
     /// ceiling measures this run's own growth against. Taken there too, for the same reason.
     resident_at_start: AtomicU64,
-    /// Whether those baselines have been taken yet ([`Self::measure_memory_from_here`]),
-    /// which is the instant from which a memory reading says something about THIS RUN — and
-    /// so the instant from which the host's own watch judges one ([`Self::watch`]). It is
-    /// taken before any of the run's own code is read, the module-level code of the
-    /// deployment package included, so no stretch of guest work falls outside the watch.
-    measured: AtomicBool,
     /// Which bound was breached, once one was. Latched: the answer to a run that spent its
     /// budget is that stop, whatever the guest does afterwards.
     stopped: Mutex<Option<Stop>>,
@@ -1884,9 +1929,8 @@ impl Bounds {
             spent: AtomicU64::new(0),
             memory_bytes: budget.memory_bytes,
             response_bytes: budget.response_bytes,
-            faulted_at_start: AtomicU64::new(faulted_bytes()),
+            held: Held::new(),
             resident_at_start: AtomicU64::new(resident_bytes()),
-            measured: AtomicBool::new(false),
             stopped: Mutex::new(None),
             breached: AtomicBool::new(false),
             spending: AtomicBool::new(false),
@@ -1903,13 +1947,11 @@ impl Bounds {
     /// not on the module the guest can reach: a run that could re-take its own baseline
     /// could hold the ceiling's worth of memory again after every call.
     fn measure_memory_from_here(&self) {
-        self.faulted_at_start
-            .store(faulted_bytes(), Ordering::Relaxed);
         self.resident_at_start
             .store(resident_bytes(), Ordering::Relaxed);
         // Last, so the host's own watch ([`Self::watch`]) never judges a run against a
         // baseline that is still the one taken when these bounds were built.
-        self.measured.store(true, Ordering::SeqCst);
+        self.held.measure_from_here();
     }
 
     /// Begin the INVOKE phase: the handler's deadline runs from HERE, so what the deadline
@@ -1979,7 +2021,7 @@ impl Bounds {
             self.breach(Stop::Deadline);
             return;
         }
-        if self.measured.load(Ordering::SeqCst) && self.past_process_ceiling() {
+        if self.held.measured() && self.past_process_ceiling() {
             self.breach(Stop::Memory);
         }
     }
@@ -2026,8 +2068,14 @@ impl Bounds {
     /// faulted pages, against what this thread had faulted when the run's own code was
     /// about to be read ([`Self::measure_memory_from_here`]).
     fn past_run_ceiling(&self) -> bool {
-        faulted_bytes().saturating_sub(self.faulted_at_start.load(Ordering::Relaxed))
-            > self.memory_bytes
+        self.held.sample() > self.memory_bytes
+    }
+
+    /// The MOST memory this run was measured holding, in bytes ([`Held::max_bytes`]).
+    ///
+    /// Called on the run's own thread, where the reading is this run's.
+    fn max_memory_bytes(&self) -> u64 {
+        self.held.max_bytes()
     }
 
     /// Whether THIS RUN has grown the whole process past [`PROCESS_RESIDENT_CEILING_BYTES`].
@@ -2072,17 +2120,6 @@ impl Bounds {
     /// How long the run has left.
     fn remaining(&self) -> Duration {
         self.deadline().saturating_duration_since(self.clock.now())
-    }
-}
-
-/// How many bytes of memory THIS thread has faulted in, as the host reports it.
-fn faulted_bytes() -> u64 {
-    match ::nix::sys::resource::getrusage(::nix::sys::resource::UsageWho::RUSAGE_THREAD) {
-        Ok(usage) => {
-            let pages = usage.minor_page_faults().saturating_add(usage.major_page_faults());
-            u64::try_from(pages).unwrap_or(0).saturating_mul(PAGE_BYTES)
-        }
-        Err(_) => 0,
     }
 }
 

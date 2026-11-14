@@ -2740,3 +2740,7 @@ mod iam_session_tag_authorization;
 // above: two branches landing in the same window appended a second declaration of it here,
 // which is a redefinition that compiled neither, so the duplicate is removed and the first
 // declaration stands.)
+// `cloudformation_provisions_cloudfront_resources` is declared in the head region above: a
+// `cloudformation_scripted_queue_deploy` are each declared once in the sorted spans above: a
+// above: a module may be declared only once, and two branches landing in the same window each
+// declared it here as well.)
