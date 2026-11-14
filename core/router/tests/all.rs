@@ -2854,3 +2854,12 @@ mod cloudformation_provisions_lambda_event_invoke_configs;
 // `cloudformation_scripted_queue_deploy` are declared ONCE each, in the spans above: a module
 // (`cognito_vended_session_is_bounded_by_its_role_policy`, `cognito_rules_role_mapping` and
 // `iam_secretsmanager_denial_envelope_by_protocol` are declared ONCE each, further up this
+// Declared HERE for the same reason its sibling above is: the X-Ray GROUP suite is the
+// other half of the same CloudFormation-to-X-Ray provisioning concern.
+#[path = "all/cloudformation_provisions_xray_groups.rs"]
+mod cloudformation_provisions_xray_groups;
+// (`cloudtrail_read_only_api_calls` is declared ONCE, in the sorted block above: a module
+// (`zz_probe` is declared ONCE, further up this file: a module may be declared only once,
+// this tail: two branches landing at once appended a second declaration of it here, and a
+// (`cloudformation_provisions_cloudfront_resources` is declared ONCE, at the end of this
+// tail: its line was restored there while two branches were landing at once, and a module

@@ -517,7 +517,7 @@ use super::template::{
     SQS_QUEUE_POLICY,
     SSM_ASSOCIATION, SSM_PARAMETER, STEP_FUNCTIONS_ACTIVITY,
     TRANSFER_SERVER, WAFV2_IP_SET, WAFV2_REGEX_PATTERN_SET, WAFV2_RULE_GROUP, WAFV2_WEB_ACL,
-    WAFV2_WEB_ACL_ASSOCIATION, WAF_REGIONAL_IP_SET, XRAY_SAMPLING_RULE,
+    WAFV2_WEB_ACL_ASSOCIATION, WAF_REGIONAL_IP_SET, XRAY_GROUP, XRAY_SAMPLING_RULE,
 };
 pub(super) use super::template::list_attribute_element;
 use super::StoredResource;
@@ -1007,6 +1007,11 @@ pub(super) enum Provisioner {
     /// `DeleteSamplingRule` deletes. X-Ray mints the `RuleARN` that type's `Ref`
     /// returns and every call on a rule can address it by.
     XraySamplingRule,
+    /// `AWS::XRay::Group`: a trace group of AWS X-Ray, which `CreateGroup` creates under
+    /// the group name the declaration states and `DeleteGroup` deletes. X-Ray mints the
+    /// `GroupARN` that type's `Ref` returns — "Ref returns the group ARN" — which is also
+    /// its one published `Fn::GetAtt` attribute and a handle every call on a group takes.
+    XrayGroup,
     /// `AWS::Config::ConfigurationRecorder`: the configuration recorder of AWS Config,
     /// which `PutConfigurationRecorder` creates under the name the template states and
     /// `DeleteConfigurationRecorder` deletes.
@@ -1179,6 +1184,7 @@ pub(super) fn provisioner_for(resource_type: &str) -> Option<Provisioner> {
         AMPLIFY_APP => Some(Provisioner::AmplifyApp),
         MWAA_ENVIRONMENT => Some(Provisioner::MwaaEnvironment),
         XRAY_SAMPLING_RULE => Some(Provisioner::XraySamplingRule),
+        XRAY_GROUP => Some(Provisioner::XrayGroup),
         CONFIG_CONFIGURATION_RECORDER => Some(Provisioner::ConfigConfigurationRecorder),
         CONFIG_DELIVERY_CHANNEL => Some(Provisioner::ConfigDeliveryChannel),
         CONFIG_CONFIG_RULE => Some(Provisioner::ConfigConfigRule),
@@ -1762,6 +1768,10 @@ impl Provisioner {
             Self::XraySamplingRule => {
                 create_sampling_rule(ctx, region, resource, propagated).await
             }
+            // `AWS::XRay::Group` publishes `Tags` as a LIST of pairs, which is the shape
+            // `CreateGroup`'s own `Tags` member takes, so a group a stack creates carries
+            // the tags CloudFormation gives it beside the ones the declaration asks for.
+            Self::XrayGroup => create_xray_group(ctx, region, resource, propagated).await,
             // `AWS::MWAA::Environment` publishes `Tags` as a MAP, which is the shape
             // `CreateEnvironment`'s own `Tags` member takes, so an environment a stack
             // creates carries the tags CloudFormation gives it beside the ones the
@@ -1882,6 +1892,9 @@ impl Provisioner {
                 // a prefix for keys; it's reserved for Amazon Web Services use") — so a
                 // sampling rule carries the stack's own tags without the three.
                 | Self::XraySamplingRule
+                // The same check guards `CreateGroup`'s own `Tags` member, so a group is in
+                // exactly that position.
+                | Self::XrayGroup
                 // Amazon MWAA refuses a tag key in the reserved namespace on every call that
                 // takes tags — `CreateEnvironment`'s `Tags` map and `TagResource` alike, in
                 // the one check its own crate's tag validation makes — so an environment
@@ -3297,6 +3310,9 @@ impl Provisioner {
             // A rule is addressed by its name or by the ARN X-Ray minted — "either name
             // or ARN, but not both" — and the ARN is this resource's physical id.
             Self::XraySamplingRule => delete_sampling_rule(ctx, region, resource).await,
+            // A group is addressed by its name or by the ARN X-Ray minted, and the ARN is
+            // this resource's physical id.
+            Self::XrayGroup => delete_xray_group(ctx, region, resource).await,
             // Each of the three AWS Config types is addressed by its own name, which is
             // this resource's physical id.
             Self::ConfigConfigurationRecorder => {
@@ -3792,6 +3808,8 @@ impl Provisioner {
             // X-Ray publishes no read of ONE sampling rule, so the rule is read out of the
             // account's own listing, by the identity that service minted for it.
             Self::XraySamplingRule => describe_sampling_rule(ctx, region, resource).await,
+            // X-Ray's own read of ONE group, by the identity that service minted for it.
+            Self::XrayGroup => describe_xray_group(ctx, region, resource).await,
             // AWS Config's own reads of the three resources, each by the name it was
             // created under.
             Self::ConfigConfigurationRecorder => {
@@ -3850,6 +3868,10 @@ mod data_and_storage;
 mod iam_identities;
 mod application_services;
 mod platform_services;
+/// The AWS X-Ray GROUP arms, beside the sampling-rule arms of the same service in
+/// [`platform_services`]: a group's identity is an ARN X-Ray draws per group, so its create,
+/// delete and read are their own concern.
+mod xray_groups;
 mod route53_policies;
 /// The FLEET types a stack launches instances with — the Amazon EC2 launch template and the
 /// Auto Scaling group that launches from one: visible to the rest of this service's state
@@ -3881,6 +3903,7 @@ use compute_fleet::*;
 pub(crate) use network_and_delivery::*;
 use s3_table_buckets::*;
 use platform_services::*;
+use xray_groups::*;
 use route53_policies::*;
 pub(crate) use application_services::*;
 use cloudwatch_alarms::*;

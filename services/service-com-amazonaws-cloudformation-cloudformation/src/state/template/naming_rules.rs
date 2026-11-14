@@ -371,6 +371,10 @@ pub(super) fn naming_rules(resource_type: &str) -> Option<NameRules> {
         // already inside — letters, digits and the hyphen are all admitted — but is far
         // shorter than one may be.
         XRAY_SAMPLING_RULE => rules(32, Characters::AsGenerated),
+        // AWS X-Ray `CreateGroup.GroupName`: `GroupName`, `@length(min: 1, max: 32)`
+        // (X-Ray's own Smithy model) — the same bound a sampling rule's name carries, and
+        // one a generated name is already inside the characters of but far longer than.
+        XRAY_GROUP => rules(32, Characters::AsGenerated),
         _ => None,
     }
 }
