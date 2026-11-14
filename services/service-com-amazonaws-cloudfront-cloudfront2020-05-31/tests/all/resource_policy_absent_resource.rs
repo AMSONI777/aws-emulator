@@ -5,27 +5,27 @@
 //!
 //! Every assertion goes through the router, so each case exercises routing, restXml
 //! (de)serialization, the handler, the persisted state and serialization — the same path a
-//! client takes. The rule under test: each of the three operations resolves its `ResourceArn`
-//! against the store before it judges the resource TYPE, so the surface answers one of three
-//! ways and never confuses two of them:
+//! client takes. The rule under test: each of the three operations judges its `ResourceArn`
+//! as an ARGUMENT before it resolves it against the store, so the surface answers one of
+//! three ways and never confuses two of them:
 //!
 //! * a value that is no ARN at all cannot be read as one, so it is refused on its FORM —
 //!   HTTP 400 `InvalidArgument` with [`MALFORMED_ARN_MESSAGE`];
-//! * an ARN this service holds no resource for is reported ABSENT — HTTP 404 `EntityNotFound`
-//!   with [`NO_SUCH_RESOURCE_MESSAGE`], the sentence CloudFront answers for that class —
-//!   whatever resource type the ARN names, the type this surface attaches policies to
-//!   included, since there is no resource to attach a policy to, read one from or remove one
-//!   from;
-//! * an ARN naming a resource this service DOES hold, of a type that takes no resource
-//!   policy, is refused on that TYPE — HTTP 400 `InvalidArgument`, worded as each operation
-//!   words it (the two WRITES name the resource type they want,
+//! * an ARN whose resource part names any type other than the one this surface attaches
+//!   policies to is refused on that TYPE — HTTP 400 `InvalidArgument`, worded as each
+//!   operation words it (the two WRITES name the resource type they want,
 //!   [`INVALID_RESOURCE_POLICY_RESOURCE_TYPE_MESSAGE`]; the READ demands a usable ARN,
-//!   [`INVALID_RESOURCE_POLICY_ARN_MESSAGE`]).
+//!   [`INVALID_RESOURCE_POLICY_ARN_MESSAGE`]) — whether or not this service holds a resource
+//!   of that type, since the type a parameter names is a property of the value submitted;
+//! * an ARN of the ACCEPTED type naming no resource this service holds is reported ABSENT —
+//!   HTTP 404 `EntityNotFound` with [`NO_SUCH_RESOURCE_MESSAGE`], the sentence CloudFront
+//!   answers for that class — since a policy is attached TO a resource, so the resource has
+//!   to exist first.
 //!
-//! The rows differ along what the rule generalises over: whether the resource the ARN names
-//! EXISTS, how this emulator holds it (a kind that mints an ARN of its own, a kind addressed
-//! by the id its own routes use, and a policy AWS publishes rather than the account), the
-//! resource type the ARN names (every type this service mints an ARN for), the ARN's
+//! The rows differ along what the rule generalises over: the resource type the ARN names
+//! (every type this service mints an ARN for), whether the resource the ARN names EXISTS, how
+//! this emulator holds it (a kind that mints an ARN of its own, a kind addressed by the id
+//! its own routes use, and a policy AWS publishes rather than the account), the ARN's
 //! partition, region and account segments, the form of the resource id, the service the ARN
 //! names, and which of the three operations asks.
 //!
@@ -54,9 +54,10 @@ use crate::resource_policy_lifecycle::{
 enum Expected {
     /// The FORM refusal: the value is no ARN at all.
     Malformed,
-    /// The EXISTENCE answer: this service holds no resource the ARN names.
+    /// The EXISTENCE answer: the ARN names the accepted type and this service holds no
+    /// resource it names.
     Absent,
-    /// The TYPE refusal: the resource is there and takes no resource policy.
+    /// The TYPE refusal: the ARN names another resource type, held or not.
     WrongType,
 }
 
@@ -189,8 +190,9 @@ async fn the_resource_policy_surface_tells_an_absent_resource_from_a_type_it_ref
         .collect();
 
     // Every resource type this service mints an ARN for, each naming a resource the store
-    // holds none of: the ANSWER is the absent one, whatever the type — the one this surface
-    // attaches policies to included, since a policy is attached TO a resource.
+    // holds none of: the type the ARN names is read off the ARN, so every type but the
+    // accepted one is the TYPE refusal, and the accepted one — which the store holds nothing
+    // for here — is the absent answer.
     rows.extend(
         TAGGABLE_RESOURCE_TYPES
             .iter()
@@ -199,65 +201,108 @@ async fn the_resource_policy_surface_tells_an_absent_resource_from_a_type_it_ref
                 (
                     format!("an absent {kind}"),
                     format!("arn:aws:cloudfront::{ACCOUNT_ID}:{kind}/absent-resource"),
-                    Expected::Absent,
+                    if *kind == RESOURCE_POLICY_RESOURCE_TYPE {
+                        Expected::Absent
+                    } else {
+                        Expected::WrongType
+                    },
                 )
             }),
     );
 
+    // The accepted type under segments no stored resource carries, and resource ids of other
+    // forms: what resolves a resource is the ARN it was minted with, so none of these names
+    // one — and each is still an ARN of the type the surface accepts, so each is the absent
+    // answer rather than the type refusal.
+    let accepted_elsewhere = [
+        (
+            "the accepted type in another partition".to_string(),
+            format!(
+                "arn:aws-cn:cloudfront::{ACCOUNT_ID}:{RESOURCE_POLICY_RESOURCE_TYPE}/vo-absent"
+            ),
+        ),
+        (
+            "the accepted type under another account".to_string(),
+            format!("arn:aws:cloudfront::111122223333:{RESOURCE_POLICY_RESOURCE_TYPE}/vo-absent"),
+        ),
+        (
+            "the accepted type with the region segment filled".to_string(),
+            format!(
+                "arn:aws:cloudfront:us-east-1:{ACCOUNT_ID}:{RESOURCE_POLICY_RESOURCE_TYPE}/vo-absent"
+            ),
+        ),
+        (
+            "the accepted type with a one-character id".to_string(),
+            format!("arn:aws:cloudfront::{ACCOUNT_ID}:{RESOURCE_POLICY_RESOURCE_TYPE}/7"),
+        ),
+        (
+            "the accepted type with an id carrying separators".to_string(),
+            format!(
+                "arn:aws:cloudfront::{ACCOUNT_ID}:{RESOURCE_POLICY_RESOURCE_TYPE}/vo.absent_9-x"
+            ),
+        ),
+    ];
+    rows.extend(
+        accepted_elsewhere
+            .into_iter()
+            .map(|(case, arn)| (case, arn, Expected::Absent)),
+    );
+
     // The same resource part as a row that EXISTS, under segments no stored resource carries:
-    // what resolves a resource is the ARN it was minted with, so neither of these names it.
+    // the type is still a distribution's, so what refuses these is the TYPE rather than the
+    // store.
     let (_, distribution_arn, _) = rows[0].clone();
     rows.push((
         "an existing distribution's resource part in the other partition".to_string(),
         distribution_arn.replacen("arn:aws:", "arn:aws-cn:", 1),
-        Expected::Absent,
+        Expected::WrongType,
     ));
     rows.push((
         "an existing distribution's resource part under another account".to_string(),
         distribution_arn.replacen(ACCOUNT_ID, "111122223333", 1),
-        Expected::Absent,
+        Expected::WrongType,
     ));
 
     rows.extend([
         (
             "an ARN of another service naming the accepted type".to_string(),
             format!("arn:aws:ec2:us-east-1:{ACCOUNT_ID}:{RESOURCE_POLICY_RESOURCE_TYPE}/vo-1"),
-            Expected::Absent,
+            Expected::WrongType,
         ),
         (
             "an ARN of another service entirely".to_string(),
             "arn:aws:s3:::absent-resource-suite-bucket".to_string(),
-            Expected::Absent,
+            Expected::WrongType,
         ),
         (
             "an ARN with no partition".to_string(),
             format!("arn::cloudfront::{ACCOUNT_ID}:{RESOURCE_POLICY_RESOURCE_TYPE}/vo-1"),
-            Expected::Absent,
+            Expected::WrongType,
         ),
         (
             "an ARN carrying no resource part".to_string(),
             format!("arn:aws:cloudfront::{ACCOUNT_ID}:"),
-            Expected::Absent,
+            Expected::WrongType,
         ),
         (
             "a bare ARN prefix".to_string(),
             "arn:".to_string(),
-            Expected::Absent,
+            Expected::WrongType,
         ),
         (
             "an ARN naming the accepted type with no id".to_string(),
             format!("arn:aws:cloudfront::{ACCOUNT_ID}:{RESOURCE_POLICY_RESOURCE_TYPE}"),
-            Expected::Absent,
+            Expected::WrongType,
         ),
         (
             "an ARN naming the accepted type with an empty id".to_string(),
             format!("arn:aws:cloudfront::{ACCOUNT_ID}:{RESOURCE_POLICY_RESOURCE_TYPE}/"),
-            Expected::Absent,
+            Expected::WrongType,
         ),
         (
             "an ARN whose resource type merely starts with the accepted one".to_string(),
             format!("arn:aws:cloudfront::{ACCOUNT_ID}:{RESOURCE_POLICY_RESOURCE_TYPE}-group/vo-1"),
-            Expected::Absent,
+            Expected::WrongType,
         ),
         (
             "a value that is no ARN at all".to_string(),

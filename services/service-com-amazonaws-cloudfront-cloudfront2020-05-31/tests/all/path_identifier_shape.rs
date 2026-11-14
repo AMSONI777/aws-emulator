@@ -47,10 +47,11 @@ use smithy_server_runtime::MultiServiceRouter;
 
 use service_com_amazonaws_cloudfront_cloudfront2020_05_31::state::{
     id_format_invalid_message, DISTRIBUTION_TENANT_ID_PREFIX, INVALID_IF_MATCH_VERSION_MESSAGE,
-    NO_SUCH_KEY_GROUP_MESSAGE,
+    IP_ADDRESS_TYPE_IPV6, NO_SUCH_KEY_GROUP_MESSAGE,
 };
 
 use crate::anycast_ip_list_lifecycle::{create_anycast_ip_list, get_anycast_ip_list, Create};
+use crate::anycast_ip_list_update::update_anycast_ip_list;
 use crate::continuous_deployment_policies::{create_policy, policy_table, staged};
 use crate::distribution_lifecycle::{call, config, emulator, Answer, API_VERSION};
 use crate::distribution_tenant_lifecycle::multi_tenant_distribution;
@@ -82,6 +83,7 @@ const INVALIDATION_ID: &str = "I1111111111111";
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Op {
     GetAnycastIpList,
+    UpdateAnycastIpList,
     DeleteDistributionTenant,
     UpdateDistributionTenant,
     AssociateDistributionTenantWebAcl,
@@ -97,6 +99,7 @@ impl Op {
     fn kind(self) -> Kind {
         match self {
             Self::GetAnycastIpList => Kind::AnycastIpList,
+            Self::UpdateAnycastIpList => Kind::AnycastIpList,
             Self::GetKeyGroup => Kind::KeyGroup,
             _ => Kind::DistributionTenant,
         }
@@ -156,6 +159,7 @@ enum Kind {
 /// Every operation under the shape rule, in the order the suite reports them.
 const OPS: &[Op] = &[
     Op::GetAnycastIpList,
+    Op::UpdateAnycastIpList,
     Op::DeleteDistributionTenant,
     Op::UpdateDistributionTenant,
     Op::AssociateDistributionTenantWebAcl,
@@ -172,6 +176,14 @@ const OPS: &[Op] = &[
 async fn call_op(router: &MultiServiceRouter, op: Op, id: &str, version: &str) -> Answer {
     match op {
         Op::GetAnycastIpList => get_anycast_ip_list(router, id).await,
+        // The update of the same resource reads the identifier the same way its read does,
+        // and does it before the `If-Match` the mutation runs under: the header here is the
+        // live list's current version, so nothing but the identifier can be what a refusal is
+        // about.
+        Op::UpdateAnycastIpList => {
+            update_anycast_ip_list(router, id, Some(version), Some(IP_ADDRESS_TYPE_IPV6), None)
+                .await
+        }
         Op::DeleteDistributionTenant => {
             call(
                 router,

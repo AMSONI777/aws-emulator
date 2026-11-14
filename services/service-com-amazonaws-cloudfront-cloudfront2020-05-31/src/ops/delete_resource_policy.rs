@@ -8,16 +8,17 @@
 //! `GetResourcePolicy` on that ARN answers not-found until another write attaches one.
 //!
 //! The surface attaches policies to ONE resource type
-//! ([`crate::state::RESOURCE_POLICY_RESOURCE_TYPE`]), and the `ResourceArn` is resolved
-//! against the store before anything is removed
+//! ([`crate::state::RESOURCE_POLICY_RESOURCE_TYPE`]), and the `ResourceArn` is judged as an
+//! ARGUMENT before it is resolved against the store and before anything is removed
 //! ([`crate::state::resource_policy_arn_refusal`]): a value that is no ARN at all is refused
-//! on its form, 400 `InvalidArgument`; an ARN this service holds no resource for is reported
-//! ABSENT, 404 `EntityNotFound` ([`crate::state::resource_policy_resource_absent`]), since
-//! there is no resource to remove a policy from; and an ARN of a resource this service DOES
-//! hold whose type takes no resource policy is a bad PARAMETER, refused 400 `InvalidArgument`
-//! on the resource type it names — which this WRITE words as the resource type it demands, as
-//! the surface's other write does
-//! ([`crate::state::INVALID_RESOURCE_POLICY_RESOURCE_TYPE_MESSAGE`]).
+//! on its form, 400 `InvalidArgument`; an ARN naming any other resource type is a bad
+//! PARAMETER, refused 400 `InvalidArgument` on the resource type it names whatever the store
+//! holds for it — which this WRITE words as the resource type it demands, as the surface's
+//! other write does
+//! ([`crate::state::INVALID_RESOURCE_POLICY_RESOURCE_TYPE_MESSAGE`]); and an ARN of the
+//! accepted type that names no resource this service holds is reported ABSENT, 404
+//! `EntityNotFound` ([`crate::state::resource_policy_resource_absent`]), since there is no
+//! resource to remove a policy from.
 //! An ARN the surface does accept, carrying no policy, is 404 `EntityNotFound`: there is
 //! nothing to remove, so the store is left exactly as it was.
 //!
@@ -182,11 +183,12 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         };
         let _ = ctx;
 
-        // The ARN is resolved against the store before anything is removed: a value that is
-        // no ARN at all is refused on its form, an ARN this service holds no resource for is
-        // reported ABSENT, and an ARN of a resource it does hold that takes no resource
-        // policy is refused on the type it names — each with the sentence this operation
-        // words that condition in, and the store is left exactly as it was.
+        // The ARN is judged as an ARGUMENT before anything is removed: a value that is no
+        // ARN at all is refused on its form, an ARN naming any other resource type is
+        // refused on the type it names, and only an ARN of the accepted type is resolved
+        // against the store, where one naming nothing is reported ABSENT — each with the
+        // sentence this operation words that condition in, and the store is left exactly as
+        // it was.
         let mut store = state.lock();
         if let Some(refusal) =
             crate::state::resource_policy_arn_refusal(&store, &input.resource_arn)

@@ -8,14 +8,15 @@
 //! the first rather than adding a second policy beside it.
 //!
 //! The surface attaches policies to ONE resource type
-//! ([`crate::state::RESOURCE_POLICY_RESOURCE_TYPE`]), and the `ResourceArn` is resolved
-//! against the store before anything is written
+//! ([`crate::state::RESOURCE_POLICY_RESOURCE_TYPE`]), and the `ResourceArn` is judged as an
+//! ARGUMENT before it is resolved against the store and before anything is written
 //! ([`crate::state::resource_policy_arn_refusal`]): a value that is no ARN at all is refused
-//! on its form, 400 `InvalidArgument`; an ARN this service holds no resource for is reported
-//! ABSENT, 404 `EntityNotFound` ([`crate::state::resource_policy_resource_absent`]), since
-//! there is no resource to attach a policy to; and an ARN of a resource this service DOES
-//! hold whose type takes no resource policy is a bad PARAMETER, refused 400 `InvalidArgument`
-//! on the resource type it names.
+//! on its form, 400 `InvalidArgument`; an ARN naming any other resource type is a bad
+//! PARAMETER, refused 400 `InvalidArgument` on the resource type it names whatever the store
+//! holds for it; and an ARN of the accepted type that names no resource this service holds is
+//! reported ABSENT, 404 `EntityNotFound`
+//! ([`crate::state::resource_policy_resource_absent`]), since there is no resource to attach
+//! a policy to.
 //!
 //! ## Shape of an operation
 //!
@@ -160,11 +161,12 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         };
         let _ = ctx;
 
-        // The ARN is resolved against the store before anything is written: a value that is
-        // no ARN at all is refused on its form, an ARN this service holds no resource for is
-        // reported ABSENT, and an ARN of a resource it does hold that takes no resource
-        // policy is refused on the type it names — each with the sentence this operation
-        // words that condition in, and the store is left exactly as it was.
+        // The ARN is judged as an ARGUMENT before anything is written: a value that is no
+        // ARN at all is refused on its form, an ARN naming any other resource type is
+        // refused on the type it names, and only an ARN of the accepted type is resolved
+        // against the store, where one naming nothing is reported ABSENT — each with the
+        // sentence this operation words that condition in, and the store is left exactly as
+        // it was.
         let mut store = state.lock();
         if let Some(refusal) =
             crate::state::resource_policy_arn_refusal(&store, &input.resource_arn)

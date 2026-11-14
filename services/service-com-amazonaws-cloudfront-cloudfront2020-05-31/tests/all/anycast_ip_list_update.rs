@@ -19,10 +19,12 @@
 //! * an update is a mutation: it mints a fresh version token, so the token the caller
 //!   matched on no longer satisfies an `If-Match`, and the list re-enters its transient
 //!   status with the CLOCK owing it the terminal one;
-//! * an id no list carries is `EntityNotFound` (404) whatever its shape — this operation's
-//!   own recorded answer, which differs from the read's — an `If-Match` that is no version
-//!   token is `InvalidIfMatchVersion` (400) and one that is not the current version is
-//!   `PreconditionFailed` (412) — and each refusal leaves the list exactly as it was.
+//! * an id this operation cannot read is `InvalidArgument` (400) — the same argument failure
+//!   the read of the same resource answers, decided before the store and before the
+//!   precondition — while an id it CAN read that no list carries is `EntityNotFound` (404),
+//!   an `If-Match` that is no version token is `InvalidIfMatchVersion` (400) and one that is
+//!   not the current version is `PreconditionFailed` (412) — and each refusal leaves the list
+//!   exactly as it was.
 //!
 //! The rows differ along what those rules generalise over: the address type the list was
 //! created with and the one it is updated to (every ordered pair the model's enum admits,
@@ -34,8 +36,9 @@
 //! builder) is the [`crate::anycast_ip_list_lifecycle`] suite's, reused rather than copied.
 
 use service_com_amazonaws_cloudfront_cloudfront2020_05_31::state::{
-    ANYCAST_IP_LIST_STATUS_DEPLOYING, IPAM_CIDR_STATUS_PROVISIONED, IPAM_CIDR_STATUS_PROVISIONING,
-    IP_ADDRESS_TYPE_DUALSTACK, IP_ADDRESS_TYPE_IPV4, IP_ADDRESS_TYPE_IPV6, STATUS_DEPLOYED,
+    id_format_invalid_message, ANYCAST_IP_LIST_STATUS_DEPLOYING, IPAM_CIDR_STATUS_PROVISIONED,
+    IPAM_CIDR_STATUS_PROVISIONING, IP_ADDRESS_TYPE_DUALSTACK, IP_ADDRESS_TYPE_IPV4,
+    IP_ADDRESS_TYPE_IPV6, STATUS_DEPLOYED,
 };
 use smithy_server_runtime::MultiServiceRouter;
 
@@ -58,7 +61,10 @@ const IP_ADDRESS_TYPES: [&str; 3] = [
 ///
 /// `IpamCidrConfigList`'s member carries `xmlName` `IpamCidrConfig`, so each configuration
 /// travels in an element of that name — the same document the create submits them in.
-async fn update_anycast_ip_list(
+///
+/// `pub(crate)` so the suites that assert what this operation decides from the REQUEST reach
+/// it through this one writer rather than growing a copy of it.
+pub(crate) async fn update_anycast_ip_list(
     router: &MultiServiceRouter,
     id: &str,
     if_match: Option<&str>,
@@ -477,19 +483,24 @@ async fn an_update_is_refused_on_an_absent_list_and_on_a_version_that_is_not_cur
     let (id, etag) = created(&router, "update-refusals", Some(IP_ADDRESS_TYPE_IPV4), Vec::new())
         .await;
 
-    // An id no list carries names nothing to update, WHATEVER shape it takes: this operation
-    // resolves the id rather than reading its shape first, which is its own recorded answer
-    // and differs from the read of the same resource. The rows span the forms an unusable id
-    // takes all the same, so the one answer is asserted over the class.
+    // An id this operation CAN read that no list carries names nothing to update: the rows
+    // span the parts of such an identifier nothing in the model constrains — the namespace
+    // label, the body's width, the body's alphabet and the separator — since none of them can
+    // refuse an id, only the store knows which ones were issued.
     for (case, candidate) in [
         ("an id never minted", "ipl-00000000000000000".to_string()),
         (
             "an id of the same namespace with another body",
             "ipl-notaminted-id".to_string(),
         ),
-        ("the stored id upper-cased", id.to_uppercase()),
-        ("the list's name", "update-refusals".to_string()),
-        ("a value of no id's namespace", "not-an-id".to_string()),
+        (
+            "an id under another namespace label",
+            "aip_1A2B3C4D5E6F7G8H9J0K1L".to_string(),
+        ),
+        (
+            "a value of another namespace entirely",
+            "not-an-id".to_string(),
+        ),
     ] {
         let answer = update_anycast_ip_list(
             &router,
@@ -509,6 +520,47 @@ async fn an_update_is_refused_on_an_absent_list_and_on_a_version_that_is_not_cur
             "EntityNotFound",
             "case {case}: expected EntityNotFound, got {:?} ({})",
             answer.error_code(),
+            answer.raw
+        );
+    }
+
+    // An id this operation cannot read at all is the ARGUMENT failure, decided from the
+    // request before the store is consulted: the rows span the forms such a value takes.
+    let id_format_invalid = id_format_invalid_message("Id");
+    for (case, candidate) in [
+        ("the stored id upper-cased", id.to_uppercase()),
+        ("the list's name", "update-refusals".to_string()),
+        (
+            "the namespace label with no separator",
+            "ipl0123456789abcdef0".to_string(),
+        ),
+        ("another resource kind's id", "EDFDVBD6EXAMPLE".to_string()),
+        ("a lone separator", "-".to_string()),
+    ] {
+        let answer = update_anycast_ip_list(
+            &router,
+            &candidate,
+            Some(&etag),
+            Some(IP_ADDRESS_TYPE_IPV6),
+            None,
+        )
+        .await;
+        assert_eq!(
+            answer.status, 400,
+            "case {case}: expected HTTP 400, got {} ({})",
+            answer.status, answer.raw
+        );
+        assert_eq!(
+            answer.error_code(),
+            "InvalidArgument",
+            "case {case}: expected InvalidArgument, got {:?} ({})",
+            answer.error_code(),
+            answer.raw
+        );
+        let actual = answer.root().find_text("Message").unwrap_or_default();
+        assert_eq!(
+            actual, id_format_invalid,
+            "case {case}: expected {id_format_invalid:?}, got {actual:?} in {}",
             answer.raw
         );
     }

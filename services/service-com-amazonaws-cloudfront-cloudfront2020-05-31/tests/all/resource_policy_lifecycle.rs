@@ -12,13 +12,13 @@
 //!   refused on its FORM: HTTP 400 `InvalidArgument` with the fixed sentence
 //!   [`MALFORMED_ARN_MESSAGE`], since the value cannot be read as an ARN in the first
 //!   place;
-//! * an ARN this service holds no resource for is reported ABSENT — HTTP 404
-//!   `EntityNotFound` — whatever resource type it names, the accepted one included: a policy
-//!   is attached TO a resource, so there has to be a resource first.
-//!   [`crate::resource_policy_absent_resource`] is the table for it;
-//! * a `ResourceArn` that IS an ARN naming a resource this service HOLDS, of a type other
-//!   than the one the surface attaches policies to, is refused on the resource TYPE it
-//!   names: HTTP 400 `InvalidArgument`, decided before anything is written. The CONDITION
+//! * an ARN of the ACCEPTED resource type this service holds no resource for is reported
+//!   ABSENT — HTTP 404 `EntityNotFound`: a policy is attached TO a resource, so there has to
+//!   be a resource first. [`crate::resource_policy_absent_resource`] is the table for it;
+//! * a `ResourceArn` that IS an ARN naming any resource type other than the one the surface
+//!   attaches policies to is refused on the resource TYPE it names, whether or not this
+//!   service holds such a resource: HTTP 400 `InvalidArgument`, decided from the parsed ARN
+//!   before the store is consulted and before anything is written. The CONDITION
 //!   is one for both operations; the SENTENCE is the one each puts on the wire — the write
 //!   names the resource type it wants ([`INVALID_RESOURCE_POLICY_RESOURCE_TYPE_MESSAGE`]),
 //!   the read demands a usable ARN ([`INVALID_RESOURCE_POLICY_ARN_MESSAGE`]);
@@ -273,21 +273,26 @@ async fn an_arn_naming_an_existing_resource_of_another_type_is_an_invalid_argume
         }
     }
 
-    // Every type this service mints an ARN for, naming a resource the store holds NONE of,
-    // is the absent answer rather than this refusal: the two are told apart by the store,
-    // never by the type alone.
+    // Every type this service mints an ARN for, naming a resource the store holds NONE of:
+    // the TYPE is read off the ARN, so only the type this surface accepts reaches the absent
+    // answer and every other type is this same refusal.
     for kind in TAGGABLE_RESOURCE_TYPES.iter().chain(OTHER_RESOURCE_TYPES.iter()) {
         let arn = format!("arn:aws:cloudfront::{ACCOUNT_ID}:{kind}/absent-resource");
         let answer = get_resource_policy(&router, &arn).await;
+        let (status, code) = if *kind == RESOURCE_POLICY_RESOURCE_TYPE {
+            (404, "EntityNotFound")
+        } else {
+            (400, "InvalidArgument")
+        };
         assert_eq!(
-            answer.status, 404,
-            "case an absent {kind}: expected HTTP 404, got {} ({})",
+            answer.status, status,
+            "case an absent {kind}: expected HTTP {status}, got {} ({})",
             answer.status, answer.raw
         );
         assert_eq!(
             answer.error_code(),
-            "EntityNotFound",
-            "case an absent {kind}: expected EntityNotFound, got {:?} ({})",
+            code,
+            "case an absent {kind}: expected {code}, got {:?} ({})",
             answer.error_code(),
             answer.raw
         );
@@ -607,11 +612,13 @@ async fn a_second_write_supersedes_the_policy_the_resource_carried() {
     }
 
     // And a refused write leaves the policy the resource already carried untouched: the ARN
-    // is resolved before anything is written, so a write the surface refuses — here for a
-    // resource this service holds none of — changes nothing.
+    // is judged and resolved before anything is written, so a write the surface refuses —
+    // here for a resource of the accepted type this service holds none of — changes nothing.
     let refused = put_resource_policy(
         &router,
-        &format!("arn:aws:cloudfront::{ACCOUNT_ID}:distribution/E1REFUSED"),
+        &format!(
+            "arn:aws:cloudfront::{ACCOUNT_ID}:{RESOURCE_POLICY_RESOURCE_TYPE}/vo-refused"
+        ),
         &policy("refused"),
     )
     .await;

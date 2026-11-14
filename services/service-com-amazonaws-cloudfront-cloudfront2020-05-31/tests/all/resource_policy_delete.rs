@@ -16,12 +16,13 @@
 //!   [`RESOURCE_POLICY_NOT_FOUND_MESSAGE`] — there is nothing to remove, so a repeated
 //!   delete is refused rather than answered a second success;
 //! * a `ResourceArn` that is no ARN at all is refused on its FORM (400 `InvalidArgument`,
-//!   [`MALFORMED_ARN_MESSAGE`]); an ARN naming a resource this service HOLDS, of another
-//!   type, is refused on the resource TYPE it names (400 `InvalidArgument`,
+//!   [`MALFORMED_ARN_MESSAGE`]); an ARN naming any resource type other than the one the
+//!   surface attaches policies to is refused on that TYPE (400 `InvalidArgument`,
 //!   [`INVALID_RESOURCE_POLICY_RESOURCE_TYPE_MESSAGE`] — the sentence the surface's other
-//!   WRITE puts on the wire); and an ARN this service holds no resource for is reported
-//!   ABSENT (404 `EntityNotFound`, [`NO_SUCH_RESOURCE_MESSAGE`]), each decided before
-//!   anything is removed.
+//!   WRITE puts on the wire), whether or not this service holds such a resource; and an ARN
+//!   of the ACCEPTED type this service holds no resource for is reported ABSENT (404
+//!   `EntityNotFound`, [`NO_SUCH_RESOURCE_MESSAGE`]), each decided before anything is
+//!   removed.
 //!
 //! The rows differ along what the rule generalises over: the resource type the ARN names
 //! (every type this service mints an ARN for, and the forms an ARN can take that name none),
@@ -330,27 +331,28 @@ async fn deleting_under_an_arn_the_surface_does_not_accept_is_refused() {
         .find_text("ARN")
         .unwrap_or_default()
         .to_string();
-    let wrong_type = [(
+    let mut wrong_type = vec![(
         "an ARN naming a distribution that exists".to_string(),
         distribution_arn,
     )];
 
     // Every other resource type this service mints an ARN for, naming a resource the store
-    // holds none of, plus the ARN forms that name no resource at all: reported ABSENT, since
-    // there is no resource to remove a policy from. The type this surface DOES accept is
-    // answered by whether the ARN carries a policy, which this suite's own delete rows cover.
-    let mut absent: Vec<(String, String)> = TAGGABLE_RESOURCE_TYPES
-        .iter()
-        .chain(OTHER_RESOURCE_TYPES.iter())
-        .filter(|kind| **kind != RESOURCE_POLICY_RESOURCE_TYPE)
-        .map(|kind| {
-            (
-                format!("an ARN naming an absent {kind}"),
-                format!("arn:aws:cloudfront::{ACCOUNT_ID}:{kind}/absent-resource"),
-            )
-        })
-        .collect();
-    absent.extend([
+    // holds none of, plus the ARN forms that name no resource type at all: the TYPE is read
+    // off the ARN, so a type the surface does not attach policies to is refused on that type
+    // whether or not this service holds one of them.
+    wrong_type.extend(
+        TAGGABLE_RESOURCE_TYPES
+            .iter()
+            .chain(OTHER_RESOURCE_TYPES.iter())
+            .filter(|kind| **kind != RESOURCE_POLICY_RESOURCE_TYPE)
+            .map(|kind| {
+                (
+                    format!("an ARN naming an absent {kind}"),
+                    format!("arn:aws:cloudfront::{ACCOUNT_ID}:{kind}/absent-resource"),
+                )
+            }),
+    );
+    wrong_type.extend([
         ("a bare ARN prefix".to_string(), "arn:".to_string()),
         (
             "an ARN carrying no resource part".to_string(),
@@ -377,6 +379,39 @@ async fn deleting_under_an_arn_the_surface_does_not_accept_is_refused() {
             format!("arn:aws:cloudfront::{ACCOUNT_ID}:{RESOURCE_POLICY_RESOURCE_TYPE}/"),
         ),
     ]);
+
+    // An ARN of the type the surface DOES attach policies to, naming a resource the store
+    // holds none of: reported ABSENT, since there is no resource to remove a policy from. The
+    // rows vary the id form and the ARN's partition, region and account segments, none of
+    // which names a resource this service minted.
+    let absent: Vec<(String, String)> = vec![
+        (
+            "an ARN naming an absent resource of the accepted type".to_string(),
+            format!(
+                "arn:aws:cloudfront::{ACCOUNT_ID}:{RESOURCE_POLICY_RESOURCE_TYPE}/absent-resource"
+            ),
+        ),
+        (
+            "the accepted type in another partition".to_string(),
+            format!(
+                "arn:aws-cn:cloudfront::{ACCOUNT_ID}:{RESOURCE_POLICY_RESOURCE_TYPE}/vo-absent"
+            ),
+        ),
+        (
+            "the accepted type under another account".to_string(),
+            format!("arn:aws:cloudfront::111122223333:{RESOURCE_POLICY_RESOURCE_TYPE}/vo-absent"),
+        ),
+        (
+            "the accepted type with the region segment filled".to_string(),
+            format!(
+                "arn:aws:cloudfront:us-east-1:{ACCOUNT_ID}:{RESOURCE_POLICY_RESOURCE_TYPE}/vo-absent"
+            ),
+        ),
+        (
+            "the accepted type with a one-character id".to_string(),
+            format!("arn:aws:cloudfront::{ACCOUNT_ID}:{RESOURCE_POLICY_RESOURCE_TYPE}/7"),
+        ),
+    ];
 
     // The forms a value that is no ARN at all takes: refused on its FORM.
     let malformed: Vec<(String, String)> = vec![

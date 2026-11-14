@@ -298,6 +298,8 @@ mod realtime_log_config_list;
 mod refusal_contract;
 #[path = "all/refusal_message_fidelity.rs"]
 mod refusal_message_fidelity;
+#[path = "all/refusal_precedes_the_store.rs"]
+mod refusal_precedes_the_store;
 #[path = "all/request_supplied_order_and_values.rs"]
 mod request_supplied_order_and_values;
 #[path = "all/request_validation_limits.rs"]

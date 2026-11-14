@@ -8,15 +8,15 @@
 //! caller sees is exactly what it would have seen had this call never happened.
 //!
 //! The surface attaches policies to ONE resource type
-//! ([`crate::state::RESOURCE_POLICY_RESOURCE_TYPE`]), and the `ResourceArn` is resolved
-//! against the store before any policy is looked up
+//! ([`crate::state::RESOURCE_POLICY_RESOURCE_TYPE`]), and the `ResourceArn` is judged as an
+//! ARGUMENT before it is resolved against the store
 //! ([`crate::state::resource_policy_arn_refusal`]): a value that is no ARN at all is refused
-//! on its form, 400 `InvalidArgument`; an ARN this service holds no resource for is reported
-//! ABSENT, 404 `EntityNotFound` ([`crate::state::resource_policy_resource_absent`]); and an
-//! ARN of a resource this service DOES hold whose type takes no resource policy is a bad
-//! PARAMETER, refused 400 `InvalidArgument` — which this READ words as the demand for a
-//! usable ARN that CloudFront answers it with
-//! ([`crate::state::INVALID_RESOURCE_POLICY_ARN_MESSAGE`]).
+//! on its form, 400 `InvalidArgument`; an ARN naming any other resource type is a bad
+//! PARAMETER, refused 400 `InvalidArgument` whatever the store holds for it — which this READ
+//! words as the demand for a usable ARN that CloudFront answers it with
+//! ([`crate::state::INVALID_RESOURCE_POLICY_ARN_MESSAGE`]); and an ARN of the accepted type
+//! that names no resource this service holds is reported ABSENT, 404 `EntityNotFound`
+//! ([`crate::state::resource_policy_resource_absent`]).
 //! An ARN the surface does accept, carrying no policy, is 404 `EntityNotFound`.
 //!
 //! ## Shape of an operation
@@ -158,11 +158,11 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         };
         let _ = ctx;
 
-        // The ARN is resolved against the store before any policy lookup: a value that is no
-        // ARN at all is refused on its form, an ARN this service holds no resource for is
-        // reported ABSENT, and an ARN of a resource it does hold that takes no resource
-        // policy is refused on the type it names — each with the sentence this operation
-        // words that condition in, whether or not a policy is attached to anything.
+        // The ARN is judged as an ARGUMENT before any policy lookup: a value that is no ARN
+        // at all is refused on its form, an ARN naming any other resource type is refused on
+        // the type it names, and only an ARN of the accepted type is resolved against the
+        // store, where one naming nothing is reported ABSENT — each with the sentence this
+        // operation words that condition in, whether or not a policy is attached to anything.
         //
         // A read: the store is taken SHARED and nothing in it is written. Nothing about a
         // resource policy is owed by the CLOCK either — a policy carries no status and no
