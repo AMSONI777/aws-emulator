@@ -34,11 +34,11 @@ use crate::config_setup_and_rule_loop::{recorder_request, Emulator, ROLE_ARN};
 /// Resource types the rows use. Entries of `com.amazonaws.configservice#ResourceType`,
 /// from `smithy_query(query="shape", shape="ResourceType")`, deliberately including
 /// types no recording in the issue used.
-const EC2_VOLUME: &str = "AWS::EC2::Volume";
+pub(crate) const EC2_VOLUME: &str = "AWS::EC2::Volume";
 /// See [`EC2_VOLUME`].
-const DYNAMODB_TABLE: &str = "AWS::DynamoDB::Table";
+pub(crate) const DYNAMODB_TABLE: &str = "AWS::DynamoDB::Table";
 /// See [`EC2_VOLUME`].
-const S3_BUCKET: &str = "AWS::S3::Bucket";
+pub(crate) const S3_BUCKET: &str = "AWS::S3::Bucket";
 /// See [`EC2_VOLUME`].
 const LAMBDA_FUNCTION: &str = "AWS::Lambda::Function";
 /// See [`EC2_VOLUME`].
@@ -57,11 +57,11 @@ const LIMIT_MAX: i64 = 100;
 /// The most resource IDs one request may narrow by
 /// (`ListDiscoveredResourcesRequest$resourceIds`: "You can list a minimum of 1
 /// resourceID and a maximum of 20 resourceIds").
-const MAX_RESOURCE_IDS: usize = 20;
+pub(crate) const MAX_RESOURCE_IDS: usize = 20;
 
 /// One seeded discovered resource: its type, its id, the custom name it carries if any,
 /// and whether it has been deleted.
-struct Discovered {
+pub(crate) struct Discovered {
     resource_type: &'static str,
     resource_id: String,
     resource_name: Option<&'static str>,
@@ -69,7 +69,7 @@ struct Discovered {
 }
 
 /// A live resource of `resource_type` with no custom name.
-fn live(resource_type: &'static str, resource_id: &str) -> Discovered {
+pub(crate) fn live(resource_type: &'static str, resource_id: &str) -> Discovered {
     Discovered {
         resource_type,
         resource_id: resource_id.to_string(),
@@ -79,7 +79,11 @@ fn live(resource_type: &'static str, resource_id: &str) -> Discovered {
 }
 
 /// A live resource carrying the custom name `resource_name`.
-fn named(resource_type: &'static str, resource_id: &str, resource_name: &'static str) -> Discovered {
+pub(crate) fn named(
+    resource_type: &'static str,
+    resource_id: &str,
+    resource_name: &'static str,
+) -> Discovered {
     Discovered {
         resource_name: Some(resource_name),
         ..live(resource_type, resource_id)
@@ -102,7 +106,7 @@ fn deletion_time() -> SystemTime {
 
 /// An emulator with a configuration recorder (which a discovered-resource read needs),
 /// holding `resources` in its discovered-resource inventory.
-async fn emulator_discovering(resources: &[Discovered]) -> Emulator {
+pub(crate) async fn emulator_discovering(resources: &[Discovered]) -> Emulator {
     let emulator = Emulator::new();
     emulator
         .ok(
@@ -135,7 +139,7 @@ async fn emulator_discovering(resources: &[Discovered]) -> Emulator {
 }
 
 /// The `resourceId` of every identifier in a response, in the order reported.
-fn reported_ids(case: &str, body: &Value) -> Vec<String> {
+pub(crate) fn reported_ids(case: &str, body: &Value) -> Vec<String> {
     body["resourceIdentifiers"]
         .as_array()
         .unwrap_or_else(|| panic!("case {case:?}: expected resourceIdentifiers, got {body}"))

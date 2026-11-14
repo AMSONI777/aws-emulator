@@ -3497,3 +3497,8 @@ mod chime_deleted_meeting_tagging;
 // leaving a note here. (Ordinary comments: an inner doc comment `//!` is legal only
 // before the first item of a file, so this fragment of the header cannot keep that form
 // where a merge of two appended tails landed it.)
+// (The same header fragment again, landed by another merge of two appended tails: it
+// stands as ordinary comments because an inner doc comment may only appear before an
+// item, so a `//!` line in this tail is `E0753` and compiles no suite of this target.)
+// (Another fragment of the same appended note: an inner doc comment is only legal before
+// the first item, so this line stands as an ordinary comment — it checks this file and

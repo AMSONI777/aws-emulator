@@ -53,6 +53,11 @@ mod config_third_party_service_linked_recorder;
 // there conflicts with the next one that lands.
 #[path = "all/connector_credential_verification.rs"]
 mod connector_credential_verification;
+// Declared beside the suite whose inventory helpers it reuses, rather than appended at
+// the tail of this file: every suite that lands appends there, so a declaration added
+// there conflicts with the next one that lands.
+#[path = "all/discovered_resource_narrowing_refusal.rs"]
+mod discovered_resource_narrowing_refusal;
 #[path = "all/discovered_resources.rs"]
 mod discovered_resources;
 #[path = "all/error_message_rules.rs"]

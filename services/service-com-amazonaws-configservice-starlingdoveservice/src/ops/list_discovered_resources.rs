@@ -117,6 +117,20 @@
 #[allow(unused_imports)]
 use super::types::*;
 
+/// How Config words `ValidationException` for a discovered-resource listing that asked
+/// to be narrowed BOTH by resource ids and by a resource name
+/// (`ListDiscoveredResources`: "You can specify either resource IDs or a resource name,
+/// but not both, in the same request").
+///
+/// The model states no text for this refusal, so the sentence is RECORDED behaviour. It
+/// is entirely fixed: it names the two narrowings the way Config's own documentation
+/// does rather than by their wire member spellings, names no operation, carries no part
+/// of the request (no resource type, no id, no name) and appends no remediation step —
+/// so every occurrence of this refusal is worded identically, which is what a client
+/// branching on the sentence reads.
+pub const RESOURCE_ID_AND_NAME_EXCLUSIVE_MESSAGE: &str =
+    "Both Resource ID and Resource Name cannot be specified in the request";
+
 // `#[operation_error]` below expands to an invocation of the LOCAL declarative
 // `smithy!` macro, which this line is what emits into the module. Without it the
 // expansion fails with `cannot find macro 'smithy' in this scope` and the
@@ -217,15 +231,13 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         }
 
         // "You can specify either resource IDs or a resource name, but not both, in the
-        // same request."
+        // same request." The refusal is worded as Config words this mutual exclusion
+        // ([`RESOURCE_ID_AND_NAME_EXCLUSIVE_MESSAGE`]), the same sentence whatever the
+        // request narrowed by.
         if !requested_ids.is_empty() && requested_name.is_some() {
             return Err(ListDiscoveredResourcesErrorModeled::ValidationException(
                 ValidationException {
-                    message: Some(
-                        "resourceIds and resourceName cannot both be specified in the same \
-                         ListDiscoveredResources request; narrow by one or the other"
-                            .to_string(),
-                    ),
+                    message: Some(RESOURCE_ID_AND_NAME_EXCLUSIVE_MESSAGE.to_string()),
                 },
             )
             .into());
