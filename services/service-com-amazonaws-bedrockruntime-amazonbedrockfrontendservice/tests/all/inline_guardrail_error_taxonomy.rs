@@ -192,65 +192,78 @@ fn assert_one_validation_class(case: &str, codes: &[String]) {
     );
 }
 
-/// RULE, on `ApplyGuardrail`: a reference whose shape the member admits but which
-/// names a revision this account does not hold is refused `400 ValidationException`
-/// with the service's own not-found sentence — on every spelling and form of the
-/// reference, and on every attempt.
+/// RULE, on `ApplyGuardrail`: a reference the service can READ as addressing a
+/// guardrail but which names a revision this account does not hold is refused
+/// `400 ValidationException` with the service's own not-found sentence — on every
+/// spelling and form of the reference, and on every attempt — while a reference it
+/// cannot read as addressing a guardrail at all (an id outside the form the control
+/// plane mints) is the same modelled class with the service's own sentence for an
+/// unreadable reference, because reading the reference and finding the guardrail are
+/// different questions.
 #[tokio::test]
 async fn an_unheld_guardrail_revision_is_refused_as_a_modelled_client_validation_error() {
     let (engine, router) = emulator_with_engine();
     publish(&engine);
 
-    // (case, identifier, version). The identifiers are admitted by
-    // `GuardrailIdentifier`'s pattern
+    // (case, identifier, version, the sentence the refusal states). The identifiers are
+    // admitted by `GuardrailIdentifier`'s pattern
     // `^(|([a-z0-9]+)|(arn:aws(-[^:]+)?:bedrock:[a-z0-9-]{1,20}:[0-9]{12}:guardrail/[a-z0-9]+))$`
     // and the versions by `GuardrailVersion`'s `^(|([1-9][0-9]{0,7})|(DRAFT))$`
     // (`smithy_query(query="operation",operation="ApplyGuardrail")`), so no row is
-    // refused for its form.
-    let rows: Vec<(&str, String, &str)> = vec![
+    // refused for its form by the boundary — which is why the rows whose id is not of
+    // the minted width are answered by the SERVICE's own reading of the reference.
+    let rows: Vec<(&str, String, &str, &str)> = vec![
         (
             "a bare id no guardrail of this account carries",
             "ffff0000ffff".to_string(),
             DRAFT_VERSION,
+            state::guardrail_registry::GUARDRAIL_NOT_FOUND,
         ),
         (
             "a bare id of another length",
             "a1b2c3".to_string(),
             "1",
+            state::GUARDRAIL_REFERENCE_FORMAT_MESSAGE,
         ),
         (
             "an ARN of this account and region naming an id never created",
             arn_naming("abcdef123456"),
             DRAFT_VERSION,
+            state::guardrail_registry::GUARDRAIL_NOT_FOUND,
         ),
         (
             "a bare id that is a PREFIX of the published one",
             GUARDRAIL_ID[..4].to_string(),
             DRAFT_VERSION,
+            state::GUARDRAIL_REFERENCE_FORMAT_MESSAGE,
         ),
         (
             "an ARN naming an id of another length",
             arn_naming("aaaa1111bbbb2222"),
             "1",
+            state::GUARDRAIL_REFERENCE_FORMAT_MESSAGE,
         ),
         (
             "the published guardrail, a version that was never cut",
             GUARDRAIL_ID.to_string(),
             "2",
+            state::guardrail_registry::GUARDRAIL_NOT_FOUND,
         ),
         (
             "the published guardrail, a version at the published digit ceiling",
             GUARDRAIL_ID.to_string(),
             "99999999",
+            state::guardrail_registry::GUARDRAIL_NOT_FOUND,
         ),
         (
             "the published guardrail's ARN, a version that was never cut",
             guardrail_arn(),
             "7",
+            state::guardrail_registry::GUARDRAIL_NOT_FOUND,
         ),
     ];
 
-    for (case, identifier, version) in rows {
+    for (case, identifier, version, sentence) in rows {
         let mut codes: Vec<String> = Vec::new();
         for attempt in 1..=ATTEMPTS {
             let attempted = format!("{case} (attempt {attempt})");
@@ -259,7 +272,7 @@ async fn an_unheld_guardrail_revision_is_refused_as_a_modelled_client_validation
                 &attempted,
                 &call,
                 APPLY_GUARDRAIL_ERRORS,
-                state::guardrail_registry::GUARDRAIL_NOT_FOUND,
+                sentence,
             ));
         }
         assert_one_validation_class(case, &codes);

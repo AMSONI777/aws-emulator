@@ -3787,3 +3787,8 @@ mod cloudformation_provisions_redshift_snapshot_copy_grants;
 // this file: two branches landing in the same window declared it here as well.)
 // (`cloudformation_provisions_cloudfront_resources` is declared ONCE, above: two branches
 // (`cloudformation_kms_encrypted_sns_sqs_pipeline` is declared ONCE, further up this file:
+// leaving a note here. (These lines landed in this appended tail as `//!`, which is
+// `E0753` past the first item of a module and compiled no suite of this target, so they
+// stand as ordinary comments.)
+// this file and for every service crate's `tests/all.rs`. (Also `//` rather than `//!`,
+// for the reason the note above records.)

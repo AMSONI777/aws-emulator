@@ -5,10 +5,14 @@
 //! registry in [`crate::state`], mints an `invocationArn`, and persists the
 //! record `GetAsyncInvoke` and `ListAsyncInvokes` then report.
 //!
-//! Two things are checked before anything is minted, because a refused request
+//! Three things are checked before anything is minted, because a refused request
 //! must leave no job behind: the model must be one the provider publishes
 //! asynchronous invocation for ([`crate::state::ModelEntry::supports_async_invoke`]),
-//! and `modelInput` must satisfy that model's own published request schema
+//! the configured output location must be one this account can write
+//! ([`crate::state::async_invoke_output::destination_is_writable`]) — resolved
+//! BEFORE the payload, since an invocation that cannot deliver its output carries
+//! out none of the work it would be accepted for — and `modelInput` must satisfy
+//! that model's own published request schema
 //! ([`crate::state::async_model_input_violation`]). Each is a
 //! `ValidationException` (400).
 //!
@@ -196,28 +200,33 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
             .into());
         };
         let region = crate::state::request_region(ctx.parts());
-        let mut guard = state.lock();
 
-        let model = match guard.resolve_model_for_inference(&input.model_id) {
-            Ok(entry) => entry.clone(),
-            // An identifier the service cannot interpret is a 400; one naming a
-            // model or resource that is not available here is a 404 (see
-            // `crate::state::resolve_model_for_inference`).
-            Err(crate::state::ModelRejection::Invalid(message)) => {
-                return Err(StartAsyncInvokeErrorModeled::ValidationException(
-                    ValidationException {
-                        message: Some(message),
-                    },
-                )
-                .into())
-            }
-            Err(crate::state::ModelRejection::NotFound(message)) => {
-                return Err(StartAsyncInvokeErrorModeled::ResourceNotFoundException(
-                    ResourceNotFoundException {
-                        message: Some(message),
-                    },
-                )
-                .into())
+        // The model stage, under this service's own guard, which is RELEASED before
+        // the destination below is resolved: the object store's guard is taken for
+        // that, and no two stores of this emulator are ever locked at once.
+        let model = {
+            let guard = state.lock();
+            match guard.resolve_model_for_inference(&input.model_id) {
+                Ok(entry) => entry.clone(),
+                // An identifier the service cannot interpret is a 400; one naming a
+                // model or resource that is not available here is a 404 (see
+                // `crate::state::resolve_model_for_inference`).
+                Err(crate::state::ModelRejection::Invalid(message)) => {
+                    return Err(StartAsyncInvokeErrorModeled::ValidationException(
+                        ValidationException {
+                            message: Some(message),
+                        },
+                    )
+                    .into())
+                }
+                Err(crate::state::ModelRejection::NotFound(message)) => {
+                    return Err(StartAsyncInvokeErrorModeled::ResourceNotFoundException(
+                        ResourceNotFoundException {
+                            message: Some(message),
+                        },
+                    )
+                    .into())
+                }
             }
         };
 
@@ -228,6 +237,28 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
             return Err(StartAsyncInvokeErrorModeled::ValidationException(
                 ValidationException {
                     message: Some(crate::state::ASYNC_INVOKE_UNSUPPORTED_MESSAGE.to_string()),
+                },
+            )
+            .into());
+        }
+
+        // WHERE the output is to go, resolved before the payload that produces it:
+        // an asynchronous invocation's result is the artifact it writes to the
+        // caller's own Amazon S3 location, so a submission whose configured location
+        // this account cannot write could never deliver what it is accepted for and
+        // is refused here, with no job minted, rather than accepted and reported
+        // failed later
+        // (`crate::state::async_invoke_output::destination_is_writable`).
+        if !crate::state::async_invoke_output::destination_is_writable(
+            &*self.engine,
+            &input.output_data_config,
+        ) {
+            return Err(StartAsyncInvokeErrorModeled::ValidationException(
+                ValidationException {
+                    message: Some(
+                        crate::state::async_invoke_output::UNWRITABLE_OUTPUT_LOCATION_MESSAGE
+                            .to_string(),
+                    ),
                 },
             )
             .into());
@@ -254,6 +285,10 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
             &input.output_data_config,
             input.tags.as_deref().unwrap_or_default(),
         );
+
+        // The store is taken again for the minting half: the token index and the
+        // record it answers for are read and written under one guard.
+        let mut guard = state.lock();
 
         // `@idempotent`: the same token with the same payload names the
         // invocation already minted; with a different payload it is a conflict.

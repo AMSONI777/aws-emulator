@@ -61,3 +61,32 @@ Smithy (com.amazonaws.bedrockruntime): GetAsyncInvoke errors = AccessDeniedExcep
 
 ## Steps to Reproduce
 1. git clone and boot the emulator; 2. replay bedrock-runtime-async-invoke-lifecycle-and-errors and inspect step task#5 - GetAsyncInvoke on an async-invoke ARN owned by another account returns 400/ValidationException instead of 403/AccessDeniedException with a `Message` member; 3. replay bedrockruntime-async-invoke-read-and-rejections step task#4 - StartAsyncInvoke with an unwritable S3 outputDataConfig returns 200 and an invocationArn instead of 400 "Invalid S3 credentials"; 4. replay bedrock-runtime-apply-guardrail-error-recovery step task#2 - the 400 body says "The provided request is not valid"; 5. replay bedrock-runtime-invoke-guardrail-checks-error-paths step task#3 - the enum value set in the 400 message is alphabetically sorted.
+
+## Resolution
+
+Causes 1, 2 and 3 are FIXED: GetAsyncInvoke attributes an invocation ARN to the owner the
+service issued it to and answers 403 `AccessDeniedException` with the reason under `Message`
+for one it did not; StartAsyncInvoke resolves the configured output location against Amazon
+S3 before it accepts a submission and refuses an unwritable one with 400 "Invalid S3
+credentials", minting no job; and a guardrail reference the service cannot read as
+addressing a guardrail is refused with the service's own sentence for an unreadable
+reference, on the apply surface and on the inference surfaces, whatever else is also wrong
+with the request. Replay of this issue's four fixtures: three pass end to end and 7 of its 8
+keys are fixed.
+
+REMAINING DIVERGENCE (cause 4): the enum-constraint refusal of
+`checks.sensitiveInformation.entities[].type` still lists the member's 31 values in the
+model's (alphabetical) declaration order rather than in the order the recorded service
+emitted them. Everything else about that refusal matches — status, error code, template,
+count, rejected value, member path and the whole value set. The recorded ORDER is not
+implementable from the evidence: the recording discloses only its first four values (the
+replay truncates the expected message mid-token, and the Evidence above elides the rest),
+and the order is not a function of the value names — neither alphabetical, nor its reverse,
+nor any Java `String.hashCode` or FNV-1a bucket iteration order (checked for every table
+size 2..256, with and without `HashMap`'s spread, in both directions), nor the raw-hash or
+length orders — so any permutation written into the emulator would have 27 invented
+positions and would still differ. The divergence is carried forward on its own as
+issues/things-that-do-not-work/20261114T120500Z-bedrock-runtime-invokeguardrailchecks-enum-value-set-order.md,
+which states the evidence above and what closes it: a recording that discloses the whole
+set in order, added to `crate::state::service_value_order` beside the two orders a
+recording did disclose in full.

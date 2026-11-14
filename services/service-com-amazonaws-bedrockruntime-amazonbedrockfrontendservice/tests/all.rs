@@ -71,3 +71,5 @@ mod model_invocation_log_delivery;
 mod resource_reference_refusals;
 #[path = "all/state_roundtrip.rs"]
 mod state_roundtrip;
+#[path = "all/submit_destination_and_guardrail_reference.rs"]
+mod submit_destination_and_guardrail_reference;

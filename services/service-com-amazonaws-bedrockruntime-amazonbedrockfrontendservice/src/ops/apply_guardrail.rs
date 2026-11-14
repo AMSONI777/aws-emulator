@@ -207,6 +207,18 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
             .into());
         }
 
+        // WHICH guardrail the request addresses, before this account's guardrails
+        // are consulted: a reference the service cannot read as addressing a
+        // guardrail at all is refused in its own words for that reference
+        // (`crate::state::reads_as_guardrail_identifier`), and the version that
+        // selects one of a guardrail's revisions is read only for a request that
+        // named a readable guardrail.
+        if !crate::state::reads_as_guardrail_identifier(&input.guardrail_identifier) {
+            return Err(validation(
+                crate::state::GUARDRAIL_REFERENCE_FORMAT_MESSAGE.to_string(),
+            ));
+        }
+
         // The revision this request applies, out of what the control plane published:
         // a guardrail this account does not hold, or a version it never cut, is a
         // resource this call cannot apply.

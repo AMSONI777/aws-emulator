@@ -19,13 +19,15 @@
 //!    member and which constraint. (How a value SET is listed inside such a
 //!    clause is the `guardrail_checks_inline` suite's subject.)
 //! 3. **A resource ARN is resolved in one order.** An invocation ARN is read,
-//!    then placed in a region, then attributed to an account, then read for the
-//!    invocation id it names, and only then looked up: an unreadable reference
-//!    and one of another region are client-input refusals
-//!    (`400 ValidationException`), one of another account is an authorization
-//!    refusal (`403 AccessDeniedException`, reason under the key `Message`), and a
-//!    readable in-region ARN of this account that names no invocation is the
-//!    service's own absent-job refusal. A minted ARN still reads back.
+//!    then placed in a region, then attributed to the owner the service ISSUED it
+//!    to, and only then looked up: an unreadable reference and one of another
+//!    region are client-input refusals (`400 ValidationException`), one this
+//!    account's service could not have issued — another account's, or carrying an
+//!    id outside the form the service mints — is an authorization refusal
+//!    (`403 AccessDeniedException`, reason under the key `Message`), and a
+//!    readable ARN this account's service could have issued that names no
+//!    invocation is the service's own absent-job refusal. A minted ARN still reads
+//!    back.
 //!
 //! Every assertion names its case and the actual value.
 //!
@@ -76,7 +78,11 @@ fn apply_guardrail_body() -> serde_json::Value {
 /// `@pattern` admits nowhere, a separator it admits nowhere, a value past the
 /// reference's length, a version that is neither a number nor `DRAFT`, a version
 /// numbered from zero, a version past its published digits — and the sentence is
-/// the same for every value of one reference.
+/// the same for every value of one reference. Each VERSION row names a guardrail
+/// the service can read (an id of the width the control plane mints), because the
+/// reference is read before the version that selects one of its revisions, so a row
+/// naming an unreadable guardrail would be refused on the guardrail instead
+/// (`submit_destination_and_guardrail_reference`).
 fn reference_rows() -> Vec<ReferenceRow> {
     let mut rows = vec![
         ReferenceRow {
@@ -94,19 +100,19 @@ fn reference_rows() -> Vec<ReferenceRow> {
         ReferenceRow {
             case: "a guardrail version that is neither a number nor DRAFT",
             body: Some(apply_guardrail_body()),
-            path: "/guardrail/abc123/version/latest/apply".to_string(),
+            path: "/guardrail/abcd1234efgh/version/latest/apply".to_string(),
             message: state::INVALID_REQUEST_MESSAGE,
         },
         ReferenceRow {
             case: "a guardrail version numbered from zero",
             body: Some(apply_guardrail_body()),
-            path: "/guardrail/abc123/version/0/apply".to_string(),
+            path: "/guardrail/abcd1234efgh/version/0/apply".to_string(),
             message: state::INVALID_REQUEST_MESSAGE,
         },
         ReferenceRow {
             case: "a guardrail version past its published digits",
             body: Some(apply_guardrail_body()),
-            path: "/guardrail/abc123/version/123456789/apply".to_string(),
+            path: "/guardrail/abcd1234efgh/version/123456789/apply".to_string(),
             message: state::INVALID_REQUEST_MESSAGE,
         },
         ReferenceRow {
@@ -300,9 +306,9 @@ async fn a_member_outside_its_constraints_still_names_the_member_and_the_require
 }
 
 /// RULE 3: a resource ARN is RESOLVED in one order — read, placed in a region,
-/// attributed to an account, read for the invocation id it names, and only then
-/// looked up — so a reference that is wrong in more than one way is reported on
-/// the first rule it breaks, and a minted ARN still reads back.
+/// attributed to the owner it was issued to, and only then looked up — so a
+/// reference that is wrong in more than one way is reported on the first rule it
+/// breaks, and a minted ARN still reads back.
 ///
 /// The rows break each rung in turn, with more than one value per rung, so the
 /// ladder is not satisfied by one ARN's special case. The request is signed for
@@ -390,20 +396,40 @@ async fn a_resource_arn_is_resolved_in_one_order_before_the_record_is_looked_up(
             state::ASYNC_INVOKE_NOT_FOUND_MESSAGE,
         ),
         (
-            "this region and account, an id outside the minted form".to_string(),
+            // An id outside the form this service mints is not one this account's
+            // service could have ISSUED, so the reference was issued to somebody
+            // else whatever its account field says — the same authorization
+            // refusal as a foreign account id.
+            "this account's id field, an id outside the minted form".to_string(),
             format!("arn:aws:bedrock:{region}:{own_account}:async-invoke/ABCDEF123456"),
-            400,
-            "ValidationException",
-            "message",
-            state::INVALID_ASYNC_INVOKE_ARN_MESSAGE,
+            403,
+            "AccessDeniedException",
+            "Message",
+            state::CROSS_ACCOUNT_RESOURCE_ARN_MESSAGE,
         ),
         (
-            "this region and account, an id of the wrong length".to_string(),
+            "this account's id field, an id shorter than the minted form".to_string(),
             format!("arn:aws:bedrock:{region}:{own_account}:async-invoke/abc123"),
-            400,
-            "ValidationException",
-            "message",
-            state::INVALID_ASYNC_INVOKE_ARN_MESSAGE,
+            403,
+            "AccessDeniedException",
+            "Message",
+            state::CROSS_ACCOUNT_RESOURCE_ARN_MESSAGE,
+        ),
+        (
+            "this account's id field, an id longer than the minted form".to_string(),
+            format!("arn:aws:bedrock:{region}:{own_account}:async-invoke/abcdef1234567"),
+            403,
+            "AccessDeniedException",
+            "Message",
+            state::CROSS_ACCOUNT_RESOURCE_ARN_MESSAGE,
+        ),
+        (
+            "this account's id field, an id carrying a separator".to_string(),
+            format!("arn:aws:bedrock:{region}:{own_account}:async-invoke/abc-def-12345"),
+            403,
+            "AccessDeniedException",
+            "Message",
+            state::CROSS_ACCOUNT_RESOURCE_ARN_MESSAGE,
         ),
     ];
     // One value past the ARN length the model publishes.

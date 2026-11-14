@@ -229,7 +229,38 @@ fn emulator_with_engine() -> (Arc<engine::InMemoryEngine>, MultiServiceRouter) {
     let mut router = MultiServiceRouter::new();
     router.set_request_authentication(false);
     router.register_service(EmulatedService::new(Arc::clone(&engine)));
+    seed_output_buckets(&engine);
     (engine, router)
+}
+
+/// The output buckets this target's asynchronous-invocation rows submit against.
+///
+/// `StartAsyncInvoke` resolves the configured output location against Amazon S3's own
+/// store before it accepts a submission — an invocation that cannot deliver its output
+/// is refused rather than minted — so a suite that submits one needs its output bucket
+/// to exist exactly as a caller does, and these are the names its rows name.
+pub(crate) const OUTPUT_BUCKETS: [&str; 3] = ["bucket", "other-bucket", "emulator-bucket"];
+
+/// Record [`OUTPUT_BUCKETS`] in the Amazon S3 store on `engine`, the way a caller
+/// creates its output bucket before submitting an invocation against it.
+///
+/// Recorded through the store's own `create_bucket` rather than over Amazon S3's
+/// `CreateBucket` wire for one reason: this harness is SYNCHRONOUS — every suite of
+/// this target calls it while building its router — and a wire call cannot be awaited
+/// there. The suite that is about the destination rule drives `CreateBucket` itself
+/// (`submit_destination_and_guardrail_reference`), so how a caller GETS a bucket is
+/// asserted over the API; this one only puts the account's buckets in place.
+///
+/// `pub(crate)` so a suite that builds its own router over the shared engine seeds the
+/// same buckets rather than growing its own list.
+pub(crate) fn seed_output_buckets(engine: &engine::InMemoryEngine) {
+    let Some(store) = ::service_com_amazonaws_s3_amazons3::state::service_state(engine) else {
+        return;
+    };
+    let mut held = store.lock();
+    for bucket in OUTPUT_BUCKETS {
+        let _ = held.create_bucket(bucket, "us-east-1");
+    }
 }
 
 /// The emulator under test, when a test does not read the state directly.
@@ -1904,7 +1935,9 @@ async fn a_request_that_breaks_a_stated_rule_is_refused_with_validation_exceptio
             case: "a guardrail identifier without a version",
             headers: vec![
                 ("content-type", "application/json"),
-                ("x-amzn-bedrock-guardrailidentifier", "abc123"),
+                // A readable reference — the id width the control plane mints — so the
+                // row is refused for the missing version and not for the reference.
+                ("x-amzn-bedrock-guardrailidentifier", "abcd1234efgh"),
             ],
             body: br#"{"prompt":"hi"}"#.to_vec(),
         },
@@ -1947,7 +1980,7 @@ async fn a_request_that_breaks_a_stated_rule_is_refused_with_validation_exceptio
         &format!("/model/{claude}/invoke"),
         &[
             ("content-type", "application/json"),
-            ("x-amzn-bedrock-guardrailidentifier", "abc123"),
+            ("x-amzn-bedrock-guardrailidentifier", "abcd1234efgh"),
             ("x-amzn-bedrock-guardrailversion", "1"),
         ],
         CLAUDE_BODY.as_bytes().to_vec(),
@@ -2367,11 +2400,13 @@ async fn start_async_invoke_persists_a_record_that_get_async_invoke_reports_back
 }
 
 /// RULE: a submitted invocation leaves `InProgress` only when the clock makes
-/// the transition due, and — because no model runs in this emulator and nothing
-/// is written to the caller's S3 location — it ends in the modelled `Failed`
-/// state carrying the reason, with `endTime` and `lastModifiedTime` set.
+/// the transition due, and the transition DELIVERS its output to the location the
+/// submission configured — so it reaches the modelled `Completed` state carrying no
+/// failure reason, with `endTime` and `lastModifiedTime` set. (What the delivered
+/// object itself is, and what an invocation whose location stopped being writable
+/// reports instead, are the `inference_input_limits` suite's subject.)
 #[tokio::test]
-async fn an_in_progress_invocation_settles_into_the_modelled_failure_state() {
+async fn an_in_progress_invocation_settles_into_its_terminal_state_when_the_clock_makes_it_due() {
     let router = emulator();
     let started = post_json(
         &router,
@@ -2396,24 +2431,32 @@ async fn an_in_progress_invocation_settles_into_the_modelled_failure_state() {
         immediate.json()["status"]
     );
 
-    // The transition is due a fixed span after the submitting call; nothing in
-    // the emulator sleeps for it, so the test is what waits.
-    std::thread::sleep(Duration::from_millis(
-        u64::try_from(state::ASYNC_INVOKE_SETTLE_MILLIS).unwrap_or(500) + 150,
-    ));
-
-    let settled = get(&router, &format!("/async-invoke/{}", encode_path(&arn))).await;
-    let record = settled.json();
+    // The transition is due a fixed span after the submitting call and NOTHING in the
+    // emulator sleeps for it, so the test looks again until it holds. The deadline is
+    // far above that span, so a loaded or slow machine changes nothing it asserts.
+    let deadline = std::time::Instant::now() + Duration::from_secs(60);
+    let record = loop {
+        let settled = get(&router, &format!("/async-invoke/{}", encode_path(&arn))).await;
+        let record = settled.json();
+        if record["status"].as_str() != Some("InProgress") {
+            break record;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "case \"read until the transition is due\": the invocation never left InProgress, \
+             last read {record}"
+        );
+        ::tokio::time::sleep(Duration::from_millis(20)).await;
+    };
     assert_eq!(
         record["status"].as_str(),
-        Some("Failed"),
-        "case \"read after the transition is due\": expected Failed, got {:?}",
+        Some("Completed"),
+        "case \"read after the transition is due\": expected Completed, got {:?}",
         record["status"]
     );
-    assert_eq!(
-        record["failureMessage"].as_str(),
-        Some(state::ASYNC_INVOKE_FAILURE_MESSAGE),
-        "case \"read after the transition is due\": expected the recorded reason, got {:?}",
+    assert!(
+        record["failureMessage"].is_null(),
+        "case \"read after the transition is due\": expected no failureMessage, got {:?}",
         record["failureMessage"]
     );
     let submitted = instant_of(&record["submitTime"]).unwrap_or_default();
@@ -2595,6 +2638,12 @@ async fn list_async_invokes_pages_in_the_requested_order_without_gaps_or_duplica
     }
 }
 
+/// How far apart the submissions of the filter test below are placed, in
+/// milliseconds: enough for a submit-time bound to be set strictly between two of
+/// them at the precision a timestamp query is rendered with. It is a SEPARATION,
+/// not a timeout: nothing the test asserts depends on how long it takes.
+const SUBMIT_SEPARATION_MILLIS: i64 = 8;
+
 /// RULE: `ListAsyncInvokes` applies its filters to the records it holds: a
 /// status filter keeps the records in that status, and the submit-time bounds
 /// keep the records submitted within them.
@@ -2628,7 +2677,16 @@ async fn list_async_invokes_applies_its_status_and_submit_time_filters() {
                 .expect("GetAsyncInvoke reports a submitTime"),
         );
         arns.push(arn);
-        std::thread::sleep(Duration::from_millis(5));
+        // Each submission has to land far enough from the next for a BOUND to be set
+        // between the two: the bounds below are rendered at the precision a timestamp
+        // query carries, so two instants in the same (or an adjacent) millisecond leave
+        // no value strictly between them. Nothing waits for a fixed span — the clock is
+        // looked at until it has moved on — and the separation bounds nothing this test
+        // asserts.
+        let separated = state::now_millis() + SUBMIT_SEPARATION_MILLIS;
+        while state::now_millis() < separated {
+            ::tokio::time::sleep(Duration::from_millis(1)).await;
+        }
     }
 
     // While the transition is not yet due every record is InProgress, and no
@@ -2683,21 +2741,35 @@ async fn list_async_invokes_applies_its_status_and_submit_time_filters() {
     );
 
     // Once the clock has made the transition due, the status filter follows the
-    // records into their terminal state.
-    std::thread::sleep(Duration::from_millis(
-        u64::try_from(state::ASYNC_INVOKE_SETTLE_MILLIS).unwrap_or(500) + 150,
-    ));
-    let failed = listed_arns(&router, "?statusEquals=Failed").await;
+    // records into their terminal state. The transition is due a fixed span after each
+    // submitting call and nothing in the emulator sleeps for it, so the test looks
+    // again until no record is still running; the deadline is far above that span.
+    let deadline = std::time::Instant::now() + Duration::from_secs(60);
+    loop {
+        let still_running = listed_arns(&router, "?statusEquals=InProgress").await;
+        if still_running.is_empty() {
+            break;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "case \"statusEquals=InProgress after the transition is due\": expected none, got \
+             {still_running:?}"
+        );
+        ::tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    // Each record delivered its output to the location it configured, so each reached
+    // the modelled `Completed` status and the filter reports all three there.
+    let completed = listed_arns(&router, "?statusEquals=Completed").await;
     assert_eq!(
-        failed.len(),
+        completed.len(),
         3,
-        "case \"statusEquals=Failed after the transition is due\": expected 3 records, got {failed:?}"
+        "case \"statusEquals=Completed after the transition is due\": expected 3 records, got \
+         {completed:?}"
     );
-    let still_running = listed_arns(&router, "?statusEquals=InProgress").await;
+    let failed = listed_arns(&router, "?statusEquals=Failed").await;
     assert!(
-        still_running.is_empty(),
-        "case \"statusEquals=InProgress after the transition is due\": expected none, got \
-         {still_running:?}"
+        failed.is_empty(),
+        "case \"statusEquals=Failed after the transition is due\": expected none, got {failed:?}"
     );
 }
 

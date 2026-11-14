@@ -168,6 +168,10 @@ pub(crate) fn emulator() -> MultiServiceRouter {
             Arc::clone(&engine),
         ),
     );
+    // The output buckets an asynchronous invocation of this target submits against:
+    // `StartAsyncInvoke` resolves its destination before accepting a submission, so
+    // this harness seeds them exactly as the shared one does.
+    crate::bedrock_runtime_inference::seed_output_buckets(&engine);
     router
 }
 

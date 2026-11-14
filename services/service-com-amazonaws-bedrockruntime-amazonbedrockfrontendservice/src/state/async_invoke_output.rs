@@ -105,6 +105,46 @@ pub fn output_location(config: &AsyncInvokeOutputDataConfig) -> Option<(&str, &s
     (!bucket.is_empty()).then_some((bucket, tail.trim_end_matches('/')))
 }
 
+/// What this service answers a submission whose configured output location it cannot
+/// write to.
+///
+/// The sentence Amazon Bedrock answers such a submission with, entirely fixed: it names
+/// neither the location nor the bucket, so the wording is the whole requirement. The
+/// refusal is about the CREDENTIALS the service would write with — the destination is
+/// resolved as the submitting account, and a location that account cannot reach is
+/// refused at submit time rather than accepted as a job that could never deliver.
+pub const UNWRITABLE_OUTPUT_LOCATION_MESSAGE: &str = "Invalid S3 credentials";
+
+/// Whether an invocation submitted against `config` could DELIVER its output — which is
+/// what `StartAsyncInvoke` resolves before it accepts one.
+///
+/// The destination is the caller's own Amazon S3 location, so the question is Amazon S3's
+/// to answer: the bucket the location addresses has to be one the object store holds,
+/// because a write names an existing bucket rather than creating one
+/// (`service_com_amazonaws_s3_amazons3::state::Store::put_object`). A value that addresses
+/// no bucket at all ([`output_location`]) is not a location this account can write either.
+///
+/// An engine that carries no Amazon S3 store at all — one this crate is mounted on without
+/// that service's state type — has nothing to resolve the destination against, so no
+/// submission is refused on this ground there; such an invocation still reports the modelled
+/// `Failed` with the reason when its output cannot be delivered ([`deliver`]), so nothing
+/// reports a delivery that did not happen.
+///
+/// Call it with no store of this service held: the object store's own guard is taken here.
+pub fn destination_is_writable<Eng: Send + Sync + 'static>(
+    engine: &Eng,
+    config: &AsyncInvokeOutputDataConfig,
+) -> bool {
+    let Some((bucket, _)) = output_location(config) else {
+        return false;
+    };
+    let Some(store) = s3::state::service_state(engine) else {
+        return true;
+    };
+    let held = store.lock();
+    held.bucket(bucket).is_some()
+}
+
 /// One invocation's own segment of the submitted prefix: the prefix, then the invocation
 /// id.
 ///

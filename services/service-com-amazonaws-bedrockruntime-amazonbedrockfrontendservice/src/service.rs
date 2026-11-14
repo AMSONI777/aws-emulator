@@ -78,6 +78,7 @@ use service_common::query_error_envelope::{
     RequestIdEnvelopeDefinition, RequestIdHeaderOperation, RequestIdReportingOperation,
 };
 use service_common::request_path;
+use service_common::restated_refusal::RestatedRefusalOperation;
 use smithy_server_runtime::{http, ErasedOperation, Refusal, Refused, Service};
 use std::collections::BTreeSet;
 use std::sync::{Arc, LazyLock};
@@ -229,6 +230,65 @@ fn resource_reference_refusal(refusal: &Refusal) -> Option<Refused> {
     })
 }
 
+/// Whether `path` is `/guardrail/{guardrailIdentifier}/version/{guardrailVersion}/apply`
+/// — the one URI space that names a guardrail in its PATH — and, if so, the
+/// `{guardrailIdentifier}` it carries, decoded as the deserializer decodes a label.
+///
+/// Read off the request line because the refusal seam the words are chosen in
+/// (`Service::override_refusal`) is handed the violations alone: a request whose
+/// guardrail reference the service cannot read is refused on that reference even
+/// where the boundary validator refused it for something else
+/// ([`in_guardrail_reference_words`]).
+fn apply_guardrail_identifier(path: &str) -> Option<String> {
+    let mut segments = path.trim_start_matches('/').split('/');
+    let ("guardrail", Some(identifier), Some("version"), Some(_), Some("apply"), None) = (
+        segments.next()?,
+        segments.next(),
+        segments.next(),
+        segments.next(),
+        segments.next(),
+        segments.next(),
+    ) else {
+        return None;
+    };
+    Some(service_common::percent_decode_path_label(identifier))
+}
+
+/// `resp` with a `ValidationException` of a request whose GUARDRAIL REFERENCE the
+/// service cannot read stated in the service's own words for that reference.
+///
+/// The guardrail is read BEFORE the version that selects one of its revisions and
+/// before anything else the request says, so a request naming a guardrail this
+/// service cannot read is refused on the guardrail whatever else is also wrong —
+/// including a boundary refusal the framework raised on another member before any
+/// handler ran. Which values ARE readable is
+/// [`crate::state::reads_as_guardrail_identifier`]; the handler answers the same
+/// sentence for a request that reaches it.
+///
+/// Everything else stays as the renderer wrote it: the status, the error code, the
+/// headers, and every other body member — and a response whose body is not a
+/// `ValidationException` carrying a detail member is returned untouched
+/// ([`service_common::error_detail_member`]).
+fn in_guardrail_reference_words(
+    req: &aws_smithy_runtime_api::http::Request,
+    resp: aws_smithy_runtime_api::http::Response,
+    _noted: Option<String>,
+) -> aws_smithy_runtime_api::http::Response {
+    let Some(identifier) = apply_guardrail_identifier(request_path(req.uri())) else {
+        return resp;
+    };
+    if crate::state::reads_as_guardrail_identifier(&identifier) {
+        return resp;
+    }
+    service_common::error_detail_member::with_restated_detail_member(
+        resp,
+        &["ValidationException"],
+        "message",
+        "message",
+        crate::state::GUARDRAIL_REFERENCE_FORMAT_MESSAGE,
+    )
+}
+
 /// The `com-amazonaws-bedrockruntime-amazonbedrockfrontendservice` emulated service: the generated [`ServiceDefinition`] plus
 /// the behavioral seams this file owns.
 ///
@@ -253,6 +313,12 @@ pub struct EmulatedService<Eng: Send + Sync + 'static> {
     /// operation produced names the request it answers. Held, not built per request:
     /// `override_operation` hands back a borrow of it.
     request_id: RequestIdHeaderOperation,
+    /// Serves a request that names a GUARDRAIL in its path, so a reference this
+    /// service cannot read is refused on that reference whatever else is wrong with
+    /// the request ([`in_guardrail_reference_words`]). The request id is reported
+    /// around it, so such a response names the request it answers exactly as every
+    /// other does.
+    apply_guardrail: RequestIdReportingOperation<RestatedRefusalOperation>,
 }
 
 impl<Eng: Send + Sync + 'static> EmulatedService<Eng> {
@@ -271,6 +337,9 @@ impl<Eng: Send + Sync + 'static> EmulatedService<Eng> {
                 EventStreamRoute(InvokeModelWithResponseStream::new(engine)),
             ),
             request_id: RequestIdHeaderOperation,
+            apply_guardrail: RequestIdReportingOperation::header(RestatedRefusalOperation::new(
+                in_guardrail_reference_words,
+            )),
         }
     }
 }
@@ -336,6 +405,17 @@ impl<Eng: Send + Sync + 'static> Service for EmulatedService<Eng> {
                     return Some(&self.invoke_model_with_response_stream)
                 }
                 _ => {}
+            }
+            // A request that names a GUARDRAIL in its path is served through the
+            // wrapper that states the refusal of an unreadable guardrail reference
+            // in the service's own words for that reference — which only the
+            // REQUEST can decide, and which the refusal seam below is handed no
+            // request to decide with. It delegates to the same generated table, so
+            // a readable reference is served exactly as it is anywhere else.
+            if apply_guardrail_identifier(request_path(req.uri())).is_some()
+                && service_common::restated_refusal::routes(self.definition(), req)
+            {
+                return Some(&self.apply_guardrail);
             }
         }
         self.entry

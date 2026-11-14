@@ -1006,19 +1006,19 @@ pub const MAX_RESOURCE_ARN_LENGTH: usize = 2048;
 ///
 /// The variants are the ORDER the resolution runs in, which is what decides
 /// which refusal a caller sees when more than one holds: an ARN is read as this
-/// service's resource, placed in a region, attributed to an account, read for
-/// the invocation id it names, and only then looked up. Each variant carries the
-/// status and code its refusal is answered with.
+/// service's resource, placed in a region, attributed to the owner it was issued
+/// to, and only then looked up. Each variant carries the status and code its
+/// refusal is answered with.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ArnRejection {
-    /// Not readable as an ARN of this service's resource, or not naming an
-    /// invocation id of the form this service mints: `ValidationException`,
-    /// HTTP 400.
+    /// Not readable as an ARN of this service's resource, and so naming no
+    /// invocation whoever owns it: `ValidationException`, HTTP 400.
     Unreadable,
     /// Readable, but naming another region: `ValidationException`, HTTP 400.
     ForeignRegion,
-    /// Readable and in region, but owned by another account:
-    /// `AccessDeniedException`, HTTP 403.
+    /// Readable and in region, but not issued to this caller — the ARN names
+    /// another account, or carries an id this account's service could not have
+    /// minted: `AccessDeniedException`, HTTP 403.
     ForeignAccount,
 }
 
@@ -1044,10 +1044,13 @@ impl ArnRejection {
 /// rule it breaks, and an ARN is never attributed to an account before it has
 /// been read as this service's.
 ///
-/// The invocation ID is read LAST, after the region and the owner: an ARN whose
-/// id is not of the minted form is still placed and attributed first, which is
-/// what lets a reference belonging to another account be refused as that rather
-/// than as a bad id.
+/// Reading the reference and attributing it are DIFFERENT questions, and the
+/// refusals differ with them: whether the value is an async-invoke ARN of this
+/// region at all is a fault in the request, while who that ARN was issued to is
+/// an authorization answer. So an ARN this endpoint can read but that was issued
+/// to another owner is refused as an authorization failure rather than as a bad
+/// reference, and the id's own form is part of that attribution rather than a
+/// constraint of its own.
 pub fn resolve_invocation_arn(value: &str, region: &str) -> Result<(), ArnRejection> {
     if value.chars().count() > MAX_RESOURCE_ARN_LENGTH {
         return Err(ArnRejection::Unreadable);
@@ -1057,21 +1060,39 @@ pub fn resolve_invocation_arn(value: &str, region: &str) -> Result<(), ArnReject
     // so an ARN of another service, or of another of this service's resources,
     // is not a reference it can read. `resource_id_of_type` is the shared reader
     // of a `<type>/<id>` (or `<type>:<id>`) resource field.
-    let invocation_id = (arn.vendor == ASYNC_INVOKE_ARN_VENDOR)
+    let invocation_id = (arn.vendor == BEDROCK_ARN_VENDOR)
         .then(|| ::service_common::arn::resource_id_of_type(value, ASYNC_INVOKE_ARN_RESOURCE_TYPE))
         .flatten()
         .ok_or(ArnRejection::Unreadable)?;
+    // An ARN whose resource field names its type and nothing after it addresses no
+    // invocation at all, so there is nothing to attribute to an owner.
+    if invocation_id.is_empty() {
+        return Err(ArnRejection::Unreadable);
+    }
     if arn.region != region {
         return Err(ArnRejection::ForeignRegion);
     }
-    if arn.account != ::engine::emulator_account_id() {
+    // WHO the reference was ISSUED TO. An async-invoke ARN is not a name a caller
+    // chooses: the service mints it for the account that submitted the invocation,
+    // so both fields that record the minting answer the ownership question — the
+    // account the ARN names, and whether the id it carries is one this account's
+    // service could have issued ([`is_minted_invocation_id`]). A reference failing
+    // either was issued to somebody else, which is an authorization refusal and
+    // not a fault in the request's syntax; a reference failing neither is this
+    // account's, whether or not a record for it is still held.
+    //
+    // The id's form belongs on THIS rung and not on the 400 one above, because that
+    // is where the recorded refusal puts it: the recording this rule comes from
+    // (`bedrock-runtime-async-invoke-lifecycle-and-errors#task#5`) asks about an
+    // in-region ARN whose `async-invoke/` id is twice the width the modelled
+    // `InvocationArn` `@pattern` admits — a constraint violation, had the service
+    // read it as one — and it is answered 403 `AccessDeniedException` with the
+    // cross-account sentence, not with a pattern violation. So ownership is decided
+    // before the id is read as a constrained value at all.
+    if arn.account != ::engine::emulator_account_id()
+        || !is_minted_invocation_id(invocation_id)
+    {
         return Err(ArnRejection::ForeignAccount);
-    }
-    // The id the modelled `InvocationArn` admits, which is also the only form
-    // `mint_invocation_id` produces: an id outside it names no invocation this
-    // service could hold, so the reference is unreadable rather than absent.
-    if !is_minted_invocation_id(invocation_id) {
-        return Err(ArnRejection::Unreadable);
     }
     Ok(())
 }
@@ -1092,10 +1113,14 @@ fn is_minted_invocation_id(id: &str) -> bool {
 const INVOCATION_ID_LENGTH: usize = 12;
 
 /// The ARN vendor (service namespace) field every resource of this service
-/// carries: the model's `arnNamespace`
-/// (`smithy_query(query="service_info")`), which is the control plane's
-/// namespace and not this data plane's endpoint prefix.
-const ASYNC_INVOKE_ARN_VENDOR: &str = "bedrock";
+/// carries.
+///
+/// The family's one statement of it
+/// (`service_common::bedrock::ARN_NAMESPACE`): every Bedrock-family model
+/// publishes the same `aws.api#service$arnNamespace`, so an ARN any of them
+/// addresses carries that one value — which is the control plane's namespace and
+/// not this data plane's endpoint prefix.
+const BEDROCK_ARN_VENDOR: &str = ::service_common::bedrock::ARN_NAMESPACE;
 
 /// The resource type an invocation ARN addresses
 /// (`smithy_query(query="shape",shape="InvocationArn")`).
@@ -1112,6 +1137,57 @@ const ASYNC_INVOKE_ARN_RESOURCE_TYPE: &str = "async-invoke";
 /// identifier carries (`bedrock-runtime-apply-guardrail-error-paths#task#1`).
 pub const GUARDRAIL_REFERENCE_FORMAT_MESSAGE: &str =
     "Guardrail was enabled but input is in incorrect format.";
+
+/// How many characters the bare `guardrailId` half of a guardrail reference
+/// carries.
+///
+/// A guardrail is addressed by the id the CONTROL plane minted for it (or by that
+/// guardrail's ARN, which carries the same id), and that id is twelve lowercase
+/// alphanumerics: it is what
+/// `service-com-amazonaws-bedrock-amazonbedrockcontrolplaneservice`'s
+/// `mint_guardrail_id` spells (two six-digit base-36 halves), and it is the width
+/// of every guardrail id Amazon Bedrock hands back. The member's own `@pattern`
+/// (`^(|([a-z0-9]+)|(arn:…:guardrail/[a-z0-9]+))$`,
+/// `smithy_query(query="shape",shape="GuardrailIdentifier")`) admits any run of
+/// lowercase alphanumerics, so the pattern alone does not say whether a value is a
+/// guardrail ID at all — a guardrail's NAME, which is what a caller most often
+/// reaches for, satisfies it and addresses nothing.
+pub const GUARDRAIL_ID_LENGTH: usize = 12;
+
+/// The resource type a guardrail ARN addresses
+/// (`smithy_query(query="shape",shape="GuardrailIdentifier")`).
+const GUARDRAIL_ARN_RESOURCE_TYPE: &str = "guardrail";
+
+/// Whether `value` READS as the reference of a guardrail: the bare guardrail id,
+/// or the ARN of a guardrail of this service's namespace carrying such an id.
+///
+/// This is the question the service answers BEFORE it looks for the guardrail:
+/// whether the value addresses a guardrail at all, which is a fact about the
+/// value, not about what this account holds. A value outside both spellings is
+/// refused in the service's own words for that reference
+/// ([`GUARDRAIL_REFERENCE_FORMAT_MESSAGE`]); one inside them that names no
+/// guardrail of this account is the absent-guardrail refusal
+/// ([`guardrail_registry::GUARDRAIL_NOT_FOUND`]).
+#[must_use]
+pub fn reads_as_guardrail_identifier(value: &str) -> bool {
+    let id = match ::service_common::arn::parse(value) {
+        Some(arn) if arn.vendor == BEDROCK_ARN_VENDOR => {
+            match ::service_common::arn::resource_id_of_type(value, GUARDRAIL_ARN_RESOURCE_TYPE) {
+                Some(id) => id,
+                None => return false,
+            }
+        }
+        // An ARN of another vendor, or of another of this vendor's resources,
+        // addresses no guardrail; anything that is not an ARN is read as the bare
+        // id spelling.
+        Some(_) => return false,
+        None => value,
+    };
+    id.len() == GUARDRAIL_ID_LENGTH
+        && id
+            .chars()
+            .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit())
+}
 
 /// The service's message for a request it refuses without naming a member of it:
 /// the refusal a value outside what the service can read gets where the service
@@ -3002,6 +3078,14 @@ pub fn validate_invoke_request(
     // requests alike.
     let guardrail_identifier = guardrail_identifier.filter(|value| !value.is_empty());
     let guardrail_version = guardrail_version.filter(|value| !value.is_empty());
+    // The guardrail REFERENCE is read before the version that selects one of its
+    // revisions, and before either of the combinations below: a value this service
+    // cannot read as addressing a guardrail is refused in its own words for that
+    // reference ([`reads_as_guardrail_identifier`]), the same way the apply surface
+    // refuses it.
+    if guardrail_identifier.is_some_and(|value| !reads_as_guardrail_identifier(value)) {
+        return Err(GUARDRAIL_REFERENCE_FORMAT_MESSAGE.to_string());
+    }
     if guardrail_identifier.is_some() && guardrail_version.is_none() {
         return Err(
             "guardrailVersion must be specified when guardrailIdentifier is provided.".to_string(),

@@ -16,7 +16,8 @@
 //! * an accepted asynchronous invocation reaches the modelled `Completed` status by
 //!   WRITING its output under the location the submission configured, so a read that
 //!   reports it finished is a read whose output Amazon S3 itself already holds; one whose
-//!   configured location cannot be written ends in `Failed` carrying the reason.
+//!   location stopped being writable after the submission ends in `Failed` carrying the
+//!   reason.
 //!
 //! The first two drive the harness the other suites of this target drive. The third mounts
 //! Amazon S3 beside this service on one engine — the way the assembled emulator runs them
@@ -51,8 +52,8 @@ const MODEL_ERRORS_PREFIX: &str = "The model returned the following errors: ";
 /// The bucket every asynchronous invocation below writes into.
 const OUTPUT_BUCKET: &str = "bedrock-async-out";
 
-/// A bucket no test below ever creates, so an invocation configured to write there has
-/// nowhere to deliver its output.
+/// A bucket the rows below create, submit against and then DELETE, so an accepted
+/// invocation's output has nowhere to be delivered by the time the settle owes it.
 const ABSENT_BUCKET: &str = "bedrock-async-absent";
 
 // ---------------------------------------------------------------------------
@@ -516,30 +517,37 @@ async fn an_accepted_async_invocation_completes_by_writing_its_output_to_the_con
     }
 }
 
-/// RULE: the `Completed` status is backed by the write. An invocation whose configured
-/// location this emulator's Amazon S3 holds no bucket for carried out none of the work it
-/// was accepted for, so it ends in the modelled `Failed` status carrying the reason, and
-/// nothing appears at the location it named.
+/// RULE: the `Completed` status is backed by the write. An invocation whose output could
+/// not be delivered carried out none of the work it was accepted for, so it ends in the
+/// modelled `Failed` status carrying the reason, and nothing appears at the location it
+/// named.
+///
+/// The destination is resolved at SUBMIT time, so a location that was unwritable then is
+/// never accepted at all (`submit_destination_and_guardrail_reference`). What reaches the
+/// delivery stage is a destination that stopped being writable after the submission — the
+/// bucket deleted while the invocation was in flight, which is the one way an accepted
+/// invocation can still have nowhere to write.
 #[tokio::test]
 async fn an_async_invocation_whose_output_location_cannot_be_written_fails_with_the_reason() {
     let router = emulator_with_object_store();
     create_bucket(&router, OUTPUT_BUCKET).await;
 
-    // The rows differ along the SHAPE of the unwritable location: a bucket this emulator
-    // does not hold addressed at its root, and the same absent bucket under a deep prefix.
+    // The rows differ along the SHAPE of the location inside the bucket that is removed:
+    // its root, and a deep prefix under it.
     // (A value that names no bucket at all never reaches this stage: the modelled `S3Uri`
     // pattern refuses it at the boundary.)
     let rows: [(&str, String); 2] = [
         (
-            "a bucket the store does not hold",
+            "a bucket deleted after the submission, addressed at its root",
             format!("s3://{ABSENT_BUCKET}"),
         ),
         (
-            "an absent bucket under a deep prefix",
+            "a bucket deleted after the submission, addressed under a deep prefix",
             format!("s3://{ABSENT_BUCKET}/renders/2026/january"),
         ),
     ];
     for (case, s3_uri) in rows {
+        create_bucket(&router, ABSENT_BUCKET).await;
         let arn = submit(
             &router,
             case,
@@ -548,6 +556,15 @@ async fn an_async_invocation_whose_output_location_cannot_be_written_fails_with_
             &s3_uri,
         )
         .await;
+        // The destination goes away while the invocation is in flight: the delivery the
+        // settle owes then has nowhere to go.
+        let deleted = s3_call(&router, "DELETE", &format!("/{ABSENT_BUCKET}"), &[]).await;
+        assert!(
+            (200..300).contains(&deleted.status),
+            "case {case:?}: the output bucket must be deletable, got {} / {}",
+            deleted.status,
+            String::from_utf8_lossy(&deleted.body)
+        );
         let record = poll_to_terminal(&router, case, &arn).await;
         assert_eq!(
             record["status"].as_str(),
