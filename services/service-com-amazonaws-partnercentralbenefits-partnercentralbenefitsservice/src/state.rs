@@ -29,6 +29,12 @@ use ::sha2::{Digest, Sha256};
 
 use crate::ops::types::{Amendment, Contact, FileDetail, FileInput, Tag};
 
+/// Redeeming one of the promotional credit codes this service has issued, which is what
+/// spends the record the reads above report.
+mod credit_code_redemption;
+
+pub use credit_code_redemption::*;
+
 /// This service's ARN namespace, from
 /// `smithy_query(query="service_info")` -> `arnNamespace: partnercentral`.
 pub const ARN_SERVICE: &str = "partnercentral";
@@ -922,8 +928,9 @@ impl AllocationFulfillment {
                     aws_account_id: ::engine::emulator_account_id().to_string(),
                     code: credit_code_text(allocation_id, 0),
                     value: issued.clone(),
-                    // A code is handed over REDEEMABLE: nothing in this emulator
-                    // redeems one, and its own expiry is what moves it to
+                    // A code is handed over REDEEMABLE: the redemption that applies it
+                    // to a bill is what moves it to `FULFILLED` (see
+                    // `redeem_credit_code`), and its own expiry what moves it to
                     // `INACTIVE` (see [`AllocatedCreditCode::expire_due`]).
                     status: ALLOCATION_STATUS_ACTIVE.to_string(),
                     issued_at_millis,

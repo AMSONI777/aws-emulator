@@ -12,6 +12,11 @@ engine = { workspace = true }
 # `sts:GetCallerIdentity` and this service must answer with one principal for
 # one credential, so the identity is resolved from the STS store (src/state.rs).
 service-com-amazonaws-sts-awssecuritytokenservicev20110615 = { workspace = true }
+# The promotional credit codes `RedeemCredits` redeems are issued against an AWS
+# partner's benefit allocation, so the registry of issued codes — and the terms of
+# the promotion each one names — belongs to that service's store, not this one's
+# (src/ops/redeem_credits.rs).
+service-com-amazonaws-partnercentralbenefits-partnercentralbenefitsservice = { workspace = true }
 # Hex-encodes the opaque `nextToken` the list operations hand out
 # (ListBillingViews, ListSourceViewsForBillingView).
 hex = { workspace = true }

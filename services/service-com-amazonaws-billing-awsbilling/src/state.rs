@@ -22,8 +22,9 @@
 //! gate both consult before they read or write a preference.
 //!
 //! Beside them, [`ComAmazonawsBillingAwsbillingState::credits`] holds the account
-//! credits `GetCredits` reports, keyed and ordered by `creditId`, and
-//! [`ComAmazonawsBillingAwsbillingState::credit_allocations`] the credits
+//! credits `GetCredits` reports, keyed and ordered by `creditId` — the ledger
+//! `RedeemCredits` mints a credit into when it redeems a promotional credit code —
+//! and [`ComAmazonawsBillingAwsbillingState::credit_allocations`] the credits
 //! applied to an account's bills, keyed by [`CreditAllocation::key`] so a
 //! reverse walk is the `billingMonth`-descending order
 //! `GetCreditAllocationHistory` documents.
@@ -716,6 +717,9 @@ pub struct ComAmazonawsBillingAwsbillingState {
     /// family, keyed and ordered by `creditId`, so `GetCredits` answers in a
     /// deterministic order. Bounded by [`MAX_CREDITS`].
     pub credits: BTreeMap<String, Credit>,
+    /// Source of the next `creditId` [`Self::mint_credit_id`] hands out — the id
+    /// a credit `RedeemCredits` mints is stored under in `credits`.
+    pub next_credit_id: u64,
     /// Every persisted account-month of Support-eligible spend, keyed and
     /// ordered by [`SupportEligibleSpend::key`] (billing month, then account)
     /// so `ListBusinessSupportAccountCharges` seeks straight to one month and
@@ -813,6 +817,9 @@ impl Default for ComAmazonawsBillingAwsbillingState {
             // A fresh account holds no credits: the modeled `GetCredits`
             // response "returns an empty list when no credits exist".
             credits: BTreeMap::new(),
+            // The modeled `CreditId` admits `^[0-9]+$`, so the first id minted
+            // is the first positive number.
+            next_credit_id: 1,
             // Nothing has been billed yet, so no account has Support-eligible
             // spend: AWS documents no charge every account carries by
             // default, the way it documents the PRIMARY billing view.
@@ -1168,6 +1175,31 @@ impl ComAmazonawsBillingAwsbillingState {
         }
         self.credits.insert(credit.credit_id.clone(), credit);
         true
+    }
+
+    /// Whether another credit fits in the store, i.e. whether
+    /// [`Self::insert_credit`] would store one rather than refuse it. Read-only,
+    /// so a handler can refuse before it consumes anything the credit would be
+    /// minted from.
+    pub fn has_room_for_a_credit(&self) -> bool {
+        self.credits.len() < MAX_CREDITS
+    }
+
+    /// Mint a `creditId` no stored credit is using, and advance the id source.
+    ///
+    /// The modeled `CreditId` is 1..32 characters of `^[0-9]+$`, so an id is a
+    /// decimal number; `GetCreditAllocationHistory$creditId` carries the same id
+    /// as a `long`, which is what keeps it numeric rather than opaque. The
+    /// returned id is not stored by this call — the caller inserts the credit it
+    /// belongs to with [`Self::insert_credit`].
+    pub fn mint_credit_id(&mut self) -> String {
+        loop {
+            let credit_id = self.next_credit_id.to_string();
+            self.next_credit_id += 1;
+            if !self.credits.contains_key(&credit_id) {
+                return credit_id;
+            }
+        }
     }
 
     /// The credits `GetCredits` reports, in `creditId` order.
@@ -1532,6 +1564,26 @@ pub fn epoch_secs(at: SystemTime) -> f64 {
     at.duration_since(UNIX_EPOCH)
         .map(|since| since.as_secs_f64())
         .unwrap_or_default()
+}
+
+/// An instant as MILLISECONDS since the epoch, the scale on which this
+/// emulator's promotional credit codes are issued and expire
+/// (`RedeemCredits`). Saturating: an instant past what the scale can hold
+/// reads as its maximum rather than wrapping.
+pub fn epoch_millis(at: SystemTime) -> i64 {
+    at.duration_since(UNIX_EPOCH)
+        .map(|since| i64::try_from(since.as_millis()).unwrap_or(i64::MAX))
+        .unwrap_or_default()
+}
+
+/// Milliseconds since the epoch as the instant this store holds: the inverse
+/// of [`epoch_millis`], for an instant that arrives on that scale.
+///
+/// The scale carries no instant before the epoch — a promotional credit code
+/// is issued and expires after it — so a negative figure is not one of this
+/// store's instants and reads as the epoch itself.
+pub fn instant_from_millis(millis: i64) -> SystemTime {
+    UNIX_EPOCH + std::time::Duration::from_millis(u64::try_from(millis).unwrap_or(0))
 }
 
 /// A request `Timestamp` as seconds since the epoch, on the same scale as

@@ -38,10 +38,12 @@ const UNKNOWN_ACCOUNT_ID: &str = "999999999999";
 const DAY: u64 = 24 * 60 * 60;
 
 /// One router over ONE shared engine — what `core/router` builds in production, so
-/// every call in a test observes the same state. The engine comes back too: the
-/// credits a real account holds are minted by AWS's billing systems rather than by
-/// an API of this service (`RedeemCredits` is still a scaffold stub), so a test
-/// seeds the store the way those systems would and then reads it back over the wire.
+/// every call in a test observes the same state. The engine comes back too: most of
+/// the credits a real account holds are minted by AWS's billing systems rather than
+/// by an API of this service (`RedeemCredits` mints the one kind that does come from
+/// the API, a redeemed promotional credit — see `tests/all/redeem_credits.rs`), so a
+/// test seeds the store the way those systems would and then reads it back over the
+/// wire.
 fn emulator() -> (MultiServiceRouter, Arc<engine::InMemoryEngine>) {
     let engine: Arc<engine::InMemoryEngine> = Arc::new(engine::InMemoryEngine::new());
     let mut router = MultiServiceRouter::new();

@@ -47,6 +47,8 @@ mod enterprise_support_charge_summary;
 mod enterprise_support_linked_account_charges;
 #[path = "all/omitted_page_size.rs"]
 mod omitted_page_size;
+#[path = "all/redeem_credits.rs"]
+mod redeem_credits;
 #[path = "all/refusal_and_projection_fidelity.rs"]
 mod refusal_and_projection_fidelity;
 #[path = "all/refusal_message_text.rs"]

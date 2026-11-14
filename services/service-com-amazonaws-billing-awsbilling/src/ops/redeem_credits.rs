@@ -1,15 +1,13 @@
 // SPDX-License-Identifier: CC0-1.0
 
 //! @op RedeemCredits
-//! SCAFFOLDED, NOT IMPLEMENTED: this operation answers HTTP 501 `NotImplemented` and
-//! asserts NOTHING about `RedeemCredits`'s real behaviour. Implement it here — this is
-//! the ONLY file to touch for this operation.
-//!
-//! A 501 from this operation means "nobody has written it yet", never "the emulator is
-//! broken". Replace the `Err(..)` in [`RedeemCredits::handle`] with real behaviour and
-//! delete the SCAFFOLDED marker line above; that line is the machine-readable record of
-//! which operations are still stubs (`grep -rl '^//! SCAFFOLDED, NOT IMPLEMENTED:' */src/ops/`),
-//! so leaving it on an implemented operation under-reports progress.
+//! IMPLEMENTED: redeems the promotional credit code the request names against the codes
+//! this emulator has ISSUED — the registry the AWS partner benefits service owns, since
+//! a code is issued against a benefit allocation there — and mints the credit that
+//! redemption earns into [`crate::state::ComAmazonawsBillingAwsbillingState::credits`],
+//! the ledger `GetCredits` reports from, with the promotion's own amount and validity
+//! period. A code nothing issued to the calling account, one already redeemed, and one
+//! past its validity period are each refused with the modeled `ValidationException`.
 //!
 //! ## Shape of an operation
 //!
@@ -72,6 +70,8 @@
 
 #[allow(unused_imports)]
 use super::types::*;
+
+use service_com_amazonaws_partnercentralbenefits_partnercentralbenefitsservice::state as partner_state;
 
 // `#[operation_error]` below expands to an invocation of the LOCAL declarative
 // `smithy!` macro, which this line is what emits into the module. Without it the
@@ -144,18 +144,206 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         input: Self::Input,
         ctx: &smithy_server_runtime::OperationContext<'_>,
     ) -> Result<Self::Output, Self::Error> {
-        // The engine is reachable from `&self` (constructor-injected); `ctx` carries
-        // request metadata. Both are bound here so an implementer has them in scope.
-        let _ = (&input, ctx, &self.engine);
-        // Implement `RedeemCredits` here, then delete the SCAFFOLDED marker at the top of
-        // this file. Return modeled failures as
-        // `Err(RedeemCreditsErrorModeled::Variant(..).into())` — the `From` impl above lifts it.
-        //
-        // To refuse a bad request this operation models no error for, return
-        // `Err(crate::scaffolded::Scaffolded::validation("..."))` — a 400
-        // `ValidationException`. Do NOT answer 501 for it: 501 means "not written yet",
-        // not "bad request". Modeled constraints are already refused BEFORE this
-        // handler runs, so reaching here means the input satisfies every one of them.
-        Err(crate::scaffolded::Scaffolded::not_implemented("RedeemCredits"))
+        // `ctx` carries request metadata only; this operation needs none of it. The
+        // credit is redeemed "on behalf of the calling account", and every request to
+        // this emulator is signed by the one account it presents
+        // ([`crate::state::caller_account_id`]).
+        let _ = ctx;
+
+        // One instant for the whole call: the same `now` decides which codes the clock
+        // has already expired and when the credit this redemption mints becomes valid.
+        let now = std::time::SystemTime::now();
+        let now_millis = crate::state::epoch_millis(now);
+        let account_id = crate::state::caller_account_id();
+
+        let state = crate::state::service_state(&*self.engine)
+            .ok_or_else(|| unavailable_store("the billing credit store is unavailable"))?;
+        // LOCK ORDER, where this handler is the only holder of both: the billing ledger
+        // FIRST, then the credit-code registry below. Taking them in that order is what
+        // makes the redemption atomic — the capacity guard that follows cannot be
+        // overtaken between the check and the insert — and a future reader of billing
+        // state from the other service must take them in the same order.
+        let mut store = state.lock();
+
+        // Asked BEFORE the code is redeemed: a code is spent by the redemption that
+        // takes it, so a redemption whose credit the ledger has no room for must take
+        // nothing at all.
+        if !store.has_room_for_a_credit() {
+            return Err(ledger_full());
+        }
+
+        // The promotion's terms come from the issued code, in the store of the service
+        // that issued it: "the amount, validity period, and applicable products defined
+        // by the promotion" are the promotion's, never this request's.
+        let codes = partner_state::service_state(&*self.engine)
+            .ok_or_else(|| unavailable_store("the promotional credit code registry is unavailable"))?;
+        let redeemed = codes
+            .lock()
+            .redeem_credit_code(&input.promo_code, account_id, now_millis)
+            .map_err(|defect| {
+                // The record of a refused redemption: WHY it was refused, never the code
+                // itself, which is a value anybody holding it can redeem.
+                tracing::info!(
+                    operation = "RedeemCredits",
+                    account_id = %account_id,
+                    outcome = "refused",
+                    reason = defect_reason(defect),
+                    "refused a redemption of a promotional credit code"
+                );
+                field_validation_failed(PROMO_CODE_FIELD, defect_message(defect))
+            })?;
+
+        // "On success, a new credit is added to the account's credit ledger with the
+        // amount, validity period, and applicable products defined by the promotion."
+        let amount = crate::state::CreditAmount {
+            currency_code: redeemed.value.currency_code.clone(),
+            currency_amount: redeemed.value.amount_text(),
+        };
+        let credit_id = store.mint_credit_id();
+        let stored = store.insert_credit(crate::state::Credit {
+            credit_id: credit_id.clone(),
+            account_id: redeemed.aws_account_id,
+            credit_type: PROMOTION_CREDIT_TYPE.to_string(),
+            // Nothing has been applied to a bill yet, so the whole of the credit is
+            // still unused: `remainingAmount` is "the unused balance of the credit".
+            initial_amount: amount.clone(),
+            remaining_amount: amount,
+            // `estimatedAmount` counts in-flight bills and `exhaustDate` is the date the
+            // balance reached zero: neither has happened to a credit just minted.
+            estimated_amount: None,
+            // The promotion restricts the credit to no product, so it applies to every
+            // one (see [`crate::state::Credit::applicable_product_names`]).
+            applicable_product_names: Vec::new(),
+            description: redeemed.description,
+            // The validity period of the promotion the code named: valid from this
+            // redemption until the code's own expiry.
+            start_date: now,
+            end_date: Some(crate::state::instant_from_millis(redeemed.expires_at_millis)),
+            exhaust_date: None,
+            // The promotion defines no bill-computation order, sharing configuration or
+            // purchase-type restriction, so the credit records none: an absent member is
+            // how "nothing recorded" is reported (see `GetCredits`).
+            application_type: None,
+            shareable_accounts: Vec::new(),
+            account_has_credit_sharing_enabled: None,
+            credit_console_visibility: None,
+            credit_sharing_type: None,
+            cost_category_arn: None,
+            rule_name: None,
+            // "The credit is then automatically applied to subsequent bills": a redeemed
+            // credit participates in billing runs, which is what `ENABLED` says.
+            credit_status: Some(CREDIT_STATUS_ENABLED.to_string()),
+            purchase_type_applications: Vec::new(),
+        });
+        // The insert cannot report `false` here: it decides the same predicate the
+        // capacity guard above decided, under the same lock, so nothing can have filled
+        // the ledger in between. The invariant is asserted in a debug build, where a test
+        // sees it break; a release build answers the request rather than panicking on it.
+        debug_assert!(
+            stored,
+            "a ledger with room for a credit must store the one this redemption minted"
+        );
+
+        // The record of a state-changing call: which credit was minted, for which
+        // account, by redeeming a promotional code. The CODE is never recorded — anybody
+        // holding it can redeem it.
+        tracing::info!(
+            operation = "RedeemCredits",
+            account_id = %account_id,
+            credit_id = %credit_id,
+            outcome = "redeemed",
+            "redeemed a promotional credit code and minted the promotion's credit"
+        );
+
+        // The modeled `RedeemCreditsResponse` carries no member: what the redemption
+        // produced is read back through `GetCredits`.
+        Ok(RedeemCreditsOutput {})
     }
+}
+
+/// The `promoCode` member name, as the modeled `ValidationExceptionField` reports it.
+const PROMO_CODE_FIELD: &str = "promoCode";
+
+/// The `fieldValidationFailed` member of the modeled `ValidationExceptionReason` enum
+/// (`smithy_query(query="shape",shape="ValidationExceptionReason")`): the reason the
+/// value of a member broke one of this operation's rules.
+const REASON_FIELD_VALIDATION_FAILED: &str = "fieldValidationFailed";
+
+/// The `creditType` of a credit a redeemed promotional code earned.
+///
+/// From the modeled `CreditData$creditType` doc — "The type of credit. Examples:
+/// `Promotion`, `Refund`, `TrueUp`" — a promotional credit code redeems into the first
+/// of them.
+const PROMOTION_CREDIT_TYPE: &str = "Promotion";
+
+/// `ENABLED`, the `CreditStatus` value of a credit that "participates in billing runs"
+/// (one of `CREDIT_STATUS_VALUES` in `ops::types`).
+const CREDIT_STATUS_ENABLED: &str = "ENABLED";
+
+/// The refusal of a code this emulator issued to no calling account.
+///
+/// A code nothing issued and a code issued to another account are ONE refusal: which of
+/// the two it was is not something a caller holding neither may learn.
+const NOT_ISSUED_MESSAGE: &str = "The promotional code you entered is not valid";
+
+/// The refusal of a code that has already been redeemed: a code is redeemable once.
+const ALREADY_REDEEMED_MESSAGE: &str =
+    "The promotional code you entered has already been redeemed";
+
+/// The refusal of a code whose promotion's validity period has closed.
+const EXPIRED_MESSAGE: &str = "The promotional code you entered has expired";
+
+/// The refusal of a redemption the credit ledger has no room for.
+///
+/// [`crate::state::MAX_CREDITS`] is an emulator resource bound, not a published AWS
+/// quota, and the request that meets it is perfectly valid — so it is answered with the
+/// modeled server error naming the bound, never with a `ValidationException` telling the
+/// caller to fix a `promoCode` that is not at fault.
+fn ledger_full() -> RedeemCreditsError {
+    unavailable_store(&format!(
+        "this emulator stores at most {} credits per billing family and already holds \
+         that many",
+        crate::state::MAX_CREDITS
+    ))
+}
+
+/// Why the presented code could not be redeemed, as the refusal words it.
+fn defect_message(defect: partner_state::CreditCodeDefect) -> &'static str {
+    match defect {
+        partner_state::CreditCodeDefect::NotIssued => NOT_ISSUED_MESSAGE,
+        partner_state::CreditCodeDefect::AlreadyRedeemed => ALREADY_REDEEMED_MESSAGE,
+        partner_state::CreditCodeDefect::Expired => EXPIRED_MESSAGE,
+    }
+}
+
+/// The same reason, as the audit record of a refused redemption names it.
+fn defect_reason(defect: partner_state::CreditCodeDefect) -> &'static str {
+    match defect {
+        partner_state::CreditCodeDefect::NotIssued => "not-issued",
+        partner_state::CreditCodeDefect::AlreadyRedeemed => "already-redeemed",
+        partner_state::CreditCodeDefect::Expired => "expired",
+    }
+}
+
+/// Refuse the request with the modeled 400 `ValidationException`, naming the member that
+/// failed and why, so the caller can fix the request from the error alone.
+fn field_validation_failed(field: &str, message: &str) -> RedeemCreditsError {
+    RedeemCreditsErrorModeled::ValidationException(ValidationException {
+        message: message.to_string(),
+        reason: REASON_FIELD_VALIDATION_FAILED.to_string(),
+        field_list: Some(vec![ValidationExceptionField {
+            name: field.to_string(),
+            message: message.to_string(),
+        }]),
+    })
+    .into()
+}
+
+/// The modeled 500 `InternalServerException` for a store this process cannot reach, so
+/// no redemption is reported for a code nothing could read or spend.
+fn unavailable_store(message: &str) -> RedeemCreditsError {
+    RedeemCreditsErrorModeled::InternalServerException(InternalServerException {
+        message: message.to_string(),
+    })
+    .into()
 }
