@@ -23,8 +23,22 @@
 //! * the clock is inside the validity window the response states.
 //!
 //! Each class is refused with the fixed text AWS words for THAT class
-//! ([`AssertionDefect::message`]), so a caller can tell a forged signature from an expired
+//! ([`AssertionDefect::sentence`]), so a caller can tell a forged signature from an expired
 //! window from a claim the provider itself rejected.
+//!
+//! ## Who refused
+//!
+//! This reading is not STS's own: a presented response is read by the internal discovery
+//! service that holds the account's SAML manifests, and what a client is served is THAT
+//! call's refusal, reported inside the envelope the relaying layer states around a failed
+//! call — the service it was made to, the status it answered, the exception it named, that
+//! call's own request id, and the proxy it went through ([`AssertionDefect::message`]). The
+//! exception names which part of the relayed reading refused: looking the provider's
+//! manifest up, or reading the presented response against the manifest it found. A class
+//! decided here rather than there — the role the REQUEST asked for not being one the
+//! response asserts, a validity window this service answers its own expiry error for, and
+//! the provider's own report that the authentication failed — carries its sentence alone,
+//! because no relayed call refused it.
 //!
 //! ## What the digest is computed over
 //!
@@ -118,12 +132,16 @@ const PROVIDER_NOT_FOUND_MESSAGE: &str = "Specified provider doesn't exist";
 const NOT_BASE64_MESSAGE: &str = "Invalid base64 SAMLResponse";
 
 /// How AWS words the refusal of a response that asserts no role pair the request asked for:
-/// the provider claims nothing about the session the request wants.
-const ROLE_NOT_ASSERTED_MESSAGE: &str = "Specified role could not be found in the SAML assertion";
+/// the provider claims nothing about the session the request wants, so the attributes carry
+/// neither the role asked for nor the provider's metadata beside it.
+const ROLE_NOT_ASSERTED_MESSAGE: &str =
+    "SAML Assertion doesn't contain the requested Role and Metadata in the attributes";
 
-/// How AWS words the refusal of a response nothing signed at all, which is a different
-/// condition from a signature that was checked and did not hold.
-const NOT_SIGNED_MESSAGE: &str = "Response is not signed";
+/// How AWS words the refusal of a response nothing signed at all: a response's own signature
+/// is optional, and the assertion inside it carries a mandatory one — a different condition
+/// from a signature that was checked and did not hold.
+const NOT_SIGNED_MESSAGE: &str =
+    "Response (with optional signature) must contain an assertion with a mandatory signature";
 
 /// How AWS words the refusal of a response presented longer after it was issued than the
 /// window it may be redeemed in: the five minutes AWS gives a SAML authentication response
@@ -204,11 +222,45 @@ pub enum AssertionDefect {
     NotYetValid,
 }
 
+/// The internal service a presented SAML authentication response is read by, as the layer
+/// that relays the call names it: STS holds no SAML manifest of its own, so the reading — and
+/// the refusal of it — belongs to that service.
+const DISCOVERY_SERVICE: &str = "AWSOpenIdDiscoveryService";
+
+/// The HTTP status that service answers a response it refused with, which is the status the
+/// envelope states for the relayed call (not this operation's own).
+const DISCOVERY_REFUSAL_STATUS: u16 = 400;
+
+/// The exception that service names when the presented value is not a response of the
+/// provider's it will read: the reading of the response itself refused.
+const INVALID_RESPONSE_EXCEPTION: &str = "AuthSamlInvalidSamlResponseException";
+
+/// The exception that service names when the manifest it would read the response against is
+/// not there to be found: the manifest LOOKUP refused, before any response was read.
+const MANIFEST_NOT_FOUND_EXCEPTION: &str = "AuthSamlManifestNotFoundException";
+
+/// What a proxy field states when the relayed call went through no proxy, which is every call
+/// made in this process.
+const NO_PROXY: &str = "null";
+
+/// The envelope the relaying layer states around a refused call, including the space that
+/// separates it from the sentence it follows: the service the call was made to, the status it
+/// answered, the exception it named, that call's OWN request id — minted per call, so two
+/// refusals never report one id — and the proxy it went through, in that order.
+#[must_use]
+fn relayed_envelope(exception: &str) -> String {
+    format!(
+        " (Service: {DISCOVERY_SERVICE}; Status Code: {DISCOVERY_REFUSAL_STATUS}; \
+         Error Code: {exception}; Request ID: {}; Proxy: {NO_PROXY})",
+        ::service_common::query_error_envelope::new_request_id()
+    )
+}
+
 impl AssertionDefect {
     /// The sentence AWS words for this class — fixed text per class, so no reader of the
     /// document puts its own diagnostics on the wire.
     #[must_use]
-    pub fn message(&self) -> String {
+    pub fn sentence(&self) -> String {
         match self {
             Self::ProviderNotFound => PROVIDER_NOT_FOUND_MESSAGE.to_string(),
             Self::NotBase64 => NOT_BASE64_MESSAGE.to_string(),
@@ -233,6 +285,49 @@ impl AssertionDefect {
             Self::Expired => RESPONSE_EXPIRED_MESSAGE.to_string(),
             Self::NotRedeemable => NOT_REDEEMABLE_MESSAGE.to_string(),
             Self::NotYetValid => RESPONSE_NOT_YET_VALID_MESSAGE.to_string(),
+        }
+    }
+
+    /// The exception the relayed reading answered this class with, or `None` for a class no
+    /// relayed call decided.
+    ///
+    /// Reading the manifest the account registered and reading the presented response against
+    /// it are two steps of that call, and the exception says which of them refused. The
+    /// classes this service decides ITSELF — the role the request asked for against the pairs
+    /// a VERIFIED response asserts, the validity window it answers its own expiry error for,
+    /// and the provider's own report that the authentication failed — are nobody's relayed
+    /// refusal.
+    #[must_use]
+    pub fn relayed_exception(&self) -> Option<&'static str> {
+        match self {
+            // The lookup: there is no manifest to read a key or an issuer out of.
+            Self::ProviderNotFound => Some(MANIFEST_NOT_FOUND_EXCEPTION),
+            // The reading: everything the presented document is held to, from its encoding
+            // to the session it names.
+            Self::NotBase64
+            | Self::NotWellFormed
+            | Self::NotSamlResponse
+            | Self::NotSigned
+            | Self::UnacceptedTransform
+            | Self::SignatureInvalid
+            | Self::IssuerNotInProvider
+            | Self::SessionNameMissing
+            | Self::SessionNamePattern => Some(INVALID_RESPONSE_EXCEPTION),
+            Self::ClaimRejected
+            | Self::RoleNotAsserted
+            | Self::Expired
+            | Self::NotRedeemable
+            | Self::NotYetValid => None,
+        }
+    }
+
+    /// The whole message this class is reported with: its sentence, and — for a class a
+    /// relayed call refused — the envelope naming that call ([`relayed_envelope`]).
+    #[must_use]
+    pub fn message(&self) -> String {
+        match self.relayed_exception() {
+            Some(exception) => format!("{}{}", self.sentence(), relayed_envelope(exception)),
+            None => self.sentence(),
         }
     }
 }

@@ -4099,3 +4099,8 @@ mod lambda_in_function_cloudwatch_authorization;
 // this file, the only place a `//!` line is legal.)
 // suite left at the top level of `tests/` fails the build. (Ordinary comments, for the
 // leaving a note here. (Ordinary comments: past the first item a `//!` line is `E0753`.)
+// (One more fragment of this file's header, landed here as an inner doc comment: it is
+// legal only before the first item, so it is a plain comment — a suite left at the top
+// (And one more of those fragments: an inner doc comment past the first item is `E0753`,
+// so it is a plain comment — `all/all_rs_declares_each_suite_once.rs` is what checks this
+// file and every service crate's `tests/all.rs`.)

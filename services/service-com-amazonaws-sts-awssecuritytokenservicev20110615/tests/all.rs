@@ -53,6 +53,9 @@ mod saml_assertion_expiry;
 #[path = "all/saml_federation.rs"]
 mod saml_federation;
 
+#[path = "all/saml_relayed_refusal.rs"]
+mod saml_relayed_refusal;
+
 #[path = "all/session_audit_records.rs"]
 mod session_audit_records;
 

@@ -538,7 +538,9 @@ const SAML_NOT_AUTHORIZED_MESSAGE: &str = "Not authorized to perform sts:AssumeR
 /// is only which modelled error each class travels as. A response outside its validity window
 /// is `ExpiredTokenException` / HTTP 400; a claim the provider itself rejected is
 /// `IDPRejectedClaim` / HTTP 403; and every other class is `InvalidIdentityToken` / HTTP 400,
-/// told apart by the fixed text its class carries.
+/// told apart by the fixed text its class carries and, where a relayed reading of the
+/// response refused it, by the envelope naming that call
+/// ([`crate::state::saml::AssertionDefect::message`]).
 fn refuse(defect: crate::state::saml::AssertionDefect) -> AssumeRoleWithSAMLError {
     use crate::state::saml::AssertionDefect;
 

@@ -38,6 +38,9 @@ use service_com_amazonaws_sts_awssecuritytokenservicev20110615 as sts;
 use super::sts_sessions::{
     element, emulator_account, member, query, LONG_TERM_KEY, STS_API_VERSION, STS_SIGNING_NAME,
 };
+use super::saml_relayed_refusal::{
+    relayed_request_id, INVALID_RESPONSE_EXCEPTION, MANIFEST_NOT_FOUND_EXCEPTION,
+};
 use super::web_identity_federation::unsigned_call;
 
 /// IAM's SigV4 signing name and awsQuery API version: the provider and the role are
@@ -59,7 +62,7 @@ const PROTOCOL_NAMESPACE: &str = "urn:oasis:names:tc:SAML:2.0:protocol";
 const ASSERTION_NAMESPACE: &str = "urn:oasis:names:tc:SAML:2.0:assertion";
 const SIGNATURE_NAMESPACE: &str = "http://www.w3.org/2000/09/xmldsig#";
 const STATUS_SUCCESS: &str = "urn:oasis:names:tc:SAML:2.0:status:Success";
-const STATUS_AUTHN_FAILED: &str = "urn:oasis:names:tc:SAML:2.0:status:AuthnFailed";
+pub(crate) const STATUS_AUTHN_FAILED: &str = "urn:oasis:names:tc:SAML:2.0:status:AuthnFailed";
 const ENVELOPED_SIGNATURE: &str = "http://www.w3.org/2000/09/xmldsig#enveloped-signature";
 const EXCLUSIVE_C14N: &str = "http://www.w3.org/2001/10/xml-exc-c14n#";
 const XPATH_TRANSFORM: &str = "http://www.w3.org/TR/1999/REC-xpath-19991116";
@@ -70,21 +73,25 @@ const SHA256_DIGEST: &str = "http://www.w3.org/2001/04/xmlenc#sha256";
 const ROLE_ATTRIBUTE: &str = "https://aws.amazon.com/SAML/Attributes/Role";
 const ROLE_SESSION_NAME_ATTRIBUTE: &str = "https://aws.amazon.com/SAML/Attributes/RoleSessionName";
 
-/// The sentences AWS words each refusal class with.
-const SIGNATURE_INVALID_MESSAGE: &str = "Response signature invalid";
-const ISSUER_NOT_IN_PROVIDER_MESSAGE: &str = "Issuer not present in specified provider";
-const PROVIDER_NOT_FOUND_MESSAGE: &str = "Specified provider doesn't exist";
-const ROLE_NOT_ASSERTED_MESSAGE: &str = "Specified role could not be found in the SAML assertion";
-const NOT_SIGNED_MESSAGE: &str = "Response is not signed";
-const NOT_BASE64_MESSAGE: &str = "Invalid base64 SAMLResponse";
+/// The sentences AWS words each refusal class with. The ones a relayed reading of the
+/// response answers are followed on the wire by the envelope naming that call, which
+/// `super::saml_relayed_refusal` is the one reading of.
+pub(crate) const SIGNATURE_INVALID_MESSAGE: &str = "Response signature invalid";
+pub(crate) const ISSUER_NOT_IN_PROVIDER_MESSAGE: &str = "Issuer not present in specified provider";
+pub(crate) const PROVIDER_NOT_FOUND_MESSAGE: &str = "Specified provider doesn't exist";
+pub(crate) const ROLE_NOT_ASSERTED_MESSAGE: &str =
+    "SAML Assertion doesn't contain the requested Role and Metadata in the attributes";
+pub(crate) const NOT_SIGNED_MESSAGE: &str =
+    "Response (with optional signature) must contain an assertion with a mandatory signature";
+pub(crate) const NOT_BASE64_MESSAGE: &str = "Invalid base64 SAMLResponse";
 const NOT_REDEEMABLE_MESSAGE: &str = "Token must be redeemed within 5 minutes of issuance";
-const SESSION_NAME_REQUIRED_MESSAGE: &str =
+pub(crate) const SESSION_NAME_REQUIRED_MESSAGE: &str =
     "RoleSessionName is required in AuthnResponse (service provider)";
-const SESSION_NAME_PATTERN_MESSAGE: &str =
+pub(crate) const SESSION_NAME_PATTERN_MESSAGE: &str =
     "RoleSessionName in AuthnResponse must match [a-zA-Z_0-9+=,.@-]{2,64}";
-const RESPONSE_EXPIRED_MESSAGE: &str = "Response has expired";
+pub(crate) const RESPONSE_EXPIRED_MESSAGE: &str = "Response has expired";
 const RESPONSE_NOT_YET_VALID_MESSAGE: &str = "Response is not yet valid";
-const IDP_REJECTED_CLAIM_MESSAGE: &str =
+pub(crate) const IDP_REJECTED_CLAIM_MESSAGE: &str =
     "The identity provider (IdP) reported that authentication failed.";
 const NOT_AUTHORIZED_MESSAGE: &str = "Not authorized to perform sts:AssumeRoleWithSAML";
 
@@ -484,8 +491,34 @@ pub(crate) async fn exchange(
 enum Expected {
     /// A session of the role, reporting the facts the response carried.
     Federated,
-    /// This status, this `<Code>` and exactly this message.
+    /// This status, this `<Code>` and exactly this message: a class this service decides
+    /// itself states its sentence alone.
     Refused(u16, &'static str, String),
+    /// This status, this `<Code>`, this sentence and then the envelope of the relayed
+    /// reading that refused it, naming this exception (`super::saml_relayed_refusal`).
+    Relayed(u16, &'static str, String, &'static str),
+}
+
+/// What every refusal answers whatever its class: this status, this `<Code>`, no credential
+/// and an awsQuery error envelope.
+fn assert_refused(case: &str, status: u16, body: &str, expected_status: u16, code: &str) {
+    assert_eq!(
+        status, expected_status,
+        "case {case:?}: expected HTTP {expected_status}, got {status} {body}"
+    );
+    assert_eq!(
+        element(body, "Code").as_deref(),
+        Some(code),
+        "case {case:?}: expected <Code>{code}</Code>, got {body}"
+    );
+    assert!(
+        element(body, "Credentials").is_none(),
+        "case {case:?}: a refused exchange must vend no credential, got {body}"
+    );
+    assert!(
+        body.contains("<ErrorResponse"),
+        "case {case:?}: expected an awsQuery XML ErrorResponse, got {body}"
+    );
 }
 
 #[tokio::test]
@@ -529,10 +562,11 @@ async fn a_saml_identity_is_federated_only_when_its_registered_provider_signed_t
             role_arn.clone(),
             provider_arn.clone(),
             "not-base64".to_string(),
-            Expected::Refused(
+            Expected::Relayed(
                 400,
                 "InvalidIdentityToken",
                 NOT_BASE64_MESSAGE.to_string(),
+                INVALID_RESPONSE_EXCEPTION,
             ),
         ),
         (
@@ -540,10 +574,11 @@ async fn a_saml_identity_is_federated_only_when_its_registered_provider_signed_t
             role_arn.clone(),
             provider_arn.clone(),
             aws_smithy_types::base64::encode("this is not an XML document"),
-            Expected::Refused(
+            Expected::Relayed(
                 400,
                 "InvalidIdentityToken",
                 "Invalid SAMLResponse: the value is not a well-formed XML document".to_string(),
+                INVALID_RESPONSE_EXCEPTION,
             ),
         ),
         (
@@ -551,10 +586,11 @@ async fn a_saml_identity_is_federated_only_when_its_registered_provider_signed_t
             role_arn.clone(),
             provider_arn.clone(),
             aws_smithy_types::base64::encode("<html><body>signed in</body></html>"),
-            Expected::Refused(
+            Expected::Relayed(
                 400,
                 "InvalidIdentityToken",
                 "Invalid SAMLResponse: the document is not a SAML 2.0 Response".to_string(),
+                INVALID_RESPONSE_EXCEPTION,
             ),
         ),
         (
@@ -565,7 +601,12 @@ async fn a_saml_identity_is_federated_only_when_its_registered_provider_signed_t
                 signed: false,
                 ..valid()
             }),
-            Expected::Refused(400, "InvalidIdentityToken", NOT_SIGNED_MESSAGE.to_string()),
+            Expected::Relayed(
+                400,
+                "InvalidIdentityToken",
+                NOT_SIGNED_MESSAGE.to_string(),
+                INVALID_RESPONSE_EXCEPTION,
+            ),
         ),
         (
             // Forged: correctly signed, by a key the named provider does not publish.
@@ -573,10 +614,11 @@ async fn a_saml_identity_is_federated_only_when_its_registered_provider_signed_t
             role_arn.clone(),
             provider_arn.clone(),
             saml_assertion(&other, &Response::valid(&other, &role_arn, &provider_arn)),
-            Expected::Refused(
+            Expected::Relayed(
                 400,
                 "InvalidIdentityToken",
                 SIGNATURE_INVALID_MESSAGE.to_string(),
+                INVALID_RESPONSE_EXCEPTION,
             ),
         ),
         (
@@ -587,10 +629,11 @@ async fn a_saml_identity_is_federated_only_when_its_registered_provider_signed_t
                 altered_after_signing: true,
                 ..valid()
             }),
-            Expected::Refused(
+            Expected::Relayed(
                 400,
                 "InvalidIdentityToken",
                 SIGNATURE_INVALID_MESSAGE.to_string(),
+                INVALID_RESPONSE_EXCEPTION,
             ),
         ),
         (
@@ -603,10 +646,11 @@ async fn a_saml_identity_is_federated_only_when_its_registered_provider_signed_t
                 transforms: vec![ENVELOPED_SIGNATURE, XPATH_TRANSFORM],
                 ..valid()
             }),
-            Expected::Refused(
+            Expected::Relayed(
                 400,
                 "InvalidIdentityToken",
                 SIGNATURE_INVALID_MESSAGE.to_string(),
+                INVALID_RESPONSE_EXCEPTION,
             ),
         ),
         (
@@ -742,10 +786,11 @@ async fn a_saml_identity_is_federated_only_when_its_registered_provider_signed_t
                 issuer: "https://impostor.example.test/saml".to_string(),
                 ..valid()
             }),
-            Expected::Refused(
+            Expected::Relayed(
                 400,
                 "InvalidIdentityToken",
                 ISSUER_NOT_IN_PROVIDER_MESSAGE.to_string(),
+                INVALID_RESPONSE_EXCEPTION,
             ),
         ),
         (
@@ -757,10 +802,11 @@ async fn a_saml_identity_is_federated_only_when_its_registered_provider_signed_t
                 names_session: false,
                 ..valid()
             }),
-            Expected::Refused(
+            Expected::Relayed(
                 400,
                 "InvalidIdentityToken",
                 SESSION_NAME_REQUIRED_MESSAGE.to_string(),
+                INVALID_RESPONSE_EXCEPTION,
             ),
         ),
         (
@@ -771,10 +817,11 @@ async fn a_saml_identity_is_federated_only_when_its_registered_provider_signed_t
                 name_id: "not a session name".to_string(),
                 ..valid()
             }),
-            Expected::Refused(
+            Expected::Relayed(
                 400,
                 "InvalidIdentityToken",
                 SESSION_NAME_PATTERN_MESSAGE.to_string(),
+                INVALID_RESPONSE_EXCEPTION,
             ),
         ),
         (
@@ -785,10 +832,11 @@ async fn a_saml_identity_is_federated_only_when_its_registered_provider_signed_t
                 name_id: "a".to_string(),
                 ..valid()
             }),
-            Expected::Refused(
+            Expected::Relayed(
                 400,
                 "InvalidIdentityToken",
                 SESSION_NAME_PATTERN_MESSAGE.to_string(),
+                INVALID_RESPONSE_EXCEPTION,
             ),
         ),
         (
@@ -798,10 +846,11 @@ async fn a_saml_identity_is_federated_only_when_its_registered_provider_signed_t
             role_arn.clone(),
             iam_provider_arn("never-registered"),
             signed(valid()),
-            Expected::Refused(
+            Expected::Relayed(
                 400,
                 "InvalidIdentityToken",
                 PROVIDER_NOT_FOUND_MESSAGE.to_string(),
+                MANIFEST_NOT_FOUND_EXCEPTION,
             ),
         ),
         (
@@ -891,28 +940,20 @@ async fn a_saml_identity_is_federated_only_when_its_registered_provider_signed_t
                 );
             }
             Expected::Refused(expected_status, code, message) => {
-                assert_eq!(
-                    status, expected_status,
-                    "case {case:?}: expected HTTP {expected_status}, got {status} {body}"
-                );
-                assert_eq!(
-                    element(&body, "Code").as_deref(),
-                    Some(code),
-                    "case {case:?}: expected <Code>{code}</Code>, got {body}"
-                );
+                assert_refused(case, status, &body, expected_status, code);
                 let reported = member(case, &body, "Message").replace("&amp;", "&");
                 assert_eq!(
                     reported, message,
                     "case {case:?}: expected the message {message:?}, got {reported:?}"
                 );
-                assert!(
-                    element(&body, "Credentials").is_none(),
-                    "case {case:?}: a refused exchange must vend no credential, got {body}"
-                );
-                assert!(
-                    body.contains("<ErrorResponse"),
-                    "case {case:?}: expected an awsQuery XML ErrorResponse, got {body}"
-                );
+            }
+            // The sentence of the class, then the envelope of the relayed reading that
+            // refused it, whose request id belongs to that call and so is read rather than
+            // predicted.
+            Expected::Relayed(expected_status, code, sentence, exception) => {
+                assert_refused(case, status, &body, expected_status, code);
+                let reported = member(case, &body, "Message").replace("&amp;", "&");
+                relayed_request_id(case, &reported, &sentence, exception);
             }
         }
     }
@@ -961,10 +1002,13 @@ async fn deleting_the_saml_provider_blocks_the_responses_it_signed() {
             Some("InvalidIdentityToken"),
             "case {attempt:?}: expected the provider to be unresolvable, got {body}"
         );
-        assert_eq!(
-            member(attempt, &body, "Message"),
+        // The provider's manifest is the thing that is gone, so the refusal relays the
+        // lookup that missed it rather than a reading of the response.
+        relayed_request_id(
+            attempt,
+            &member(attempt, &body, "Message"),
             PROVIDER_NOT_FOUND_MESSAGE,
-            "case {attempt:?}: expected {PROVIDER_NOT_FOUND_MESSAGE:?}, got {body}"
+            MANIFEST_NOT_FOUND_EXCEPTION,
         );
         assert!(
             element(&body, "Credentials").is_none(),
