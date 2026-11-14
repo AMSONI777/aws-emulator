@@ -51,9 +51,24 @@ const HISTORY_FEATURES: &[&str] = &["CREDIT_SHARING_HISTORY", "RI_SHARING_HISTOR
 /// `CREDIT_PREFERENCE_OPTIONS`, whose keys must name one credit.
 pub(crate) const PLAIN_KEY: &str = "sharing";
 
+/// The `creditId` the credit this suite seeds carries, and the key naming it.
+///
+/// `CREDIT_PREFERENCE_OPTIONS` keys identify ONE credit, which has to be a credit
+/// the consolidated billing family holds, so the id is a modelled `CreditId`
+/// (1..32 characters of `^[0-9]+$`) and [`seed_credit`] puts that credit in the
+/// store.
+pub(crate) const CREDIT_ID: &str = "1";
+
 /// The key `CREDIT_PREFERENCE_OPTIONS` takes, in the documented
-/// `credit/{creditId}/{option}` form.
-pub(crate) const CREDIT_KEY: &str = "credit/CR-ACCESS-1/status";
+/// `credit/{creditId}/{option}` form, naming the credit [`CREDIT_ID`].
+pub(crate) const CREDIT_KEY: &str = "credit/1/status";
+
+/// Put the credit [`CREDIT_KEY`] names in the store, as the billing systems that
+/// mint credits would, so a write of that key is about the access gate rather
+/// than about the credit lookup.
+pub(crate) fn seed_credit(engine: &Arc<engine::InMemoryEngine>) {
+    crate::credits::seed(engine, vec![crate::credits::credit(CREDIT_ID, ACCOUNT_ID)]);
+}
 
 /// The key an update of `feature` carries.
 pub(crate) fn key_for(feature: &str) -> &'static str {
@@ -129,6 +144,7 @@ async fn a_feature_the_account_cannot_reach_is_refused_on_both_operations() {
     // changes between the two halves of each row.
     for feature in ALL_FEATURES {
         let (router, engine) = standalone_emulator_with_engine();
+        seed_credit(&engine);
 
         set_access(&engine, feature, false);
         let case = format!("{feature} without access");

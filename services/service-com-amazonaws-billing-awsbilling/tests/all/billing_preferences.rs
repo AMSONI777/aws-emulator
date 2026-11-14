@@ -20,6 +20,8 @@ use serde_json::{json, Value};
 use service_com_amazonaws_billing_awsbilling::EmulatedService;
 use smithy_server_runtime::MultiServiceRouter;
 
+use crate::credits::{credit, seed};
+
 /// The account id every generated emulator presents (`engine::EMULATOR_ACCOUNT_ID`),
 /// which is the management account of this emulator's consolidated billing family.
 const ACCOUNT_ID: &str = "000000000000";
@@ -31,6 +33,13 @@ const ACCOUNT_NAME: &str = "Management Account";
 /// A pattern-valid 12-digit account id that is in no consolidated billing family
 /// this emulator holds.
 const FOREIGN_ACCOUNT_ID: &str = "999999999999";
+
+/// The credits this suite seeds into the store before any call, so that a
+/// `credit/{creditId}/{option}` key names a credit the family actually holds —
+/// which is what `UpdateBillingPreferences` requires of one. The ids are
+/// modelled `CreditId`s: 1..32 characters of `^[0-9]+$`
+/// (`smithy_query(query="shape", shape="CreditId")`).
+const SEEDED_CREDIT_IDS: &[&str] = &["1", "7", "42", "9001"];
 
 /// Every `BillingFeature` the model declares (`BILLING_FEATURE_VALUES`).
 const ALL_FEATURES: &[&str] = &[
@@ -64,6 +73,10 @@ const UPDATABLE_FEATURES: &[&str] = &[
 /// behind the Billing-console access activation. The gate itself — which features
 /// are refused, with what code, on a read and on a write — is pinned in
 /// `tests/all/billing_feature_access.rs`.
+/// The credits of [`SEEDED_CREDIT_IDS`] are put in the store too, owned by the
+/// account every request here authenticates as: a credit preference key names a
+/// credit, and this suite is about what the preference store reports for one,
+/// not about the credit lookup (pinned in `tests/all/credit_preference_keys.rs`).
 fn emulator() -> MultiServiceRouter {
     let engine: Arc<engine::InMemoryEngine> = Arc::new(engine::InMemoryEngine::new());
     {
@@ -75,6 +88,13 @@ fn emulator() -> MultiServiceRouter {
             state.grant_feature_access(feature);
         }
     }
+    seed(
+        &engine,
+        SEEDED_CREDIT_IDS
+            .iter()
+            .map(|credit_id| credit(credit_id, ACCOUNT_ID))
+            .collect(),
+    );
     let mut router = MultiServiceRouter::new();
     router.set_request_authentication(false);
     router.register_service(EmulatedService::new(engine));
@@ -263,12 +283,12 @@ fn feature_rows() -> Vec<FeatureRow> {
             case: "credit preference options, two options of one credit",
             feature: "CREDIT_PREFERENCE_OPTIONS",
             pairs: vec![
-                ("credit/CR-9001/status", "ENABLED"),
-                ("credit/CR-9001/sharing", "DISABLED"),
+                ("credit/9001/status", "ENABLED"),
+                ("credit/9001/sharing", "DISABLED"),
             ],
             expected: vec![
-                ("credit/CR-9001/sharing", "DISABLED"),
-                ("credit/CR-9001/status", "ENABLED"),
+                ("credit/9001/sharing", "DISABLED"),
+                ("credit/9001/status", "ENABLED"),
             ],
         },
     ]
@@ -354,7 +374,7 @@ async fn one_feature_s_preferences_are_invisible_to_another() {
     let router = emulator();
     for feature in UPDATABLE_FEATURES {
         let key = if *feature == "CREDIT_PREFERENCE_OPTIONS" {
-            "credit/CR-1/status"
+            "credit/1/status"
         } else {
             "shared-key"
         };
@@ -366,7 +386,7 @@ async fn one_feature_s_preferences_are_invisible_to_another() {
     }
     for feature in UPDATABLE_FEATURES {
         let expected_key = if *feature == "CREDIT_PREFERENCE_OPTIONS" {
-            "credit/CR-1/status"
+            "credit/1/status"
         } else {
             "shared-key"
         };
@@ -384,7 +404,7 @@ async fn an_update_leaves_every_key_it_does_not_name_unchanged() {
     // The rule holds for each updatable feature, so each one is a row.
     for feature in UPDATABLE_FEATURES {
         let (kept, changed) = if *feature == "CREDIT_PREFERENCE_OPTIONS" {
-            ("credit/CR-7/status", "credit/CR-7/sharing")
+            ("credit/7/status", "credit/7/sharing")
         } else {
             ("kept-key", "changed-key")
         };
@@ -777,8 +797,8 @@ async fn a_refused_update_writes_nothing() {
             case: "two credits in one credit preference request",
             feature: "CREDIT_PREFERENCE_OPTIONS",
             pairs: vec![
-                ("credit/CR-1/status", "ENABLED"),
-                ("credit/CR-2/status", "ENABLED"),
+                ("credit/1/status", "ENABLED"),
+                ("credit/7/status", "ENABLED"),
             ],
             status: 400,
             code: "ValidationException",
@@ -904,8 +924,8 @@ async fn the_credit_status_key_is_settable_and_read_back() {
         &router,
         "CREDIT_PREFERENCE_OPTIONS",
         &[
-            ("credit/CR-ABC-123/status", "ENABLED"),
-            ("credit/CR-ABC-123/sharing", "DISABLED"),
+            ("credit/42/status", "ENABLED"),
+            ("credit/42/sharing", "DISABLED"),
         ],
     )
     .await;
@@ -914,14 +934,8 @@ async fn the_credit_status_key_is_settable_and_read_back() {
     assert_eq!(
         reported(&body),
         vec![
-            (
-                "credit/CR-ABC-123/sharing".to_string(),
-                "DISABLED".to_string()
-            ),
-            (
-                "credit/CR-ABC-123/status".to_string(),
-                "ENABLED".to_string()
-            ),
+            ("credit/42/sharing".to_string(), "DISABLED".to_string()),
+            ("credit/42/status".to_string(), "ENABLED".to_string()),
         ],
         "case credit options: expected both stored options in key order, got {body:?}"
     );

@@ -9,6 +9,12 @@
 //! (`state::feature_access`) is refused 403 `AccessDeniedException` before any of
 //! that validation runs.
 //!
+//! A key that NAMES a resource is resolved against the store that holds it: an
+//! account-list key's account against the consolidated billing family, and a
+//! `credit/{creditId}/{option}` key's credit against `state::credits`. A key
+//! naming a resource the family does not hold is refused 403
+//! `AccessDeniedException` and stores nothing.
+//!
 //! ## Shape of an operation
 //!
 //! Each operation is a struct that owns the shared engine and implements
@@ -245,6 +251,7 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         // feature": the model documents a key form for exactly one feature, so
         // that is the one checked here. "For CREDIT_PREFERENCE_OPTIONS, all keys
         // must reference the same creditId."
+        let mut named_credit: Option<&str> = None;
         if feature == crate::state::CREDIT_PREFERENCE_OPTIONS_FEATURE {
             let mut credit: Option<&str> = None;
             for preference in &input.billing_preferences_per_key {
@@ -269,6 +276,7 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
                     Some(_) => {}
                 }
             }
+            named_credit = credit;
         }
 
         // Only what needs the store is done under the lock, so a caller's batch
@@ -311,6 +319,26 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
                         "Account {account} is not a member of this consolidated billing family"
                     )));
                 }
+            }
+        }
+
+        // A `credit/{creditId}/{option}` key names ONE credit (every key of the
+        // request the same one), and that credit is the caller's to configure
+        // only "for credits they own, or ... for any credit in the family": the
+        // id is resolved against the stored credits exactly as an account-list
+        // key's account is resolved against the family above, so no preference
+        // is ever stored for a credit this family does not hold.
+        if let Some(credit_id) = named_credit {
+            if let Err(refusal) = state.credit_preference_authority(caller, credit_id) {
+                return Err(access_denied(match refusal {
+                    crate::state::CreditPreferenceRefusal::OutsideFamily => format!(
+                        "Credit {credit_id} is not a credit of this consolidated billing family"
+                    ),
+                    crate::state::CreditPreferenceRefusal::NotOwned => format!(
+                        "Account {caller} does not own credit {credit_id}, so it cannot set that \
+                         credit's billing preferences"
+                    ),
+                }));
             }
         }
 

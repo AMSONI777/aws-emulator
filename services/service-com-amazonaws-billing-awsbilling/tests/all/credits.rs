@@ -125,7 +125,7 @@ fn money(currency_code: &str, currency_amount: &str) -> CreditAmount {
 /// A credit with only its required members recorded: the minimum a store can hold.
 ///
 /// Rows below vary from here along exactly what the reported rule generalises over.
-fn credit(credit_id: &str, account_id: &str) -> Credit {
+pub(crate) fn credit(credit_id: &str, account_id: &str) -> Credit {
     Credit {
         credit_id: credit_id.to_string(),
         account_id: account_id.to_string(),
@@ -151,7 +151,7 @@ fn credit(credit_id: &str, account_id: &str) -> Credit {
 }
 
 /// Put `credits` in the store, as the billing systems that mint them would.
-fn seed(engine: &Arc<engine::InMemoryEngine>, credits: Vec<Credit>) {
+pub(crate) fn seed(engine: &Arc<engine::InMemoryEngine>, credits: Vec<Credit>) {
     let store = engine.state::<ComAmazonawsBillingAwsbillingState>();
     let mut store = store.lock();
     for one in credits {

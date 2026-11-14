@@ -290,6 +290,23 @@ pub const CREDIT_KEY_PREFIX: &str = "credit";
 /// account for any credit in the family".
 pub const CREDIT_STATUS_OPTION: &str = "status";
 
+/// Why an account may not set a `CREDIT_PREFERENCE_OPTIONS` preference of one
+/// credit — the answer
+/// [`ComAmazonawsBillingAwsbillingState::credit_preference_authority`] gives for
+/// a credit the caller cannot speak for.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CreditPreferenceRefusal {
+    /// The consolidated billing family holds no credit under that id: either
+    /// nothing is stored under it, or what is belongs to an account outside the
+    /// family. The two are ONE refusal, so a caller that may speak for neither
+    /// does not learn which it was.
+    OutsideFamily,
+    /// The credit belongs to another account of the same family, and the caller
+    /// is not the family's management account: only the payer account speaks for
+    /// a credit it does not own.
+    NotOwned,
+}
+
 /// The suffix the model's own enum uses for a read-only history feature:
 /// `BILLING_FEATURE_VALUES` pairs `RI_SHARING` with `RI_SHARING_HISTORY` and
 /// `CREDIT_SHARING` with `CREDIT_SHARING_HISTORY`, and the
@@ -299,6 +316,11 @@ pub const HISTORY_FEATURE_SUFFIX: &str = "_HISTORY";
 
 /// The length of an `AccountId`, whose modelled pattern is `^[0-9]{12}$`.
 const ACCOUNT_ID_LEN: usize = 12;
+
+/// The longest a `CreditId` may be: the modeled shape is `@length(min: 1, max:
+/// 32)` over `^[0-9]+$` (`smithy_query(query="shape", shape="CreditId")`), and
+/// [`Credit::credit_id`] is the key a credit is stored under.
+const CREDIT_ID_MAX_LEN: usize = 32;
 
 /// The display name the emulator's own account carries inside its consolidated
 /// billing family, which `BillingPreferenceSummary.accountName` reports beside
@@ -1002,6 +1024,36 @@ impl ComAmazonawsBillingAwsbillingState {
             .map(String::as_str)
     }
 
+    /// Whether `account_id` may set a `CREDIT_PREFERENCE_OPTIONS` preference of
+    /// the credit `credit_id`, and why not when it may not.
+    ///
+    /// A `credit/{creditId}/{option}` key identifies ONE credit, and the
+    /// `UpdateBillingPreferences` doc scopes it to that credit's ownership: the
+    /// key is settable "by member accounts for credits they own, or by the
+    /// management account for any credit in the family". So the id is resolved
+    /// against [`Self::credits`], the store keyed by exactly that id: an id no
+    /// credit of this family is held under names nothing the caller can speak
+    /// for, whichever option the key carries.
+    pub fn credit_preference_authority(
+        &self,
+        account_id: &str,
+        credit_id: &str,
+    ) -> Result<(), CreditPreferenceRefusal> {
+        let Some(credit) = self.credits.get(credit_id) else {
+            return Err(CreditPreferenceRefusal::OutsideFamily);
+        };
+        if credit.account_id == account_id {
+            return Ok(());
+        }
+        if self.family_account_name(&credit.account_id).is_none() {
+            return Err(CreditPreferenceRefusal::OutsideFamily);
+        }
+        if self.is_billing_family_management_account(account_id) {
+            return Ok(());
+        }
+        Err(CreditPreferenceRefusal::NotOwned)
+    }
+
     /// Whether a record about the bill of `billed_account` belongs to the
     /// billing history reported FOR `account_id`.
     ///
@@ -1260,16 +1312,33 @@ pub fn history_feature_for(feature: &str) -> Option<String> {
 /// The `creditId` and option a `CREDIT_PREFERENCE_OPTIONS` key names, for a key
 /// in the documented `credit/{creditId}/{option}` form; `None` for any other
 /// shape of key.
+///
+/// The id segment IDENTIFIES a credit, so it has to be able to name one: only a
+/// modelled `CreditId` ([`is_credit_id`]) is read as one. A key whose id segment
+/// is outside that shape names no credit at all and is not a key of this
+/// feature.
 pub fn credit_key_parts(key: &str) -> Option<(&str, &str)> {
     let mut segments = key.split('/');
     let prefix = segments.next()?;
     let credit_id = segments.next()?;
     let option = segments.next()?;
     let extra = segments.next();
-    if prefix != CREDIT_KEY_PREFIX || credit_id.is_empty() || option.is_empty() || extra.is_some() {
+    if prefix != CREDIT_KEY_PREFIX
+        || !is_credit_id(credit_id)
+        || option.is_empty()
+        || extra.is_some()
+    {
         return None;
     }
     Some((credit_id, option))
+}
+
+/// Whether `value` is a `CreditId`: 1..[`CREDIT_ID_MAX_LEN`] characters of
+/// `^[0-9]+$`, the modeled shape of the id a credit is stored under.
+pub fn is_credit_id(value: &str) -> bool {
+    !value.is_empty()
+        && value.len() <= CREDIT_ID_MAX_LEN
+        && value.bytes().all(|byte| byte.is_ascii_digit())
 }
 
 /// Whether `key` under `feature` is a sharing key: every key of a sharing

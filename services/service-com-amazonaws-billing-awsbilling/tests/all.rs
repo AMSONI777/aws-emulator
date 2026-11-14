@@ -37,6 +37,8 @@ mod business_support_subscription_history;
 mod credit_allocation_family;
 #[path = "all/credit_allocation_history.rs"]
 mod credit_allocation_history;
+#[path = "all/credit_preference_keys.rs"]
+mod credit_preference_keys;
 #[path = "all/credits.rs"]
 mod credits;
 #[path = "all/cross_account_existence_signal.rs"]
