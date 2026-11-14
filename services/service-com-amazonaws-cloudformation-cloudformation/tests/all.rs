@@ -109,6 +109,8 @@ mod cross_stack_name_collision;
 mod custom_resource_providers;
 #[path = "all/custom_resource_response_identity.rs"]
 mod custom_resource_response_identity;
+#[path = "all/declared_alarm_is_readable_in_cloudwatch.rs"]
+mod declared_alarm_is_readable_in_cloudwatch;
 #[path = "all/declared_notification_runs_its_function.rs"]
 mod declared_notification_runs_its_function;
 // An EMPTY, moved-out suite: its rows now live in `all/delete_stack_export_in_use.rs`.

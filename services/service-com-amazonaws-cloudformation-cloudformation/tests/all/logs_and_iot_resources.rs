@@ -89,7 +89,11 @@ async fn iot(
 }
 
 /// The log group CloudWatch Logs holds under `name`, or `None` where it holds none.
-async fn described_group(router: &MultiServiceRouter, name: &str) -> Option<Value> {
+///
+/// `pub(crate)` so the suite over an alarm a stack declares beside the CloudWatch Logs
+/// resources whose metric it watches (`declared_alarm_is_readable_in_cloudwatch.rs`) confirms
+/// the Logs half of the same template through this one read.
+pub(crate) async fn described_group(router: &MultiServiceRouter, name: &str) -> Option<Value> {
     let (status, document) = logs(
         router,
         "DescribeLogGroups",

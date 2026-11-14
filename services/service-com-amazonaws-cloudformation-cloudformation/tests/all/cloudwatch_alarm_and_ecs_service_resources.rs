@@ -44,7 +44,12 @@ const ECS_TARGET_PREFIX: &str = "AmazonEC2ContainerServiceV20141113";
 
 /// Call one Amazon CloudWatch operation through the same router, signed for `monitoring` the
 /// way a client's SDK signs it: the status and the parsed answer document.
-async fn cloudwatch(
+///
+/// `pub(crate)` so the suite over an alarm a stack declares beside the CloudWatch Logs
+/// resources whose metric it watches
+/// (`declared_alarm_is_readable_in_cloudwatch.rs`) reaches CloudWatch through this one
+/// calling convention rather than spelling the signing of a `monitoring` request again.
+pub(crate) async fn cloudwatch(
     router: &MultiServiceRouter,
     operation: &str,
     request: &Value,

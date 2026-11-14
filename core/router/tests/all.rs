@@ -3418,3 +3418,9 @@ mod eks_kubernetes_api_rbac_audit;
 // at the top of a crate root, and these five lines are a fragment of this file's own
 // header that a merge of two appended tails landed down here.)
 // this file and for every service crate's `tests/all.rs`. (A line comment: an inner doc
+// (A trailing fragment of that same repeated note, left as a LINE comment for the reason
+// above: `this file and for every service crate's tests/all.rs`.)
+// (Ordinary `//` comments: a copy of the header note appended into this tail as `//!` is
+// `E0753` and compiles no suite of this target.) A suite left at the top level of `tests/`
+// fails the build. Declare each suite exactly ONCE: this is one crate root, so a second
+// `mod` for the same name is `E0428` and fails every suite in this target.
