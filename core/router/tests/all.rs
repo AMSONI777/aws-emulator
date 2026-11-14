@@ -2010,9 +2010,6 @@ mod redshift_health_alarms_evaluate;
 // (`cloudformation_metric_stream_filter_update` is declared ONCE, in the sorted head region
 // the same file twice, which compiles neither.)
 // (`zz_probe` is declared ONCE, further up this tail, for the reason recorded there.)
-// (`zz_probe` is declared ONCE, further up this tail: a module may be declared only once.)
-// (`cloudwatch_alarm_ssm_ops_item_action` is declared once, in the head region above: a
-// module may be declared only once.)
 // (`cloudformation_metric_stream_filter_update` is declared once, in the sorted head region
 // above: a module may be declared only once, and two branches landing at once each appended
 // it here.)
@@ -2028,16 +2025,10 @@ mod redshift_health_alarms_evaluate;
 // only once.)
 // (`zz_probe` is declared further up this tail already: two branches landing in the same
 // window each appended it, and a module may be declared only once.)
-// (`cloudwatch_alarm_ssm_ops_item_action` and the suites beside it
-// (`cloudformation_metric_stream_filter_update` is declared ONCE, in the sorted head region
-// the same file twice, which compiles neither.)
-// (`zz_probe` is declared ONCE, further up this tail, for the reason recorded there.)
 // (`zz_probe` is declared once, further up this tail: a module may be declared only once.)
 // (`zz_probe` is declared once further up this tail: a module may be declared only once.)
 // (`zz_probe` is declared ONCE, further up this tail: it was appended here as well while two
 // branches were landing at once, which declared it a second time and compiled neither.)
-// (`cloudwatch_alarm_ssm_ops_item_action` is declared in the head region above: a module may
-// be declared only once.)
 // stack-deployed metric-stream pipeline exports before and after an update rewrites its filter
 // spans CloudFormation, IAM, CloudWatch, Firehose and Amazon S3 at once, so no single service
 // crate's test target can deploy the pipeline and then read the objects it delivered.
@@ -2094,38 +2085,10 @@ mod apigatewaymanagementapi_manage_connections_authorization;
 // `apigateway_cognito_authorizer_app_client_audience`,
 // `lambda_sqs_event_source_visibility_hold`, `codebuild_s3_build_output` and
 // `cloudformation_scripted_queue_deploy` are each declared ONCE, in the spans above: two
-// The CloudFormation search-estate and domain-endpoint-output suites are declared ONCE, in
-// the span above: two landings each appended their own copy here, and a module declared
-// twice loads the same file twice, which does not compile.
 // (`apigateway_sns_service_integration`, `lambda_signed_write_to_an_aoss_collection_endpoint`,
 // `cloudformation_metric_stream_estate_is_drainable` and `redshift_health_alarms_evaluate` are
 // each declared ONCE, further up this file: two landings each appended their own copy here, and
 // a module declared twice loads the same file twice, which compiles neither.)
-// Declared here, in this same head region, for the reason the entry above records: whether
-// the one service that claims the `sdb` signing name serves BOTH of that endpoint's APIs is
-// only observable against the whole service set, where that key is resolved.
-#[path = "all/sdb_legacy_query_api_on_the_assembled_router.rs"]
-mod sdb_legacy_query_api_on_the_assembled_router;
-// Declared here, in this same head region, for the reason the entry above records: which app
-// client's token a COGNITO_USER_POOLS authorizer admits spans Amazon Cognito user pools (which
-// mints the tokens) and API Gateway's execute-api data plane (which reads them), so neither
-// crate's own test target can mint a pool token and then present it to a deployed method.
-#[path = "all/apigateway_cognito_authorizer_app_client_audience.rs"]
-mod apigateway_cognito_authorizer_app_client_audience;
-// Declared here, beside the suite whose helpers it shares: the reservation a Lambda event
-// source mapping holds on an Amazon SQS record is observable only as what an INDEPENDENT
-// consumer of that queue is handed, so the suite spans the two services and belongs to
-// neither crate's own test target.
-#[path = "all/lambda_sqs_event_source_visibility_hold.rs"]
-mod lambda_sqs_event_source_visibility_hold;
-// What a build PUTS in, and READS out of, the account's object store: the artifact objects
-// it uploads, the cache it carries between builds, and the source archive it runs on.
-#[path = "all/codebuild_s3_build_output.rs"]
-mod codebuild_s3_build_output;
-// Declared beside the queue-provisioning suite: this one drives the whole scripted
-// deploy-wait-use-delete workflow over the ASSEMBLED emulator, which is what a waiter polls.
-#[path = "all/cloudformation_scripted_queue_deploy.rs"]
-mod cloudformation_scripted_queue_deploy;
 // region above: a module may be declared only once.)
 // `cloudformation_provisions_cloudfront_resources` is declared once, just below: two `mod`
 // items for one name is a redefinition that compiles neither.
@@ -2432,8 +2395,6 @@ mod route53_health_check_string_match;
 // `mod` items for one name is a redefinition that compiles neither.)
 // `cloudformation_domain_endpoint_is_dialled_by_consumers` are declared ONCE each, in the
 // spans above: two `mod` items for one name is a redefinition that compiles neither.)
-// (`apigateway_cognito_authorizer_app_client_audience` is declared in the head region of
-// this file already: two branches landing in the same window each declared it, and a module
 // Declared in this appended tail, which is where every new suite inserts its lines: what a
 // stack-deployed `RedrivePolicy` does to a message the deployed consumer never processes spans
 // CloudFormation (which provisions the queue pair, the function and the mapping), AWS Lambda
@@ -2743,7 +2704,6 @@ mod iam_session_tag_authorization;
 // this file: a module may be declared only once.)
 // `cloudformation_scripted_queue_deploy` are each declared ONCE, in the head region of this
 // (`apigateway_sns_service_integration` is declared ONCE, in the appended tail below: a
-// may be declared only once.)
 // above, and `cloudformation_metric_stream_estate_is_drainable` ONCE further down this tail:
 // both had been re-declared here while two branches were landing at once, and two `mod` items
 // for one name is a redefinition that compiles neither.
@@ -2761,3 +2721,14 @@ mod iam_session_tag_authorization;
 // the HTTPS front door, both Cognito session suites and the IAM/Secrets Manager envelope are
 // each declared ONCE, further down this tail, for that same reason.)
 // are declared ONCE each, further up this tail, for that same reason.)
+// (`apigateway_cognito_authorizer_app_client_audience` is declared once, in the sorted block
+// at the head of this file: a module may be declared only once, and two branches landing at
+// once appended a second declaration of it here.)
+// (`cloudformation_metric_stream_filter_update` is declared once, in the sorted block at the
+// head of this file: a module may be declared only once, and two branches landing at once
+// appended a second declaration of it here.)
+// module may be declared only once, and two branches landing at once appended a second
+// declaration of it here.)
+// (`ses_event_destination_reaches_an_eventbridge_rule_target` is declared ONCE, further up
+// this file: two branches landing at once appended a second declaration of it here, and a
+// module declared twice compiles neither.)

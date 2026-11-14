@@ -474,10 +474,15 @@ fn the_published_version_history_is_well_formed() {
             "case {case:?}: the current default {default:?} must be on offer"
         );
 
+        // Near misses of the default that no version of the group carries: the
+        // default in the wrong case, and the default with a further rung appended.
+        // (A PREFIX of a version name is not a near miss: the rungs of a published
+        // ladder share prefixes, so `Version_1.2` is a prefix of `Version_1.22` and
+        // a version in its own right.)
         for unknown in [
             "Version_999.0".to_string(),
             default.to_lowercase(),
-            default[..default.len() - 1].to_string(),
+            format!("{default}.0"),
         ] {
             assert_eq!(
                 group.version_state(&unknown),

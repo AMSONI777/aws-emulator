@@ -16,7 +16,7 @@
 //!   managed rule group").
 //! * `ListAvailableManagedRuleGroupVersions` reports the whole ladder of versions
 //!   the group's vendor offers, newest first, beside the version the vendor
-//!   currently sets as the default — which is not necessarily the newest it offers.
+//!   currently has as the default — the newest version it still offers.
 //!   A version the vendor published and has since retired — a gap in the ladder —
 //!   is no longer offered and is refused as EXPIRED rather than as a version nobody
 //!   published.
@@ -110,9 +110,12 @@ const CORE_RULE_SET_LADDER: &[&str] = &[
     "Version_1.0",
 ];
 
-/// The version the core rule set's vendor currently publishes as its default: one of
-/// [`CORE_RULE_SET_LADDER`], and not its first entry.
-const CORE_RULE_SET_DEFAULT: &str = "Version_1.1";
+/// The version the core rule set's vendor currently has as its default: the newest
+/// entry of [`CORE_RULE_SET_LADDER`], which is the one a caller paging the ladder
+/// newest first is handed first. That the default is the newest offered version of
+/// EVERY published group, at every page size, is spanned by
+/// [`crate::managed_rule_group_default_version`].
+const CORE_RULE_SET_DEFAULT: &str = "Version_1.22";
 
 /// The version names missing from [`CORE_RULE_SET_LADDER`]: the ones its vendor
 /// published and has since retired, each still known to the describe.
@@ -207,8 +210,8 @@ async fn every_group_lists_the_description_its_publisher_states() {
 }
 
 /// The longest published ladder, as its vendor offers it: every version newest
-/// first, the page's own last version as `NextMarker`, and the vendor's published
-/// default — which is NOT the newest release.
+/// first, the page's own last version as `NextMarker`, and the vendor's default —
+/// the newest release on offer.
 #[tokio::test]
 async fn the_published_ladder_is_offered_newest_first_with_the_vendors_default() {
     let waf = Waf::new();
@@ -239,13 +242,13 @@ async fn the_published_ladder_is_offered_newest_first_with_the_vendors_default()
         core["CurrentDefaultVersion"],
         json!(CORE_RULE_SET_DEFAULT),
         "case \"the core rule set's default version\": expected the vendor's \
-         published default, got {core}"
+         default, got {core}"
     );
-    assert_ne!(
+    assert_eq!(
         core["CurrentDefaultVersion"],
         json!(CORE_RULE_SET_LADDER.first()),
-        "case \"the core rule set's default version\": the published default differs \
-         from the newest version on offer, got {core}"
+        "case \"the core rule set's default version\": the default is the newest \
+         version on offer, got {core}"
     );
     for version in &expected {
         let at = core["Versions"]
@@ -323,7 +326,7 @@ async fn a_retired_version_is_expired_rather_than_unpublished() {
         );
     }
 
-    for offered in [CORE_RULE_SET_DEFAULT, CORE_RULE_SET_LADDER[0]] {
+    for offered in [CORE_RULE_SET_DEFAULT, CORE_RULE_SET_LADDER[1]] {
         let described = waf
             .ok(
                 "DescribeManagedRuleGroup",

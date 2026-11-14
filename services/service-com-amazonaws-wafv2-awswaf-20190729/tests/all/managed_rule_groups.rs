@@ -67,7 +67,6 @@ async fn every_catalogued_managed_rule_group_can_be_run_from_a_web_acl_rule() {
             is_versioning_supported: _,
             is_advanced_managed_rule_set: _,
             versions: _,
-            default_version: _,
             expired_versions: _,
             rules: _,
             token_labels: _,

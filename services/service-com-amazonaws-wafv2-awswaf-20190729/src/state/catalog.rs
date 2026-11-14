@@ -86,19 +86,6 @@ pub struct ManagedRuleGroupDescriptor {
     /// catalogued group offers at least its initial version (see
     /// [`MANAGED_RULE_GROUP_CATALOGUE`]).
     pub versions: &'static [ManagedRuleGroupRelease],
-    /// The version its vendor currently sets as this group's DEFAULT, when that is
-    /// not simply the newest version it offers.
-    ///
-    /// `ListAvailableManagedRuleGroupVersionsResponse$CurrentDefaultVersion` is
-    /// "the name of the version that's currently set as the default", which is the
-    /// version a `ManagedRuleGroupStatement` that pins none runs: a property the
-    /// VENDOR publishes per group, and not the same thing as the version it
-    /// released last — a vendor that keeps a long version ladder on offer can hold
-    /// the default at an earlier version so that statements pinning nothing do not
-    /// move with every release. `None` means the vendor's default is the newest
-    /// version on offer, which is what a group with one version on offer has; see
-    /// [`Self::current_default_version`].
-    pub default_version: Option<&'static str>,
     /// The versions of this group its vendor has RETIRED, oldest first: ones it
     /// published and has since stopped offering.
     ///
@@ -137,20 +124,21 @@ pub struct ManagedRuleGroupDescriptor {
 }
 
 impl ManagedRuleGroupDescriptor {
-    /// The version of this group that is currently the default: the one its vendor
-    /// publishes as such ([`Self::default_version`]), and otherwise the NEWEST
-    /// version it offers.
+    /// The version of this group that is currently the default: the NEWEST version
+    /// its vendor still offers.
     ///
     /// `ListAvailableManagedRuleGroupVersionsResponse$CurrentDefaultVersion` is
     /// "the name of the version that's currently set as the default", and
     /// `DescribeManagedRuleGroup$VersionName` says WAF "uses the vendor's default
-    /// version" when a request names none. The catalogue keeps each group's
-    /// versions in release order, so a group whose vendor publishes no default of
-    /// its own defaults to the last of them — which is every group that keeps one
-    /// version on offer.
+    /// version" when a request names none. A vendor moves that default forward onto
+    /// the versions it releases, so the default is the newest version it has on
+    /// offer: never one it has retired, and never a rung of the ladder a caller
+    /// paging [`Self::versions_newest_first`] has yet to reach — whatever `Limit` a
+    /// request names, the default is the FIRST entry of the first page. The
+    /// catalogue keeps each group's versions in release order, so it is the last of
+    /// them, and a group whose vendor offers one version defaults to that one.
     pub fn current_default_version(&self) -> Option<&'static str> {
-        self.default_version
-            .or_else(|| self.versions.last().map(|release| release.name))
+        self.versions.last().map(|release| release.name)
     }
 
     /// The versions this group's vendor offers, NEWEST first: the order
@@ -165,19 +153,17 @@ impl ManagedRuleGroupDescriptor {
         self.versions.iter().rev().collect()
     }
 
-    /// This entry with `versions` on offer, `expired_versions` retired and
-    /// `default_version` published as the vendor's default — the version ladder of
-    /// a group whose publisher states one, replacing what the constructor assumed.
+    /// This entry with `versions` on offer and `expired_versions` retired — the
+    /// version ladder of a group whose publisher states one, replacing what the
+    /// constructor assumed.
     pub(super) const fn offering(
         self,
         versions: &'static [ManagedRuleGroupRelease],
         expired_versions: &'static [ManagedRuleGroupRelease],
-        default_version: &'static str,
     ) -> Self {
         Self {
             versions,
             expired_versions,
-            default_version: Some(default_version),
             ..self
         }
     }
@@ -544,8 +530,8 @@ impl ManagedRuleGroupRelease {
 /// Each entry also carries the VERSIONS its vendor offers of that group (see
 /// [`ManagedRuleGroupDescriptor::versions`]), oldest first: every published group
 /// offers at least its initial version, which is what
-/// `ListAvailableManagedRuleGroupVersions` lists newest first, and the version its
-/// vendor sets as the default among them
+/// `ListAvailableManagedRuleGroupVersions` lists newest first — the newest of them
+/// being the one its vendor currently has as the default
 /// ([`ManagedRuleGroupDescriptor::current_default_version`]).
 ///
 /// And it carries what the group is PUBLISHED as — the description its publisher
@@ -572,11 +558,7 @@ pub const MANAGED_RULE_GROUP_CATALOGUE: &[ManagedRuleGroupDescriptor] = &[
          vulnerabilities described in OWASP publications.",
         COMMON_RULE_SET_RULES,
     )
-    .offering(
-        COMMON_RULE_SET_VERSIONS,
-        COMMON_RULE_SET_RETIRED_VERSIONS,
-        COMMON_RULE_SET_DEFAULT_VERSION,
-    ),
+    .offering(COMMON_RULE_SET_VERSIONS, COMMON_RULE_SET_RETIRED_VERSIONS),
     descriptor(
         "AWSManagedRulesAdminProtectionRuleSet",
         "admin-protection",
@@ -864,14 +846,6 @@ pub(super) const COMMON_RULE_SET_RETIRED_VERSIONS: &[ManagedRuleGroupRelease] = 
     release("Version_1.13", "2023-08-21T00:00:00Z"),
 ];
 
-/// The version its vendor currently publishes as the core rule set's DEFAULT.
-///
-/// Not the newest version on offer: a vendor holds the default of a long-lived rule
-/// set at an earlier version so that a `ManagedRuleGroupStatement` pinning none
-/// keeps running the same rules as new versions are published. See
-/// [`ManagedRuleGroupDescriptor::default_version`].
-pub(super) const COMMON_RULE_SET_DEFAULT_VERSION: &str = "Version_1.1";
-
 /// The versions offered of `AWSManagedRulesBotControlRuleSet`, oldest first.
 ///
 /// The intelligent-threat-mitigation groups below are the ones the WAF Developer
@@ -943,7 +917,6 @@ pub(super) const fn descriptor(
         is_versioning_supported: true,
         is_advanced_managed_rule_set: false,
         versions: CURRENT_VERSION_ONLY,
-        default_version: None,
         expired_versions: RETIRED_INITIAL_VERSION,
         rules,
         token_labels: NO_TOKEN_LABELS,
@@ -986,7 +959,6 @@ pub(super) const fn unversioned(
         is_versioning_supported: false,
         is_advanced_managed_rule_set: false,
         versions: CURRENT_VERSION_ONLY,
-        default_version: None,
         expired_versions: RETIRED_INITIAL_VERSION,
         rules,
         token_labels: NO_TOKEN_LABELS,
@@ -1027,7 +999,6 @@ pub(super) const fn advanced(
         is_versioning_supported: true,
         is_advanced_managed_rule_set: true,
         versions,
-        default_version: None,
         expired_versions,
         rules,
         token_labels,

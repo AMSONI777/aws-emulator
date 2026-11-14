@@ -280,7 +280,10 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
             versions: Some(versions),
             // The default version is the group's, not the page's: it is reported
             // whichever page the request asked for, and a group whose vendor offers
-            // no versions has none.
+            // no versions has none. It is the NEWEST version on offer
+            // (`crate::state::ManagedRuleGroupDescriptor::current_default_version`),
+            // so whatever `Limit` a request names it is the first entry of the
+            // first page rather than a rung a caller has still to page down to.
             current_default_version: group
                 .current_default_version()
                 .map(|version| version.to_string()),

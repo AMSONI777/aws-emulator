@@ -441,8 +441,9 @@ async fn every_offered_version_can_be_pinned_by_a_web_acl_rule() {
 
 /// The catalogue's own invariants, which every expectation above composes itself
 /// from: each group offers at least one version, names them uniquely, dates each
-/// of them readably and in release order, and its default is one of the versions it
-/// offers — the newest, for a group whose vendor publishes no default of its own.
+/// of them readably and in release order, and its default is the newest version it
+/// offers. That the default is the newest one, on every page size, is spanned by
+/// [`crate::managed_rule_group_default_version`].
 #[test]
 fn the_published_catalogue_is_well_formed() {
     for group in MANAGED_RULE_GROUP_CATALOGUE {
@@ -501,19 +502,10 @@ fn the_published_catalogue_is_well_formed() {
              group offers"
         );
         assert_eq!(
-            group.default_version.unwrap_or(default),
-            default,
-            "case {case:?}: a group whose vendor publishes a default reports that \
-             one, and one that does not reports its newest offered version"
+            Some(default),
+            group.versions.last().map(|release| release.name),
+            "case {case:?}: the newest offered version is the default"
         );
-        if group.default_version.is_none() {
-            assert_eq!(
-                Some(default),
-                group.versions.last().map(|release| release.name),
-                "case {case:?}: with no published default the newest offered version \
-                 is the default"
-            );
-        }
     }
 }
 
