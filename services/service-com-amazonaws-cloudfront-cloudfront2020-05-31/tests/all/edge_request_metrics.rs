@@ -57,7 +57,7 @@ const REGION: &str = "us-east-1";
 
 /// The period the series are read at, in seconds: the granularity CloudFront reports a
 /// distribution's traffic at.
-const PERIOD: i64 = 60;
+pub(crate) const PERIOD: i64 = 60;
 
 /// One emulator carrying this service and CloudWatch on ONE engine: the edge publishes into
 /// the CloudWatch store, so both have to be mounted on the same engine for a client to read
@@ -211,7 +211,7 @@ pub(crate) async fn assert_deployed(router: &MultiServiceRouter, id: &str) {
 /// The whole span of the series this suite reads, as a `(StartTime, EndTime)` pair around the
 /// instant the traffic was served: wide enough that every datapoint falls inside it whichever
 /// minute the suite happens to run in.
-fn window(at: f64) -> (f64, f64) {
+pub(crate) fn window(at: f64) -> (f64, f64) {
     (at - 2.0 * PERIOD as f64, at + 2.0 * PERIOD as f64)
 }
 
