@@ -18,11 +18,12 @@
 //!   with every member the request named and no member it did not.
 //! * "By default, all buckets have a default encryption configuration that uses
 //!   server-side encryption with Amazon S3 managed keys (SSE-S3)"
-//!   (`GetBucketEncryption`'s documentation), "General purpose buckets - By default, S3
-//!   Bucket Key is not enabled" (`ServerSideEncryptionRule$BucketKeyEnabled`), and a
-//!   general purpose bucket blocks the customer-key encryption type
-//!   (`…$BlockedEncryptionTypes`): a bucket no put has configured reports one `AES256` rule
-//!   with the Bucket Key off and that type blocked.
+//!   (`GetBucketEncryption`'s documentation) and "General purpose buckets - By default, S3
+//!   Bucket Key is not enabled" (`ServerSideEncryptionRule$BucketKeyEnabled`): a bucket no
+//!   put has configured reports one `AES256` rule with the Bucket Key off — and no
+//!   `BlockedEncryptionTypes`, which is "a bucket-level setting … used to prevent the
+//!   upload of new objects encrypted with the specified server-side encryption type"
+//!   (`…$BlockedEncryptionTypes`), an opt-in setting nothing but a put establishes.
 //! * "This parameter is allowed if and only if `SSEAlgorithm` is set to `aws:kms` or
 //!   `aws:kms:dsse`" (`ApplyServerSideEncryptionByDefault$KMSMasterKeyID`): a rule naming a
 //!   KMS key beside any other algorithm is refused with `InvalidArgument` (HTTP 400).
@@ -34,8 +35,8 @@
 use quick_xml::events::Event;
 use quick_xml::Reader;
 use service_com_amazonaws_s3_amazons3::state::{
-    DEFAULT_BLOCKED_ENCRYPTION_TYPES, DEFAULT_BUCKET_KEY_ENABLED, DEFAULT_SSE_ALGORITHM,
-    MAX_SERVER_SIDE_ENCRYPTION_RULES, SSE_C_ENCRYPTION_TYPE,
+    DEFAULT_BUCKET_KEY_ENABLED, DEFAULT_SSE_ALGORITHM, MAX_SERVER_SIDE_ENCRYPTION_RULES,
+    SSE_C_ENCRYPTION_TYPE,
 };
 use smithy_server_runtime::MultiServiceRouter;
 
@@ -115,21 +116,13 @@ impl Rule {
     /// buckets - By default, S3 Bucket Key is not enabled",
     /// `ServerSideEncryptionRule$BucketKeyEnabled`), so a rule stored without it is
     /// reported with it OFF rather than with the member dropped. `BlockedEncryptionTypes`
-    /// is a bucket-level SETTING with a default of its own, which a rule that says nothing
-    /// about it does not turn off, so such a rule is reported with the default blocked set.
-    /// Every round-trip assertion compares against this form, so what is pinned is the
-    /// configuration a reader sees rather than the bytes a writer sent.
+    /// is an OPT-IN bucket-level setting with no documented on state, so a rule that says
+    /// nothing about it is reported with the member absent — never with a blocked set the
+    /// request did not name. Every round-trip assertion compares against this form, so what
+    /// is pinned is the configuration a reader sees rather than the bytes a writer sent.
     pub(crate) fn as_reported(&self) -> Self {
         Self {
             bucket_key_enabled: Some(self.bucket_key_enabled.unwrap_or(false)),
-            blocked_encryption_types: Some(
-                self.blocked_encryption_types.clone().unwrap_or_else(|| {
-                    DEFAULT_BLOCKED_ENCRYPTION_TYPES
-                        .iter()
-                        .map(|blocked| (*blocked).to_string())
-                        .collect()
-                }),
-            ),
             ..self.clone()
         }
     }
@@ -259,27 +252,19 @@ pub(crate) fn reported_rules(answer: &Answer) -> Vec<Rule> {
 }
 
 /// The one rule a bucket no `PutBucketEncryption` has configured reports: the SSE-S3
-/// default with the Bucket Key off and the published encryption type blocked.
+/// default with the Bucket Key off and no blocked encryption type at all.
 fn default_rule() -> Rule {
-    Rule::by_default(DEFAULT_SSE_ALGORITHM)
-        .with_bucket_key(DEFAULT_BUCKET_KEY_ENABLED)
-        .blocking(&DEFAULT_BLOCKED_ENCRYPTION_TYPES)
+    Rule::by_default(DEFAULT_SSE_ALGORITHM).with_bucket_key(DEFAULT_BUCKET_KEY_ENABLED)
 }
 
 #[test]
-fn the_blocked_encryption_type_is_one_the_model_publishes() {
-    // The default this emulator reports names an `EncryptionType` value, so it has to be
-    // one of the values the enum publishes — re-derived from that list rather than trusted.
+fn the_blockable_encryption_type_is_one_the_model_publishes() {
+    // The type a rule may block names an `EncryptionType` value, so it has to be one of
+    // the values the enum publishes — re-derived from that list rather than trusted.
     assert!(
         ENCRYPTION_TYPE_VALUES.contains(&SSE_C_ENCRYPTION_TYPE),
-        "the blocked encryption type must be one of {ENCRYPTION_TYPE_VALUES:?}, got \
+        "the blockable encryption type must be one of {ENCRYPTION_TYPE_VALUES:?}, got \
          {SSE_C_ENCRYPTION_TYPE:?}"
-    );
-    assert_eq!(
-        DEFAULT_BLOCKED_ENCRYPTION_TYPES.as_slice(),
-        [SSE_C_ENCRYPTION_TYPE],
-        "a new bucket blocks exactly the customer-key encryption type, got {:?}",
-        DEFAULT_BLOCKED_ENCRYPTION_TYPES
     );
 }
 

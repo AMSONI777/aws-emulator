@@ -29,8 +29,7 @@
 //!   answers `AccessDenied` (HTTP 403) and leaves the configuration in place.
 
 use service_com_amazonaws_s3_amazons3::state::{
-    DEFAULT_BLOCKED_ENCRYPTION_TYPES, DEFAULT_BUCKET_KEY_ENABLED, DEFAULT_SSE_ALGORITHM,
-    MAX_SERVER_SIDE_ENCRYPTION_RULES,
+    DEFAULT_BUCKET_KEY_ENABLED, DEFAULT_SSE_ALGORITHM, MAX_SERVER_SIDE_ENCRYPTION_RULES,
 };
 use smithy_server_runtime::MultiServiceRouter;
 
@@ -59,28 +58,27 @@ async fn delete_encryption(
 /// The one rule a bucket with no configuration of its own reports, spelled as the SERVICE
 /// documents it rather than as this crate's constants hold it: SSE-S3 is the
 /// `ServerSideEncryption` value `AES256` ("server-side encryption with Amazon S3 managed
-/// keys (SSE-S3)", this operation's and `GetBucketEncryption`'s documentation), "General
+/// keys (SSE-S3)", this operation's and `GetBucketEncryption`'s documentation) and "General
 /// purpose buckets - By default, S3 Bucket Key is not enabled"
-/// (`ServerSideEncryptionRule$BucketKeyEnabled`), and a general purpose bucket blocks
-/// server-side encryption with customer-provided keys, the `EncryptionType` value `SSE-C`
-/// (`ServerSideEncryptionRule$BlockedEncryptionTypes`).
+/// (`ServerSideEncryptionRule$BucketKeyEnabled`). It names no `BlockedEncryptionTypes`:
+/// blocking an encryption type is "a bucket-level setting … used to prevent the upload of
+/// new objects encrypted with the specified server-side encryption type"
+/// (`ServerSideEncryptionRule$BlockedEncryptionTypes`), an opt-in setting a reset leaves
+/// unestablished.
 ///
 /// Every assertion about the restored default compares against THIS form, so a change to
 /// the crate's own defaults cannot make the suite agree with itself;
 /// [`the_restored_default_is_the_one_the_crate_publishes`] is what ties the two together.
 fn documented_default_rule() -> Rule {
-    Rule::by_default("AES256")
-        .with_bucket_key(false)
-        .blocking(&["SSE-C"])
+    Rule::by_default("AES256").with_bucket_key(false)
 }
 
 #[test]
 fn the_restored_default_is_the_one_the_crate_publishes() {
     // The constants the handlers compute the default from must be the documented default
     // above; otherwise one of the two is wrong, whichever way they were changed.
-    let published = Rule::by_default(DEFAULT_SSE_ALGORITHM)
-        .with_bucket_key(DEFAULT_BUCKET_KEY_ENABLED)
-        .blocking(&DEFAULT_BLOCKED_ENCRYPTION_TYPES);
+    let published =
+        Rule::by_default(DEFAULT_SSE_ALGORITHM).with_bucket_key(DEFAULT_BUCKET_KEY_ENABLED);
     assert_eq!(
         published,
         documented_default_rule(),

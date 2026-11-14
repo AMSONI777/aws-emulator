@@ -596,21 +596,16 @@ pub const DEFAULT_SSE_ALGORITHM: &str = "AES256";
 /// (`ServerSideEncryptionRule$BucketKeyEnabled`).
 pub const DEFAULT_BUCKET_KEY_ENABLED: bool = false;
 
-/// The `EncryptionType` values a general purpose bucket blocks until a
-/// `PutBucketEncryption` names another set.
-///
-/// `BlockedEncryptionTypes` is "a bucket-level setting for Amazon S3 general purpose
-/// buckets used to prevent the upload of new objects encrypted with the specified
-/// server-side encryption type", and "currently, this parameter only supports blocking or
-/// unblocking server-side encryption with customer-provided keys (SSE-C)"
-/// (`ServerSideEncryptionRule$BlockedEncryptionTypes`). A general purpose bucket blocks
-/// SSE-C uploads by default, which is why this is what a never-configured bucket reports.
-pub const DEFAULT_BLOCKED_ENCRYPTION_TYPES: [&str; 1] = [SSE_C_ENCRYPTION_TYPE];
-
 /// The `EncryptionType` value that names server-side encryption with customer-provided
 /// keys — one of the two values the enum publishes
 /// (`smithy_query(query="shape",shape="EncryptionType")` reports `[NONE, SSE-C]`), which
 /// `tests/all/bucket_encryption.rs` re-derives from that value list.
+///
+/// It is the type a `BlockedEncryptionTypes` can block today: "currently, this parameter
+/// only supports blocking or unblocking server-side encryption with customer-provided keys
+/// (SSE-C)" (`ServerSideEncryptionRule$BlockedEncryptionTypes`). Blocking it is an OPT-IN
+/// bucket-level setting, so no bucket carries it until a `PutBucketEncryption` names it —
+/// there is no default blocked set.
 pub const SSE_C_ENCRYPTION_TYPE: &str = "SSE-C";
 
 /// The `ServerSideEncryption` values a `KMSMasterKeyID` may accompany in a default

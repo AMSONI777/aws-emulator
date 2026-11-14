@@ -1883,13 +1883,12 @@ impl Bucket {
     /// `PutBucketEncryption` associated with it, or the single SSE-S3 rule every bucket
     /// carries until one does ([`default_encryption_rule`]).
     ///
-    /// A configured rule that names NO `BlockedEncryptionTypes` leaves the bucket's blocked
-    /// set at [`DEFAULT_BLOCKED_ENCRYPTION_TYPES`], which is what this materialises:
-    /// blocking an encryption type is "a bucket-level setting … used to prevent the upload
-    /// of new objects encrypted with the specified server-side encryption type", one whose
-    /// own enum publishes the value that UNBLOCKS it (`NONE`, beside `SSE-C` —
-    /// `smithy_query(query="shape",shape="EncryptionType")`), so a configuration that says
-    /// nothing about it neither turns the blocking off nor hides it from a reader.
+    /// A configured rule is reported with exactly the members it was configured with: a
+    /// rule that names no `BlockedEncryptionTypes` carries none here, because blocking an
+    /// encryption type is "a bucket-level setting … used to prevent the upload of new
+    /// objects encrypted with the specified server-side encryption type"
+    /// (`ServerSideEncryptionRule$BlockedEncryptionTypes`) — an OPT-IN setting with no
+    /// documented on state, so nothing establishes it but a request that names it.
     ///
     /// COMPUTED, never stored: a bucket that was never configured keeps [`Self::encryption`]
     /// at `None`, so reading this changes nothing a later caller sees. This is what
@@ -1897,16 +1896,7 @@ impl Bucket {
     /// write's inherited encryption from, so the two can never disagree.
     pub fn effective_encryption_rules(&self) -> Vec<BucketEncryptionRule> {
         match self.encryption() {
-            Some(configured) => configured
-                .iter()
-                .map(|rule| BucketEncryptionRule {
-                    blocked_encryption_types: rule
-                        .blocked_encryption_types
-                        .clone()
-                        .or_else(|| Some(default_blocked_encryption_types())),
-                    ..rule.clone()
-                })
-                .collect(),
+            Some(configured) => configured.to_vec(),
             None => vec![default_encryption_rule()],
         }
     }

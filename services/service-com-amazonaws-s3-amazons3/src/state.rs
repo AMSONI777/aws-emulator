@@ -2955,8 +2955,14 @@ pub struct BucketEncryptionRule {
 /// encryption with Amazon S3 managed keys (SSE-S3)" (`GetBucketEncryption`'s own
 /// documentation), and "General purpose buckets - By default, S3 Bucket Key is not
 /// enabled" (`ServerSideEncryptionRule$BucketKeyEnabled`) — so the rule a never-configured
-/// bucket reports is [`DEFAULT_SSE_ALGORITHM`] with the Bucket Key off and
-/// [`DEFAULT_BLOCKED_ENCRYPTION_TYPES`] blocked.
+/// bucket reports is [`DEFAULT_SSE_ALGORITHM`] with the Bucket Key off.
+///
+/// It names NO `BlockedEncryptionTypes`: that member is "a bucket-level setting for Amazon
+/// S3 general purpose buckets used to prevent the upload of new objects encrypted with the
+/// specified server-side encryption type"
+/// (`ServerSideEncryptionRule$BlockedEncryptionTypes`), an OPT-IN setting with no
+/// documented on state, so a bucket no request has named it on blocks nothing and reports
+/// no such container.
 ///
 /// COMPUTED rather than stored, so a read of a bucket that was never configured reports
 /// this without writing anything: [`Bucket::encryption`] stays `None` and a later reader
@@ -2966,17 +2972,8 @@ pub fn default_encryption_rule() -> BucketEncryptionRule {
         sse_algorithm: Some(DEFAULT_SSE_ALGORITHM.to_string()),
         kms_master_key_id: None,
         bucket_key_enabled: Some(DEFAULT_BUCKET_KEY_ENABLED),
-        blocked_encryption_types: Some(default_blocked_encryption_types()),
+        blocked_encryption_types: None,
     }
-}
-
-/// The `EncryptionType` values a bucket blocks while no `PutBucketEncryption` has named a
-/// set of its own — [`DEFAULT_BLOCKED_ENCRYPTION_TYPES`], as a stored rule holds them.
-pub fn default_blocked_encryption_types() -> Vec<String> {
-    DEFAULT_BLOCKED_ENCRYPTION_TYPES
-        .iter()
-        .map(|blocked| (*blocked).to_string())
-        .collect()
 }
 
 /// Every value the `Protocol` enum publishes: the two schemes a website redirect may be

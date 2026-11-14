@@ -25,8 +25,16 @@
 //!
 //! The rows differ along what the rule generalises over: WHICH algorithm the declaration
 //! names (SSE-KMS with no key, SSE-KMS naming a key, dual-layer SSE-KMS, SSE-S3, and nothing
-//! at all), whether an S3 Bucket Key is declared and in which position, and the template
-//! SPELLING (JSON and YAML).
+//! at all), whether an S3 Bucket Key is declared and in which position, the template
+//! SPELLING (JSON and YAML), and whether the declared key is a CONDITIONAL that resolves to
+//! `AWS::NoValue` or to the key a parameter names.
+//!
+//! What a bucket reports is exactly what its declaration stated: a reported rule carries no
+//! member no `BucketEncryption` established, which the conditional rows assert for
+//! `BlockedEncryptionTypes` — "a bucket-level setting … used to prevent the upload of new
+//! objects encrypted with the specified server-side encryption type"
+//! (`smithy_query(query="doc",shape="ServerSideEncryptionRule",member="BlockedEncryptionTypes"`,
+//! in the s3 model), an opt-in setting no template here declares.
 //!
 //! Every expected value is computed from what the row declares, never read back out of the
 //! answer under test.
@@ -34,7 +42,7 @@
 use smithy_server_runtime::MultiServiceRouter;
 
 use crate::stack_lifecycle::{
-    create_stack, describe_stack, router, wait_for_the_transition, xml_blocks, xml_text,
+    create_stack, describe_stack, member, router, wait_for_the_transition, xml_blocks, xml_text,
 };
 use crate::stack_resource_provisioning::{output_value, s3};
 use service_com_amazonaws_cloudformation_cloudformation::state::status;
@@ -299,6 +307,118 @@ async fn a_bucket_a_stack_declares_carries_the_default_encryption_it_declared() 
             Some(*stored_under),
             "case {case:?}: a read of the seed must report the same, got {:?}",
             read.header(SSE_HEADER)
+        );
+    }
+}
+
+/// The declaration an asset-publishing toolkit stack gives its staging bucket: an SSE-KMS
+/// default whose `KMSMasterKeyID` is a CONDITIONAL — one branch resolves to
+/// `AWS::NoValue`, which "removes the corresponding resource property", and the other to
+/// the key the stack was parameterised with.
+///
+/// It is the same mapping rule as the rows above, reached through the resolution the
+/// template sections do first: the property the provisioner sends is the one the intrinsics
+/// left, so a declaration whose key resolved away configures the algorithm alone.
+const CONDITIONAL_TEMPLATE: &str = r#"{
+     "Parameters":{
+       "BucketName":{"Type":"String"},
+       "AssetsBucketKmsKeyId":{"Type":"String","Default":"AWS_MANAGED_KEY"}},
+     "Conditions":{
+       "UseAwsManagedKey":{"Fn::Equals":[{"Ref":"AssetsBucketKmsKeyId"},"AWS_MANAGED_KEY"]}},
+     "Resources":{"StagingBucket":{"Type":"AWS::S3::Bucket","Properties":{
+       "BucketName":{"Ref":"BucketName"},
+       "BucketEncryption":{"ServerSideEncryptionConfiguration":[
+         {"ServerSideEncryptionByDefault":{
+            "SSEAlgorithm":"aws:kms",
+            "KMSMasterKeyID":{"Fn::If":["UseAwsManagedKey",
+              {"Ref":"AWS::NoValue"},
+              {"Ref":"AssetsBucketKmsKeyId"}]}}}]}}}},
+     "Outputs":{"StagingBucketName":{"Value":{"Ref":"StagingBucket"}}}}"#;
+
+/// The value the row that takes the other branch parameterises the stack with: a key ARN,
+/// one of the three forms `KMSMasterKeyID` documents, which S3 stores and echoes verbatim.
+const PARAMETERISED_KEY_ARN: &str =
+    "arn:aws:kms:us-west-2:111122223333:key/1234abcd-12ab-34cd-56ef-1234567890ab";
+
+/// The element a reported rule would carry a blocked encryption type in.
+const BLOCKED_ELEMENT: &str = "BlockedEncryptionTypes";
+
+#[tokio::test]
+async fn a_declared_default_is_reported_with_only_the_members_it_declared() {
+    let router = router();
+
+    // The rows differ along which branch the conditional key takes — and so along whether
+    // the declaration states a `KMSMasterKeyID` at all.
+    let rows = [
+        (
+            "the AWS managed key, so the declared key resolves away",
+            "toolkit-sse-managed",
+            "toolkit-staging-managed",
+            "AWS_MANAGED_KEY",
+            None,
+        ),
+        (
+            "a parameterised customer key, so the declared key is the one it names",
+            "toolkit-sse-customer",
+            "toolkit-staging-customer",
+            PARAMETERISED_KEY_ARN,
+            Some(PARAMETERISED_KEY_ARN),
+        ),
+    ];
+
+    for (case, stack, bucket_name, parameter, expected_key) in rows {
+        let (http_status, created) = create_stack(
+            &router,
+            stack,
+            CONDITIONAL_TEMPLATE,
+            &[
+                member("Parameters.member.1.ParameterKey", "BucketName"),
+                member("Parameters.member.1.ParameterValue", bucket_name),
+                member("Parameters.member.2.ParameterKey", "AssetsBucketKmsKeyId"),
+                member("Parameters.member.2.ParameterValue", parameter),
+            ],
+        )
+        .await;
+        assert_eq!(
+            http_status, 200,
+            "case {case:?}: CreateStack must answer 200, got {http_status} {created}"
+        );
+        wait_for_the_transition().await;
+        let (http_status, described) = describe_stack(&router, stack).await;
+        assert_eq!(
+            http_status, 200,
+            "case {case:?}: DescribeStacks must answer 200, got {http_status} {described}"
+        );
+        assert_eq!(
+            xml_text(&described, "StackStatus").as_deref(),
+            Some(status::CREATE_COMPLETE),
+            "case {case:?}: the stack must reach CREATE_COMPLETE, got {described}"
+        );
+        let name = output_value(&described, "StagingBucketName");
+        assert_eq!(
+            name, bucket_name,
+            "case {case:?}: the stack must publish the bucket it declared, got {described}"
+        );
+
+        let (http_status, body) = get_encryption(&router, &name).await;
+        assert_eq!(
+            http_status, 200,
+            "case {case:?}: s3:GetBucketEncryption({name:?}) must answer 200, got \
+             {http_status} {body}"
+        );
+        let reported = reported_rules(&body);
+        let expected = vec![rule("aws:kms", expected_key, false)];
+        assert_eq!(
+            reported, expected,
+            "case {case:?}: {name:?} must report {expected:?}, got {reported:?} ({body})"
+        );
+
+        // And nothing the declaration did not state: blocking an encryption type is an
+        // opt-in bucket-level setting, which no `BucketEncryption` here establishes, so the
+        // bucket reports no such container for a client to round-trip back.
+        assert!(
+            !body.contains(&format!("<{BLOCKED_ELEMENT}")),
+            "case {case:?}: {name:?} must report no <{BLOCKED_ELEMENT}>, got {body}"
         );
     }
 }
