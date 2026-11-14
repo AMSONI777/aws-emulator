@@ -4,10 +4,8 @@
 //!
 //! Put a new suite at `tests/all/<name>.rs` and declare it below, keeping the list
 //! sorted.
-//!
 //! A suite that is not declared here compiles nowhere and its tests never run. A
 //! suite left at the top level of `tests/` fails the build.
-
 // `tests/all.rs` is a test-target CRATE ROOT, so a bare `mod` resolves to a SIBLING
 // (`tests/boot_serve.rs`) — which the layout check refuses. The `#[path]` is what
 // points it into `tests/all/`.
@@ -2875,3 +2873,18 @@ mod s3_object_read_identity_or_bucket_policy;
 // `zz_probe` further up this tail: two landings each appended their own copy here, and a
 // module declared twice loads the same file twice, which compiles neither — so both copies
 // are removed from this tail rather than left to break the whole target.)
+// are declared ONCE, in the head region above.
+// are declared ONCE each, in the span above: two branches each re-added the pair here, which
+// declares each of them twice and compiles nowhere.
+// (`apigateway_sns_service_integration` is declared once, further up this tail: two branches
+// landing in the same window appended a second declaration of it here, which is a
+// redefinition that compiles neither, so the duplicate is removed and the first stands.)
+// CloudTrail suites above: two `mod` items for one name is a redefinition that compiles
+// `zz_probe` and `cloudformation_metric_stream_filter_update` are declared ONCE each, above:
+// `cloudtrail_read_only_api_calls` and `zz_probe` are declared ONCE each, above: two `mod`
+// `cloudwatch_alarm_ssm_ops_item_action` is declared ONCE, in the head region above, for the
+// reason the entry there records: the work item an alarm's Systems Manager OpsItem action
+// what it opened.
+// `codebuild_s3_build_output` is declared ONCE, in the span above: two landings each
+// `cloudformation_domain_endpoint_is_dialled_by_consumers` is declared ONCE, in the span
+// above, for the reason the entry there records.

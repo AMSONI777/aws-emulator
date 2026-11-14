@@ -12,6 +12,35 @@ from pyspark.context import SparkContext
 from pyspark.jvm import JavaSparkContext, SPARK_VERSION, gateway
 from pyspark.rdd import RDD, slices
 
+# The failure a read that cannot be planned raises, which is the filesystem's one reading of
+# that class.
+AnalysisException = filesystem.AnalysisException
+
+# The column names a read gives the columns of a source that names none, as Spark names them.
+UNNAMED_COLUMN = "_c%d"
+
+
+def _truth(value):
+    """A reader option's value as the boolean Spark reads it as."""
+    if isinstance(value, bool):
+        return value
+    return str(value).strip().lower() in ("true", "yes", "1")
+
+
+def _typed(value):
+    """One field as the value an inferred schema gives it."""
+    text = value.strip()
+    if not text:
+        return None
+    try:
+        return int(text)
+    except ValueError:
+        pass
+    try:
+        return float(text)
+    except ValueError:
+        return value
+
 
 class Row(object):
     """One row: its fields by name and by position, as `Row` holds them."""
@@ -56,6 +85,149 @@ class Row(object):
 
     def asDict(self, recursive=False):
         return dict(zip(self._fields, self._values))
+
+    def fields(self):
+        return list(self._fields)
+
+
+class DataFrameReader(object):
+    """Where a dataset of rows is READ from: the objects its source path names.
+
+    "Returns a DataFrameReader that can be used to read data in as a DataFrame"
+    (`SparkSession.read`). A path naming one object reads that object and a path naming a
+    prefix reads every object under it, which is how a Spark source addresses a directory of
+    part files; the read is made through the filesystem, so it is made as the identity the
+    program runs as and a refused one raises that refusal.
+    """
+
+    def __init__(self, session=None):
+        self._session = session
+        self._options = {}
+        self._format = None
+        self._columns = None
+
+    def format(self, source):
+        self._format = str(source).strip().lower()
+        return self
+
+    def option(self, key, value):
+        self._options[str(key).strip().lower()] = value
+        return self
+
+    def options(self, **named):
+        for key, value in named.items():
+            self.option(key, value)
+        return self
+
+    def schema(self, schema):
+        if hasattr(schema, "fieldNames"):
+            self._columns = list(schema.fieldNames())
+        elif isinstance(schema, (list, tuple)):
+            self._columns = [str(column) for column in schema]
+        elif isinstance(schema, str):
+            self._columns = [
+                field.strip().split(" ")[0] for field in schema.split(",") if field.strip()
+            ]
+        return self
+
+    def _read(self, kind, path):
+        if path is None:
+            raise AnalysisException("a read names no path")
+        read = filesystem.source_objects(path)
+        if kind in ("csv", "com.databricks.spark.csv"):
+            return self._csv(read)
+        if kind == "json":
+            return self._json(read)
+        if kind == "text":
+            return self._text(read)
+        raise AnalysisException(
+            "This emulator reads a Spark source in the csv, json and text formats; "
+            "%s names another one" % (kind,)
+        )
+
+    def _csv(self, read):
+        import csv
+        import io
+
+        header = _truth(self._options.get("header", False))
+        infer = _truth(self._options.get("inferschema", False))
+        separator = str(self._options.get("sep", self._options.get("delimiter", ",")))
+        columns = list(self._columns) if self._columns else None
+        rows = []
+        for _held, body in read:
+            fields = csv.reader(
+                io.StringIO(body.decode("utf-8")), delimiter=separator or ","
+            )
+            lines = [line for line in fields if line]
+            if not lines:
+                continue
+            start = 0
+            if header:
+                if columns is None:
+                    columns = [str(name).strip() for name in lines[0]]
+                start = 1
+            for line in lines[start:]:
+                values = [_typed(value) for value in line] if infer else list(line)
+                named = columns or [
+                    UNNAMED_COLUMN % (index,) for index in range(len(values))
+                ]
+                if columns is None:
+                    columns = list(named)
+                rows.append(Row(**dict(zip(named, values))))
+        return DataFrame(rows, columns or [])
+
+    def _json(self, read):
+        import json
+
+        rows = []
+        columns = list(self._columns) if self._columns else []
+        for _held, body in read:
+            for line in body.decode("utf-8").splitlines():
+                if not line.strip():
+                    continue
+                record = json.loads(line)
+                if not isinstance(record, dict):
+                    record = {UNNAMED_COLUMN % (0,): record}
+                for name in record:
+                    if name not in columns:
+                        columns.append(name)
+                rows.append(Row(**record))
+        return DataFrame(rows, columns)
+
+    def _text(self, read):
+        rows = []
+        for _held, body in read:
+            for line in body.decode("utf-8").splitlines():
+                rows.append(Row(**{"value": line}))
+        return DataFrame(rows, ["value"])
+
+    def load(self, path=None, format=None, schema=None, **named):
+        if schema is not None:
+            self.schema(schema)
+        self.options(**named)
+        return self._read(format or self._format or "csv", path)
+
+    def csv(self, path, schema=None, **named):
+        if schema is not None:
+            self.schema(schema)
+        self.options(**named)
+        return self._read("csv", path)
+
+    def json(self, path, schema=None, **named):
+        if schema is not None:
+            self.schema(schema)
+        self.options(**named)
+        return self._read("json", path)
+
+    def text(self, path, **named):
+        self.options(**named)
+        return self._read("text", path)
+
+    def parquet(self, *paths, **named):
+        raise AnalysisException(
+            "This emulator reads a Spark source in the csv, json and text formats; "
+            "parquet names another one"
+        )
 
 
 class DataFrameWriter(object):
@@ -223,6 +395,11 @@ class SparkSession(object):
     def conf(self):
         return self._context.getConf()
 
+    @property
+    def read(self):
+        """Returns a DataFrameReader that can be used to read data in as a DataFrame."""
+        return DataFrameReader(self)
+
     # The gateway and the Java context an application reaches the Hadoop filesystem
     # through, under the names PySpark gives them.
     @property
@@ -287,5 +464,5 @@ class SparkSession(object):
 # `SparkSession.builder`, the attribute an application starts from.
 SparkSession.builder = SparkSession.Builder()
 
-__all__ = ["DataFrame", "Row", "SparkSession"]
+__all__ = ["DataFrame", "DataFrameReader", "DataFrameWriter", "Row", "SparkSession"]
 "#;

@@ -54,3 +54,28 @@ Cause 2 — [mismatch] emr__glue__s3.glue-job-missing-s3-getobject-source-reject
 3. Cause 1: create a bucket, put an object 'data/target.txt' and a CSV manifest '<bucket>,data/target.txt'; create an IAM role trusting batchoperations.s3.amazonaws.com with s3:GetObject/s3:PutObject/s3:PutObjectTagging on the bucket; call s3control CreateJob with ConfirmationRequired=false, Operation.S3PutObjectTagging, Manifest(S3BatchOperations_CSV_20180820) and a Report. Poll s3control DescribeJob — expect Status to reach 'Complete' and GetObjectTagging on the target to show the tag; observe Status 'Ready' indefinitely and an empty TagSet (replay emr__glue__s3.iam-role-trust-s3-service-assumed-for-batch-op-positive).
 4. Cause 1 (negative side): repeat step 3 with an otherwise identical role whose trust policy names ec2.amazonaws.com — expect terminal 'Failed' with a FailureReason and nothing tagged; observe Status 'Ready' (replay emr__glue__s3.s3-batch-operation-role-missing-s3-trust-rejected).
 5. Cause 2: put 'data/input.csv' and a PySpark Glue script in a bucket; create an IAM role that can read 'scripts/*' but carries an explicit Deny on s3:GetObject for 'data/*'; glue CreateJob with that Role and Command.ScriptLocation, then glue StartJobRun with SOURCE_PATH=s3://<bucket>/data/ and OUTPUT_PATH=s3://<bucket>/output/. Poll glue GetJobRun — expect JobRunState FAILED with an ErrorMessage naming the unreadable source path; observe FAILED with 'This emulator records job runs but executes no job script, so the job run ended without running.' (replay emr__glue__s3.glue-job-missing-s3-getobject-source-rejected).
+
+## Resolution
+
+Cause 1 (the S3 Batch Operations job state machine) was already implemented when this report
+was picked up: the s3control service runs a submitted job off the response path, applies its
+one action to every entry of its object list, writes the completion report and settles Failed
+with FailureReasons naming a role S3 Batch Operations cannot assume (`state/batch_job_worker`,
+`state/batch_job_plan`, `state/batch_job_role`). The sibling check
+`emr__glue__s3.iam-role-trust-s3-service-assumed-for-batch-op-positive` passes, and the rule
+is pinned by the s3control crate's `batch_job_*` suites and by
+`core/router/tests/all/zz_batch_job_probe.rs`.
+
+Cause 2 (the Glue job run that never executed its script) is implemented: a run of a job
+whose `JobCommand$Name` is an Apache Spark one now executes its script with the Spark engine
+and the AWS Glue ETL library on its import path (`service_common::spark_guest_runtime` plus
+`state/spark_runtime`), reading and writing as the job's `Role`, so a run whose role is
+refused the source path reports the object store's own refusal naming that path, and a run
+whose role may read it succeeds and leaves its output. The rule is pinned by
+`services/service-com-amazonaws-glue-awsglue/tests/all/spark_job_script_execution.rs`.
+
+Both of this report's cross-service checks still end as `Check timed out after 60.0s`: each
+burns its 60 s harness budget inside its own retry sleep (`_run_job_until_settled` and
+`_start_and_wait_with_retry`), so neither reaches the assertion whose text this report
+records, and the recorded scripts and acceptance predicates are not readable from this
+checkout. What those checks need beyond the rules above is unknown from here.

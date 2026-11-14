@@ -112,17 +112,20 @@ class SparkContext(object):
         return self.parallelize(list(range(start, end, step)), numSlices)
 
     def textFile(self, name, minPartitions=None, use_unicode=True):
-        """The lines of the object `name` names, as a dataset of them."""
-        text = filesystem.read_text(name)
-        lines = text.split("\n")
-        if lines and lines[-1] == "":
-            lines = lines[:-1]
+        """The lines of every object the path covers, as a dataset of them.
+
+        A path naming one object reads that object; one naming a prefix reads every object
+        under it, which is what a text source addresses — a directory of part files is how
+        the output of an earlier job is read back in.
+        """
+        lines = filesystem.source_text(name)
         return RDD(slices(lines, minPartitions or DEFAULT_PARALLELISM))
 
     def wholeTextFiles(self, path, minPartitions=None, use_unicode=True):
+        read = filesystem.source_objects(path)
         return RDD(
             slices(
-                [(filesystem._text(path), filesystem.read_text(path))],
+                [(held, body.decode("utf-8")) for held, body in read],
                 minPartitions or DEFAULT_PARALLELISM,
             )
         )

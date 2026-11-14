@@ -137,9 +137,18 @@ class FSDataOutputStream(object):
         if self._closed:
             return None
         self._closed = True
-        _client().put_object(
-            Bucket=self._bucket, Key=self._key, Body=bytes(self._buffer)
-        )
+        held = "s3://%s/%s" % (self._bucket, self._key)
+        try:
+            _client().put_object(
+                Bucket=self._bucket, Key=self._key, Body=bytes(self._buffer)
+            )
+        except Exception as error:
+            # The write is signed as the identity the program runs as, so a store that
+            # refuses that identity is what the program raises — worded as Hadoop words it
+            # and naming the object it could not write.
+            if _is_denial(error):
+                raise _denied(held, "putObject", held, error)
+            raise
         return None
 
     def __enter__(self):
@@ -285,17 +294,19 @@ class FileSystem(object):
 
 
 def read_bytes(path):
-    """The bytes of the object `path` names."""
+    """The bytes of the object `path` names, read as the identity the program runs as."""
     named = object_of(path)
     if named is None:
         scheme, _, _ = split_uri(path)
         raise UnsupportedFileSystem("No FileSystem for scheme: %s" % (scheme,))
     bucket, key = named
-    read = _client().get_object(Bucket=bucket, Key=key)
-    body = read["Body"].read()
-    if isinstance(body, str):
-        return body.encode("utf-8")
-    return bytes(bytearray(body))
+    try:
+        read = _client().get_object(Bucket=bucket, Key=key)
+    except Exception as error:
+        if _is_denial(error):
+            raise _denied(path, "getObject", _uri(bucket, key), error)
+        raise
+    return _as_bytes(read["Body"].read())
 
 
 def read_text(path):
@@ -309,4 +320,180 @@ def write_text(path, text):
     stream.write(text)
     stream.close()
     return None
+
+
+# --- what a program's READ of a source path covers, and what a refused one raises ---------
+
+# The error codes an object store answers when the identity the call was signed as may not
+# make it. The role the work runs as is what signs these calls, so this is the answer a read
+# or a write gets when that role is refused the access.
+DENIED_CODES = (
+    "AccessDenied",
+    "AccessDeniedException",
+    "AllAccessDisabled",
+    "Forbidden",
+    "UnauthorizedAccess",
+)
+
+# The error codes an object store answers for a key it does not hold — the one answer a read
+# of a path that may instead be a PREFIX of objects falls through on.
+MISSING_CODES = ("NoSuchKey", "NotFound", "404")
+
+# The HTTP status a refusal reports when the store's own answer named none.
+DENIED_STATUS = 403
+
+
+class AccessDeniedException(IOError):
+    """An access the identity the call was signed as was refused, as Hadoop words it."""
+
+
+class AnalysisException(Exception):
+    """A source a read cannot be planned over, as Spark words it."""
+
+
+def _refusal(error):
+    """The (code, message) a store's refusal carried, or ('', text) for anything else."""
+    response = getattr(error, "response", None)
+    if isinstance(response, dict):
+        held = response.get("Error") or {}
+        return (str(held.get("Code") or ""), str(held.get("Message") or ""))
+    return ("", str(error))
+
+
+def _is_denial(error):
+    """Whether a store's answer refused the identity the call was signed as."""
+    code, _ = _refusal(error)
+    return code in DENIED_CODES
+
+
+def _is_missing(error):
+    """Whether a store's answer was that it holds no such key."""
+    code, _ = _refusal(error)
+    return code in MISSING_CODES
+
+
+def _status(error):
+    """The HTTP status the store's own answer carried, or the one a refusal carries."""
+    response = getattr(error, "response", None)
+    if isinstance(response, dict):
+        metadata = response.get("ResponseMetadata") or {}
+        held = metadata.get("HTTPStatusCode")
+        if held is not None:
+            try:
+                return int(held)
+            except (TypeError, ValueError):
+                return DENIED_STATUS
+    return DENIED_STATUS
+
+
+def _denied(path, operation, where, error):
+    """The access-denied failure a refused call raises, worded as Hadoop words it."""
+    code, message = _refusal(error)
+    stated = message or "Access Denied"
+    return AccessDeniedException(
+        "%s: %s on %s: Access Denied (Service: Amazon S3; Status Code: %d; Error Code: %s; "
+        "Message: %s)"
+        % (_text(path), operation, where, _status(error), code or "AccessDenied", stated)
+    )
+
+
+def _uri(bucket, key):
+    """The S3 URI of one object, in the scheme a program names a path in."""
+    return "s3://%s/%s" % (bucket, key)
+
+
+def _as_bytes(body):
+    """An answered body as bytes, however the SDK handed it over."""
+    if isinstance(body, str):
+        return body.encode("utf-8")
+    return bytes(bytearray(body))
+
+
+def prefix_of(path):
+    """The (bucket, key) an Amazon S3 URI names, where the key MAY be empty.
+
+    A path naming a bucket, or a bucket and a prefix, addresses every object under it, which
+    is what a dataset source or an output directory is.
+    """
+    scheme, authority, within = split_uri(path)
+    if scheme is None or scheme.lower() not in S3_SCHEMES or not authority:
+        return None
+    return (authority, within)
+
+
+def list_objects(path):
+    """Every object stored under the prefix `path` names, as (key, size) pairs."""
+    named = prefix_of(path)
+    if named is None:
+        raise UnsupportedFileSystem("No FileSystem for scheme: %s" % (split_uri(path)[0],))
+    bucket, key = named
+    prefix = key.rstrip("/")
+    if prefix:
+        prefix = prefix + "/"
+    client = _client()
+    found = []
+    token = None
+    while True:
+        asked = {"Bucket": bucket, "Prefix": prefix}
+        if token:
+            asked["ContinuationToken"] = token
+        try:
+            listed = client.list_objects_v2(**asked)
+        except Exception as error:
+            if _is_denial(error):
+                raise _denied(path, "listStatus", _text(path), error)
+            raise
+        for entry in listed.get("Contents") or []:
+            if not str(entry["Key"]).endswith("/"):
+                found.append((str(entry["Key"]), int(entry.get("Size") or 0)))
+        token = listed.get("NextContinuationToken")
+        if not listed.get("IsTruncated") or not token:
+            break
+    return found
+
+
+def source_objects(path):
+    """Every object ONE read of `path` covers: the object itself, or the prefix's objects.
+
+    A path naming a stored object reads that object; one naming a prefix reads every object
+    under it, which is how a Spark source path addresses a directory of part files. A path
+    the store holds nothing for is the analysis failure Spark raises for it, and an access
+    the identity was refused is that refusal.
+    """
+    named = prefix_of(path)
+    if named is None:
+        raise UnsupportedFileSystem("No FileSystem for scheme: %s" % (split_uri(path)[0],))
+    bucket, key = named
+    if key and not key.endswith("/"):
+        try:
+            read = _client().get_object(Bucket=bucket, Key=key)
+            return [(_uri(bucket, key), _as_bytes(read["Body"].read()))]
+        except Exception as error:
+            if _is_denial(error):
+                raise _denied(path, "getObject", _uri(bucket, key), error)
+            # A path the store holds no object for may still name a PREFIX of objects, which
+            # is the one answer worth reading on; anything else the store said about this
+            # read is what the read failed with.
+            if not _is_missing(error):
+                raise
+    read = []
+    for stored, _size in list_objects(path):
+        try:
+            answer = _client().get_object(Bucket=bucket, Key=stored)
+        except Exception as error:
+            if _is_denial(error):
+                raise _denied(path, "getObject", _uri(bucket, stored), error)
+            raise
+        read.append((_uri(bucket, stored), _as_bytes(answer["Body"].read())))
+    if not read:
+        raise AnalysisException("Path does not exist: %s" % (_text(path),))
+    return read
+
+
+def source_text(path):
+    """The lines of every object one read of `path` covers, in the order of their keys."""
+    lines = []
+    for _held, body in source_objects(path):
+        lines.extend(body.decode("utf-8").splitlines())
+    return lines
 "#;

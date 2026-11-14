@@ -77,7 +77,7 @@ boto3.client("s3").put_object(
 ///
 /// IAM is mounted because the role resolution asks it over the emulator's own in-process
 /// callback; Amazon S3 because a run READS its script from it and a script WRITES through it.
-fn emulator_with_iam_and_s3() -> (MultiServiceRouter, Arc<engine::InMemoryEngine>) {
+pub(crate) fn emulator_with_iam_and_s3() -> (MultiServiceRouter, Arc<engine::InMemoryEngine>) {
     let (mut router, engine) = emulator_with_iam();
     router.register_service(service_com_amazonaws_s3_amazons3::EmulatedService::new(
         Arc::clone(&engine),
@@ -87,7 +87,7 @@ fn emulator_with_iam_and_s3() -> (MultiServiceRouter, Arc<engine::InMemoryEngine
 
 /// Give the role `role_name` the inline policies `documents` and the attached managed
 /// policies `attachments` — the records `PutRolePolicy` and `AttachRolePolicy` write.
-fn grant_role(
+pub(crate) fn grant_role(
     engine: &Arc<engine::InMemoryEngine>,
     role_name: &str,
     documents: &[Value],
@@ -116,7 +116,7 @@ fn grant_role(
 }
 
 /// An identity policy document with one statement: `effect` for `actions` on `resource`.
-fn statement(effect: &str, actions: &[&str], resource: &str) -> Value {
+pub(crate) fn statement(effect: &str, actions: &[&str], resource: &str) -> Value {
     json!({
         "Version": "2012-10-17",
         "Statement": [{ "Effect": effect, "Action": actions, "Resource": resource }],

@@ -343,6 +343,8 @@ mod session_deletion;
 mod session_tags;
 #[path = "all/sessions.rs"]
 mod sessions;
+#[path = "all/spark_job_script_execution.rs"]
+mod spark_job_script_execution;
 #[path = "all/state_roundtrip.rs"]
 mod state_roundtrip;
 #[path = "all/statement_listing.rs"]
