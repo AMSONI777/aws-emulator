@@ -312,16 +312,29 @@ async fn disassociating_applications_unlinks_both_sides_of_the_association() {
             );
             // "Amazon GameLift Streams will not initiate new streams in the stream
             // group using the disassociated application": the content the group's
-            // locations replicated for it goes with the link.
+            // locations replicated for it goes with the link. What does NOT go with
+            // it is the application's own copy, in the Region it was created in:
+            // that row is the ingested content itself, which no association made and
+            // no disassociation takes away. The group holds that Region and one
+            // more, so an associated application reports both and an unlinked one
+            // reports its home Region alone.
             let replications = application["ReplicationStatuses"]
                 .as_array()
                 .map_or(0, Vec::len);
-            let wanted = if remaining.contains(application_arn) { 2 } else { 0 };
+            let wanted = if remaining.contains(application_arn) { 2 } else { 1 };
             assert_eq!(
                 replications, wanted,
                 "case {case:?}: application {id} must report {wanted} replication row(s), \
                  got {application}"
             );
+            if !remaining.contains(application_arn) {
+                assert_eq!(
+                    application["ReplicationStatuses"],
+                    json!([{"Location": REGION, "Status": "COMPLETED"}]),
+                    "case {case:?}: an unlinked application still reports its own \
+                     content as replicated in its home Region, got {application}"
+                );
+            }
         }
     }
 

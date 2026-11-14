@@ -340,7 +340,6 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
                     application.replications.push(crate::state::Replication {
                         stream_group_arn: arn.clone(),
                         location: location.clone(),
-                        completes_at: now + crate::state::TRANSITION,
                     });
                 }
             }

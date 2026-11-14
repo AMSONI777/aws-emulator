@@ -766,20 +766,19 @@ async fn associating_applications_persists_the_link() {
             json!([group_arn]),
             "case {case:?}: expected {arn} to report the group, got {application}"
         );
+        // Replication to a location has finished exactly when that location can
+        // stream the content: this group's location is already `ACTIVE` (the
+        // association required it), and each application's own content is in place,
+        // so both report the location `COMPLETED` rather than on a timer of their
+        // own. The one row is the Region the content lives in, which the group's one
+        // location also names.
         assert_eq!(
             application["ReplicationStatuses"],
-            json!([{"Location": REGION, "Status": "REPLICATING"}]),
-            "case {case:?}: expected a replication row for the group's location, got \
-             {application}"
+            json!([{"Location": REGION, "Status": "COMPLETED"}]),
+            "case {case:?}: expected a completed replication row for the group's \
+             location, got {application}"
         );
     }
-    std::thread::sleep(PAST_TRANSITION);
-    let (_, application) = call(&router, "GET", &format!("/applications/{first_app}"), None).await;
-    assert_eq!(
-        application["ReplicationStatuses"],
-        json!([{"Location": REGION, "Status": "COMPLETED"}]),
-        "case \"replication completes on the clock\": got {application}"
-    );
 
     // @idempotent: a repeat neither duplicates the link nor moves the default.
     let (status, again) = call(

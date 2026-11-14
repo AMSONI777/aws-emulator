@@ -15,8 +15,12 @@
 mod admin_shell_not_found;
 #[path = "all/application_associations.rs"]
 mod application_associations;
+#[path = "all/application_read_projection.rs"]
+mod application_read_projection;
 #[path = "all/control_plane_fidelity.rs"]
 mod control_plane_fidelity;
+#[path = "all/no_content_framing.rs"]
+mod no_content_framing;
 #[path = "all/not_found_messages.rs"]
 mod not_found_messages;
 #[path = "all/refusal_envelope.rs"]

@@ -269,14 +269,13 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
             .into());
         };
         let now = ::std::time::SystemTime::now();
-        let mut state = state.lock();
-        state.materialize(now);
 
         // `ApplicationSourceUri` — "Enter an Amazon S3 URI to a bucket that contains
         // your game or other application." The model gives the member no `@pattern`,
         // so the location is checked here, BEFORE any resource is allocated: a
         // source the service could never read is not an application that streams
-        // nothing, it is a request to correct.
+        // nothing, it is a request to correct. Checked before the store is locked,
+        // because the value alone decides it.
         if !crate::state::is_s3_uri(&input.application_source_uri) {
             return Err(CreateApplicationErrorModeled::ValidationException(
                 ValidationException {
@@ -285,6 +284,22 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
             )
             .into());
         }
+
+        // How much content this create copies, read from the object store BEFORE the
+        // store is locked: the read is an awaited in-process call, and this service's
+        // state is held under a non-async lock. It is what the application reports as
+        // its `StorageBytes` from here on — the size of the content at the instant it
+        // was ingested, never recomputed on a later read.
+        let region = crate::state::region_of(ctx.parts());
+        let storage_bytes = crate::state::content::stored_bytes(
+            ctx,
+            &region,
+            &input.application_source_uri,
+        )
+        .await;
+
+        let mut state = state.lock();
+        state.materialize(now);
 
         // `ApplicationLogOutputUri` — "Required if you specify one or more
         // ApplicationLogPaths." The model cannot express the dependency, so it is
@@ -360,7 +375,6 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
                         .into(),
                     );
                 }
-                let region = crate::state::region_of(ctx.parts());
                 let id = state.mint_id("a-");
                 let arn = crate::state::application_arn(&region, &id);
                 // "If the request is successful, Amazon GameLift Streams begins to
@@ -378,6 +392,7 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
                     status: crate::state::APPLICATION_INITIALIZED.to_string(),
                     status_reason: None,
                     replications: Vec::new(),
+                    storage_bytes,
                     associated_stream_groups: Vec::new(),
                     tags: input.tags.unwrap_or_default(),
                     created_at: now,
@@ -411,7 +426,7 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
             id: Some(application.id.clone()),
             status: Some(application.status.clone()),
             status_reason: application.status_reason.clone(),
-            replication_statuses: Some(application.replication_statuses(now)),
+            replication_statuses: Some(state.replication_statuses(application)),
             created_at: Some(crate::state::timestamp(application.created_at)),
             last_updated_at: Some(crate::state::timestamp(application.last_updated_at)),
             associated_stream_groups: Some(application.associated_stream_groups.clone()),

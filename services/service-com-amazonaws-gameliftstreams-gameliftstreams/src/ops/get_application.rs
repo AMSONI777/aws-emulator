@@ -4,6 +4,11 @@
 //! Answers from the stored application record, which an `Identifier` names by
 //! bare id or by ARN.
 //!
+//! The success carries one member this on-disk model does not declare —
+//! `StorageBytes`, how many bytes of content the application holds — so the output
+//! shape this operation serializes is [`super::types::GetApplicationAnswer`], the
+//! model's own projection plus that member. See that type for why.
+//!
 //! ## Shape of an operation
 //!
 //! Each operation is a struct that owns the shared engine and implements
@@ -188,12 +193,13 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
     for GetApplication<Eng>
 {
     type Input = GetApplicationInput;
-    type Output = GetApplicationOutput;
+    type Output = GetApplicationAnswer;
     type Error = GetApplicationError;
 
     const NAME: &'static str = "GetApplication";
     const INPUT_SCHEMA: &'static ::aws_smithy_schema::Schema = super::types::GET_APPLICATION_INPUT_SCHEMA;
-    const OUTPUT_SCHEMA: &'static ::aws_smithy_schema::Schema = super::types::GET_APPLICATION_OUTPUT_SCHEMA;
+    const OUTPUT_SCHEMA: &'static ::aws_smithy_schema::Schema =
+        super::types::GET_APPLICATION_ANSWER_SCHEMA;
     const SUCCESS_STATUS: u16 = 200u16;
 
     async fn handle(
@@ -240,21 +246,26 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
             )
             .into());
         };
-        Ok(GetApplicationOutput {
-            arn: application.arn.clone(),
-            description: Some(application.description.clone()),
-            runtime_environment: Some(application.runtime_environment.clone()),
-            executable_path: Some(application.executable_path.clone()),
-            application_log_paths: Some(application.application_log_paths.clone()),
-            application_log_output_uri: application.application_log_output_uri.clone(),
-            application_source_uri: Some(application.application_source_uri.clone()),
-            id: Some(application.id.clone()),
-            status: Some(application.status.clone()),
-            status_reason: application.status_reason.clone(),
-            replication_statuses: Some(application.replication_statuses(now)),
-            created_at: Some(crate::state::timestamp(application.created_at)),
-            last_updated_at: Some(crate::state::timestamp(application.last_updated_at)),
-            associated_stream_groups: Some(application.associated_stream_groups.clone()),
+        Ok(GetApplicationAnswer {
+            application: GetApplicationOutput {
+                arn: application.arn.clone(),
+                description: Some(application.description.clone()),
+                runtime_environment: Some(application.runtime_environment.clone()),
+                executable_path: Some(application.executable_path.clone()),
+                application_log_paths: Some(application.application_log_paths.clone()),
+                application_log_output_uri: application.application_log_output_uri.clone(),
+                application_source_uri: Some(application.application_source_uri.clone()),
+                id: Some(application.id.clone()),
+                status: Some(application.status.clone()),
+                status_reason: application.status_reason.clone(),
+                replication_statuses: Some(state.replication_statuses(application)),
+                created_at: Some(crate::state::timestamp(application.created_at)),
+                last_updated_at: Some(crate::state::timestamp(application.last_updated_at)),
+                associated_stream_groups: Some(application.associated_stream_groups.clone()),
+            },
+            // The size of the content this application was created from, as the
+            // create recorded it.
+            storage_bytes: application.storage_bytes,
         })
     }
 }

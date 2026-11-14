@@ -28,6 +28,11 @@
 //! * [`with_internal_id`] appends the per-request `" (Internal ID: <uuid>)"` suffix
 //!   every message this service's HANDLERS answer with carries, so no handler words
 //!   that suffix itself.
+//! * [`content`] is the one read of the content an application is created from: how
+//!   many bytes the Amazon S3 location named by `ApplicationSourceUri` holds, which
+//!   is what the application's read path reports as `StorageBytes`.
+
+pub mod content;
 
 use std::collections::{HashMap, HashSet};
 use std::time::{Duration, SystemTime};
@@ -662,18 +667,20 @@ pub fn is_s3_uri(uri: &str) -> bool {
 /// `length 1..32, pattern ^[a-zA-Z0-9-]+$`.
 const ID_ALPHABET: &[u8] = b"0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz";
 
-/// One location's share of an application's content replication, as
-/// `CreateApplication` reports it in `ReplicationStatuses`.
+/// One location's share of an application's content replication, as the
+/// application's readers report it in `ReplicationStatuses`.
 ///
 /// Keyed by the stream group that asked for the location, so dropping that group
 /// drops exactly its replication rows and leaves the ones another group needs.
+/// Whether the row reads `COMPLETED` is NOT held here: replication to a location
+/// has finished exactly when that location can stream the content, which is the
+/// location's own status on the group that asked for it
+/// ([`ComAmazonawsGameliftstreamsGameliftstreamsState::replication_statuses`]).
 #[derive(Debug, Clone)]
 pub struct Replication {
     /// ARN of the stream group whose location configuration asked for this.
     pub stream_group_arn: String,
     pub location: String,
-    /// When replication to `location` is due to finish.
-    pub completes_at: SystemTime,
 }
 
 /// A persisted application resource.
@@ -692,6 +699,10 @@ pub struct Application {
     /// An `ApplicationStatusReason` value, set only in `ERROR` status.
     pub status_reason: Option<String>,
     pub replications: Vec<Replication>,
+    /// How many bytes of content this application's stored copy holds: the size
+    /// of the objects at `application_source_uri` when the content was ingested,
+    /// which is what the application's read path reports as `StorageBytes`.
+    pub storage_bytes: i64,
     /// ARNs of the stream groups this application is associated with.
     pub associated_stream_groups: Vec<String>,
     pub tags: HashMap<String, String>,
@@ -702,37 +713,30 @@ pub struct Application {
 }
 
 impl Application {
-    /// `ReplicationStatuses` for this application: one row per location, reported
-    /// `COMPLETED` once every group that asked for that location has finished
-    /// replicating to it. Empty for an application no stream group references.
+    /// The location this application's own copy of the content lives in: the
+    /// Region the create was answered in, which is the region segment of the ARN
+    /// minted with the record — so the home location is read off the stored
+    /// resource rather than held as a second copy of it.
+    pub fn home_location(&self) -> &str {
+        arn_region(&self.arn)
+    }
+
+    /// Has the content at `application_source_uri` finished being copied into
+    /// this application's own storage?
     ///
-    /// Collapsed through an ordered map keyed by location, so the cost is
-    /// `n log n` in the stored rows rather than quadratic, and the result is in a
-    /// stable order.
-    pub fn replication_statuses(&self, now: SystemTime) -> Vec<ReplicationStatus> {
-        let mut by_location: ::std::collections::BTreeMap<&str, bool> =
-            ::std::collections::BTreeMap::new();
-        for replication in &self.replications {
-            let completed = now >= replication.completes_at;
-            by_location
-                .entry(replication.location.as_str())
-                .and_modify(|all_completed| *all_completed &= completed)
-                .or_insert(completed);
-        }
-        by_location
-            .into_iter()
-            .map(|(location, completed)| ReplicationStatus {
-                location: Some(location.to_string()),
-                status: Some(
-                    if completed {
-                        REPLICATION_COMPLETED
-                    } else {
-                        REPLICATION_REPLICATING
-                    }
-                    .to_string(),
-                ),
-            })
-            .collect()
+    /// That is what the pre-`READY` statuses describe — "INITIALIZED: Amazon
+    /// GameLift Streams has received the request and is initiating the work flow
+    /// to create an application", "PROCESSING: ... Amazon GameLift Streams is
+    /// copying the content and caching for future deployment in a stream group"
+    /// — and `READY` is where that work flow ends: "READY: The application is
+    /// ready to deploy in a stream group." A `DELETING` application was `READY`
+    /// before the delete started and still holds its content; an `ERROR` one
+    /// never finished copying it (`StatusReason`).
+    pub fn content_is_stored(&self) -> bool {
+        matches!(
+            self.status.as_str(),
+            APPLICATION_READY | APPLICATION_DELETING
+        )
     }
 
     /// Advance the transition the clock owed at `now`. Answers `true` when the
@@ -1896,6 +1900,66 @@ impl ComAmazonawsGameliftstreamsGameliftstreamsState {
     pub fn application(&self, identifier: &str) -> Option<&Application> {
         self.applications
             .get(&identifier_id(identifier, APPLICATION_RESOURCE)?)
+    }
+
+    /// `ReplicationStatuses` for `application`: one row per location the content
+    /// is replicated to, each `COMPLETED` once the content can be streamed from
+    /// that location and `REPLICATING` until then.
+    ///
+    /// "Represents the status of the replication of an application to a location.
+    /// An application cannot be streamed from a location until it has finished
+    /// replicating there" (`ReplicationStatus` documentation), so a location's row
+    /// reads `COMPLETED` exactly when that location can serve the content:
+    ///
+    /// * the application's HOME location — the Region it was created in, which is
+    ///   where its own copy of the content lives — reported `COMPLETED` from the
+    ///   moment the content has been ingested there
+    ///   ([`Application::content_is_stored`]), whether or not any stream group
+    ///   references the application: that copy is made by the create itself, not
+    ///   by a group. Before then there is nothing replicated anywhere and no row
+    ///   for it, which is what a create answers with.
+    /// * every location a stream group asked for, once that group holds the
+    ///   location in a status it can stream from
+    ///   ([`StreamGroup::can_stream_from`]) — the same fact the group's own read
+    ///   path reports, so the two halves of this store cannot disagree about
+    ///   whether a location is usable. A location more than one group asked for is
+    ///   reported `COMPLETED` only once every one of them can stream from it.
+    ///
+    /// Collapsed through an ordered map keyed by location, so the cost is
+    /// `n log n` in the stored rows rather than quadratic, and the result is in a
+    /// stable order.
+    pub fn replication_statuses(&self, application: &Application) -> Vec<ReplicationStatus> {
+        let mut by_location: ::std::collections::BTreeMap<&str, bool> =
+            ::std::collections::BTreeMap::new();
+        for replication in &application.replications {
+            let completed = self
+                .stream_group(&replication.stream_group_arn)
+                .is_some_and(|group| group.can_stream_from(&replication.location));
+            by_location
+                .entry(replication.location.as_str())
+                .and_modify(|all_completed| *all_completed &= completed)
+                .or_insert(completed);
+        }
+        // The home location's own copy is the ingested content itself, so it is
+        // not qualified by what a group asked for there — and it is reported only
+        // once that content is in place.
+        if application.content_is_stored() {
+            by_location.insert(application.home_location(), true);
+        }
+        by_location
+            .into_iter()
+            .map(|(location, completed)| ReplicationStatus {
+                location: Some(location.to_string()),
+                status: Some(
+                    if completed {
+                        REPLICATION_COMPLETED
+                    } else {
+                        REPLICATION_REPLICATING
+                    }
+                    .to_string(),
+                ),
+            })
+            .collect()
     }
 
     /// The stored application an `Identifier` names, for mutation.

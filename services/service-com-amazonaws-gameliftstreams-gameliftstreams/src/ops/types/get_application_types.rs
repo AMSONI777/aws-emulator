@@ -36,3 +36,96 @@ pub struct GetApplicationOutput {
     pub associated_stream_groups: Option<Vec<String>>,
 }
 
+/// `StorageBytes` — how many bytes of content the application holds — as a member of
+/// `GetApplication`'s success.
+///
+/// This on-disk model declares NO such member on `GetApplicationOutput` (nor on
+/// `CreateApplicationOutput` or `ApplicationSummary`:
+/// `smithy_query(query="shape", shape="GetApplicationOutput,ApplicationSummary")`), yet
+/// the API answers one on this read, so the member schema is written here rather than
+/// derived. Its shape id sits in a namespace of its OWN, so it can neither claim to be
+/// modelled nor collide with a member the model may declare later, and its type is the
+/// one this model already gives every other byte count it reports (`ShaderCacheSummary`'s
+/// own `StorageBytes` targets `Long`, "The total storage used ... in bytes"). Its index
+/// is the next one after the model's members, which keep the indices and the order the
+/// model gives them.
+const M_STORAGE_BYTES: ::aws_smithy_schema::Schema = ::aws_smithy_schema::Schema::new_member(
+    ::aws_smithy_schema::ShapeId::from_static(
+        "com.amazonaws.gameliftstreams.recorded#GetApplicationOutput$StorageBytes",
+        "com.amazonaws.gameliftstreams.recorded",
+        "StorageBytes",
+    ),
+    ::aws_smithy_schema::ShapeType::Long,
+    "StorageBytes",
+    14,
+);
+
+/// The whole success `GetApplication` answers with: every member the model declares on
+/// `GetApplicationOutput`, plus the `StorageBytes` the API reports beside them.
+///
+/// Written as a pair rather than as one flat structure because
+/// `#[smithy_macros::smithy(shape = ...)]` admits exactly the model's member list — a
+/// Rust field with no member behind it is a compile error — so the modelled projection
+/// keeps its derive (and with it the model's own member schemas, byte for byte) and the
+/// unmodelled member is appended by the serializer below.
+#[derive(Debug, Clone, Default)]
+pub struct GetApplicationAnswer {
+    /// The modelled projection of the application.
+    pub application: GetApplicationOutput,
+    /// The size in bytes of the application's stored content.
+    pub storage_bytes: i64,
+}
+
+impl GetApplicationAnswer {
+    /// This answer's output schema: the model's own members, with their own schemas, in
+    /// the model's order, and the recorded member last.
+    ///
+    /// The shape id is `GetApplicationOutput`'s, because this IS that operation's output
+    /// shape as the API answers it.
+    pub const SCHEMA: ::aws_smithy_schema::Schema = ::aws_smithy_schema::Schema::new_struct(
+        ::aws_smithy_schema::ShapeId::from_static(
+            "com.amazonaws.gameliftstreams#GetApplicationOutput",
+            "com.amazonaws.gameliftstreams",
+            "GetApplicationOutput",
+        ),
+        ::aws_smithy_schema::ShapeType::Structure,
+        &[
+            &GetApplicationOutput::M_ARN,
+            &GetApplicationOutput::M_DESCRIPTION,
+            &GetApplicationOutput::M_RUNTIME_ENVIRONMENT,
+            &GetApplicationOutput::M_EXECUTABLE_PATH,
+            &GetApplicationOutput::M_APPLICATION_LOG_PATHS,
+            &GetApplicationOutput::M_APPLICATION_LOG_OUTPUT_URI,
+            &GetApplicationOutput::M_APPLICATION_SOURCE_URI,
+            &GetApplicationOutput::M_ID,
+            &GetApplicationOutput::M_STATUS,
+            &GetApplicationOutput::M_STATUS_REASON,
+            &GetApplicationOutput::M_REPLICATION_STATUSES,
+            &GetApplicationOutput::M_CREATED_AT,
+            &GetApplicationOutput::M_LAST_UPDATED_AT,
+            &GetApplicationOutput::M_ASSOCIATED_STREAM_GROUPS,
+            &M_STORAGE_BYTES,
+        ],
+    );
+}
+
+/// [`GetApplicationAnswer::SCHEMA`] as the operation's output schema.
+pub static GET_APPLICATION_ANSWER_SCHEMA: &::aws_smithy_schema::Schema =
+    &GetApplicationAnswer::SCHEMA;
+
+impl ::aws_smithy_schema::serde::SerializableStruct for GetApplicationAnswer {
+    /// The modelled members exactly as the derive writes them, then the recorded one.
+    ///
+    /// Each member's wire name is taken from the member schema handed to the serializer,
+    /// which is why delegating writes the model's own names and this writes
+    /// `StorageBytes`.
+    fn serialize_members(
+        &self,
+        serializer: &mut dyn ::aws_smithy_schema::serde::ShapeSerializer,
+    ) -> ::std::result::Result<(), ::aws_smithy_schema::serde::SerdeError> {
+        self.application.serialize_members(serializer)?;
+        serializer.write_long(&M_STORAGE_BYTES, self.storage_bytes)?;
+        Ok(())
+    }
+}
+

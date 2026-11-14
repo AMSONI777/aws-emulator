@@ -76,11 +76,26 @@
 //! ARN at all, which this API answers with the error code `BadRequestException`.
 //! That shape is in no model of this service, so there is no modelled member to carry
 //! its text, and it keeps the framework's envelope through `override_refusal` below.
+//!
+//! ## Why this file frames the responses that carry no content
+//!
+//! A sixth seam, `override_protocol`, is one this service also takes, for one framing
+//! the model's protocol cannot state: an operation whose output structure declares no
+//! member (`TagResource`, `UntagResource`) answers `204 No Content`, and such a response
+//! carries no body at all and states the length it has, rather than the empty JSON
+//! object the serializer renders for a members-less output and no framing header. The
+//! correction is not written here — it is
+//! [`service_common::no_content_responses::without_content`], which owns that framing
+//! for every service that needs it — and it is applied at the one place every response
+//! of this service passes through rather than per operation.
 
-use aws_smithy_runtime_api::http::Response as RtResponse;
+use aws_smithy_runtime_api::http::{Request as WireRequest, Response as RtResponse};
 use aws_smithy_schema::serde::SerdeError;
+use aws_smithy_schema::Schema;
 use aws_smithy_schema_server::constraints::{self, Violation, ViolationKind};
 use aws_smithy_schema_server::envelope;
+use aws_smithy_schema_server::{ProtocolError, ServerProtocol};
+use service_common::no_content_responses::without_content;
 use smithy_server_runtime::{
     http, BoxFuture, DeserializableStruct, ErasedOperation, Operation, OperationContext, Refusal,
     Refused, ServerHttpProtocol, Service,
@@ -199,6 +214,97 @@ fn constraint_refusal_table<Eng: Send + Sync + 'static>(
     refusals
 }
 
+/// The protocol this service answers modelled requests in: the model's own, with the one
+/// framing correction the module docs state.
+///
+/// Implemented on the service itself because the model-derived protocol it delegates to is
+/// owned by the generated entry and reached by reference (`self.entry.protocol()`), and
+/// [`Service::override_protocol`] hands back a borrow of `&self` — so there is one protocol
+/// instance, the generated one, and no second routing table to drift from the model.
+impl<Eng: Send + Sync + 'static> ServerProtocol for EmulatedService<Eng> {
+    type Request = WireRequest;
+    type Response = RtResponse;
+
+    fn protocol_id(&self) -> &aws_smithy_schema::ShapeId {
+        self.entry.protocol().protocol_id()
+    }
+
+    fn routing_key<'a>(&self, request: &'a WireRequest) -> Result<&'a str, ProtocolError> {
+        self.entry.protocol().routing_key(request)
+    }
+
+    fn deserialize_input<'a>(
+        &self,
+        request: &'a WireRequest,
+        input_schema: &Schema,
+    ) -> Result<Box<dyn aws_smithy_schema::serde::ShapeDeserializer + 'a>, ProtocolError> {
+        self.entry
+            .protocol()
+            .deserialize_input(request, input_schema)
+    }
+
+    fn serialize_output(
+        &self,
+        output: &dyn aws_smithy_schema::serde::SerializableStruct,
+        output_schema: &Schema,
+        operation_name: &str,
+        success_status: u16,
+    ) -> Result<RtResponse, ProtocolError> {
+        let response = self.entry.protocol().serialize_output(
+            output,
+            output_schema,
+            operation_name,
+            success_status,
+        )?;
+        // The status and every other header are the protocol's: only an answer that
+        // carries no content is emptied of the body rendered for it and framed with the
+        // length it has.
+        Ok(without_content(response))
+    }
+
+    fn serialize_error(
+        &self,
+        error: &dyn aws_smithy_schema::serde::SerializableStruct,
+        error_schema: &Schema,
+        error_code: &str,
+        http_status: u16,
+    ) -> Result<RtResponse, ProtocolError> {
+        let response = self
+            .entry
+            .protocol()
+            .serialize_error(error, error_schema, error_code, http_status)?;
+        // Every modelled failure of this service carries its error envelope at a 4xx or
+        // 5xx, so nothing here is emptied; the same call is made on both paths rather
+        // than leaving one of them to answer differently.
+        Ok(without_content(response))
+    }
+
+    fn serialize_event_stream_message(
+        &self,
+        event_type: &str,
+        is_exception: bool,
+        event: &dyn aws_smithy_schema::serde::SerializableStruct,
+        event_schema: &Schema,
+    ) -> Result<RtResponse, ProtocolError> {
+        self.entry.protocol().serialize_event_stream_message(
+            event_type,
+            is_exception,
+            event,
+            event_schema,
+        )
+    }
+}
+
+/// `ServerProtocol` requires `Debug`; the generated entry is not `Debug`, so this names
+/// the protocol being served rather than the service's internals.
+impl<Eng: Send + Sync + 'static> std::fmt::Debug for EmulatedService<Eng> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("EmulatedService")
+            .field("protocol", &self.entry.protocol().protocol_id())
+            .finish()
+    }
+}
+
 impl<Eng: Send + Sync + 'static> Service for EmulatedService<Eng> {
     fn definition(&self) -> &dyn smithy_server_runtime::ErasedServiceDefinition {
         // The model-derived half of this service — identity, protocol, routing
@@ -266,6 +372,15 @@ impl<Eng: Send + Sync + 'static> Service for EmulatedService<Eng> {
             code: VALIDATION_EXCEPTION.to_string(),
             message: refusal_message(violations)?,
         })
+    }
+
+    fn override_protocol(&self) -> Option<&dyn smithy_server_runtime::ServerHttpProtocol> {
+        // Every response a modelled operation of this service produces is serialized by
+        // the protocol returned here. See the module docs: it is the model's own
+        // protocol, with one correction — an answer that carries no content carries no
+        // body and states the length it has, instead of the empty JSON object the
+        // serializer renders for a members-less output and no framing header at all.
+        Some(self)
     }
 
     fn override_routing_error(
