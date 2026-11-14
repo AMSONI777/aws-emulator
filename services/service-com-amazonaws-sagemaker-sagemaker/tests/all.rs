@@ -253,6 +253,8 @@ mod service_resolved_members;
 mod state_roundtrip;
 #[path = "all/studio_app_lifecycle.rs"]
 mod studio_app_lifecycle;
+#[path = "all/studio_domain_network_placement.rs"]
+mod studio_domain_network_placement;
 #[path = "all/studio_domain_registry.rs"]
 mod studio_domain_registry;
 #[path = "all/training_job_admission.rs"]

@@ -223,6 +223,27 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         let arn = crate::state::resource_arn(&region, crate::state::DOMAIN_ARN_KIND, &domain_id);
         let url = crate::state::studio_domain_url(&region, &domain_id);
 
+        // A domain's traffic goes through the VPC, the subnets and the security groups the
+        // request names, which are Amazon EC2's resources: the placement is resolved against
+        // the service that OWNS them, before the store is locked and with no guard held
+        // across the await (see `crate::state::domain_network`). The create is SERVED either
+        // way — a placement whose parts belong to different VPCs is a provisioning failure
+        // that travels on the domain, as the `Failed` status and the `FailureReason` the
+        // clock owes it, rather than a refusal of this call.
+        let security_group_ids = crate::state::domain_security_group_ids(
+            &input.default_user_settings,
+            input.domain_settings.as_ref(),
+            input.default_space_settings.as_ref(),
+        );
+        let creation_failure_reason = crate::state::domain_network_failure_reason(
+            ctx,
+            &region,
+            input.vpc_id.as_deref(),
+            input.subnet_ids.as_deref().unwrap_or_default(),
+            &security_group_ids,
+        )
+        .await;
+
         let mut store = state.lock();
         // The store is bounded, so a caller creating domain after domain cannot grow it
         // without end. `ResourceLimitExceeded` is the limit failure this operation models.
@@ -272,9 +293,13 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
                 tag_propagation: input
                     .tag_propagation
                     .unwrap_or_else(|| crate::state::DEFAULT_TAG_PROPAGATION.to_string()),
-                // A domain comes up `Pending` and owes `InService` to the clock, so a
-                // caller that reads it straight back still observes the transient status.
+                // A domain comes up `Pending` and owes the clock either `InService` or, for
+                // a placement the account's network does not admit, `Failed` with the reason
+                // resolved above — so a caller that reads it straight back still observes
+                // the transient status.
                 status: crate::state::DOMAIN_STATUS_PENDING.to_string(),
+                failure_reason: None,
+                creation_failure_reason,
                 tags: input.tags.unwrap_or_default(),
                 creation_time: now,
                 last_modified_time: now,

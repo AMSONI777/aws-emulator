@@ -217,9 +217,10 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
             status: Some(domain.status.clone()),
             creation_time: Some(crate::state::timestamp(domain.creation_time)),
             last_modified_time: Some(crate::state::timestamp(domain.last_modified_time)),
-            // Nothing has failed: this domain reaches `InService`, and only a domain in a
-            // failure status has a reason to report.
-            failure_reason: None,
+            // Reported from the domain: `None` while nothing has failed, and the reason the
+            // clock settled it with once a domain whose placement the account's network does
+            // not admit lands in `Failed`.
+            failure_reason: domain.failure_reason.clone(),
             // The security group SageMaker creates for a `VpcOnly` domain's boundary is an
             // EC2 security group in the caller's VPC, which nothing here creates.
             security_group_id_for_domain_boundary: None,

@@ -44,6 +44,11 @@ aws-sdk-s3 = { version = "1", default-features = false, features = ["rt-tokio", 
 # service's own API, so what a client reads back with `GetLogEvents` is what the log service
 # stored.
 aws-sdk-cloudwatchlogs = { version = "1", default-features = false, features = ["rt-tokio", "behavior-version-latest"] }
+# The AWS SDK for EC2, driven over the same in-process callback: the VPC, subnets and
+# security groups a Studio domain is placed in are EC2's resources, so
+# `state::domain_network` asks the service that owns them which VPC holds each one rather
+# than deciding it here (no network client feature: the transport is the emulator's own).
+aws-sdk-ec2 = { version = "1", default-features = false, features = ["behavior-version-latest"] }
 # `base64`: the codec the hook script's `Content` is carried in ("a base64-encoded string
 # that contains a shell script", `NotebookInstanceLifecycleHook$Content`), decoded with the
 # maintained codec rather than by hand.
@@ -83,6 +88,10 @@ service-com-amazonaws-s3-amazons3 = { workspace = true }
 # suite: the hook publishes what its script wrote through that service's own API, and the
 # suite reads it back with `GetLogEvents`.
 service-com-amazonaws-cloudwatchlogs-logs-20140328 = { workspace = true }
+# Amazon EC2, mounted beside SageMaker on one engine by the domain-network suite: a VPC, its
+# subnets and its security groups are EC2's resources, minted through that service's own API
+# exactly where `CreateDomain` resolves the placement it is given.
+service-com-amazonaws-ec2-amazonec2 = { workspace = true }
 
 [lints]
 workspace = true

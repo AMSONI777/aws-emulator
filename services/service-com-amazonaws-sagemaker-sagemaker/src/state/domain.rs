@@ -29,6 +29,10 @@ pub const DOMAIN_QUOTA: usize = 1_000;
 pub const DOMAIN_STATUS_PENDING: &str = "Pending";
 /// See [`DOMAIN_STATUS_PENDING`].
 pub const DOMAIN_STATUS_IN_SERVICE: &str = "InService";
+/// See [`DOMAIN_STATUS_PENDING`]. The terminal status a domain whose provisioning could not
+/// complete settles in — a placement the account's network does not admit
+/// ([`crate::state::domain_network`]) — beside the `FailureReason` that states why.
+pub const DOMAIN_STATUS_FAILED: &str = "Failed";
 
 /// How long after `CreateDomain` the clock owes the `Pending` -> `InService` transition.
 ///
@@ -95,9 +99,11 @@ pub fn domain_not_found(region: &str, domain_id: &str) -> String {
 /// A Studio domain created by `CreateDomain`, as `DescribeDomain` replays it and
 /// `ListDomains` summarises it.
 ///
-/// `in_service_due_at` is the instant the clock owes the `Pending` -> `InService`
-/// transition; it is stored, never slept on, and materialised by whichever reporting call
-/// first runs at or after it ([`Domain::settle_status`]).
+/// `in_service_due_at` is the instant the clock owes this domain its move out of
+/// `Pending` — into `InService`, or into [`DOMAIN_STATUS_FAILED`] where the create
+/// resolved a placement the account's network does not admit; it is stored, never slept
+/// on, and materialised by whichever reporting call first runs at or after it
+/// ([`Domain::settle_status`]).
 ///
 /// The members the request did not carry stay `None`: the model documents a default for
 /// `AppNetworkAccessType`, `HomeEfsFileSystemCreation` and `TagPropagation` only, so
@@ -123,6 +129,17 @@ pub struct Domain {
     pub home_efs_file_system_creation: String,
     pub tag_propagation: String,
     pub status: String,
+    /// Why this domain is in a failure status, i.e. the `FailureReason` a reader reports
+    /// beside the status. `None` until the clock settles a domain whose provisioning could
+    /// not complete, because only a domain in a failure status has a reason to report.
+    pub failure_reason: Option<String>,
+    /// Why this domain's provisioning will NOT complete, as the create resolved it against
+    /// the account's own network ([`crate::state::domain_network_failure_reason`]), or `None`
+    /// for a placement that holds together. Kept apart from [`Domain::failure_reason`]
+    /// because it is what the clock still owes the domain rather than what the domain
+    /// already reports: the create is served and the domain is `Pending` either way, and
+    /// this decides WHICH status [`Domain::settle_status`] materialises.
+    pub creation_failure_reason: Option<String>,
     pub tags: Vec<Tag>,
     pub creation_time: SystemTime,
     pub last_modified_time: SystemTime,
@@ -130,17 +147,30 @@ pub struct Domain {
 }
 
 impl Domain {
-    /// Materialise the `Pending` -> `InService` transition the clock already owes, the
-    /// way [`Endpoint::settle_status`] does for an endpoint: it was due at
-    /// `in_service_due_at` whether or not anybody read the domain, so the observer makes
-    /// no difference to the result, and `LastModifiedTime` moves to the instant the
-    /// transition was due rather than to "now".
+    /// Materialise the transition out of `Pending` the clock already owes, the way
+    /// [`Endpoint::settle_status`] does for an endpoint: it was due at `in_service_due_at`
+    /// whether or not anybody read the domain, so the observer makes no difference to the
+    /// result, and `LastModifiedTime` moves to the instant the transition was due rather
+    /// than to "now".
+    ///
+    /// WHICH status it lands in is what the create already resolved: `InService` for a
+    /// domain whose provisioning completes, and [`DOMAIN_STATUS_FAILED`] with the
+    /// `FailureReason` beside it for one whose placement the account's network does not
+    /// admit ([`Domain::creation_failure_reason`]).
     ///
     /// Answers whether the transition happened on this call, so the caller can record it.
     pub fn settle_status(&mut self, now: SystemTime) -> bool {
         if self.status == DOMAIN_STATUS_PENDING && now >= self.in_service_due_at {
-            self.status = DOMAIN_STATUS_IN_SERVICE.to_string();
             self.last_modified_time = self.in_service_due_at;
+            // What the create resolved about the domain's placement decides WHICH status the
+            // clock owed: a domain whose network the account does not admit fails with the
+            // reason that create recorded, and never comes up.
+            if let Some(reason) = self.creation_failure_reason.clone() {
+                self.status = DOMAIN_STATUS_FAILED.to_string();
+                self.failure_reason = Some(reason);
+                return true;
+            }
+            self.status = DOMAIN_STATUS_IN_SERVICE.to_string();
             return true;
         }
         false

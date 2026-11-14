@@ -1078,6 +1078,11 @@ pub mod custom_image;
 pub mod domain;
 pub use domain::*;
 
+/// The NETWORK a Studio domain is placed in — the VPC, subnets and security groups a
+/// create names, resolved against the service that owns them: see `state/domain_network.rs`.
+pub mod domain_network;
+pub use domain_network::*;
+
 /// The job slices (training, processing and transform jobs): see `state/jobs.rs`.
 pub mod jobs;
 pub use jobs::*;
