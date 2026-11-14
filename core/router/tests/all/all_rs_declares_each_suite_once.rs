@@ -35,7 +35,7 @@ struct Declaration {
 }
 
 /// This crate's `tests` directory, which holds `all.rs` and the `all/` suites it declares.
-fn tests_dir() -> PathBuf {
+pub(crate) fn tests_dir() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join("tests")
 }
 
@@ -191,7 +191,7 @@ fn every_declaration_names_a_suite_file_that_exists() {
 
 /// The workspace root: this crate's manifest directory (`core/router`) sits two levels
 /// below it.
-fn workspace_root() -> PathBuf {
+pub(crate) fn workspace_root() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR"))
         .ancestors()
         .nth(2)
@@ -206,8 +206,9 @@ fn workspace_root() -> PathBuf {
 /// crate, and the crate that breaks it cannot pin it itself: a repeated `mod` makes that
 /// crate's own `all` target fail to compile, so no suite inside it is ever run to report
 /// the repetition. This target is the one that links every service crate, so it is where
-/// the rule can be checked for all of them.
-fn declaration_roots() -> Vec<PathBuf> {
+/// the rule can be checked for all of them. A sibling suite checking another rule of the
+/// same layout reads the same roots, so this enumerator is shared rather than copied.
+pub(crate) fn declaration_roots() -> Vec<PathBuf> {
     let services = workspace_root().join("services");
     let entries = fs::read_dir(&services)
         .unwrap_or_else(|error| panic!("read {}: {error}", services.display()));

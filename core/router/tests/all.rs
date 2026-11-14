@@ -3265,3 +3265,20 @@ mod apigateway_proxy_stage_surfaces_its_handlers_envelope;
 // comment may only appear before any item.)
 // this file and for every service crate's `tests/all.rs`. (An ordinary comment: an inner
 // doc comment is only legal before the first item of a crate root.)
+// Declared here, in the appended tail, which is where every new suite inserts its lines.
+// Like its sibling layout check, this suite reads every crate's `tests/all.rs` rather than
+// starting a router, and this target is the one that links every service crate.
+#[path = "all/all_rs_inner_doc_comments_precede_the_first_item.rs"]
+mod all_rs_inner_doc_comments_precede_the_first_item;
+// (A landing appended a fragment of this file's own header here, five of its lines typed
+// with `//!`: an inner doc comment is legal only before the first item, so in this tail it
+// is `E0753` and compiles nothing. The header at the top of this file carries the rule
+// those lines repeated, so the fragment is gone rather than re-typed.)
+// (Several landings appended a fragment of this file's own header to this tail, the last
+// of its lines typed with `//!`: an inner doc comment is legal only before the first item,
+// so one here is `E0753` and compiles nothing. The header at the top of this file carries
+// the rule those lines repeated — declare each suite exactly ONCE, since this is one crate
+// root and a second `mod` for the same name is `E0428` — and `all/all_rs_declares_each_suite_once.rs`
+// and `all/all_rs_inner_doc_comments_precede_the_first_item.rs` check both halves of it for
+// this file and for every service crate's `tests/all.rs`, so the fragment is gone rather
+// than re-typed.)
