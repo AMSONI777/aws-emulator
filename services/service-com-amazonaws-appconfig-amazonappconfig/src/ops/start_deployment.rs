@@ -186,6 +186,35 @@ fn not_found(message: String, resource_name: String) -> StartDeploymentError {
     .into()
 }
 
+/// Bring `environment` up to the state the clock already owes it and refuse the deployment
+/// with a `ConflictException` (HTTP 409) when that environment is still working on one.
+///
+/// The refusal reports the ENVIRONMENT's own state, which is what it has just been brought
+/// up to: see [`crate::state::environment_not_ready_for_deployment`]. Stated once here
+/// because the gate is applied wherever this call reads the environment — before it resolves
+/// what would be deployed, and again after the `PRE_START_DEPLOYMENT` action point, in case
+/// something started a deployment while that was being consulted.
+fn refuse_an_environment_working_on_a_deployment(
+    environment: &mut crate::state::Environment,
+    at: std::time::SystemTime,
+) -> Result<(), StartDeploymentError> {
+    // A deployment whose rollout and bake time have both elapsed is no longer in flight,
+    // and must not block this one.
+    environment.materialize(at);
+    if environment.active_deployment().is_some() {
+        return Err(
+            StartDeploymentErrorModeled::ConflictException(ConflictException {
+                message: Some(crate::state::environment_not_ready_for_deployment(
+                    &environment.id,
+                    &environment.state,
+                )),
+            })
+            .into(),
+        );
+    }
+    Ok(())
+}
+
 /// A `BadRequestException` (HTTP 400) refusing the deployment because a validator of the
 /// configuration profile reported the candidate configuration non-compliant.
 ///
@@ -358,6 +387,42 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
                 input.environment_id,
             ));
         };
+        // The environment is the resource this call ADDRESSES (`POST
+        // /applications/{ApplicationId}/environments/{EnvironmentId}/deployments`), so its
+        // LIVE STATE is settled as soon as it resolves and before anything about WHAT would
+        // be deployed — the configuration profile this request's body names, the version of
+        // it, the strategy that would pace it — is resolved: an environment AppConfig is
+        // still working on takes no second deployment whatever the request would deploy into
+        // it, so the conflict in the state of the resource is what such a call is refused
+        // with rather than a lookup of the content it named.
+        let Some(environment) = store
+            .application_mut(&application_id)
+            .and_then(|application| application.environments.get_mut(&environment_id))
+        else {
+            return Err(StartDeploymentErrorModeled::InternalServerException(
+                InternalServerException {
+                    message: Some(
+                        "The environment could not be re-read while starting the deployment"
+                            .to_string(),
+                    ),
+                },
+            )
+            .into());
+        };
+        refuse_an_environment_working_on_a_deployment(environment, started_at)?;
+        // Re-read what the environment lookup above borrowed mutably: everything below
+        // reads the application's own records.
+        let Some(application) = store.application(&application_id) else {
+            return Err(StartDeploymentErrorModeled::InternalServerException(
+                InternalServerException {
+                    message: Some(
+                        "The application could not be re-read while starting the deployment"
+                            .to_string(),
+                    ),
+                },
+            )
+            .into());
+        };
         let Some(profile) = application.resolve_profile(&input.configuration_profile_id) else {
             return Err(not_found(
                 crate::state::configuration_profile_not_found(
@@ -449,20 +514,10 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
             .into());
         };
 
-        // Bring the environment up to date first: a deployment whose rollout and bake
-        // time have both elapsed is no longer in flight, and must not block this one.
-        environment.materialize(started_at);
-        if environment.active_deployment().is_some() {
-            // The refusal reports the ENVIRONMENT's own state, which is what it has been
-            // brought up to above: see `environment_not_ready_for_deployment`.
-            return Err(StartDeploymentErrorModeled::ConflictException(ConflictException {
-                message: Some(crate::state::environment_not_ready_for_deployment(
-                    &environment.id,
-                    &environment.state,
-                )),
-            })
-            .into());
-        }
+        // Read back here, where the numbers and the name the event carries come off it. The
+        // gate above ran under this same guard, so nothing can have started a deployment
+        // into it in between; what CAN, the `PRE_START_DEPLOYMENT` invocations that run with
+        // no guard held, is gated again below.
 
         // `LatestDeploymentNumber` is the caller's own note about the state it believes it
         // is deploying from. It is ADVISORY: the member is optional, carries no default
@@ -617,16 +672,7 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         // Re-read after the invocations: the environment is only ready for this
         // deployment if nothing else started one while the action point was being
         // consulted.
-        environment.materialize(started_at);
-        if environment.active_deployment().is_some() {
-            return Err(StartDeploymentErrorModeled::ConflictException(ConflictException {
-                message: Some(crate::state::environment_not_ready_for_deployment(
-                    &environment.id,
-                    &environment.state,
-                )),
-            })
-            .into());
-        }
+        refuse_an_environment_working_on_a_deployment(environment, started_at)?;
 
         let deployment_number = environment.next_deployment_number;
         environment.next_deployment_number += 1;

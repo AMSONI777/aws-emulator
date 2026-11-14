@@ -45,7 +45,9 @@ use ::aws_smithy_schema_server::constraints::{Violation, ViolationKind};
 /// Quoted as the SERVICE states it, which is not the anchored spelling the model writes for
 /// the members that do carry a `@pattern`
 /// (`smithy_query(query="shape", shape="StackNameOrId")`): a requirement reaches a message as
-/// the layer that refuses states it.
+/// the layer that refuses states it. It is the expression a refusal STATES; which values are
+/// taken as addressing a stack is [`is_an_addressable_form`], where the unique-id form is
+/// admitted beside it.
 pub const STACK_IDENTIFIER_PATTERN: &str = "[a-zA-Z][-a-zA-Z0-9]*|arn:[-a-zA-Z0-9:/._+]*";
 
 /// The least a stack identifier may hold: `@length(min: 1)`, which the model states for the
@@ -79,10 +81,9 @@ pub const STACK_NAME_OR_ID_PATH: &str = "stackNameOrId";
 /// [`STACK_IDENTIFIER_PATTERN`] and [`STACK_UNIQUE_ID_PATTERN`] as the expression a whole
 /// identifier has to BE, compiled once for the process.
 ///
-/// Anchored at both ends before it is applied: the constraint states the shape of the whole
-/// value, not of a part of it. `None` only if the expression itself could not be compiled, in
-/// which case nothing is refused by it rather than everything.
-fn whole_identifier() -> Option<&'static ::regex::Regex> {
+/// `None` only if the expression itself could not be compiled, in which case nothing is
+/// refused by it rather than everything.
+fn stated_expression() -> Option<&'static ::regex::Regex> {
     static COMPILED: ::std::sync::OnceLock<Option<::regex::Regex>> =
         ::std::sync::OnceLock::new();
     COMPILED
@@ -101,7 +102,7 @@ fn whole_identifier() -> Option<&'static ::regex::Regex> {
 /// RESOLVED, so one that names no stack is answered as a missing stack; everything else is
 /// answered for its own shape.
 fn is_an_addressable_form(identifier: &str) -> bool {
-    whole_identifier().is_none_or(|expression| expression.is_match(identifier))
+    stated_expression().is_none_or(|expression| expression.is_match(identifier))
 }
 
 /// The message CloudFormation answers for an identifier that breaks its constraints, stated
@@ -175,12 +176,10 @@ mod tests {
             "Stack9",
             "arn:aws:cloudformation:us-east-1:123456789012:stack/a/0",
             "arn:aws-cn:cloudformation:cn-north-1:123456789012:stack/a/0",
-            // A value in the 8-4-4-4-12 form that happens to START with a letter: the name
-            // alternative admits it, since what the expression reads is the characters and
-            // their positions rather than what the value was minted as.
+            // The unique id a stack id ENDS in, whichever character it begins with and in
+            // either case of hexadecimal: a request carrying one is about a STACK, and is
+            // answered for the stack it names.
             "ae81d159-090a-7b61-9856-04d0999cb465",
-            // The unique id a stack id ends in, in either case of hexadecimal: a request
-            // carrying one is about a stack, and is answered for the stack it names.
             "0e81d159-090a-7b61-9856-04d0999cb465",
             "0E81D159-090A-7B61-9856-04D0999CB465",
         ] {
@@ -191,6 +190,9 @@ mod tests {
             );
         }
         for (case, refused) in [
+            ("a value of digits alone", "1234567890"),
+            ("a single digit", "9"),
+            ("a value of hyphens alone", "----"),
             ("a name with an underscore", "a_stack"),
             ("a name with a dot", "a.stack"),
             ("a name starting with a digit", "9stack"),
@@ -214,6 +216,8 @@ mod tests {
                 "a unique id with no groups at all",
                 "0e81d159090a7b61985604d0999cb465",
             ),
+            ("a value of punctuation alone", "._+:/"),
+            ("a value of one space", " "),
         ] {
             let expected = Some(format!(
                 "1 validation error detected: Value '{refused}' at 'stackName' failed to \

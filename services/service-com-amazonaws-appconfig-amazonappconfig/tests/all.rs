@@ -157,6 +157,8 @@ mod rollout_percentage_gates_serving;
 mod start_deployment_configuration_version;
 #[path = "all/start_deployment_latest_deployment_number.rs"]
 mod start_deployment_latest_deployment_number;
+#[path = "all/start_deployment_live_state_gate.rs"]
+mod start_deployment_live_state_gate;
 #[path = "all/start_deployment_resource_identifiers.rs"]
 mod start_deployment_resource_identifiers;
 #[path = "all/start_experiment_run.rs"]

@@ -3615,3 +3615,24 @@ mod iam_denial_reason_attribution;
 // comment is only legal before the first item of a crate root.)
 // this file and for every service crate's `tests/all.rs`. (An ordinary comment, for the reason
 // the lines above record.)
+// (The lines below arrived as INNER doc comments (`//!`) in this appended tail, where
+// is `E0753` and fails every suite in this target, so what the guidance says stands in the
+// header at the top of this file and the duplicates appended here are removed.)
+// (The note about declaring each suite exactly ONCE is the crate header at the top of this
+// file; a copy appended here was written as an inner doc comment, which is only accepted
+// before a module's first item, so it broke the build and is removed. `E0428` for a second
+// `mod` of one name, and `all/all_rs_declares_each_suite_once.rs`, are stated there.)
+// (A copy of the crate header's note landed here as an inner doc comment, which is only
+// accepted before a module's first item, so it broke the build and is removed.)
+// (The crate-level guidance repeated copies of which concurrent landings kept appending to
+// this tail belongs to the module header at the top of this file, where it stands: an inner
+// doc comment may only precede items, so a `//!` line down here is `E0753` and compiles
+// nothing, and the duplicates are removed rather than reworded again.)
+// (A fragment of this file's own header that concurrent landings kept appending to this
+// tail; it is removed rather than reworded, since the rule it repeats stands in the crate
+// header at the top of this file. An inner doc comment past the first item is `E0753` and
+// compiles no suite of this target, which is what those appended `//!` lines did.)
+// (One more line of that same note landed here as an INNER doc comment while branches were
+// landing at once; it belongs at the head of this file or nowhere, so it is removed.)
+// (One more fragment of that same header landed here as an inner doc comment and is
+// removed; the rule it states stands in the module doc at the HEAD of this file.)

@@ -13,10 +13,11 @@
 //! policies in force on that role do not admit the queue operations the crawl makes on
 //! that queue, and creates the identically-shaped crawler whose role does hold them.
 //!
-//! A refusal that rests on those policies NAMES what they withhold: the queue action the
-//! role is missing, the queue it is missing it on and the identity the crawl would run as,
-//! in the sentence an unauthorized call is refused with. It asserts nothing about the
-//! queue existing, which this check never establishes.
+//! The refusal is Glue's OWN sentence for a queue a crawl cannot read, not the queue
+//! service's authorization answer: it names the queue the target carried and nothing else —
+//! neither the identity the crawl would run as, nor which queue call was withheld, nor which
+//! of IAM's rules withheld it — and it states the two reasons a crawl could not read that
+//! queue, its absence and the role's access, in one clause.
 
 use std::collections::BTreeMap;
 use std::sync::Arc;
@@ -94,22 +95,15 @@ fn allow(actions: &[&str], resource: &str) -> Value {
     })
 }
 
-/// The sentence an unauthorized call is refused with, as the rejection of an event-mode
-/// create has to word it: the identity the crawl would run as, the queue action the
-/// role's policies withhold, the queue it would be made on, and which of IAM's rules
-/// withheld the grant — an explicit `Deny`, or no grant at all.
+/// The sentence Glue refuses an event-mode create with when the crawl cannot read the
+/// queue a target names: the queue ARN as the request supplied it, inside fixed text that
+/// conflates the queue's absence with the role's access to it.
 ///
 /// Spelled out here rather than built from the service's own constructor, so the wording
 /// this suite pins is the test's and not the code's.
-fn expected_refusal(role_arn: &str, action: &str, queue_arn: &str, explicit_deny: bool) -> String {
-    let clause = if explicit_deny {
-        "with an explicit deny in an identity-based policy".to_string()
-    } else {
-        format!("because no identity-based policy allows the {action} action")
-    };
+fn expected_refusal(queue_arn: &str) -> String {
     format!(
-        "User: {role_arn} is not authorized to perform: {action} on resource: \
-         {queue_arn} {clause}"
+        "SQS queue {queue_arn} does not exist or the role provided does not have access to it."
     )
 }
 
@@ -125,13 +119,13 @@ fn event_mode_crawler(name: &str, role: &str, queue: &str) -> Value {
     })
 }
 
-/// The refusal one row of the table below earns: the queue action the rejection must
-/// name, and whether an explicit `Deny` withheld it rather than an absent grant. `None`
-/// where the row's role holds the whole grant and the create must be admitted.
-type ExpectedRefusal = Option<(String, bool)>;
+/// Whether the row's documents leave the crawl a queue call it may not make, which is what
+/// the create is refused over; `false` where the row's role holds the whole grant and the
+/// create must be admitted.
+type ExpectedRefusal = bool;
 
 /// One row of the table below: what the case is, the identity policy documents the
-/// crawler's role carries, and the refusal they earn.
+/// crawler's role carries, and whether they earn the refusal.
 type Row = (String, Vec<Value>, ExpectedRefusal);
 
 /// A role whose policies do not admit the crawl's queue operations cannot back an
@@ -143,9 +137,9 @@ type Row = (String, Vec<Value>, ExpectedRefusal);
 /// each missing in turn), a `Deny` of one of them beside an `Allow` of all, and the full
 /// grant — written as the exact ARN, through a wildcard, and spread over two documents.
 ///
-/// Each refused row also pins WHICH action the refusal names: the one the role's own
-/// documents withhold for that row, so a client reading the rejection is told the grant to
-/// add instead of being sent looking for a queue that is there.
+/// Every refused row earns the SAME sentence, naming the queue: which queue call the row's
+/// documents withhold, and whether a `Deny` or an absent grant withheld it, decides that the
+/// create is refused and nothing about how it is worded.
 #[tokio::test]
 async fn an_event_mode_crawler_needs_its_role_to_consume_the_event_queue() {
     let engine: Arc<engine::InMemoryEngine> = Arc::new(engine::InMemoryEngine::new());
@@ -168,30 +162,26 @@ async fn an_event_mode_crawler_needs_its_role_to_consume_the_event_queue() {
     // rejection must name and whether an explicit `Deny` withheld it, or `None` where
     // the create must be admitted)
     let mut rows: Vec<Row> = vec![
-        (
-            "no policy at all".to_string(),
-            Vec::new(),
-            Some((first_action.to_string(), false)),
-        ),
+        ("no policy at all".to_string(), Vec::new(), true),
         (
             "the queue operations on another queue".to_string(),
             vec![allow(&every_action, &queue_arn("some-other-queue"))],
-            Some((first_action.to_string(), false)),
+            true,
         ),
         (
             "an unrelated grant on the queue".to_string(),
             vec![allow(&["sqs:SendMessage"], &queue)],
-            Some((first_action.to_string(), false)),
+            true,
         ),
         (
             "every queue operation, named exactly".to_string(),
             vec![allow(&every_action, &queue)],
-            None,
+            false,
         ),
         (
             "every queue operation, through a wildcard".to_string(),
             vec![allow(&["sqs:*"], &format!("{}*", queue_arn("")))],
-            None,
+            false,
         ),
         (
             "every queue operation, spread over two documents".to_string(),
@@ -199,17 +189,17 @@ async fn an_event_mode_crawler_needs_its_role_to_consume_the_event_queue() {
                 allow(&every_action[..1], &queue),
                 allow(&every_action[1..], &queue),
             ],
-            None,
+            false,
         ),
         (
             "an explicit deny of the first operation beside the grant".to_string(),
             vec![allow(&every_action, &queue), deny(first_action)],
-            Some((first_action.to_string(), true)),
+            true,
         ),
         (
             "an explicit deny of the last operation beside the grant".to_string(),
             vec![allow(&every_action, &queue), deny(last_action)],
-            Some((last_action.to_string(), true)),
+            true,
         ),
     ];
     // One row per action the crawl makes, each one missing from an otherwise complete
@@ -224,7 +214,7 @@ async fn an_event_mode_crawler_needs_its_role_to_consume_the_event_queue() {
         rows.push((
             format!("every queue operation except {missing}"),
             vec![allow(&granted, &queue)],
-            Some((missing.to_string(), false)),
+            true,
         ));
     }
 
@@ -235,7 +225,7 @@ async fn an_event_mode_crawler_needs_its_role_to_consume_the_event_queue() {
         let request = event_mode_crawler(&crawler, &role, &queue);
 
         let (status, body) = call(&router, "CreateCrawler", &request).await;
-        let Some((action, explicit_deny)) = refusal else {
+        if !refusal {
             assert_eq!(
                 status, 200,
                 "case {case:?}: the role holds the grant, so the create must be admitted, \
@@ -248,7 +238,7 @@ async fn an_event_mode_crawler_needs_its_role_to_consume_the_event_queue() {
                 "case {case:?}: the created crawler must be readable, got {read}"
             );
             continue;
-        };
+        }
 
         assert_eq!(
             status, 400,
@@ -262,9 +252,9 @@ async fn an_event_mode_crawler_needs_its_role_to_consume_the_event_queue() {
         let message = error_message(&body);
         assert_eq!(
             message,
-            expected_refusal(&role, action, &queue, *explicit_deny),
-            "case {case:?}: the refusal must name the withheld action {action} on {queue} \
-             for {role}, got {message:?}"
+            expected_refusal(&queue),
+            "case {case:?}: the refusal must be Glue's own sentence naming {queue}, got \
+             {message:?}"
         );
         // No crawler was stored: the refused create left nothing behind.
         let (status, body) = call(&router, "GetCrawler", &json!({ "Name": crawler })).await;
@@ -280,15 +270,13 @@ async fn an_event_mode_crawler_needs_its_role_to_consume_the_event_queue() {
     }
 }
 
-/// The refusal is worded from the REQUEST: whichever way the request names the role —
-/// its bare name or its ARN — the identity the rejection names is that role's ARN, the
-/// resource it names is the queue the target carried, and nothing in it claims the queue
-/// is absent.
+/// The refusal is worded from the REQUEST: whichever way the request names the role — its
+/// bare name or its ARN — the one variable part of the sentence is the queue the target
+/// carried, exactly as sent, and the role the crawl would run as is not disclosed.
 #[tokio::test]
 async fn the_refusal_is_worded_from_the_request() {
     let engine: Arc<engine::InMemoryEngine> = Arc::new(engine::InMemoryEngine::new());
     let router = emulator_on(engine.clone());
-    let first_action = EVENT_QUEUE_ACTIONS[0];
     // A role granted nothing at all, so every row below is refused at the crawl's first
     // queue call.
     let role_arn = seed_role(&engine, "worded-role", &[]);
@@ -322,14 +310,14 @@ async fn the_refusal_is_worded_from_the_request() {
         let message = error_message(&body);
         assert_eq!(
             message,
-            expected_refusal(&role_arn, first_action, queue, false),
-            "case {case:?}: the refusal must name the role's ARN, the withheld action and \
-             the queue the request carried, got {message:?}"
+            expected_refusal(queue),
+            "case {case:?}: the refusal must name the queue the request carried, got \
+             {message:?}"
         );
-        // The check reads policies, not the queue's existence, so it asserts none.
+        // Glue words its own refusal, so the identity the crawl would run as is not in it.
         assert!(
-            !message.contains("does not exist"),
-            "case {case:?}: the refusal must not claim the queue is absent, got {message:?}"
+            !message.contains(&role_arn),
+            "case {case:?}: the refusal must not disclose the role, got {message:?}"
         );
     }
 }

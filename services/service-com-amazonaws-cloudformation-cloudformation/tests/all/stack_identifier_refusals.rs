@@ -6,11 +6,12 @@
 //! **The rules every case here holds the service to:**
 //!
 //! 1. A stack identifier a request carries is checked against CloudFormation's own
-//!    constraints for it — at least one character, and the name-or-ARN expression — BEFORE
+//!    constraints for it — at least one character, and the name-or-ARN expression, beside
+//!    which the form a stack's unique id takes is admitted — BEFORE
 //!    the stack is resolved, and a value that breaks them is refused with the aggregated
 //!    `<n> validation errors detected: …` envelope naming the member path the operation
 //!    states, one clause per constraint broken, rather than with a stack-not-found message.
-//!    An identifier the expression ADMITS reaches the lookup, so an absent stack is still
+//!    An identifier the check ADMITS reaches the lookup, so an absent stack is still
 //!    answered as the missing stack it is.
 //! 2. Whichever layer refused a request before a handler ran, the wire `<Code>` is the one
 //!    code CloudFormation's Query API publishes for a refused request, `ValidationError`;
@@ -20,11 +21,14 @@
 //!    request is refused, even though the stack itself stays readable by its own id.
 //!
 //! The tables span the class rather than one recorded request: the malformed-identifier side
-//! over ELEVEN values differing along what the rule generalises over (an empty value,
-//! characters the expression does not admit in the positions it does not admit them, and
-//! values NEAR the form a stack's unique id takes without being it — that form is resolved
-//! rather than refused, and `stack_unique_id_identifiers.rs` pins it on its own) crossed with
-//! every operation whose identifier member this service checks itself; the
+//! over EIGHTEEN values differing along what the rule generalises over (an empty value,
+//! characters the expression does not admit in the positions it does not admit them, values
+//! carrying no name run at all — digits, hyphens, punctuation and spaces alone — and five
+//! values NEAR the form a stack's unique id takes without being it, that form itself being
+//! resolved rather than refused and pinned on its own by `stack_unique_id_identifiers.rs`)
+//! crossed with
+//! every operation whose identifier member this service checks itself; the admitted side over
+//! the values the check admits that no stack carries, a stack's unique id included; the
 //! absent-member side over four operations and three different required members; and the
 //! physical-id side over a live stack, the same stack once deleted, and an id nothing ever
 //! created.
@@ -185,17 +189,28 @@ const IDENTIFIER_ROWS: &[IdentifierRow] = &[
 ];
 
 /// The identifiers no stack could ever carry: an empty value, values whose characters — or the
-/// position of them — the expression does not admit, and values NEAR the form a stack's unique
-/// id takes without being it (that form is resolved rather than refused, and
+/// position of them — the check does not admit, values carrying no name run at all, and values
+/// NEAR the form a stack's unique id takes without being it — the groups and their lengths are
+/// what that form IS (the form itself is resolved rather than refused, and
 /// `stack_unique_id_identifiers.rs` pins it on its own).
 const MALFORMED: &[(&str, &str)] = &[
     ("an empty identifier", ""),
+    ("digits alone", "1234567890"),
+    ("a single digit", "9"),
+    ("hyphens alone", "----"),
+    ("digits and hyphens alone", "0123-4567"),
+    ("punctuation alone", "._+:/"),
+    ("a single space", " "),
+    ("digits either side of a space", "12 34"),
     ("a name with an underscore", "identifier_stack"),
     ("a name with a dot", "identifier.stack"),
     ("a name starting with a digit", "9identifier"),
     ("a name starting with a hyphen", "-identifier"),
     ("a name with a space", "identifier stack"),
-    ("a unique id a group short", "0e81d159-090a-7b61-04d0999cb465"),
+    (
+        "a unique id a group short",
+        "0e81d159-090a-7b61-04d0999cb465",
+    ),
     (
         "a unique id with a short last group",
         "0e81d159-090a-7b61-9856-04d0999cb46",
@@ -211,6 +226,21 @@ const MALFORMED: &[(&str, &str)] = &[
     (
         "a unique id with no groups at all",
         "0e81d159090a7b61985604d0999cb465",
+    ),
+];
+
+/// Identifiers the check DOES admit — so each one reaches the lookup — that no stack of the
+/// Region carries: a name nothing created, and the unique id a stack id ends in, which
+/// addresses no stack because only a name or a WHOLE stack id does.
+const ADMITTED_BUT_ABSENT: &[(&str, &str)] = &[
+    ("a name nothing created", "identifier-absent"),
+    (
+        "a stack's unique id",
+        "0e81d159-090a-7b61-9856-04d0999cb465",
+    ),
+    (
+        "a unique id nothing ever minted",
+        "01234567-0123-0123-0123-012345678901",
     ),
 ];
 
@@ -280,14 +310,14 @@ async fn a_well_formed_identifier_still_reaches_the_stack_lookup() {
     );
     let stack_id = xml_text(&described, "StackId").expect("the stack's own id");
 
-    // Two well-formed identifiers nothing holds: a name the expression admits, and a stack
-    // ARN of the form the expression's other alternative admits. Both reach the lookup, so
-    // each operation answers its OWN not-found refusal rather than a constraint clause.
+    // Every identifier the check admits that nothing holds: a name nothing created, the unique
+    // id a stack id ends in (which addresses no stack), and a stack ARN of the form the
+    // expression's other alternative admits. Each reaches the lookup, so each operation
+    // answers its OWN not-found refusal rather than a constraint clause.
     let absent_id = format!("{stack_id}-absent");
-    for (case, identifier) in [
-        ("a name nothing created", "identifier-absent"),
-        ("a stack id no stack carries", absent_id.as_str()),
-    ] {
+    let mut absent: Vec<(&str, &str)> = ADMITTED_BUT_ABSENT.to_vec();
+    absent.push(("a stack id no stack carries", absent_id.as_str()));
+    for (case, identifier) in absent {
         for row in IDENTIFIER_ROWS {
             if !row.refuses_an_absent_stack {
                 continue;

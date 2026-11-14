@@ -113,10 +113,9 @@ const ROWS: &[UniqueIdRow] = &[
         path: "stackName",
         serves_a_live_stack: false,
     },
-    // Two operations that WRITE: an identifier the expression does not admit is refused by
-    // them too, so the rule holds for the mutating reads of a stack as well as the reporting
-    // ones. Neither is crossed with the live stack, since a write would move the stack the
-    // rows above read.
+    // Two operations that WRITE: a unique id resolves to no stack for them either, so the rule
+    // holds for the mutating reads of a stack as well as the reporting ones. Neither is
+    // crossed with the live stack, since a write would move the stack the rows above read.
     UniqueIdRow {
         action: "SetStackPolicy",
         extra: &[("StackPolicyBody", POLICY)],
@@ -175,23 +174,27 @@ async fn a_stack_unique_id_is_answered_as_the_stack_it_does_not_name() {
     );
     let stack_id = xml_text(&described, "StackId").expect("the stack's own id");
     let minted = unique_id_of(&stack_id);
-    // The minted id's own leading character is random hexadecimal, so each side of the
-    // boundary is built from it: the same 8-4-4-4-12 value led by a digit (which the name
-    // alternative cannot admit) and led by a letter (which it does).
+    // The minted id's own leading character is random hexadecimal, so both sides of the
+    // character the value BEGINS with are built from it: the same 8-4-4-4-12 value led by a
+    // digit and led by a letter. Neither is a form a stack is addressed by, so neither
+    // resolves — and neither is malformed either.
     let digit_led = format!("0{}", &minted[1..]);
     let letter_led = format!("a{}", &minted[1..]);
+    let upper = digit_led.to_ascii_uppercase();
 
     // Every unique id: the live stack's own led by a digit and by a letter, that digit-led
     // value in the other case of hexadecimal, and two nothing ever minted. No stack is
     // addressed by any of them — only a name or a whole stack id is — so each is answered as
     // the missing stack it names rather than for its own shape.
-    let upper = digit_led.to_ascii_uppercase();
     for (case, identifier) in [
-        ("the live stack's own unique id", digit_led.as_str()),
+        ("that unique id led by a digit", digit_led.as_str()),
+        ("that unique id led by a letter", letter_led.as_str()),
         ("that unique id in upper-case hexadecimal", upper.as_str()),
-        ("the live stack's unique id led by a letter", letter_led.as_str()),
         ("a unique id nothing ever minted", UNMINTED_UNIQUE_ID),
-        ("a letter-led value nothing ever minted", LETTER_LED_UNIQUE_ID),
+        (
+            "a letter-led value nothing ever minted",
+            LETTER_LED_UNIQUE_ID,
+        ),
     ] {
         for row in ROWS {
             let case = format!("{} naming {case}", row.action);
@@ -237,5 +240,54 @@ async fn a_stack_unique_id_is_answered_as_the_stack_it_does_not_name() {
                 "case {case:?}: expected the call to be served, got {status} {body}"
             );
         }
+    }
+}
+
+/// RULE: the refusal the bare unique id earns is the same not-found sentence the operation
+/// answers any identifier that resolves to nothing — so a client reading it cannot tell the
+/// two apart, which is what makes the value RESOLVED rather than refused. Asserted on the
+/// listing, whose own refusal names the identifier exactly as sent.
+#[tokio::test]
+async fn the_bare_unique_id_earns_the_same_refusal_as_any_absent_stack() {
+    let router = router();
+    let (status, body) = create_stack(&router, "unique-id-sentence", TEMPLATE, &[]).await;
+    assert_eq!(
+        status, 200,
+        "expected CreateStack to be accepted, got {status} {body}"
+    );
+    wait_for_the_transition().await;
+    let (status, described) = call(
+        &router,
+        "DescribeStacks",
+        &[member("StackName", "unique-id-sentence")],
+    )
+    .await;
+    assert_eq!(
+        status, 200,
+        "expected the stack to be readable, got {status} {described}"
+    );
+    let minted = unique_id_of(&xml_text(&described, "StackId").expect("the stack's own id"));
+
+    for (case, identifier) in [
+        ("the live stack's bare unique id", minted.as_str()),
+        ("a name nothing created", "unique-id-never-created"),
+        ("a unique id nothing ever minted", UNMINTED_UNIQUE_ID),
+    ] {
+        let (status, body) = call(
+            &router,
+            "ListStackResources",
+            &[member("StackName", identifier)],
+        )
+        .await;
+        assert_eq!(
+            status, 400,
+            "case {case:?}: expected HTTP 400, got {status} {body}"
+        );
+        let expected = format!("Stack with id {identifier} does not exist");
+        assert_eq!(
+            xml_text(&body, "Message").as_deref(),
+            Some(expected.as_str()),
+            "case {case:?}: expected {expected:?}, got {body}"
+        );
     }
 }

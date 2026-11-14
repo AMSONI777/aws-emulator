@@ -302,10 +302,9 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
             });
             if let Some(documents) = documents {
                 let prepared = ::service_common::iam_authorization::prepare_documents(&documents);
-                let role_arn = crate::state::glue_role_reference(&input.role).arn;
-                let refusal = event_queues.iter().find_map(|queue| {
-                    crate::state::event_queue_refusal(&prepared, &role_arn, queue)
-                });
+                let refusal = event_queues
+                    .iter()
+                    .find_map(|queue| crate::state::event_queue_refusal(&prepared, queue));
                 if let Some(message) = refusal {
                     return Err(CreateCrawlerErrorModeled::InvalidInputException(
                         InvalidInputException {
