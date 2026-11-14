@@ -31,9 +31,9 @@ use service_com_amazonaws_glue_awsglue::state::{
 use smithy_server_runtime::MultiServiceRouter;
 
 use crate::error_messages::assert_refusal;
-use crate::job_runs::{emulator_with_engine, far_future};
+use crate::job_runs::{emulator_with_engine, far_future, set_workflow_due_instant};
 use crate::trigger_starts::{
-    register_targets, set_due_instant, stored_run_ids, trigger_state, CRAWLER, JOB, OTHER_JOB,
+    register_targets, stored_run_ids, trigger_state, CRAWLER, JOB, OTHER_JOB,
 };
 use crate::wire::{call_in_region, ok, REGION};
 
@@ -351,7 +351,7 @@ async fn a_stop_leaves_the_runs_a_firing_already_began_alone() {
             ok(&router, "StartTrigger", &json!({ "Name": trigger })).await;
             // Hold every run the firings began in flight, so what is asserted after the
             // stop is what the stop did and not what the clock settled.
-            set_due_instant(&engine, &workflow, far_future());
+            set_workflow_due_instant(&engine, &workflow, far_future());
         }
         let before = stored_run_ids(&engine, &workflow);
 

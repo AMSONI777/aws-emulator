@@ -14,6 +14,11 @@
 //! module into `tests/all/` (a bare `mod` would resolve to a sibling of `tests/all.rs`,
 //! which the layout check refuses), and the file that attribute names.
 //!
+//! The collision is a property of the NAME, not of how the declaration is written, so the
+//! reader below takes a declaration in every spelling the compiler does — with or without a
+//! visibility, with or without a trailing line comment — and counts them all against the one
+//! namespace.
+//!
 //! It reads files only; it starts no router and reaches no network.
 
 use std::collections::BTreeMap;
@@ -34,9 +39,34 @@ fn tests_dir() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join("tests")
 }
 
-/// Every module `source` declares at its top level, in file order. A `mod` nested inside an
-/// item is indented and belongs to another namespace, so only a declaration starting in
-/// column one counts; a commented-out line declares nothing.
+/// The module name `line` declares, read the way the compiler reads it: a `mod <name>;`
+/// item in column one, whatever visibility precedes it and whatever line comment trails
+/// it. Every one of those spellings introduces `<name>` into the root's single namespace,
+/// so a reader blind to one of them misses the collision that spelling makes.
+///
+/// A `mod` that does not start in column one is nested inside an item and belongs to
+/// another namespace; a line whose code is empty — a commented-out declaration — declares
+/// nothing.
+fn declaration_name(line: &str) -> Option<&str> {
+    if line.starts_with(char::is_whitespace) {
+        return None;
+    }
+    let code = line.split("//").next().unwrap_or(line).trim_end();
+    let item = match code.strip_prefix("pub") {
+        None => code,
+        // `pub` is a token, so only a space or a `(scope)` may follow it: a run-together
+        // `pubmod x;`, which the compiler rejects, declares nothing here either.
+        Some(rest) => match rest.strip_prefix('(') {
+            None => rest.strip_prefix(' ')?.trim_start(),
+            Some(scoped) => scoped.split_once(')')?.1.trim_start(),
+        },
+    };
+    let name = item.strip_prefix("mod ")?.trim().strip_suffix(';')?.trim();
+    (!name.is_empty() && !name.contains(char::is_whitespace)).then_some(name)
+}
+
+/// Every module `source` declares at its top level, in file order, each carrying the
+/// `#[path]` attribute that precedes it.
 fn declarations(source: &str) -> Vec<Declaration> {
     let mut declared = Vec::new();
     let mut pending: Option<String> = None;
@@ -45,19 +75,17 @@ fn declarations(source: &str) -> Vec<Declaration> {
             pending = attribute.strip_suffix("\"]").map(str::to_string);
             continue;
         }
-        let Some(rest) = line.strip_prefix("mod ") else {
-            if !line.starts_with("//") {
+        let Some(name) = declaration_name(line) else {
+            if !line.trim_start().starts_with("//") {
                 pending = None;
             }
             continue;
         };
-        if let Some(name) = rest.strip_suffix(';') {
-            declared.push(Declaration {
-                name: name.to_string(),
-                path: pending.take(),
-                line: index + 1,
-            });
-        }
+        declared.push(Declaration {
+            name: name.to_string(),
+            path: pending.take(),
+            line: index + 1,
+        });
     }
     declared
 }
@@ -249,7 +277,7 @@ fn the_reader_reports_a_declaration_the_target_cannot_compile() {
     // the check owes it. `present` is this suite's own file, so the existence half has a
     // file that really is there to accept.
     let present = "all_rs_declares_each_suite_once";
-    let cases: [(&str, String, usize, usize); 11] = [
+    let cases: [(&str, String, usize, usize); 16] = [
         (
             "one declaration",
             format!("#[path = \"all/{present}.rs\"]\nmod {present};\n"),
@@ -330,6 +358,44 @@ fn the_reader_reports_a_declaration_the_target_cannot_compile() {
             format!(
                 "#[path = \"all/{present}.rs\"]\nmod {present};\nfn helper() {{\n    mod inner;\n}}\n"
             ),
+            0,
+            0,
+        ),
+        // The spellings below declare the same module as a bare `mod <name>;` does, so each
+        // repetition is the same E0428 and owes the same reports.
+        (
+            "one declaration carrying a trailing line comment",
+            format!("#[path = \"all/{present}.rs\"]\nmod {present}; // the suite above\n"),
+            0,
+            0,
+        ),
+        (
+            "the second declaration carrying a trailing line comment",
+            format!(
+                "#[path = \"all/{present}.rs\"]\nmod {present};\n\
+                 #[path = \"all/{present}.rs\"]\nmod {present}; // appended in the tail\n"
+            ),
+            2,
+            0,
+        ),
+        (
+            "one declaration behind a visibility",
+            format!("#[path = \"all/{present}.rs\"]\npub mod {present};\n"),
+            0,
+            0,
+        ),
+        (
+            "the second declaration behind a scoped visibility",
+            format!(
+                "#[path = \"all/{present}.rs\"]\nmod {present};\n\
+                 #[path = \"all/{present}.rs\"]\npub(crate) mod {present};\n"
+            ),
+            2,
+            0,
+        ),
+        (
+            "a run-together `pubmod`, which the compiler rejects",
+            format!("#[path = \"all/{present}.rs\"]\npubmod {present};\n"),
             0,
             0,
         ),

@@ -2961,3 +2961,16 @@ mod cloudformation_cognito_identity_role_attachment_refusal;
 // (`pricing_plan_subscription_resource_eligibility` is declared ONCE, in the head region
 // above: a module may be declared only once, and two branches landing at once each kept a
 // different copy of it.)
+// a module may be declared only once, and a second declaration fails this whole target.)
+// (`cloudtrail_read_only_api_calls` and `zz_probe` are declared once each, further up this
+// file: a module may be declared only once, however many landings append it here.)
+// (`cloudformation_metric_stream_filter_update` is declared in the head region above, and
+// `zz_probe` further up this tail: a module may be declared only once.)
+// `cloudformation_metric_stream_estate_is_drainable` are declared once each, further up this
+// tail: a module may be declared only once, however many landings append it here.)
+// Declared in the appended tail: what a session an identity pool vends may DO is decided by
+// IAM's record of the mapped role and
+// Declare each suite exactly ONCE: this is one crate root, so a second `mod` for the same
+// name is `E0428` and fails every suite in this target. `all/all_rs_declares_each_suite_once.rs`
+// checks that for this file and for every service crate's `tests/all.rs`, so check there
+// rather than leaving a note here.

@@ -38,7 +38,8 @@ use smithy_server_runtime::MultiServiceRouter;
 
 use crate::error_messages::assert_refusal;
 use crate::job_runs::{
-    already_past, emulator_with_engine, far_future, RUN_AT_REST_DEADLINE, RUN_POLL_INTERVAL,
+    already_past, emulator_with_engine, far_future, set_workflow_due_instant,
+    RUN_AT_REST_DEADLINE, RUN_POLL_INTERVAL,
 };
 use crate::wire::{call_in_region, ok, REGION};
 
@@ -270,59 +271,6 @@ pub(crate) fn stored_run_ids(
         .unwrap_or_else(|| panic!("the store must hold workflow {workflow:?}"))
 }
 
-/// Move EVERY due instant an unsettled run of `workflow` still owes, and every one the job
-/// runs those runs' actions began still owe, to `at` — so a test can hold the transient
-/// window open or make the owed transition due without sleeping.
-///
-/// The actions move WITH the run because a run is a composite of them: it comes to rest only
-/// once the runs it began have. A job run owes up to TWO states at once — the state it is in
-/// while its script runs, and the state its own execution came to — so this moves both, as
-/// `job_runs::set_due_instant` does for a job's own runs: a helper that moved only the first
-/// would leave the run half way, in flight for ever, and the workflow run waiting on it.
-pub(crate) fn set_due_instant(
-    engine: &Arc<engine::InMemoryEngine>,
-    workflow: &str,
-    at: SystemTime,
-) {
-    let state = engine.state::<ComAmazonawsGlueAwsglueState>();
-    let mut store = state.lock();
-    let actions: Vec<(String, String)> = store
-        .workflow(workflow)
-        .unwrap_or_else(|| panic!("the store must hold workflow {workflow:?}"))
-        .runs
-        .iter()
-        .flat_map(|run| run.action_job_runs.iter())
-        .map(|begun| (begun.job_name.clone(), begun.run_id.clone()))
-        .collect();
-    for (job_name, run_id) in actions {
-        if let Some(job_run) = store
-            .job_mut(REGION, &job_name)
-            .and_then(|job| job.run_mut(&run_id))
-        {
-            // BOTH instants a job run is owed a state at, exactly as the job-run
-            // suite's own helper moves them (`job_runs::set_due_instants`): the state
-            // the clock owes it NEXT, and the state its script execution decided it
-            // comes to REST in. Moving only the first leaves the rest in the future,
-            // so the run would settle into running and stop there and the workflow run
-            // would never come to rest.
-            if job_run.settles_at.is_some() {
-                job_run.settles_at = Some(at);
-            }
-            if job_run.rests_at.is_some() {
-                job_run.rests_at = Some(at);
-            }
-        }
-    }
-    let entry = store
-        .workflow_mut(workflow)
-        .unwrap_or_else(|| panic!("the store must hold workflow {workflow:?}"));
-    for run in &mut entry.runs {
-        if run.settles_at.is_some() {
-            run.settles_at = Some(at);
-        }
-    }
-}
-
 // ---------------------------------------------------------------------------
 // Start, then read back
 // ---------------------------------------------------------------------------
@@ -456,7 +404,7 @@ async fn settled_run(
 ) -> Value {
     let deadline = SystemTime::now() + RUN_AT_REST_DEADLINE;
     loop {
-        set_due_instant(engine, workflow, already_past());
+        set_workflow_due_instant(engine, workflow, already_past());
         let read = ok(
             router,
             "GetWorkflowRun",
@@ -497,7 +445,7 @@ async fn each_firing_begins_another_run_of_the_workflow() {
             );
             // Hold the runs already begun in flight, so a count is of what the starts
             // recorded and not of what the clock has since settled.
-            set_due_instant(&engine, &workflow, far_future());
+            set_workflow_due_instant(&engine, &workflow, far_future());
 
             let ids = stored_run_ids(&engine, &workflow);
             let expected = if row.fires { start } else { 0 };
@@ -564,7 +512,7 @@ async fn a_firing_past_the_workflow_concurrency_ceiling_is_refused() {
                 status, 200,
                 "case {case:?}: start {start} is inside the ceiling, got {status} with {body}"
             );
-            set_due_instant(&engine, &workflow, far_future());
+            set_workflow_due_instant(&engine, &workflow, far_future());
         }
 
         assert_refusal(
@@ -592,7 +540,7 @@ async fn a_firing_past_the_workflow_concurrency_ceiling_is_refused() {
 
         // Once the clock has finished the runs in flight, the next firing begins a run
         // again: the ceiling is on runs in flight, not on starts ever made.
-        set_due_instant(&engine, &workflow, already_past());
+        set_workflow_due_instant(&engine, &workflow, already_past());
         let (status, body) = start_trigger(&router, &trigger).await;
         assert_eq!(
             status, 200,

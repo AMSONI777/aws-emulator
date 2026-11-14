@@ -36,7 +36,9 @@ use service_com_amazonaws_glue_awsglue::state::{
 };
 use smithy_server_runtime::MultiServiceRouter;
 
-use crate::job_runs::{emulator_with_engine, RUN_AT_REST_DEADLINE, RUN_POLL_INTERVAL};
+use crate::job_runs::{
+    emulator_with_engine, set_workflow_due_instant, RUN_AT_REST_DEADLINE, RUN_POLL_INTERVAL,
+};
 use crate::wire::{call, call_in_region, error_code, error_message, ok, REGION};
 
 /// A second Region's endpoint, so a row can assert the key a workflow is addressed by.
@@ -109,7 +111,7 @@ pub(crate) async fn given_workflow_with_runs(
     }
 
     set_start_instants(engine, name, start_offsets);
-    set_due_instant(engine, name, SystemTime::now() + HELD_OPEN);
+    set_workflow_due_instant(engine, name, SystemTime::now() + HELD_OPEN);
     started
 }
 
@@ -129,49 +131,6 @@ fn set_start_instants(engine: &Arc<engine::InMemoryEngine>, workflow: &str, offs
     );
     for (run, offset) in entry.runs.iter_mut().zip(offsets) {
         run.started_on = SystemTime::UNIX_EPOCH + START_EPOCH + Duration::from_secs(*offset);
-    }
-}
-
-/// Move EVERY due instant every run of `workflow` still owes, and every one the job runs
-/// those runs' actions began still owe, to `at` — so a row can hold the transient window open
-/// or make the owed transition due without sleeping.
-///
-/// The actions move WITH the run because a run is a composite of them: it comes to rest only
-/// once the runs it began have. A job run owes up to TWO states at once — the state it is in
-/// while its script runs, and the state its own execution came to — so both of its instants
-/// move, as `job_runs::set_due_instant` does for a job's own runs.
-fn set_due_instant(engine: &Arc<engine::InMemoryEngine>, workflow: &str, at: SystemTime) {
-    let state = engine.state::<ComAmazonawsGlueAwsglueState>();
-    let mut store = state.lock();
-    let actions: Vec<(String, String)> = store
-        .workflow(workflow)
-        .unwrap_or_else(|| panic!("the store must hold workflow {workflow:?}"))
-        .runs
-        .iter()
-        .flat_map(|run| run.action_job_runs.iter())
-        .map(|begun| (begun.job_name.clone(), begun.run_id.clone()))
-        .collect();
-    for (job_name, run_id) in actions {
-        if let Some(job_run) = store
-            .job_mut(REGION, &job_name)
-            .and_then(|job| job.run_mut(&run_id))
-        {
-            // A job run owes up to TWO states at once — the state it is in while its script
-            // runs, and the state its own execution came to — so both instants move, or the
-            // run stops half way in `RUNNING` and the composite waits for ever.
-            if job_run.settles_at.is_some() {
-                job_run.settles_at = Some(at);
-            }
-            if job_run.rests_at.is_some() {
-                job_run.rests_at = Some(at);
-            }
-        }
-    }
-    let entry = store
-        .workflow_mut(workflow)
-        .unwrap_or_else(|| panic!("the store must hold workflow {workflow:?}"));
-    for run in &mut entry.runs {
-        run.settles_at = Some(at);
     }
 }
 
@@ -613,7 +572,7 @@ async fn listing_runs_reports_the_state_the_clock_owes_and_changes_nothing_else(
     // ([`crate::job_runs::RUN_AT_REST_DEADLINE`]).
     let deadline = SystemTime::now() + RUN_AT_REST_DEADLINE;
     let settled = loop {
-        set_due_instant(&engine, name, SystemTime::UNIX_EPOCH);
+        set_workflow_due_instant(&engine, name, SystemTime::UNIX_EPOCH);
         let read = ok(&router, "GetWorkflowRuns", &json!({ "Name": name })).await;
         let running = listed_runs(&read)
             .iter()

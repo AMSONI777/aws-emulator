@@ -27,21 +27,21 @@
 //! The due instants the lifecycle turns on are read and moved THROUGH THE STORE rather than
 //! slept for, so the transient window is deterministic.
 
-use std::sync::Arc;
-use std::time::SystemTime;
-
 use serde_json::{json, Value};
 use service_com_amazonaws_glue_awsglue::state::messages::WORKFLOW_NOT_FOUND;
 use service_com_amazonaws_glue_awsglue::state::{
-    ComAmazonawsGlueAwsglueState, TERMINAL_WORKFLOW_RUN_STATUSES, WORKFLOW_RUN_ID_PREFIX,
-    WORKFLOW_RUN_STATUS_COMPLETED, WORKFLOW_RUN_STATUS_RUNNING,
+    TERMINAL_WORKFLOW_RUN_STATUSES, WORKFLOW_RUN_ID_PREFIX, WORKFLOW_RUN_STATUS_COMPLETED,
+    WORKFLOW_RUN_STATUS_RUNNING,
 };
 use smithy_server_runtime::MultiServiceRouter;
 
+use std::time::SystemTime;
+
 use crate::job_runs::{
-    already_past, emulator_with_engine, far_future, RUN_AT_REST_DEADLINE, RUN_POLL_INTERVAL,
+    already_past, emulator_with_engine, far_future, set_workflow_due_instant,
+    RUN_AT_REST_DEADLINE, RUN_POLL_INTERVAL,
 };
-use crate::wire::{call, error_code, error_message, ok, REGION};
+use crate::wire::{call, error_code, error_message, ok};
 
 /// The role ARN the job every trigger action below runs is registered with.
 const ROLE_ARN: &str = "arn:aws:iam::000000000000:role/sim2real-glue-job-role";
@@ -147,52 +147,6 @@ fn run_properties(run: &Value) -> Value {
     match run.get("WorkflowRunProperties") {
         None | Some(Value::Null) => json!({}),
         Some(properties) => properties.clone(),
-    }
-}
-
-/// Move the due instant of every unsettled run of `workflow`, and every due instant the job
-/// runs those runs' actions began still owe, to `at` — so a test can hold the transient
-/// window open or make the owed transition due without sleeping.
-///
-/// The actions move WITH the run because a run is a composite of them: it comes to rest only
-/// once the runs it began have, so moving its own instant alone would leave it waiting. A job
-/// run owes up to TWO states at once — the state it is in while its script runs, and the
-/// state its own execution came to — so both of its instants move, as
-/// `job_runs::set_due_instant` does for a job's own runs.
-fn set_due_instant(engine: &Arc<engine::InMemoryEngine>, workflow: &str, at: SystemTime) {
-    let state = engine.state::<ComAmazonawsGlueAwsglueState>();
-    let mut store = state.lock();
-    let actions: Vec<(String, String)> = store
-        .workflow(workflow)
-        .unwrap_or_else(|| panic!("the store must hold workflow {workflow:?}"))
-        .runs
-        .iter()
-        .flat_map(|run| run.action_job_runs.iter())
-        .map(|begun| (begun.job_name.clone(), begun.run_id.clone()))
-        .collect();
-    for (job_name, run_id) in actions {
-        if let Some(job_run) = store
-            .job_mut(REGION, &job_name)
-            .and_then(|job| job.run_mut(&run_id))
-        {
-            // A job run owes up to TWO states at once — the state it is in while its script
-            // runs, and the state its own execution came to — so both instants move, or the
-            // run stops half way in `RUNNING` and the composite waits for ever.
-            if job_run.settles_at.is_some() {
-                job_run.settles_at = Some(at);
-            }
-            if job_run.rests_at.is_some() {
-                job_run.rests_at = Some(at);
-            }
-        }
-    }
-    let entry = store
-        .workflow_mut(workflow)
-        .unwrap_or_else(|| panic!("the store must hold workflow {workflow:?}"));
-    for run in &mut entry.runs {
-        if run.settles_at.is_some() {
-            run.settles_at = Some(at);
-        }
     }
 }
 
@@ -393,7 +347,7 @@ async fn a_started_workflow_run_is_read_back_from_the_store() {
         let run_id = start_run(&router, &workflow, &row.start).await;
         // Hold the transient window open, so what is asserted below is the status a start
         // leaves a run in and not whatever the clock has since made due.
-        set_due_instant(&engine, &workflow, far_future());
+        set_workflow_due_instant(&engine, &workflow, far_future());
         // The run the entry point's one job action began is held in flight for the same
         // reason: this row asserts the action counts a start leaves, not what the clock has
         // since made of that run.
@@ -512,7 +466,7 @@ async fn the_owed_status_falls_due_on_the_clock() {
         let run_id = start_run(&router, &workflow, &row.start).await;
 
         // Ahead of the due instant the run is still in flight, however often it is read.
-        set_due_instant(&engine, &workflow, far_future());
+        set_workflow_due_instant(&engine, &workflow, far_future());
         for read in 0..3 {
             let run = get_run(&router, &workflow, &run_id).await;
             assert_eq!(
@@ -532,7 +486,7 @@ async fn the_owed_status_falls_due_on_the_clock() {
         // ([`crate::job_runs::RUN_AT_REST_DEADLINE`]).
         let deadline = SystemTime::now() + RUN_AT_REST_DEADLINE;
         let settled = loop {
-            set_due_instant(&engine, &workflow, already_past());
+            set_workflow_due_instant(&engine, &workflow, already_past());
             let read = get_run(&router, &workflow, &run_id).await;
             if read.get("Status").and_then(Value::as_str) != Some(WORKFLOW_RUN_STATUS_RUNNING) {
                 break read;
@@ -886,7 +840,7 @@ async fn a_start_past_the_workflows_concurrency_ceiling_is_refused() {
         // how many runs are running and not how many were ever started.
         for _ in 0..*admitted {
             start_run(&router, name, &json!({})).await;
-            set_due_instant(&engine, name, far_future());
+            set_workflow_due_instant(&engine, name, far_future());
         }
 
         let (status, body) = call(&router, "StartWorkflowRun", &json!({ "Name": name })).await;
@@ -910,7 +864,7 @@ async fn a_start_past_the_workflows_concurrency_ceiling_is_refused() {
 
                 // The ceiling bounds the runs IN FLIGHT: once the clock has finished them,
                 // a start is admitted again.
-                set_due_instant(&engine, name, already_past());
+                set_workflow_due_instant(&engine, name, already_past());
                 let run_id = start_run(&router, name, &json!({})).await;
                 let run = get_run(&router, name, &run_id).await;
                 assert_eq!(

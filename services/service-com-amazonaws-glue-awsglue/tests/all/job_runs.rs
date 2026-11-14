@@ -159,6 +159,64 @@ fn set_due_instants(
     }
 }
 
+/// Move EVERY due instant the single run `run` still owes to `at`.
+///
+/// The per-run half of [`set_due_instant`], for a caller that holds ONE run of a job whose
+/// other runs are not its to move — the run a workflow action began, say. The rule is the
+/// same one [`set_due_instant`] documents: a run owes up to TWO states at once, so both
+/// instants move, or the run stops half way and a composite waiting on it never comes to
+/// rest.
+pub(crate) fn make_owed_states_due(run: &mut JobRunEntry, at: SystemTime) {
+    if run.settles_at.is_some() {
+        run.settles_at = Some(at);
+    }
+    if run.rests_at.is_some() {
+        run.rests_at = Some(at);
+    }
+}
+
+/// Move every due instant every unsettled run of the workflow `workflow` still owes, and
+/// every instant the job runs those runs' actions began still owe, to `at` — so a test can
+/// hold the transient window open or make what the clock owes due without sleeping.
+///
+/// The actions move WITH the runs because a workflow run is a COMPOSITE of them: it comes to
+/// rest only once the runs it began have, so moving its own instant alone would leave it
+/// waiting on work that never finishes. Each action's instants move by
+/// [`make_owed_states_due`], which is where the "a run owes up to TWO states at once" rule
+/// lives.
+pub(crate) fn set_workflow_due_instant(
+    engine: &Arc<engine::InMemoryEngine>,
+    workflow: &str,
+    at: SystemTime,
+) {
+    let state = engine.state::<ComAmazonawsGlueAwsglueState>();
+    let mut store = state.lock();
+    let actions: Vec<(String, String)> = store
+        .workflow(workflow)
+        .unwrap_or_else(|| panic!("the store must hold workflow {workflow:?}"))
+        .runs
+        .iter()
+        .flat_map(|run| run.action_job_runs.iter())
+        .map(|begun| (begun.job_name.clone(), begun.run_id.clone()))
+        .collect();
+    for (job_name, run_id) in actions {
+        if let Some(job_run) = store
+            .job_mut(crate::wire::REGION, &job_name)
+            .and_then(|job| job.run_mut(&run_id))
+        {
+            make_owed_states_due(job_run, at);
+        }
+    }
+    let entry = store
+        .workflow_mut(workflow)
+        .unwrap_or_else(|| panic!("the store must hold workflow {workflow:?}"));
+    for run in &mut entry.runs {
+        if run.settles_at.is_some() {
+            run.settles_at = Some(at);
+        }
+    }
+}
+
 /// Hold the state every unfinished run of `job_name` comes to REST in open, leaving the state
 /// the clock owes it NEXT where it was.
 ///
