@@ -36,7 +36,9 @@ const REGION: &str = "us-east-1";
 /// How many tags one resource may carry: the `Tags` map's own bound
 /// (`smithy_query(query="shape", shape="Tags")`: `length 1..50`), which is also the
 /// per-resource ceiling.
-const MAX_TAGS: usize = 50;
+///
+/// Shared with the other suites in this target (`tests/all/application_creation.rs`).
+pub(crate) const MAX_TAGS: usize = 50;
 
 /// AWS's `LimitExceededException` sentence for a tag write that would take a resource
 /// past its tag ceiling: fixed text whose only variable part is the ceiling itself.
@@ -93,7 +95,10 @@ fn resources() -> Vec<Resource> {
 /// the character classes `TagKey`/`TagValue` admit
 /// (`^([\p{L}\p{Z}\p{N}_.:/=+\-@]*)$`, from
 /// `smithy_query(query="shape", shape="TagKey,TagValue")`).
-fn tag_rows() -> Vec<(&'static str, Value)> {
+///
+/// Shared with the other suites in this target (`tests/all/application_creation.rs`), so
+/// the tag class is stated once.
+pub(crate) fn tag_rows() -> Vec<(&'static str, Value)> {
     vec![
         ("one tag", json!({ "Environment": "Test" })),
         ("an empty value", json!({ "Environment": "" })),
@@ -119,16 +124,21 @@ fn tag_rows() -> Vec<(&'static str, Value)> {
 }
 
 /// `count` tags whose keys are `<prefix>-<n>`, for the rows that count tags rather than
-/// caring what they say.
-fn numbered_tags(prefix: &str, count: usize) -> Value {
+/// caring what they say. Shared with `tests/all/application_creation.rs`.
+pub(crate) fn numbered_tags(prefix: &str, count: usize) -> Value {
     let map: Map<String, Value> = (0..count)
         .map(|index| (format!("{prefix}-{index}"), json!(format!("value-{index}"))))
         .collect();
     Value::Object(map)
 }
 
-/// The tags `ListTagsForResource` reports for `arn`.
-async fn listed_tags(emulator: &Emulator, case: &str, arn: &str) -> Map<String, Value> {
+/// The tags `ListTagsForResource` reports for `arn`. Shared with
+/// `tests/all/application_creation.rs`.
+pub(crate) async fn listed_tags(
+    emulator: &Emulator,
+    case: &str,
+    arn: &str,
+) -> Map<String, Value> {
     let payload = emulator
         .ok(case, "ListTagsForResource", json!({ "ResourceArn": arn }))
         .await;
@@ -139,8 +149,9 @@ async fn listed_tags(emulator: &Emulator, case: &str, arn: &str) -> Map<String, 
         .clone()
 }
 
-/// The object a tag row carries, as a map.
-fn object(tags: &Value) -> Map<String, Value> {
+/// The object a tag row carries, as a map. Shared with
+/// `tests/all/application_creation.rs`.
+pub(crate) fn object(tags: &Value) -> Map<String, Value> {
     tags.as_object().expect("a tag row is an object").clone()
 }
 

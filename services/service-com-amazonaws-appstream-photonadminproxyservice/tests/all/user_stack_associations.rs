@@ -74,7 +74,10 @@ fn not_found_sentence(kind: &str, name: &str) -> String {
 }
 
 /// The sentence the store reports when it stands at its ceiling.
-fn limit_sentence(store: &str) -> String {
+///
+/// Shared with the other suites in this target (`tests/all/application_creation.rs`), so
+/// the sentence is spelled out once.
+pub(crate) fn limit_sentence(store: &str) -> String {
     format!(
         "The requested limit exceeds the permitted limit for an account: this emulator \
          holds at most {CEILING} {store}"

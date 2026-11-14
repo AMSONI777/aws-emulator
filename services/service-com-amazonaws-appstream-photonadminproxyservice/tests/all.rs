@@ -19,6 +19,8 @@ mod app_block_builder_app_block_associations;
 mod app_block_deletion;
 #[path = "all/app_blocks.rs"]
 mod app_blocks;
+#[path = "all/application_creation.rs"]
+mod application_creation;
 #[path = "all/application_fleet_associations.rs"]
 mod application_fleet_associations;
 #[path = "all/application_update.rs"]

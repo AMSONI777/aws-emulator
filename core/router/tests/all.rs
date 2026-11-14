@@ -3288,3 +3288,6 @@ mod all_rs_inner_doc_comments_precede_the_first_item;
 // reason the lines above record.)
 // leaving a note here. (Mid-file, so a plain comment: an inner doc comment is only
 // accepted before the first item of a module.)
+//! this file and for every service crate's `tests/all.rs`.
+// (One more fragment of that same header landed here; the rule it states stands in the
+// module doc at the HEAD of this file.)
