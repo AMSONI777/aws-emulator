@@ -431,6 +431,10 @@ pub mod stabilising;
 /// service publishes for a provider request performs on this store.
 pub mod provider_responses;
 
+/// Receiving a SIGNAL at a published wait condition handle URL: the one write that URL
+/// performs on this store.
+pub mod handle_signals;
+
 /// Carrying out what a landed provider answer owes — the requests the operation behind it
 /// still has to publish — without waiting for the next client call.
 pub mod provider_driver;

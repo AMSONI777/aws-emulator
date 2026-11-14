@@ -27,6 +27,7 @@
 //! the one `stack_lifecycle.rs` exports, the way `error_envelope.rs` reuses it: this suite
 //! adds only the helpers its own rules need.
 
+use service_com_amazonaws_cloudformation_cloudformation::state::provisioning::wait_condition_handle;
 use service_com_amazonaws_cloudformation_cloudformation::state::{
     change_set_status, execution_status, status, template, CAPABILITY_AUTO_EXPAND,
     MAX_EVENT_PROPERTIES_BYTES,
@@ -1351,6 +1352,26 @@ async fn a_create_reports_an_event_for_every_resource_it_provisions() {
             );
             for event in once_created {
                 let physical = event.physical_resource_id.clone().unwrap_or_default();
+                // An `AWS::CloudFormation::WaitConditionHandle` is not NAMED at all: its
+                // physical id is the pre-signed URL this service publishes for the handle,
+                // which names the handle in the target it addresses rather than carrying a
+                // generated name (`state::provisioning::wait_condition_handle`).
+                if *resource_type == "AWS::CloudFormation::WaitConditionHandle" {
+                    let path = physical
+                        .strip_prefix("https://")
+                        .and_then(|rest| rest.split_once('/'))
+                        .map(|(_, path)| format!("/{path}"))
+                        .unwrap_or_default();
+                    let names_the_handle = wait_condition_handle::parse_signal_path(&path)
+                        .is_some_and(|target| target.logical_resource_id == *logical_id);
+                    assert!(
+                        names_the_handle,
+                        "case {:?}: {logical_id} reports the pre-signed URL published for it \
+                         once created, got {physical:?}",
+                        case.case
+                    );
+                    continue;
+                }
                 // The name CloudFormation generates for a resource the template does not
                 // name is `<stack>-<logical id>-<unique>`; a type whose `Ref` returns an
                 // ARN or a URL carries that name inside it.

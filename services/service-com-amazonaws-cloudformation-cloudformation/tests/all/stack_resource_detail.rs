@@ -261,7 +261,7 @@ fn detail_cases() -> Vec<DetailCase> {
                 expect(
                     "Alpha",
                     "AWS::CloudFormation::WaitConditionHandle",
-                    PhysicalId::Generated("detail-mixed-Alpha-".to_string()),
+                    PhysicalId::PublishedHandleUrl("Alpha"),
                     Some(r#"{"Nested":{"Depth":"two"}}"#),
                 ),
             ],

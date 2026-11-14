@@ -23,6 +23,7 @@ use crate::stack_lifecycle::{
     call, create_stack, member, router, wait_for_the_transition, xml_text, xml_unescape, ACCOUNT_ID,
     REGION,
 };
+use service_com_amazonaws_cloudformation_cloudformation::state::provisioning::wait_condition_handle;
 use service_com_amazonaws_cloudformation_cloudformation::state::{
     resource_status, MAX_DESCRIBED_STACK_RESOURCES, STATUS_TRANSITION_DELAY,
     TEMPLATE_BODY_MAX_BYTES,
@@ -150,6 +151,12 @@ pub(crate) enum PhysicalId {
     /// generated `<stack name>-<logical id>-<unique id>` name — so it is this prefix plus
     /// a 12-character unique segment.
     Generated(String),
+    /// The id of an `AWS::CloudFormation::WaitConditionHandle`: the pre-signed URL that
+    /// handle publishes, whose bucket, key and signature are per-run values — so what is
+    /// asserted is that it is an absolute `https` URL this service reads back as the target
+    /// of the handle under this logical id
+    /// (`state::provisioning::wait_condition_handle`).
+    PublishedHandleUrl(&'static str),
 }
 
 /// What one declared resource must be reported as.
@@ -245,7 +252,7 @@ fn resource_cases() -> Vec<ResourceCase> {
                 expect(
                     "Alpha",
                     "AWS::CloudFormation::WaitConditionHandle",
-                    PhysicalId::Generated("mixed-Alpha-".to_string()),
+                    PhysicalId::PublishedHandleUrl("Alpha"),
                 ),
                 expect(
                     "Bucket",
@@ -328,6 +335,24 @@ pub(crate) fn assert_physical_id(case: &str, expected: &PhysicalId, actual: Opti
             assert!(
                 unique.len() == 12 && unique.chars().all(|c| c.is_ascii_hexdigit()),
                 "case {case:?}: expected a 12-character unique segment, got {unique:?}"
+            );
+        }
+        PhysicalId::PublishedHandleUrl(logical_id) => {
+            let id = actual.unwrap_or_default().to_string();
+            let path = id
+                .strip_prefix("https://")
+                .and_then(|rest| rest.split_once('/'))
+                .map(|(_, path)| format!("/{path}"))
+                .unwrap_or_default();
+            let target = wait_condition_handle::parse_signal_path(&path).unwrap_or_else(|| {
+                panic!(
+                    "case {case:?}: expected the pre-signed URL of a wait condition handle, \
+                     got {id:?}"
+                )
+            });
+            assert_eq!(
+                target.logical_resource_id, *logical_id,
+                "case {case:?}: expected the URL to name the handle {logical_id:?}, got {id:?}"
             );
         }
     }

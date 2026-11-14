@@ -277,6 +277,10 @@ mod step_functions_state_machine;
 /// request CloudFormation sends it on every stack operation touching the resource, and the
 /// answer the provider PUTs to the `ResponseURL` the request carries.
 pub mod custom_resource;
+/// `AWS::CloudFormation::WaitConditionHandle`: the pre-signed write target such a resource
+/// IS, which CloudFormation itself mints as the handle's physical id, and the signal document
+/// a client PUTs to it ([`wait_condition_handle`]).
+pub mod wait_condition_handle;
 /// Calling another emulated service in-process: the wires a resource provider reaches an
 /// owning service's own handlers over, and how a refusal it answers is read
 /// ([`in_process_calls`]).
@@ -2565,6 +2569,49 @@ pub async fn reconcile(
         // readiness read that follows it are two questions for the same provisioner, and
         // one lookup is what keeps them from ever being asked of different ones.
         let owner = owner_for(&resource.resource_type);
+        // An `AWS::CloudFormation::WaitConditionHandle` is backed by no API of any service:
+        // what it IS is the pre-signed URL a client signals the wait conditions declared with
+        // it at, which CLOUDFORMATION itself mints and publishes as the handle's physical id
+        // ([`wait_condition_handle`]). So this arm is not a create in an owning service
+        // either: the handle exists once that URL is published and this service serves it
+        // ([`crate::service::wait_condition_plane`]).
+        if wait_condition_handle::is_handle(&resource.resource_type) {
+            let published =
+                wait_condition_handle::signal_url(ctx, region, &stack.stack_id, &resource.logical_id);
+            // The identifier the naming rules computed for the record is only the stand-in a
+            // declaration was resolved against: a wait condition naming this handle through a
+            // `Ref` has to carry the URL it is really signalled at, exactly as a property
+            // naming a resource whose identity its owning service minted does
+            // ([`repoint_references`]).
+            let computed =
+                ::std::mem::replace(&mut resource.physical_resource_id, published.clone());
+            if !computed.is_empty() && computed != published {
+                minted.push(Minted {
+                    // The stand-in is an identifier CloudFormation COMPUTED — a handle
+                    // declares no name of its own — so a longer value carrying it carries it
+                    // because a reference to this handle put it there ([`Minted::composed`]).
+                    composed: true,
+                    stand_in: computed,
+                    assigned: published,
+                });
+            }
+            // Nothing was created in any owning service for it, so the record stays
+            // DECLARED-ONLY exactly as every other such type's does: what makes a later
+            // deployment of the same declaration keep the URL already published — rather than
+            // mint a second one for a resource that was never replaced — is that the identity
+            // of this type is one no deployment can recompute
+            // ([`super::StoredStack::deploy_template`]).
+            outcome
+                .transitions
+                .push(ResourceTransition::initiated(&resource, reporting.in_progress));
+            outcome.transitions.push(ResourceTransition::finished(
+                &resource,
+                reporting.completed,
+                None,
+            ));
+            outcome.resources.push(resource);
+            continue;
+        }
         let created = match owner {
             // The resource is created WITH the tags CloudFormation gives it: the stack's
             // own, plus the three that name the stack and this resource's place in it.
@@ -3160,7 +3207,7 @@ pub fn is_same_resource(left: &StoredResource, right: &StoredResource) -> bool {
 /// create, nothing to carry out) from one whose create an owning service refused or never
 /// reached: that resource does not exist there, so a deployment that declares it again
 /// creates it.
-fn already_deployed(existing: &StoredResource) -> bool {
+pub(super) fn already_deployed(existing: &StoredResource) -> bool {
     existing.materialised || provisioner_for(&existing.resource_type).is_none()
 }
 

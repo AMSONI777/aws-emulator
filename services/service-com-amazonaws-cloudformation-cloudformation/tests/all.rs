@@ -655,6 +655,8 @@ mod validation_event_paths;
 mod vpc_network_teardown;
 #[path = "all/waf_regional_ip_set_resources.rs"]
 mod waf_regional_ip_set_resources;
+#[path = "all/wait_condition_handle_urls.rs"]
+mod wait_condition_handle_urls;
 #[path = "all/wait_conditions.rs"]
 mod wait_conditions;
 #[path = "all/deletion_policy_snapshot.rs"]

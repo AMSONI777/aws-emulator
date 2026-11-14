@@ -3693,8 +3693,14 @@ fn adopt_identities_in_force(
             .or_else(|| {
                 keeps_its_identifier
                     .then(|| {
+                        // Over the records the stack ALREADY DEPLOYED
+                        // ([`provisioning::already_deployed`]), which is the set the
+                        // deployment reconciles against: a resource whose owning service
+                        // created it, and one of a type no service here provisions — a wait
+                        // condition handle among them, whose identity is the URL THIS service
+                        // published for it and which nothing recomputes either.
                         already_created.iter().find(|existing| {
-                            existing.materialised
+                            provisioning::already_deployed(existing)
                                 && existing.logical_id == resource.logical_id
                                 && existing.resource_type == resource.resource_type
                                 && declares_the_same_replacing_properties(existing, resource)
@@ -3710,7 +3716,13 @@ fn adopt_identities_in_force(
             // already exists. Only the fact that it exists, what the owning service
             // reported about it, and an identity that service MINTED (which no
             // deployment recomputes) carry forward here.
-            resource.materialised = true;
+            //
+            // Whether the resource exists in an owning service is the EXISTING record's
+            // answer: a record of a type no service here provisions says nothing was created
+            // anywhere for it, and a deployment that re-declares it carries that forward as
+            // it stands rather than reporting a resource as created in a service that has
+            // none ([`provisioning::already_deployed`] is what admitted such a record).
+            resource.materialised = existing.materialised;
             if keeps_its_identifier {
                 // The identifier in force is the one that service minted, or the one an
                 // adopted resource already had, so the record keeps it: an output naming
@@ -3776,17 +3788,21 @@ fn declares_the_same_replacing_properties(
 /// deployment cannot recompute, so a re-deploy carries the one in force FORWARD rather than
 /// treating the resource as a different one.
 ///
-/// Two cases, for the one reason: the OWNING SERVICE assigned the identifier
-/// ([`template::identity_is_service_assigned`]), or — for a CUSTOM RESOURCE — the resource's
-/// own PROVIDER did. "Ref returns the physical ID of the resource", and a custom resource's
-/// is "a required custom resource provider-defined physical ID that is unique for that
-/// provider" — the value the naming rules compute is only the stand-in a declaration is
-/// resolved against until the provider answers. Without this a re-declaration of a custom
-/// resource would be read as a different resource and created all over again, instead of
-/// being updated through its provider.
+/// Three cases, for the one reason: the OWNING SERVICE assigned the identifier
+/// ([`template::identity_is_service_assigned`]), the resource's own PROVIDER did — for a
+/// CUSTOM RESOURCE — or CLOUDFORMATION ITSELF minted it when the resource was created. "Ref
+/// returns the physical ID of the resource", and a custom resource's is "a required custom
+/// resource provider-defined physical ID that is unique for that provider"; a wait condition
+/// handle's is the pre-signed URL this service published for it
+/// ([`provisioning::wait_condition_handle`]), whose signing query no deployment could
+/// recompute. The value the naming rules compute is only the stand-in a declaration is
+/// resolved against until the real identifier exists. Without this a re-declaration of such a
+/// resource would be read as a different one — created all over again, under a second
+/// identifier, with the first abandoned.
 fn identity_is_assigned_elsewhere(resource_type: &str) -> bool {
     template::identity_is_service_assigned(resource_type)
         || resource_types::is_custom_resource(resource_type)
+        || provisioning::wait_condition_handle::is_handle(resource_type)
 }
 
 /// Whether a terminal status is the one a ROLLBACK settles into, so the reason that rollback

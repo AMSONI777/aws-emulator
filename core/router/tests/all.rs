@@ -3657,3 +3657,16 @@ mod iam_denial_reason_attribution;
 // suite left at the top level of `tests/` fails the build. (A line comment: `//!` here is
 // `E0753`, and the header at the top of this file states the paragraph.)
 // this file and for every service crate's `tests/all.rs`. (The same, for the same reason.)
+// once appended a second declaration of each here, which compiled neither. The copies they
+// appended are removed; the declarations that stand are the ones above.)
+// file beside the other `cloudformation_…` suites: two branches landing in the same window
+// appended a second declaration of it here, which is a redefinition that compiled neither, so
+// the copy is removed and the declaration above stands.)
+// Every suite is declared exactly ONCE: this is one crate root, so a second `mod` for the
+// crate's `tests/all.rs`, so check there rather than leaving a note here. (This note sits in
+// the appended tail, where two branches landing at once left it as an INNER doc comment —
+// which is `E0753` anywhere but the head of a file — so it is an ordinary comment now.)
+// the appended tail, where concurrent landings keep leaving it as an INNER doc comment —
+// which is `E0753` anywhere but the head of a file — so it is an ordinary comment here.)
+// This file and every service crate's `tests/all.rs` are checked by that suite.
+// A suite left at the top level of `tests/` fails the build.

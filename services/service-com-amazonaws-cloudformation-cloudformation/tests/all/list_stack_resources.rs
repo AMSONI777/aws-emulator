@@ -27,7 +27,9 @@ use crate::stack_lifecycle::{
 };
 // The XML readers and the physical-id expectation this suite needs already exist, shared,
 // in the `DescribeStackResources` suite: one fix to how a response is read serves both.
-use crate::stack_resources::{element, is_iso8601_instant, sns_arn, wire_resources, PhysicalId};
+use crate::stack_resources::{
+    assert_physical_id, element, is_iso8601_instant, sns_arn, wire_resources, PhysicalId,
+};
 use service_com_amazonaws_cloudformation_cloudformation::state::{
     self, resource_status, PAGE_SIZE,
 };
@@ -207,7 +209,7 @@ fn list_cases() -> Vec<ListCase> {
                 expect(
                     "Alpha",
                     "AWS::CloudFormation::WaitConditionHandle",
-                    PhysicalId::Generated("list-mixed-Alpha-".to_string()),
+                    PhysicalId::PublishedHandleUrl("Alpha"),
                 ),
                 expect(
                     "Bucket",
@@ -278,16 +280,10 @@ fn assert_summary(case: &str, expected: &ExpectedSummary, actual: &WireSummary, 
             Some(id.as_str()),
             "case {case:?}: expected the physical id {id:?}, got {actual:?}"
         ),
-        PhysicalId::Generated(prefix) => {
-            let id = actual.physical_id.clone().unwrap_or_default();
-            let unique = id.strip_prefix(prefix.as_str()).unwrap_or_else(|| {
-                panic!("case {case:?}: expected a physical id starting {prefix:?}, got {id:?}")
-            });
-            assert!(
-                unique.len() == 12 && unique.chars().all(|c| c.is_ascii_hexdigit()),
-                "case {case:?}: expected a 12-character unique segment, got {unique:?}"
-            );
-        }
+        // Every other kind of id is held to the rule the sibling suite's one reading of it
+        // states, so a summary and a described resource cannot drift about what a physical
+        // id must be (`crate::stack_resources::assert_physical_id`).
+        other => assert_physical_id(case, other, actual.physical_id.as_deref()),
     }
     assert_eq!(
         actual.status.as_deref(),

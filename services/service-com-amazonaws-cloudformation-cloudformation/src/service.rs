@@ -75,8 +75,10 @@ pub mod double_members;
 pub mod list_element_refusals;
 pub mod management_events;
 pub mod query_error_envelope;
+pub mod wait_condition_plane;
 
 use crate::state::provisioning::custom_resource;
+use crate::state::provisioning::wait_condition_handle;
 use crate::state::registry;
 use aws_smithy_runtime_api::http::{Request as WireRequest, Response as WireResponse};
 use aws_smithy_schema::serde::{SerializableStruct, ShapeDeserializer};
@@ -493,8 +495,16 @@ impl<Eng: Send + Sync + 'static> Service for EmulatedService<Eng> {
         // addressed under, carrying the STACK by its own ARN, so a provider following the URL
         // it was handed addresses this service's own target whatever endpoint name it reached
         // this emulator by. See [`custom_resource_plane`].
-        custom_resource::parse_response_path(parts.uri.path())
+        if custom_resource::parse_response_path(parts.uri.path())
             .is_some_and(|target| custom_resource::target_region(&target).is_some())
+        {
+            return true;
+        }
+        // ...and one whose PATH is one of the WAIT CONDITION HANDLE URLs this service
+        // published, which is the other plane it serves at its own endpoint: the OBJECT KEY
+        // of that handle's write target, carrying the stack by its own ARN. See
+        // [`wait_condition_plane`].
+        wait_condition_handle::parse_signal_path(parts.uri.path()).is_some()
     }
 
     fn override_operation(
@@ -545,8 +555,25 @@ impl<Eng: Send + Sync + 'static> Service for EmulatedService<Eng> {
         // provider's documented answer is received. The PATH decides: a request to this
         // service's own endpoint that named no operation is a routing failure, whatever its
         // host looks like, and keeps the framework's default.
-        let target =
-            custom_resource::parse_response_path(::service_common::request_path(req.uri()))?;
+        let path = ::service_common::request_path(req.uri());
+        // A write to the URL an `AWS::CloudFormation::WaitConditionHandle` publishes is the
+        // same case, served by the plane that owns those URLs: the signal releases the wait
+        // conditions declared with that handle ([`wait_condition_plane`]), and the work a
+        // released wait owes is driven exactly as a landed provider answer's is.
+        if let Some(signalled) = wait_condition_handle::parse_signal_path(path) {
+            let region = wait_condition_handle::target_region(&signalled)?.to_string();
+            let (answered, released) =
+                wait_condition_plane::serve(&*self.engine, req, &region, &signalled);
+            // Only the write that RELEASED the wait starts that work, so a caller writing to
+            // the URL repeatedly sets off no more of it: the operation is not waiting for
+            // signals afterwards, and every later write answers `false`
+            // ([`crate::state::handle_signals::SignalOutcome`]).
+            if released {
+                crate::state::provider_driver::drive_landed_answer(&self.engine, &region);
+            }
+            return Some(answered);
+        }
+        let target = custom_resource::parse_response_path(path)?;
         // The Region the answer is about: the one the stack's own ARN names, which is the
         // only thing the URL says about it — the write carries no credential of its own.
         let region = custom_resource::target_region(&target)?.to_string();
