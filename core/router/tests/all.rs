@@ -3984,3 +3984,8 @@ mod cloudformation_cloudfront_fronted_rest_api;
 // (The guidance that stood here — declare each suite under `tests/all/` exactly once — is the
 // head block's at the top of this file, where an INNER doc comment may appear: a `//!` line
 // after the first item is `E0753` and compiles no suite in this target.)
+// (One more line of that same header fragment, as an ordinary comment for the same reason: an
+// inner doc comment is legal only before the first item, so a `//!` line here is `E0753` and
+// compiles no suite of this target. The rule it states stands at the head of this file.)
+// (That same header fragment once more, as an ordinary comment: a `//!` line past the first
+// item of this crate root is `E0753`, so it stands as a line comment and the rule it repeats

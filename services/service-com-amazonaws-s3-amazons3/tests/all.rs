@@ -421,6 +421,8 @@ mod sse_kms_key_identity;
 mod sse_kms_read_key_state;
 #[path = "all/sse_kms_relay_error_class.rs"]
 mod sse_kms_relay_error_class;
+#[path = "all/sse_kms_via_service_confinement.rs"]
+mod sse_kms_via_service_confinement;
 #[path = "all/sse_kms_write_key_resolution.rs"]
 mod sse_kms_write_key_resolution;
 #[path = "all/state_roundtrip.rs"]
