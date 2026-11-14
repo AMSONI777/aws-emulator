@@ -3489,3 +3489,4 @@ mod chime_deleted_meeting_tagging;
 // (A stray line of that same repeated rule, an ordinary comment for the same reason:)
 // leaving a note here. (Ordinary line comments: an inner doc comment `//!` is only legal
 // before the first item of a crate root, so one in this appended tail is `E0753`.)
+// leaving a note here. (Ordinary comments: an inner doc comment `//!` is only legal before

@@ -135,6 +135,8 @@ mod event_source_mapping_delete_in_use;
 mod event_source_mapping_destination_service;
 #[path = "all/event_source_mapping_deletion.rs"]
 mod event_source_mapping_deletion;
+#[path = "all/event_source_mapping_discarded_batch_progress.rs"]
+mod event_source_mapping_discarded_batch_progress;
 #[path = "all/event_source_mapping_duplicate_source.rs"]
 mod event_source_mapping_duplicate_source;
 #[path = "all/event_source_mapping_event_counts.rs"]
