@@ -155,6 +155,8 @@ mod kms_key_resolution;
 mod list_anomalies;
 #[path = "all/live_tail_sessions.rs"]
 mod live_tail_sessions;
+#[path = "all/live_tail_wire_delivery.rs"]
+mod live_tail_wire_delivery;
 #[path = "all/log_anomaly_detector_enumeration.rs"]
 mod log_anomaly_detector_enumeration;
 #[path = "all/log_anomaly_detector_removal.rs"]

@@ -9,11 +9,11 @@
 //! clause can state it; CloudWatch Logs answers each of those with a FIXED sentence of its
 //! own, naming the two parameters and nothing from the request.
 //!
-//! Three sentence forms cover every such pair this service checks, and each is stated here
+//! Six sentence forms cover every such pair this service checks, and each is stated here
 //! once so a handler states AWS's sentence rather than authoring a paraphrase of it:
 //!
 //! * [`mutually_exclusive`] — the two cannot be combined, as the recorded refusals for the
-//!   log-group name/ARN selector pair and for the live-tail stream-name/prefix pair are
+//!   log-group name/ARN selector pair and for the two `DescribeLogGroups` name filters are
 //!   worded;
 //! * [`must_contain_both`] — the two are meaningful only together, as the recorded
 //!   `DescribeMetricFilters` refusal for a half-named metric is worded, naming the request
@@ -25,12 +25,16 @@
 //!   pair rather than as a rule over a list;
 //! * [`disabled_past_one`] — one is DISABLED once the other is named more than once, as the
 //!   recorded `StartLiveTail` refusal for a stream selector across several log groups is
-//!   worded: two sentences, the first stating what the request did and the second the rule.
+//!   worded: two sentences, the first stating what the request did and the second the rule;
+//! * [`disabled_by`] — one is DISABLED because the other was provided at all, as the
+//!   recorded `StartLiveTail` refusal for its two stream selectors together is worded: the
+//!   same two sentences, over a pair where naming one takes the other away.
 //!
 //! Each form takes the parameters as the service NAMES them, which is a property of the
 //! pair: the selector pair is stated in the service's display words (`LogGroup name`), the
 //! metric pair in the capitalised member names AWS states them in, and the live-tail pair in
-//! the member spellings — so the names are the caller's choice and the sentence is not.
+//! the capitalised names the live-tail rules spell those members as (`LogStreamPrefixes` for
+//! `logStreamNamePrefixes`) — so the names are the caller's choice and the sentence is not.
 //! Nothing of the submitted value is interpolated into any of them.
 
 /// The sentence for two parameters that cannot be combined: `<first> and <second> are
@@ -72,10 +76,19 @@ pub fn disabled_past_one(disabled: &str, item: &str) -> String {
     )
 }
 
+/// The sentence pair for a parameter that is disabled by another the request also provided:
+/// `<provided> provided with <disabled>. <disabled> is disabled if <subject> is provided.` —
+/// two sentences, each ending in a period, naming the two parameters and nothing from the
+/// request. `subject` names the parameter that WAS provided as the rule's second sentence
+/// states it, which is the member in the rule's own prose rather than in its wire spelling.
+pub fn disabled_by(provided: &str, disabled: &str, subject: &str) -> String {
+    format!("{provided} provided with {disabled}. {disabled} is disabled if {subject} is provided.")
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
-        cannot_be_combined, disabled_past_one, either_required, must_contain_both,
+        cannot_be_combined, disabled_by, disabled_past_one, either_required, must_contain_both,
         mutually_exclusive,
     };
 
@@ -96,12 +109,6 @@ mod tests {
                 "LogGroup name pattern",
                 "LogGroup name prefix and LogGroup name pattern are mutually exclusive \
                  parameters.",
-            ),
-            // The recorded `StartLiveTail` refusal, stated in the member spellings.
-            (
-                "logStreamNames",
-                "logStreamNamePrefixes",
-                "logStreamNames and logStreamNamePrefixes are mutually exclusive parameters.",
             ),
         ];
         for (first, second, expected) in exclusive {
@@ -202,6 +209,32 @@ mod tests {
             assert_eq!(
                 actual, expected,
                 "case {first}/{second}: expected {expected:?}, got {actual:?}"
+            );
+        }
+
+        let disabled_by_another = [
+            // The recorded `StartLiveTail` refusal for both stream selectors at once.
+            (
+                "LogStreamNames",
+                "LogStreamPrefixes",
+                "log stream names",
+                "LogStreamNames provided with LogStreamPrefixes. LogStreamPrefixes is \
+                 disabled if log stream names is provided.",
+            ),
+            // The same form over another pair, to show the words that are the form's own.
+            (
+                "LogGroupArn",
+                "LogGroupName",
+                "log group ARN",
+                "LogGroupArn provided with LogGroupName. LogGroupName is disabled if log \
+                 group ARN is provided.",
+            ),
+        ];
+        for (provided, disabled, subject, expected) in disabled_by_another {
+            let actual = disabled_by(provided, disabled, subject);
+            assert_eq!(
+                actual, expected,
+                "case {provided}/{disabled}: expected {expected:?}, got {actual:?}"
             );
         }
     }

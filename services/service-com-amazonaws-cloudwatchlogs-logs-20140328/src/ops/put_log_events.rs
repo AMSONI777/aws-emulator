@@ -15,6 +15,9 @@
 //! service's own `AWS/Logs` metric data — and is evaluated against the Contributor
 //! Insights rules collecting from the log group
 //! (`service_com_amazonaws_cloudwatch_graniteserviceversion20100801::state::insight_rules`).
+//! Each stored event is also STREAMED to every open Live Tail session tailing its log group
+//! whose selection admits it ([`crate::state::live_tail`]), which is what makes a session
+//! carry the events ingested while it was open and only those.
 //! Each accepted batch also publishes what the log group took IN — the count of the stored
 //! events and their uncompressed bytes — as the service's own `AWS/Logs` metric data.
 //! This is the ONLY file to touch for this operation.
@@ -589,6 +592,19 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> PutLogEvents<Eng>
         // arrived. The deliveries themselves are made below, with no guard held.
         let deliveries = crate::state::subscription_delivery::deliveries(
             &store,
+            &input.log_group_name,
+            &input.log_stream_name,
+            &batch,
+        );
+
+        // An event this batch stores is also what an OPEN LIVE TAIL SESSION over this log
+        // group streams: `StartLiveTail` "returns a stream of log events that have been
+        // recently ingested in the log groups", so the batch is offered to the sessions
+        // tailing the group here — under the same guard it is stored through, so the
+        // sessions it reaches are the ones that were open when it was ingested — and each
+        // session buffers the events its own selection admits.
+        crate::state::live_tail::publish(
+            &mut store,
             &input.log_group_name,
             &input.log_stream_name,
             &batch,

@@ -15,8 +15,15 @@
 //!
 //! # What a session answers
 //!
-//! The model documents the stream's shape, and each part of it is served from the log
-//! groups the request names:
+//! A Live Tail session is a SUBSCRIPTION to what the tailed log groups ingest while it is
+//! open — "a stream of log events that have been recently ingested in the log groups" — so
+//! the session registers itself in the store ([`crate::state::live_tail`]) and every
+//! `PutLogEvents` into one of those groups offers its events to it. An event a group
+//! already held when the session opened was ingested before there was a session to publish
+//! it to, so it is not delivered.
+//!
+//! The model documents the stream's shape, and each part of it is served from that
+//! subscription:
 //!
 //! * "A single LiveTailSessionStart object is sent at the start of the session" — one
 //!   `sessionStart` event naming the session and echoing the selection it was started
@@ -24,31 +31,40 @@
 //! * "Every second, a LiveTailSessionUpdate object is sent. Each of these objects
 //!   contains an array of the actual log events [...] If no new log events were ingested
 //!   in the past second, the LiveTailSessionUpdate object will contain an empty array."
-//!   The session this emulator serves is one response rather than a connection held
-//!   open, so it carries ONE such update, over the events the selected log groups hold
-//!   that the session's selection admits — read out of the store, never synthesised —
-//!   and an empty array when the selection admits none.
+//!   One `sessionUpdate` per second of the session therefore, carrying the events ingested
+//!   in that second that the session's selection admits — published by the ingestion
+//!   itself, never synthesised — and an empty array for a second that ingested none.
 //! * "The array of log events contained in a LiveTailSessionUpdate can include as many
 //!   as 500 log events. If the number of log events matching the request exceeds 500 per
 //!   second, the log events are sampled down to 500 log events to be included in each
-//!   LiveTailSessionUpdate object" — [`MAX_EVENTS_PER_UPDATE`], with
-//!   `sessionMetadata.sampled` set exactly when the match exceeded it, as that member
+//!   LiveTailSessionUpdate object" — [`crate::state::live_tail::MAX_EVENTS_PER_UPDATE`],
+//!   with `sessionMetadata.sampled` set exactly when the match exceeded it, as that member
 //!   documents ("more than 500 log events matched the request for this update, and the
 //!   sessionResults includes a sample of 500 of those events").
 //!
-//! One update is bounded by [`MAX_UPDATE_BYTES`] as well, so a request this small cannot
-//! be answered with every byte the tailed groups hold; an update that left a matching
-//! event out for either ceiling reports itself sampled.
+//! # How long one session runs
+//!
+//! A session is answered as ONE response rather than as a connection whose frames the
+//! client takes one at a time, so the client consumes nothing until the session is over —
+//! which is the case the operation states a bound for: "If your client consumes the log
+//! events slower than the server produces them, CloudWatch Logs buffers up to 10
+//! LiveTailSessionUpdate events or 5000 log events, after which it starts dropping the
+//! oldest events." The response therefore carries exactly that buffer — up to
+//! [`crate::state::live_tail::MAX_BUFFERED_UPDATES`] updates and
+//! [`crate::state::live_tail::MAX_BUFFERED_EVENTS`] log events — and the session then ends
+//! by the stream closing, which is one of the two documented ends of a session ("You can
+//! end a session before it times out by closing the session stream").
 //!
 //! The two remaining members of the union, `SessionTimeoutException` and
-//! `SessionStreamingException`, are in-band events of a session held open — the first
-//! "when the session times out, after it has been kept open for three hours", the second
-//! "if an unknown error occurs on the server side" — so neither belongs to a session
-//! that is answered and closed in one response.
+//! `SessionStreamingException`, are the OTHER two ends: the first is sent "when the session
+//! times out, after it has been kept open for three hours" and the second "if an unknown
+//! error occurs on the server side", so a session that ends by its stream closing carries
+//! neither.
 //!
-//! Nothing here mutates the store: a session reports the log events a group has
-//! ingested, so a tail leaves the groups it tailed exactly as a later reader finds them,
-//! and the session itself is observable through no operation of this service.
+//! The store a session touches is its own registration: it buffers what the ingestion
+//! publishes to it and takes that registration away when it ends, so a tail leaves the
+//! groups it tailed exactly as a later reader finds them, and the session itself is
+//! observable through no operation of this service.
 //!
 //! ## Input
 //!
@@ -74,7 +90,7 @@
 //!   client reads the output shape itself out of
 //!   (`service_common::event_stream::INITIAL_RESPONSE_EVENT`, carrying no member, because
 //!   the stream is this output's only one), then the `sessionStart` event, then one
-//!   `sessionUpdate`.
+//!   `sessionUpdate` per second of the session.
 //!
 //! ## Errors
 //!
@@ -92,6 +108,8 @@ use super::types::*;
 use aws_smithy_runtime_api::http::{Request, Response};
 use aws_smithy_schema_server::constraints::{validate, Violation, ViolationKind};
 use aws_smithy_schema_server::DeserializableStruct;
+// The bounds on a session's updates and its buffer are stated where the sessions live.
+use crate::state::live_tail::{MAX_BUFFERED_EVENTS, MAX_BUFFERED_UPDATES, UPDATE_INTERVAL};
 use service_common::event_stream::{
     error_response, event_stream_only_response, frame_empty_initial_response, frame_event,
 };
@@ -119,32 +137,19 @@ const SESSION_START_EVENT: &str = "sessionStart";
 /// See [`SESSION_START_EVENT`].
 const SESSION_UPDATE_EVENT: &str = "sessionUpdate";
 
-/// The most log events one `sessionUpdate` carries: "The array of log events contained
-/// in a LiveTailSessionUpdate can include as many as 500 log events. If the number of
-/// log events matching the request exceeds 500 per second, the log events are sampled
-/// down to 500 log events to be included in each LiveTailSessionUpdate object"
-/// (`StartLiveTail`). Past it the update carries a sample of this many and reports
-/// itself sampled.
-const MAX_EVENTS_PER_UPDATE: usize = 500;
-
-/// The most bytes of log-event messages one `sessionUpdate` carries.
-///
-/// An EMULATOR bound rather than an AWS one, on the size of the answer a session
-/// produces: one event's message may be a megabyte ([`crate::state::MAX_LOG_EVENT_BYTES`]),
-/// so the event ceiling above alone would let a request this small be answered with
-/// hundreds of megabytes. Accounted from the messages themselves, as this service's other
-/// bounded read of stored events accounts its page, and an update that leaves a matching
-/// event out for either ceiling reports itself sampled. The newest event is always
-/// carried, so a single large event is delivered rather than dropped.
-const MAX_UPDATE_BYTES: usize = 1_048_576;
-
 /// The refusal for a request that names both log-stream selectors: "If you specify this
 /// field, you can't also specify the logStreamNamePrefixes field"
-/// (`StartLiveTailRequest$logStreamNames`). Worded like the service's other
-/// exclusive-pair sentences ([`crate::state::LOG_GROUP_SELECTORS_EXCLUSIVE`]), naming the
-/// two members the request spells.
+/// (`StartLiveTailRequest$logStreamNames`). The service states it as the PREFIX selector
+/// being disabled by the names the request also gave
+/// ([`crate::state::parameter_pairs::disabled_by`]) — two sentences, naming the two members
+/// in the capitalised spellings those live-tail rules name them in and, in the second
+/// sentence, the names it was given in the rule's own prose.
 static STREAM_SELECTORS_EXCLUSIVE: std::sync::LazyLock<String> = std::sync::LazyLock::new(|| {
-    crate::state::parameter_pairs::mutually_exclusive("logStreamNames", "logStreamNamePrefixes")
+    crate::state::parameter_pairs::disabled_by(
+        LOG_STREAM_NAMES_PARAMETER,
+        LOG_STREAM_NAME_PREFIXES_PARAMETER,
+        LOG_STREAM_NAMES_SUBJECT,
+    )
 });
 
 /// The refusal for a request that selects streams while tailing more than one log group:
@@ -167,6 +172,11 @@ const LOG_STREAM_NAMES_PARAMETER: &str = "LogStreamNames";
 /// about the stream-prefix selector under the name `LogStreamPrefixes` (recorded), which is
 /// the member's name in the words of the rule rather than its wire spelling.
 const LOG_STREAM_NAME_PREFIXES_PARAMETER: &str = "LogStreamPrefixes";
+/// `logStreamNames` as the SECOND sentence of the exclusive-pair refusal names it: that
+/// sentence states the condition in prose ("is disabled if log stream names is provided"),
+/// so the member is named in the rule's own words there rather than in either spelling
+/// above.
+const LOG_STREAM_NAMES_SUBJECT: &str = "log stream names";
 /// One item of `logGroupIdentifiers` as the refusal above names it: the rule is about how
 /// MANY of them the request named, so the sentence names the member in the singular.
 const LOG_GROUP_IDENTIFIER_PARAMETER: &str = "LogGroupIdentifier";
@@ -175,16 +185,6 @@ const LOG_GROUP_IDENTIFIER_PARAMETER: &str = "LogGroupIdentifier";
 /// not hold. Fixed text for the class: it states the resource the session could not be
 /// started over and carries nothing of the request.
 const LOG_GROUP_MISSING_MESSAGE: &str = "Provided LogGroup doesn't exist.";
-
-/// One log event a session delivers, with the group identifier the request named its log
-/// group by and the stream it was ingested into — the two positions the modelled
-/// `LiveTailSessionLogEvent` reports beside the event itself.
-struct Delivered<'store> {
-    at: crate::state::EventKey,
-    log_group_identifier: &'store str,
-    log_stream_name: &'store str,
-    event: &'store crate::state::StoredEvent,
-}
 
 /// The `StartLiveTail` operation.
 ///
@@ -205,13 +205,83 @@ impl<Eng> StartLiveTail<Eng> {
 }
 
 impl<Eng: Send + Sync + 'static> StartLiveTail<Eng> {
-    /// The whole request: resolve the log groups, select their events, and frame the
-    /// session's `sessionStart` and `sessionUpdate` events.
-    fn respond(
+    /// The whole request: open the session, then frame its `sessionStart` and the
+    /// `sessionUpdate` of each second the session runs for.
+    ///
+    /// The session is registered by [`StartLiveTail::open`] before the first second is
+    /// waited out, so the events a `PutLogEvents` stores from then on are published to it;
+    /// each second's update is what that publication left in the session's buffer.
+    async fn respond(
         &self,
         protocol: &dyn ServerHttpProtocol,
         req: &Request,
     ) -> Result<Response, StartLiveTailErrorModeled> {
+        let (session, session_start) = self.open(protocol, req)?;
+
+        // The body opens with the frame a client reads the OUTPUT shape out of, before any
+        // frame of the session: `StartLiveTailResponse`'s only member is the stream itself,
+        // so that frame carries no member.
+        let mut frames = frame_empty_initial_response(protocol).map_err(|error| {
+            internal(format!("the initial response could not be framed: {error}"))
+        })?;
+        frames.extend(
+            frame_event(
+                protocol,
+                SESSION_START_EVENT,
+                false,
+                &session_start,
+                &LiveTailSessionStart::SCHEMA,
+            )
+            .map_err(|error| {
+                internal(format!("the sessionStart event could not be framed: {error}"))
+            })?,
+        );
+
+        // "Every second, a LiveTailSessionUpdate object is sent", for as many of them as
+        // the session's own buffer holds for a client that has consumed none of them yet
+        // (see "How long one session runs"). No state is held while the second passes: the
+        // update is taken from the session's buffer, which the ingestion fills.
+        let mut delivered = 0usize;
+        for _ in 0..MAX_BUFFERED_UPDATES {
+            ::tokio::time::sleep(UPDATE_INTERVAL).await;
+            let update = session.take_update();
+            delivered = delivered.saturating_add(update.events.len());
+            frames.extend(
+                frame_event(
+                    protocol,
+                    SESSION_UPDATE_EVENT,
+                    false,
+                    &session_update(&update),
+                    &LiveTailSessionUpdate::SCHEMA,
+                )
+                .map_err(|error| {
+                    internal(format!("the sessionUpdate event could not be framed: {error}"))
+                })?,
+            );
+            if delivered >= MAX_BUFFERED_EVENTS {
+                break;
+            }
+        }
+        Ok(event_stream_only_response(frames))
+    }
+
+    /// Read and admit the request, register the session it starts, and answer the
+    /// `sessionStart` that names it.
+    ///
+    /// SYNCHRONOUS on purpose: every read and write of the log store the session's start
+    /// needs happens here, so the store's guard is gone before the session waits for its
+    /// first update.
+    fn open(
+        &self,
+        protocol: &dyn ServerHttpProtocol,
+        req: &Request,
+    ) -> Result<
+        (
+            crate::state::live_tail::SessionHandle,
+            LiveTailSessionStart,
+        ),
+        StartLiveTailErrorModeled,
+    > {
         let input = self.read_input(protocol, req)?;
 
         // "If you specify this field, you can't also specify the logStreamNamePrefixes
@@ -244,71 +314,29 @@ impl<Eng: Send + Sync + 'static> StartLiveTail<Eng> {
                 message: Some("the log store is unavailable".to_string()),
             })
         })?;
-        let store = state.lock();
+        let mut store = state.lock();
 
         // A session is started over the log groups it names, so every identifier has to
         // resolve before any of them is tailed: a session that could never deliver one
-        // group's events is refused rather than silently narrowed to the others.
-        let mut groups = Vec::with_capacity(input.log_group_identifiers.len());
+        // group's events is refused rather than silently narrowed to the others. What the
+        // session keeps is the group's NAME — which is what an ingestion names its group by
+        // — mapped to the identifier the request spelled, because that is the spelling each
+        // delivered event reports.
+        let mut groups: std::collections::BTreeMap<String, String> =
+            std::collections::BTreeMap::new();
         for identifier in &input.log_group_identifiers {
             let name = crate::state::log_group_name_from_identifier(identifier);
-            let Some(group) = store.log_groups.get(name) else {
+            if !store.log_groups.contains_key(name) {
                 return Err(StartLiveTailErrorModeled::ResourceNotFoundException(
                     ResourceNotFoundException {
                         message: Some(LOG_GROUP_MISSING_MESSAGE.to_string()),
                     },
                 ));
-            };
-            groups.push((identifier.as_str(), group));
-        }
-
-        // The events the session's selection admits, in the store's own event order (the
-        // timestamp, then the ingestion sequence), so events of different streams and of
-        // different groups interleave in one chronological run.
-        let mut matched: Vec<Delivered<'_>> = Vec::new();
-        for (log_group_identifier, group) in &groups {
-            for (log_stream_name, stream) in &group.streams {
-                if !covers_stream(
-                    log_stream_name,
-                    input.log_stream_names.as_deref(),
-                    input.log_stream_name_prefixes.as_deref(),
-                ) {
-                    continue;
-                }
-                for event in &stream.events {
-                    if pattern.match_message(&event.message).is_none() {
-                        continue;
-                    }
-                    matched.push(Delivered {
-                        at: event.key(),
-                        log_group_identifier,
-                        log_stream_name,
-                        event,
-                    });
-                }
             }
+            groups
+                .entry(name.to_string())
+                .or_insert_with(|| identifier.clone());
         }
-        matched.sort_by_key(|delivered| delivered.at);
-
-        // Past either ceiling the update carries a sample — the most recent events, which
-        // is what a tail of a stream is watching — and says so through `sampled`. The
-        // newest event is kept whatever its size, so one large event is delivered rather
-        // than dropped.
-        let mut kept = 0usize;
-        let mut bytes = 0usize;
-        for candidate in matched.iter().rev() {
-            if kept >= MAX_EVENTS_PER_UPDATE {
-                break;
-            }
-            let cost = candidate.event.message.len();
-            if kept > 0 && bytes.saturating_add(cost) > MAX_UPDATE_BYTES {
-                break;
-            }
-            bytes = bytes.saturating_add(cost);
-            kept += 1;
-        }
-        let sampled = kept < matched.len();
-        let delivered = &matched[matched.len().saturating_sub(kept)..];
 
         let session_start = LiveTailSessionStart {
             // Both ids are minted per session: nothing in the request carries either,
@@ -320,53 +348,22 @@ impl<Eng: Send + Sync + 'static> StartLiveTail<Eng> {
             log_stream_name_prefixes: input.log_stream_name_prefixes.clone(),
             log_event_filter_pattern: input.log_event_filter_pattern.clone(),
         };
-        let session_update = LiveTailSessionUpdate {
-            session_metadata: Some(LiveTailSessionMetadata { sampled }),
-            session_results: Some(
-                delivered
-                    .iter()
-                    .map(|delivered| LiveTailSessionLogEvent {
-                        log_stream_name: Some(delivered.log_stream_name.to_string()),
-                        log_group_identifier: Some(delivered.log_group_identifier.to_string()),
-                        message: Some(delivered.event.message.clone()),
-                        timestamp: Some(delivered.event.timestamp),
-                        ingestion_time: Some(delivered.event.ingestion_time),
-                    })
-                    .collect(),
+        // The session subscribes from HERE: it is registered under the guard the groups
+        // were resolved through, so every event ingested after this point is offered to it
+        // and every event ingested before it was never published to it at all.
+        let session = crate::state::live_tail::SessionHandle::open(
+            &state,
+            &mut store,
+            session_start.session_id.as_deref().unwrap_or_default(),
+            crate::state::live_tail::SessionRecord::new(
+                groups,
+                input.log_stream_names.clone(),
+                input.log_stream_name_prefixes.clone(),
+                pattern,
             ),
-        };
+        );
         drop(store);
-
-        // The body opens with the frame a client reads the OUTPUT shape out of, before any
-        // frame of the session: `StartLiveTailResponse`'s only member is the stream itself,
-        // so that frame carries no member.
-        let mut frames = frame_empty_initial_response(protocol)
-            .map_err(|error| internal(format!("the initial response could not be framed: {error}")))?;
-        frames.extend(
-            frame_event(
-                protocol,
-                SESSION_START_EVENT,
-                false,
-                &session_start,
-                &LiveTailSessionStart::SCHEMA,
-            )
-            .map_err(|error| {
-                internal(format!("the sessionStart event could not be framed: {error}"))
-            })?,
-        );
-        frames.extend(
-            frame_event(
-                protocol,
-                SESSION_UPDATE_EVENT,
-                false,
-                &session_update,
-                &LiveTailSessionUpdate::SCHEMA,
-            )
-            .map_err(|error| {
-                internal(format!("the sessionUpdate event could not be framed: {error}"))
-            })?,
-        );
-        Ok(event_stream_only_response(frames))
+        Ok((session, session_start))
     }
 
     /// Read the request into the modelled input shape and check it against the model.
@@ -396,24 +393,28 @@ impl<Eng: Send + Sync + 'static> StartLiveTail<Eng> {
     }
 }
 
-/// Whether one of the group's streams is in the session's selection: the named streams
-/// when the request named any, the streams whose name starts with one of the prefixes
-/// when it gave prefixes, and every stream of the group when it gave neither. The two
-/// selectors are refused together before this is reached.
-fn covers_stream(
-    log_stream_name: &str,
-    names: Option<&[String]>,
-    prefixes: Option<&[String]>,
-) -> bool {
-    if let Some(names) = names {
-        return names.iter().any(|name| name == log_stream_name);
+/// One `sessionUpdate` event: the log events the session buffered for the second that just
+/// ended, each reporting the stream it was ingested into and the identifier its group was
+/// named by, and the metadata saying whether a matching event was left out.
+fn session_update(update: &crate::state::live_tail::Update) -> LiveTailSessionUpdate {
+    LiveTailSessionUpdate {
+        session_metadata: Some(LiveTailSessionMetadata {
+            sampled: update.sampled,
+        }),
+        session_results: Some(
+            update
+                .events
+                .iter()
+                .map(|delivered| LiveTailSessionLogEvent {
+                    log_stream_name: Some(delivered.log_stream_name.clone()),
+                    log_group_identifier: Some(delivered.log_group_identifier.clone()),
+                    message: Some(delivered.message.clone()),
+                    timestamp: Some(delivered.timestamp),
+                    ingestion_time: Some(delivered.ingestion_time),
+                })
+                .collect(),
+        ),
     }
-    if let Some(prefixes) = prefixes {
-        return prefixes
-            .iter()
-            .any(|prefix| log_stream_name.starts_with(prefix.as_str()));
-    }
-    true
 }
 
 /// This service's wording for the violations a request failed, falling back to the
@@ -474,7 +475,7 @@ impl<Eng: Send + Sync + 'static> service_common::event_stream::EventStreamOperat
     ) -> BoxFuture<'r, Response> {
         Box::pin(async move {
             let protocol = svc.definition().protocol();
-            let response = match self.respond(protocol, req) {
+            let response = match self.respond(protocol, req).await {
                 Ok(response) => response,
                 Err(error) => error_response(protocol, &error),
             };

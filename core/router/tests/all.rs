@@ -3892,3 +3892,10 @@ mod cloudformation_provisions_redshift_snapshot_copy_grants;
 // (An appended fragment of the module doc: it stands as an ordinary comment because an
 // inner doc comment is only legal before the first item.) This file and every service
 // crate's `tests/all.rs` are checked by `all/all_rs_declares_each_suite_once.rs`.
+//! ONCE: this is one crate root, so a second `mod` for the same name is `E0428` and a
+//! note written with `//!` anywhere but this header is `E0753` — either fails every
+//! suite in this target. `all/all_rs_declares_each_suite_once.rs` checks the
+//! declarations, for this file and for every service crate's `tests/all.rs`.
+// header that a landing appended here: past the first item a `//!` line is `E0753` and
+// compiles no suite in this target, so it stands as an ordinary comment.)
+// an ordinary comment for the reason the lines around it record.)

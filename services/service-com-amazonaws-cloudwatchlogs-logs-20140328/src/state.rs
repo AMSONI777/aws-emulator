@@ -181,6 +181,10 @@ pub mod metric_filters;
 /// filters.
 pub mod subscription_delivery;
 
+/// The OPEN Live Tail sessions, and the publication of an ingested log event to the ones
+/// tailing its log group.
+pub mod live_tail;
+
 /// Whether CloudWatch Logs can assume the role a subscription delivery is configured under,
 /// which is what a put that configures one validates.
 pub mod delivery_role;
@@ -465,6 +469,15 @@ pub struct ComAmazonawsCloudwatchlogsLogs20140328State {
     /// mints, so every association gets an identifier no earlier one used — including after
     /// the association holding an identifier has been disassociated.
     pub next_s3_table_integration_source_seq: u64,
+    /// Every OPEN Live Tail session, keyed by the `sessionId` minted for it.
+    ///
+    /// A session is a SUBSCRIBER rather than a resource: `StartLiveTail` "returns a stream
+    /// of log events that have been recently ingested in the log groups", so an ingestion
+    /// publishes what it stores to the sessions tailing that log group
+    /// ([`live_tail::publish`]) and each session holds what its own selection admits until
+    /// its next update takes it. An entry lives exactly as long as the request serving the
+    /// session ([`live_tail::SessionHandle`]), and no operation of this service reports one.
+    pub live_tail_sessions: BTreeMap<String, live_tail::SessionRecord>,
 }
 
 impl ComAmazonawsCloudwatchlogsLogs20140328State {
