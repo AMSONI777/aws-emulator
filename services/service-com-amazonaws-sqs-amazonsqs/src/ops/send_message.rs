@@ -290,6 +290,14 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         )
         .map_err(kms_refusal)?;
 
+        // Whether this send is a client's own request or the NOTIFICATION FAN-OUT of a
+        // published message, which Amazon SNS hands the queue as its own service principal on
+        // behalf of the topic: the two are judged by different bounds (see the size rule
+        // below). Read before this service's store is locked, from the credential the call
+        // presents — the one thing about a request a client cannot choose for itself.
+        let fanned_out_by_the_notification_service =
+            sqs::service_delivery::is_a_notification_fan_out(&*self.engine, ctx);
+
         let mut state = store.lock();
 
         let now = SystemTime::now();
@@ -457,10 +465,20 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         // stored. The system attributes are NOT part of it — "the size of a message system
         // attribute doesn't count towards the total size of a message" — but they are part
         // of what the store retains, so the store's own budget below counts them.
+        //
+        // The attribute bounds what this API accepts from a CLIENT: it is "the limit of how
+        // many bytes a message can contain before Amazon SQS rejects it"
+        // (`SetQueueAttributes$Attributes`), and this is where the request is rejected. The
+        // NOTIFICATION FAN-OUT of a published message is not such a request: Amazon SNS
+        // accepted that payload under the TOPIC's own maximum and hands the queue the result,
+        // so this bound does not bound it and the notification arrives whole
+        // ([`sqs::service_delivery`]).
         let maximum = queue.integer(sqs::MAXIMUM_MESSAGE_SIZE);
         let attribute_bytes = sqs::message_attribute_bytes(&message_attributes);
         let size = input.message_body.len().saturating_add(attribute_bytes);
-        if i64::try_from(size).unwrap_or(i64::MAX) > maximum {
+        if i64::try_from(size).unwrap_or(i64::MAX) > maximum
+            && !fanned_out_by_the_notification_service
+        {
             return Err(Scaffolded::invalid_parameter_value(sqs::invalid_parameters_message(
                 &sqs::message_too_long_reason(maximum),
             )));

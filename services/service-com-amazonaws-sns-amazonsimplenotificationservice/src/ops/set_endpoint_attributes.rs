@@ -182,6 +182,10 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
     /// application targets, which is known only once that endpoint resolves, so that rule
     /// is judged after the lookup: an endpoint that is not there is reported as missing
     /// however the map beside it is spelled.
+    ///
+    /// A write is a lifecycle event of the application the endpoint belongs to: an
+    /// application carrying `EventEndpointUpdated` has one notification published to the
+    /// topic that attribute names ([`crate::ops::publish::application_event`]).
     async fn handle(
         &self,
         input: Self::Input,
@@ -195,13 +199,6 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
             )
             .into()
         };
-        let missing = || -> Self::Error {
-            SetEndpointAttributesErrorModeled::NotFoundException(NotFoundException {
-                message: Some(state::ENDPOINT_DOES_NOT_EXIST.to_string()),
-            })
-            .into()
-        };
-
         let region = state::request_region(ctx.parts());
         if let Some(message) =
             state::regional_arn_refusal("EndpointArn", &input.endpoint_arn, &region)
@@ -226,72 +223,116 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
             )
             .into());
         };
-        let mut store = store.lock();
-
-        // The map the record WOULD hold, and the token it would carry: what it holds now,
-        // with the request's entries applied over it. Every rule below is judged on THAT
-        // pair, so a write past the per-record ceiling is never stored and a half-applied
-        // write cannot be observed.
-        let Some(held) = store.platform_endpoints.get(&input.endpoint_arn) else {
-            return Err(missing());
+        // The store's lock is held for the WRITE alone, and released before the lifecycle
+        // event is published: that publish fans a notification out to the event topic's
+        // subscribers, which are in-process calls into other services and must not run under
+        // this store's lock.
+        let application_arn = {
+            let mut store = store.lock();
+            write_endpoint_attributes(&mut store, &input)?
         };
-        let application_arn = held.platform_application_arn.clone();
-        let mut would_hold = held.attributes.clone();
-        let mut token = held.token.clone();
 
-        // Which names an endpoint takes depends on the push service its application
-        // targets, so the catalog comes off that application's record: the same catalog
-        // the registration admits. An endpoint record always names an application this
-        // store holds — the registration resolves it, and removing an application removes
-        // its endpoints — so a miss here is the store disagreeing with itself rather than
-        // anything the request did, which is what the modelled server error is for.
-        let Some(platform) = store
-            .platform_applications
-            .get(&application_arn)
-            .map(|application| application.platform.clone())
-        else {
-            return Err(SetEndpointAttributesErrorModeled::InternalErrorException(
-                InternalErrorException {
-                    message: Some("the SNS store is unavailable".to_string()),
-                },
-            )
-            .into());
-        };
-        if let Some(unknown) = state::unknown_attribute_name(&input.attributes, |name| {
-            state::is_endpoint_attribute(&platform, name)
-        }) {
-            return Err(refuse(state::mobile_push_unknown_attribute_refusal(
-                state::ATTRIBUTES_MEMBER,
-                unknown,
-            )));
-        }
-
-        for (name, value) in &input.attributes {
-            if name == state::ENDPOINT_TOKEN_ATTRIBUTE {
-                token = value.clone();
-            } else {
-                would_hold.insert(name.clone(), value.clone());
-            }
-        }
-        // Measured on what the endpoint would REPORT, the token included, since a caller
-        // supplies that too: no sequence of writes grows one record past the ceiling.
-        let mut would_report = would_hold.clone();
-        would_report.insert(state::ENDPOINT_TOKEN_ATTRIBUTE.to_string(), token.clone());
-        if let Some(message) = state::attribute_bytes_refusal(state::ENDPOINT_RECORD, &would_report)
-        {
-            return Err(refuse(message));
-        }
-
-        // The write itself. The record was resolved above under this same lock, which is
-        // held across both lookups, so this one cannot miss where that one hit: the arm
-        // below is what the borrow checker needs to re-reach the record mutably, not a
-        // second lookup a request can fail.
-        let Some(endpoint) = store.platform_endpoints.get_mut(&input.endpoint_arn) else {
-            return Err(missing());
-        };
-        endpoint.attributes = would_hold;
-        endpoint.token = token;
+        // "EventEndpointUpdated – Topic ARN to which EndpointUpdate event notifications are
+        // sent" (`SetPlatformApplicationAttributesInput$Attributes`): the same rule the
+        // registration's own event follows, for the lifecycle this call performs.
+        crate::ops::publish::application_event::publish(
+            &*self.engine,
+            ctx,
+            crate::ops::publish::application_event::EndpointEvent::Updated,
+            &application_arn,
+            &input.endpoint_arn,
+        )
+        .await;
 
         Ok(SetEndpointAttributesOutput)
     }
+}
+
+/// Apply the request's attribute map to the endpoint it names, and report the ARN of the
+/// platform application that endpoint belongs to — which is the application whose own
+/// `EventEndpointUpdated` topic the lifecycle event is published to.
+///
+/// The whole store-touching half of the operation, so the one place that holds the store's
+/// lock is the caller's block — the shape [`crate::ops::publish`] uses for the same reason:
+/// what follows the write is an in-process call into another service.
+fn write_endpoint_attributes(
+    store: &mut state::ComAmazonawsSnsAmazonsimplenotificationserviceState,
+    input: &SetEndpointAttributesInput,
+) -> Result<String, SetEndpointAttributesError> {
+    let refuse = |message: String| -> SetEndpointAttributesError {
+        SetEndpointAttributesErrorModeled::InvalidParameterException(InvalidParameterException {
+            message: Some(message),
+        })
+        .into()
+    };
+    let missing = || -> SetEndpointAttributesError {
+        SetEndpointAttributesErrorModeled::NotFoundException(NotFoundException {
+            message: Some(state::ENDPOINT_DOES_NOT_EXIST.to_string()),
+        })
+        .into()
+    };
+
+    // The map the record WOULD hold, and the token it would carry: what it holds now,
+    // with the request's entries applied over it. Every rule below is judged on THAT
+    // pair, so a write past the per-record ceiling is never stored and a half-applied
+    // write cannot be observed.
+    let Some(held) = store.platform_endpoints.get(&input.endpoint_arn) else {
+        return Err(missing());
+    };
+    let application_arn = held.platform_application_arn.clone();
+    let mut would_hold = held.attributes.clone();
+    let mut token = held.token.clone();
+
+    // Which names an endpoint takes depends on the push service its application
+    // targets, so the catalog comes off that application's record: the same catalog
+    // the registration admits. An endpoint record always names an application this
+    // store holds — the registration resolves it, and removing an application removes
+    // its endpoints — so a miss here is the store disagreeing with itself rather than
+    // anything the request did, which is what the modelled server error is for.
+    let Some(platform) = store
+        .platform_applications
+        .get(&application_arn)
+        .map(|application| application.platform.clone())
+    else {
+        return Err(SetEndpointAttributesErrorModeled::InternalErrorException(
+            InternalErrorException {
+                message: Some("the SNS store is unavailable".to_string()),
+            },
+        )
+        .into());
+    };
+    if let Some(unknown) = state::unknown_attribute_name(&input.attributes, |name| {
+        state::is_endpoint_attribute(&platform, name)
+    }) {
+        return Err(refuse(state::mobile_push_unknown_attribute_refusal(
+            state::ATTRIBUTES_MEMBER,
+            unknown,
+        )));
+    }
+
+    for (name, value) in &input.attributes {
+        if name == state::ENDPOINT_TOKEN_ATTRIBUTE {
+            token = value.clone();
+        } else {
+            would_hold.insert(name.clone(), value.clone());
+        }
+    }
+    // Measured on what the endpoint would REPORT, the token included, since a caller
+    // supplies that too: no sequence of writes grows one record past the ceiling.
+    let mut would_report = would_hold.clone();
+    would_report.insert(state::ENDPOINT_TOKEN_ATTRIBUTE.to_string(), token.clone());
+    if let Some(message) = state::attribute_bytes_refusal(state::ENDPOINT_RECORD, &would_report) {
+        return Err(refuse(message));
+    }
+
+    // The write itself. The record was resolved above under this same lock, which is
+    // held across both lookups, so this one cannot miss where that one hit: the arm
+    // below is what the borrow checker needs to re-reach the record mutably, not a
+    // second lookup a request can fail.
+    let Some(endpoint) = store.platform_endpoints.get_mut(&input.endpoint_arn) else {
+        return Err(missing());
+    };
+    endpoint.attributes = would_hold;
+    endpoint.token = token;
+    Ok(application_arn)
 }

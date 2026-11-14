@@ -170,6 +170,12 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
     /// operation's `InvalidParameterException` (HTTP 400). Existence of the application
     /// and acceptability of the request's own values are therefore distinct refusal
     /// classes, and neither is ever answered as the other.
+    ///
+    /// A registration that MINTS an endpoint is also a lifecycle event of the application it
+    /// belongs to: an application carrying `EventEndpointCreated` has one notification
+    /// published to the topic that attribute names, naming the endpoint this call returned
+    /// ([`crate::ops::publish::application_event`]). The idempotent answer creates no
+    /// endpoint, so it publishes nothing.
     async fn handle(
         &self,
         input: Self::Input,
@@ -208,87 +214,142 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
             )
             .into());
         };
-        let mut store = store.lock();
-
-        // The application this device registers against: a miss here is the lookup
-        // failure, never a bad argument. The platform and name come off the RECORD, so
-        // the endpoint's ARN sits under the application that minted it.
-        let Some(application) = store
-            .platform_applications
-            .get(&input.platform_application_arn)
-        else {
-            return Err(CreatePlatformEndpointErrorModeled::NotFoundException(
-                NotFoundException {
-                    message: Some(state::PLATFORM_APPLICATION_DOES_NOT_EXIST.to_string()),
-                },
-            )
-            .into());
+        // The store's lock is held for the registration ALONE, and released before the event
+        // the application configures a topic for is published: that publish fans the
+        // notification out to the topic's subscribers, which are in-process calls into other
+        // services and must not run under this store's lock.
+        let application_arn = input.platform_application_arn.clone();
+        let registered = {
+            let mut store = store.lock();
+            register_endpoint(&mut store, input, &region)?
         };
-        let platform = application.platform.clone();
-        let application_name = application.name.clone();
 
-        // The attributes this registration would leave the endpoint holding: the map the
-        // request carried, plus the user data its own member carries, which SNS reports
-        // as that same attribute.
-        let mut attributes = input.attributes.unwrap_or_default();
-        if let Some(unknown) = state::unknown_attribute_name(&attributes, |name| {
-            state::is_endpoint_attribute(&platform, name)
-        }) {
-            let message =
-                state::mobile_push_unknown_attribute_refusal(state::ATTRIBUTES_MEMBER, unknown);
-            return Err(refuse(message));
+        // "EventEndpointCreated – Topic ARN to which EndpointCreated event notifications are
+        // sent" (`SetPlatformApplicationAttributesInput$Attributes`): an application that
+        // names such a topic has this registration published to it, naming the endpoint this
+        // call minted. The idempotent answer minted none, so it publishes nothing.
+        if registered.minted {
+            crate::ops::publish::application_event::publish(
+                &*self.engine,
+                ctx,
+                crate::ops::publish::application_event::EndpointEvent::Created,
+                &application_arn,
+                &registered.arn,
+            )
+            .await;
         }
-        if let Some(data) = input.custom_user_data {
-            attributes.insert(
-                state::ENDPOINT_CUSTOM_USER_DATA_ATTRIBUTE.to_string(),
-                data,
-            );
-        }
-        // Every report of an endpoint takes the device token off the record's own field,
-        // so a copy of it inside the attribute map would be a second source for one
-        // value: it is absorbed here rather than stored beside the field.
-        attributes.remove(state::ENDPOINT_TOKEN_ATTRIBUTE);
-        if let Some(message) = state::attribute_bytes_refusal(state::ENDPOINT_RECORD, &attributes) {
-            return Err(refuse(message));
-        }
-
-        // The idempotency clause: one device token is one endpoint of one application.
-        if let Some(held) = store
-            .endpoints_of_application(&input.platform_application_arn)
-            .into_iter()
-            .find(|endpoint| endpoint.token == input.token)
-        {
-            if held.attributes == attributes {
-                return Ok(CreatePlatformEndpointOutput {
-                    endpoint_arn: Some(held.arn.clone()),
-                });
-            }
-            let message = state::endpoint_token_conflict_refusal(&held.arn);
-            return Err(refuse(message));
-        }
-
-        if store.platform_endpoints.len() >= state::MAX_RECORDS_PER_STORE {
-            return Err(refuse(state::limit_exceeded_message("platform endpoints")));
-        }
-
-        // The endpoint id is minted by the store, not derived from the device token: two
-        // devices of one application get two ids, and nothing about a token is readable
-        // off the ARN that carries it.
-        let endpoint_id = store.next_unique_id();
-        let arn = state::platform_endpoint_arn(&region, &platform, &application_name, &endpoint_id);
-        store.platform_endpoints.insert(
-            arn.clone(),
-            PlatformEndpointRecord {
-                arn: arn.clone(),
-                platform_application_arn: input.platform_application_arn,
-                token: input.token,
-                attributes,
-                created_at: ::std::time::SystemTime::now(),
-            },
-        );
 
         Ok(CreatePlatformEndpointOutput {
-            endpoint_arn: Some(arn),
+            endpoint_arn: Some(registered.arn),
         })
     }
+}
+
+/// The endpoint a registration resolved to: its ARN, and whether THIS call minted it.
+struct Registered {
+    /// The endpoint's ARN, as [`state::platform_endpoint_arn`] spells it.
+    arn: String,
+    /// `false` for the idempotent answer, which returned an endpoint the application already
+    /// held and changed nothing about it.
+    minted: bool,
+}
+
+/// Register the request's device token as an endpoint of the application it names, and report
+/// the endpoint it resolved to.
+///
+/// The whole store-touching half of the operation, so the one place that holds the store's
+/// lock is the caller's block — the shape [`crate::ops::publish`] uses for the same reason:
+/// what follows the write is an in-process call into another service.
+fn register_endpoint(
+    store: &mut state::ComAmazonawsSnsAmazonsimplenotificationserviceState,
+    input: CreatePlatformEndpointInput,
+    region: &str,
+) -> Result<Registered, CreatePlatformEndpointError> {
+    let refuse = |message: String| -> CreatePlatformEndpointError {
+        CreatePlatformEndpointErrorModeled::InvalidParameterException(InvalidParameterException {
+            message: Some(message),
+        })
+        .into()
+    };
+
+    // The application this device registers against: a miss here is the lookup
+    // failure, never a bad argument. The platform and name come off the RECORD, so
+    // the endpoint's ARN sits under the application that minted it.
+    let Some(application) = store
+        .platform_applications
+        .get(&input.platform_application_arn)
+    else {
+        return Err(CreatePlatformEndpointErrorModeled::NotFoundException(
+            NotFoundException {
+                message: Some(state::PLATFORM_APPLICATION_DOES_NOT_EXIST.to_string()),
+            },
+        )
+        .into());
+    };
+    let platform = application.platform.clone();
+    let application_name = application.name.clone();
+
+    // The attributes this registration would leave the endpoint holding: the map the
+    // request carried, plus the user data its own member carries, which SNS reports
+    // as that same attribute.
+    let mut attributes = input.attributes.unwrap_or_default();
+    if let Some(unknown) = state::unknown_attribute_name(&attributes, |name| {
+        state::is_endpoint_attribute(&platform, name)
+    }) {
+        let message =
+            state::mobile_push_unknown_attribute_refusal(state::ATTRIBUTES_MEMBER, unknown);
+        return Err(refuse(message));
+    }
+    if let Some(data) = input.custom_user_data {
+        attributes.insert(
+            state::ENDPOINT_CUSTOM_USER_DATA_ATTRIBUTE.to_string(),
+            data,
+        );
+    }
+    // Every report of an endpoint takes the device token off the record's own field,
+    // so a copy of it inside the attribute map would be a second source for one
+    // value: it is absorbed here rather than stored beside the field.
+    attributes.remove(state::ENDPOINT_TOKEN_ATTRIBUTE);
+    if let Some(message) = state::attribute_bytes_refusal(state::ENDPOINT_RECORD, &attributes) {
+        return Err(refuse(message));
+    }
+
+    // The idempotency clause: one device token is one endpoint of one application. The
+    // registration that answers with an endpoint it already held created nothing, so it
+    // publishes no `EndpointCreated` event either.
+    if let Some(held) = store
+        .endpoints_of_application(&input.platform_application_arn)
+        .into_iter()
+        .find(|endpoint| endpoint.token == input.token)
+    {
+        if held.attributes == attributes {
+            return Ok(Registered {
+                arn: held.arn.clone(),
+                minted: false,
+            });
+        }
+        let message = state::endpoint_token_conflict_refusal(&held.arn);
+        return Err(refuse(message));
+    }
+
+    if store.platform_endpoints.len() >= state::MAX_RECORDS_PER_STORE {
+        return Err(refuse(state::limit_exceeded_message("platform endpoints")));
+    }
+
+    // The endpoint id is minted by the store, not derived from the device token: two
+    // devices of one application get two ids, and nothing about a token is readable
+    // off the ARN that carries it.
+    let endpoint_id = store.next_unique_id();
+    let arn = state::platform_endpoint_arn(region, &platform, &application_name, &endpoint_id);
+    store.platform_endpoints.insert(
+        arn.clone(),
+        PlatformEndpointRecord {
+            arn: arn.clone(),
+            platform_application_arn: input.platform_application_arn,
+            token: input.token,
+            attributes,
+            created_at: ::std::time::SystemTime::now(),
+        },
+    );
+    Ok(Registered { arn, minted: true })
 }

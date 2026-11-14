@@ -184,6 +184,22 @@ mod queue_encryption;
 #[path = "publish/stream_delivery.rs"]
 mod stream_delivery;
 
+/// The identity a hand-over to a subscribed queue is made under — this service's own service
+/// principal, acting for the topic — which is how the queue's own service tells the fan-out of
+/// a publish from a request its owner made of it. One concern of its own, for the reason
+/// [`queue_encryption`] is: it is read by ANOTHER service, out of a store both share. Declared
+/// with a `#[path]` for the same reason.
+#[path = "publish/service_delivery.rs"]
+mod service_delivery;
+
+/// The endpoint-lifecycle events a MOBILE PUSH platform application publishes to the topics
+/// its own `Event…` attributes name. Declared here, with a `#[path]` for the reason
+/// [`function_delivery`] is, because such a notification is published through this operation's
+/// own publishing path rather than through a second copy of it; the endpoint operations that
+/// perform those lifecycle changes call it.
+#[path = "publish/application_event.rs"]
+pub(crate) mod application_event;
+
 /// The `http`/`https`-protocol half of the same fan-out, declared with a `#[path]` for the
 /// reason [`function_delivery`] is: a subscribed URL is an endpoint of no AWS service, so it
 /// is POSTed to over the emulator's own transport and governed by the subscription's own
@@ -1326,7 +1342,11 @@ pub(crate) async fn deliver_to_endpoints<Eng: Send + Sync + 'static>(
     // What this request owes the topic's counters: what it has counted already, plus the
     // outcome of every delivery below.
     let mut counted = deliveries.counted.clone();
-    let mut queues = Queues::new(ctx, queue_encryption::kms_state(engine));
+    let mut queues = Queues::new(
+        ctx,
+        queue_encryption::kms_state(engine),
+        service_delivery::in_flight_calls(engine),
+    );
     if !deliveries.queues.is_empty() {
         // BOXED, for the reason the legs below are.
         Box::pin(deliver_to_queues(
@@ -1669,6 +1689,11 @@ pub(super) struct Queues<'ctx, 'op> {
     clients: Vec<(String, ::aws_sdk_sqs::Client)>,
     /// What each queue answered about itself, keyed by its url.
     facts: Vec<(String, QueueFacts)>,
+    /// The directory the credential ONE hand-over is made under is recorded in, and `None` for
+    /// an engine carrying none ([`service_delivery::in_flight_calls`]).
+    in_flight: Option<
+        ::engine::ServiceState<::service_common::service_principal_calls::ServicePrincipalCalls>,
+    >,
 }
 
 /// What a queue answered when the facts a delivery to it is decided from were read.
@@ -1691,12 +1716,18 @@ impl<'ctx, 'op> Queues<'ctx, 'op> {
     pub(super) fn new(
         ctx: &'ctx smithy_server_runtime::OperationContext<'op>,
         kms: Option<::engine::ServiceState<queue_encryption::KmsState>>,
+        in_flight: Option<
+            ::engine::ServiceState<
+                ::service_common::service_principal_calls::ServicePrincipalCalls,
+            >,
+        >,
     ) -> Self {
         Self {
             ctx,
             kms,
             clients: Vec::new(),
             facts: Vec::new(),
+            in_flight,
         }
     }
 
@@ -1816,7 +1847,24 @@ impl<'ctx, 'op> Queues<'ctx, 'op> {
                 return Attempted::new(HandOver::Refused, withheld.answered());
             }
         }
-        let mut request = client
+        // The hand-over ITSELF is made as this service's own principal, acting for the topic
+        // the message was published to: the queue's service reads the credential the call
+        // presents and so judges a notification SNS hands it as the service delivery it is,
+        // rather than as a send its owner asked for ([`service_delivery`]). The facts above
+        // were read as the emulator itself, because they are a report of the queue rather
+        // than a delivery into it.
+        let in_flight = service_delivery::as_the_service_principal(
+            self.ctx,
+            self.in_flight.as_ref(),
+            &delivery.topic_arn,
+        );
+        let sender = match &in_flight {
+            Some(call) => {
+                sqs_client_signing_with(self.ctx, &queue.region, Some(call.credentials()))
+            }
+            None => client,
+        };
+        let mut request = sender
             .send_message()
             .queue_url(&queue.queue_url)
             .message_body(&*delivery.body);
@@ -2140,15 +2188,29 @@ pub(super) fn refusal_of(answered: Option<u16>) -> HandOver {
     HandOver::Refused
 }
 
-/// An SQS client over the in-process callback into this same emulator.
+/// An SQS client over the in-process callback into this same emulator, signing with the
+/// emulator's own credentials.
 fn sqs_client(
     ctx: &smithy_server_runtime::OperationContext<'_>,
     region: &str,
 ) -> ::aws_sdk_sqs::Client {
-    let config = ::aws_sdk_sqs::Config::builder()
+    sqs_client_signing_with(ctx, region, None)
+}
+
+/// The same client, signing with `credentials` when a call is made under an identity of its
+/// own — a hand-over made as this service's service principal ([`service_delivery`]) — and
+/// with the emulator's own otherwise.
+///
+/// ONE construction of the hop into Amazon SQS, so the two identities a delivery can be made
+/// under do not configure it differently.
+fn sqs_client_signing_with(
+    ctx: &smithy_server_runtime::OperationContext<'_>,
+    region: &str,
+    credentials: Option<::aws_sdk_sqs::config::Credentials>,
+) -> ::aws_sdk_sqs::Client {
+    let mut config = ::aws_sdk_sqs::Config::builder()
         .behavior_version(::aws_sdk_sqs::config::BehaviorVersion::latest())
         .http_client(ctx.callback().http_client())
-        .credentials_provider(ctx.callback().aws_credentials_provider())
         .region(::aws_sdk_sqs::config::Region::new(region.to_string()))
         .endpoint_url(format!("https://sqs.{region}.amazonaws.com"))
         // The transport is in-process: there is nothing to retry, time out or watch for a
@@ -2160,9 +2222,12 @@ fn sqs_client(
         .identity_cache(::aws_sdk_sqs::config::IdentityCache::no_cache())
         .stalled_stream_protection(
             ::aws_sdk_sqs::config::StalledStreamProtectionConfig::disabled(),
-        )
-        .build();
-    ::aws_sdk_sqs::Client::from_conf(config)
+        );
+    config = match credentials {
+        Some(credentials) => config.credentials_provider(credentials),
+        None => config.credentials_provider(ctx.callback().aws_credentials_provider()),
+    };
+    ::aws_sdk_sqs::Client::from_conf(config.build())
 }
 
 /// The JSON notification SNS wraps a message in for a subscriber that has not asked for raw

@@ -184,6 +184,9 @@ pub mod queue_depth_metrics;
 /// The two redrive attributes a queue carries, and what each document has to look like to
 /// be stored at all.
 mod redrive;
+/// Whether a send is a delivery another service is handing the queue as its own service
+/// principal, on behalf of one of its own resources, rather than a client's own request.
+pub mod service_delivery;
 pub use message_attributes::*;
 pub use permissions::*;
 pub use queue_depth_metrics::*;

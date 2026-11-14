@@ -129,6 +129,8 @@ mod send_message_batch;
 mod send_message_size_refusals;
 #[path = "all/sender_attribution.rs"]
 mod sender_attribution;
+#[path = "all/service_delivery_message_size.rs"]
+mod service_delivery_message_size;
 #[path = "all/state_roundtrip.rs"]
 mod state_roundtrip;
 #[path = "all/support.rs"]

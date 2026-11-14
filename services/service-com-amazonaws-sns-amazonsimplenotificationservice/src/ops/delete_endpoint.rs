@@ -162,6 +162,11 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
     /// endpoint that is also subscribed to a topic, then you must also unsubscribe the
     /// endpoint from the topic" (same doc) — the unsubscribe is a separate call the
     /// caller makes, so this one does not make it.
+    ///
+    /// A delete that REMOVED an endpoint is a lifecycle event of the application it belonged
+    /// to: an application carrying `EventEndpointDeleted` has one notification published to
+    /// the topic that attribute names ([`crate::ops::publish::application_event`]). The
+    /// idempotent answer removed nothing, so it publishes nothing.
     async fn handle(
         &self,
         input: Self::Input,
@@ -187,7 +192,25 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
             )
             .into());
         };
-        store.lock().platform_endpoints.remove(&input.endpoint_arn);
+        // Which application the endpoint belonged to is read while it is still held, because
+        // the lifecycle event is published for THAT application. A delete that removed
+        // nothing is the idempotent case, which changed no endpoint's life and so publishes
+        // nothing.
+        let removed = store.lock().platform_endpoints.remove(&input.endpoint_arn);
+
+        // "EventEndpointDeleted – Topic ARN to which EndpointDeleted event notifications are
+        // sent" (`SetPlatformApplicationAttributesInput$Attributes`): the same rule the
+        // registration's own event follows, for the lifecycle this call performs.
+        if let Some(removed) = removed {
+            crate::ops::publish::application_event::publish(
+                &*self.engine,
+                ctx,
+                crate::ops::publish::application_event::EndpointEvent::Deleted,
+                &removed.platform_application_arn,
+                &removed.arn,
+            )
+            .await;
+        }
 
         Ok(DeleteEndpointOutput)
     }

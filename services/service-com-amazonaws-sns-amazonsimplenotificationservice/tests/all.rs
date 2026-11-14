@@ -136,6 +136,9 @@ mod phone_number_opt_out_listing;
 #[path = "all/platform_application_deletion.rs"]
 mod platform_application_deletion;
 
+#[path = "all/platform_application_event_notifications.rs"]
+mod platform_application_event_notifications;
+
 #[path = "all/platform_application_reads.rs"]
 mod platform_application_reads;
 
@@ -210,6 +213,9 @@ mod sms_sandbox_verification;
 
 #[path = "all/sqs_delivery_authorization.rs"]
 mod sqs_delivery_authorization;
+
+#[path = "all/sqs_delivery_message_size.rs"]
+mod sqs_delivery_message_size;
 
 #[path = "all/sqs_delivery_queue_encryption.rs"]
 mod sqs_delivery_queue_encryption;
