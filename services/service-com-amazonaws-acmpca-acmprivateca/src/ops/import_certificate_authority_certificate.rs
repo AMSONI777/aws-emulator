@@ -239,13 +239,20 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         let presented = pem_certificate(&input.certificate)?;
         let certificate =
             crate::state::encode_certificate_pem(&presented).ok_or_else(malformed_certificate)?;
-        let chain = match input.certificate_chain.as_deref() {
+        let presented_chain = match input.certificate_chain.as_deref() {
             // An empty chain blob is modelled (`CertificateChainBlob` has min length 0)
             // and carries no certificate, so it is the same as supplying none.
-            None => None,
-            Some([]) => None,
-            Some(bytes) => Some(pem_certificate_chain(bytes)?),
+            None => Vec::new(),
+            Some([]) => Vec::new(),
+            Some(bytes) => pem_certificate_chain(bytes)?,
         };
+        let chain = encode_chain(&presented_chain)?;
+        // Whether the certificate chains up to the chain presented with it is a question
+        // about those two bodies alone, so it is answered here rather than under this
+        // service's lock: the walk verifies a signature per link
+        // ([`crate::state::chains_up_to`]), and no other caller waits for it.
+        let chain_mismatch = (!crate::state::chains_up_to(&presented, &presented_chain))
+            .then_some(crate::state::CertificateMismatch::Chain);
 
         // The store is read and written inside this block, so its guard is released at
         // the block's end: what the block answers is the CRL the CA owes object storage
@@ -318,14 +325,15 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
             // whose private key this service does not have. Which field diverges is what
             // the refusal's sentence says ([`crate::state::CertificateMismatch`]).
             if let Some(mismatch) = record.certificate_mismatch(&presented) {
-                return Err(
-                    ImportCertificateAuthorityCertificateErrorModeled::CertificateMismatchException(
-                        CertificateMismatchException {
-                            message: Some(mismatch.message().to_string()),
-                        },
-                    )
-                    .into(),
-                );
+                return Err(certificate_mismatch(mismatch));
+            }
+            // And where the certificate sits is judged after what it is over, so a
+            // certificate that is not this CA's at all is reported as that rather than as
+            // the path it does not complete. A certificate that does not chain up to the
+            // chain presented with it would leave the CA signing under a path no relying
+            // party can build, which is why nothing is written until both hold.
+            if let Some(mismatch) = chain_mismatch {
+                return Err(certificate_mismatch(mismatch));
             }
 
             record.ca_certificate_pem = Some(certificate);
@@ -351,6 +359,20 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
     }
 }
 
+/// `CertificateMismatchException` carrying the sentence for `mismatch`: what tells the
+/// presented certificate apart from the one this CA must take
+/// ([`crate::state::CertificateMismatch`]).
+fn certificate_mismatch(
+    mismatch: crate::state::CertificateMismatch,
+) -> ImportCertificateAuthorityCertificateError {
+    ImportCertificateAuthorityCertificateErrorModeled::CertificateMismatchException(
+        CertificateMismatchException {
+            message: Some(mismatch.message().to_string()),
+        },
+    )
+    .into()
+}
+
 /// The one X.509 certificate `bytes` carries, decoded, or `MalformedCertificateException`.
 fn pem_certificate(
     bytes: &[u8],
@@ -362,24 +384,36 @@ fn pem_certificate(
         .ok_or_else(malformed_certificate)
 }
 
-/// Every X.509 certificate `bytes` carries, re-encoded canonically, or
+/// Every X.509 certificate `bytes` carries, decoded in the order they were presented, or
 /// `MalformedCertificateException`.
 fn pem_certificate_chain(
     bytes: &[u8],
-) -> Result<String, ImportCertificateAuthorityCertificateError> {
-    let blocks = ::std::str::from_utf8(bytes)
+) -> Result<Vec<::x509_cert::Certificate>, ImportCertificateAuthorityCertificateError> {
+    ::std::str::from_utf8(bytes)
         .ok()
         .and_then(|text| crate::state::parse_pem_blocks(text, crate::state::PEM_LABEL_CERTIFICATE))
-        .filter(|blocks| {
+        .and_then(|blocks| {
             blocks
                 .iter()
-                .all(|der| crate::state::is_x509_certificate(der))
+                .map(|der| crate::state::parse_x509_certificate(der))
+                .collect::<Option<Vec<::x509_cert::Certificate>>>()
         })
-        .ok_or_else(malformed_certificate)?;
-    Ok(blocks
+        .ok_or_else(malformed_certificate)
+}
+
+/// The chain as this service stores and hands it back: the certificates it carries,
+/// re-encoded canonically, or `None` for a chain carrying none.
+fn encode_chain(
+    chain: &[::x509_cert::Certificate],
+) -> Result<Option<String>, ImportCertificateAuthorityCertificateError> {
+    if chain.is_empty() {
+        return Ok(None);
+    }
+    let blocks: Option<String> = chain
         .iter()
-        .map(|der| crate::state::encode_pem(crate::state::PEM_LABEL_CERTIFICATE, der))
-        .collect())
+        .map(crate::state::encode_certificate_pem)
+        .collect();
+    Ok(Some(blocks.ok_or_else(malformed_certificate)?))
 }
 
 /// "One or more fields in the certificate are invalid."

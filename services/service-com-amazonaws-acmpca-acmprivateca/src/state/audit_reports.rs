@@ -27,8 +27,9 @@ pub const AUDIT_REPORT_STATUS_SUCCESS: &str = "SUCCESS";
 /// (`ResourceNotFoundException`) for both the CA and the report, so the sentence is what
 /// says which was not found — this one is about the REPORT, in the form this service's
 /// other not-found refusals take ([`CERTIFICATE_NOT_FOUND_MESSAGE`]), naming no id of its
-/// own.
-pub const AUDIT_REPORT_NOT_FOUND_MESSAGE: &str = "Could not find specified audit report.";
+/// own. The whole sentence is fixed text, down to the capitalisation of the resource it
+/// names.
+pub const AUDIT_REPORT_NOT_FOUND_MESSAGE: &str = "Could not find specified Audit Report.";
 
 /// The folder in the bucket a CA's audit reports are written under: `audit-report/<ca-id>`,
 /// so one bucket holds the reports of every CA that writes to it without their keys
@@ -175,7 +176,12 @@ fn audited_certificate(
     let values = [
         ca.owner_account.clone(),
         certificate.arn.clone(),
-        certificate.serial.clone(),
+        // The row's serial is what joins it to a certificate a client holds, and a client
+        // reads a serial off a certificate in the octet-pair rendering X.509 tooling prints
+        // ([`serial_octets`]) — the same rendering `RevokeCertificate` takes a serial in.
+        // The ARN beside it carries the undelimited form it was minted as, which is the
+        // same number spelled the way an ARN spells it.
+        serial_octets(&certificate.serial),
         subject,
         format_timestamp(certificate.not_before),
         format_timestamp(certificate.not_after),
@@ -186,7 +192,13 @@ fn audited_certificate(
         revocation
             .map(|revocation| revocation.reason.clone())
             .unwrap_or_default(),
-        certificate.template_arn.clone().unwrap_or_default(),
+        // The template the certificate was issued UNDER, which for a request that named
+        // none is the one the service defaults to (`certificate_template`): a row states
+        // what the certificate carries, not what the request spelled out.
+        certificate
+            .template_arn
+            .clone()
+            .unwrap_or_else(default_template_arn),
     ];
     AUDIT_REPORT_COLUMNS
         .iter()

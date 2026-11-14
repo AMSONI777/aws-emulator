@@ -23,6 +23,8 @@ use x509_cert::request::CertReq;
 use x509_cert::time::Time;
 use x509_cert::Certificate;
 
+use crate::ca_certificate_chain_import::Authority;
+
 /// A SigV4 `Authorization` header whose credential scope names this service and the
 /// region every ARN the request mints must carry. The router verifies no signature here
 /// (`set_request_authentication(false)`); the scope is read for routing and the region.
@@ -240,7 +242,9 @@ pub(crate) fn pem_of_bytes(label: &str, body: &[u8]) -> String {
 }
 
 /// The distinguished name `rcgen` puts in the objects below: one CommonName.
-fn rcgen_subject(common_name: &str) -> rcgen::DistinguishedName {
+///
+/// `pub(crate)` so the chain suite builds the authorities it presents with the same name.
+pub(crate) fn rcgen_subject(common_name: &str) -> rcgen::DistinguishedName {
     let mut subject = rcgen::DistinguishedName::new();
     subject.push(rcgen::DnType::CommonName, common_name);
     subject
@@ -596,9 +600,12 @@ async fn the_private_ca_lifecycle_runs_end_to_end() {
         "case {case:?}: the CSR carries the CA's own subject, got {csr:?}"
     );
 
-    // 3. Importing the certificate the CA's own request asks for activates the CA.
-    let ca_certificate = ca_certificate_for(&csr);
-    let ca_chain = certificate_pem("an-intermediate");
+    // 3. Importing the certificate the CA's own request asks for activates the CA — with
+    // the chain that signed it beside it, which is the path the certificate chains up to
+    // (`crate::ca_certificate_chain_import`).
+    let signer = Authority::new("example-signer");
+    let ca_certificate = signer.certificate_for(&csr);
+    let ca_chain = signer.chain();
     let imported = emulator
         .ok(
             case,
@@ -1147,29 +1154,48 @@ async fn pem_bodies_are_accepted_only_where_they_are_well_formed() {
     }
 
     // Accepted bodies: CRLF line endings, no trailing newline, and a chain of several
-    // blocks. The certificate is the CA's own either way; what each row varies is the
-    // framing it arrives in and the chain beside it.
-    let accepted: &[(&str, Framing, Option<String>)] = &[
-        ("crlf", Framing::Crlf, None),
-        ("no trailing newline", Framing::NoTrailingNewline, None),
+    // blocks. What each row varies is the framing the certificate arrives in and the chain
+    // beside it — and a row that presents a chain presents the certificate that chains up
+    // to that chain, which is the rule the chain suite covers in full
+    // (`crate::ca_certificate_chain_import`).
+    let chain_root = Authority::new("pem-root-authority");
+    let chain_intermediate = Authority::issued_by(&chain_root, "pem-intermediate-authority");
+    let accepted: &[(&str, Framing, Option<&Authority>, Option<String>)] = &[
+        ("crlf", Framing::Crlf, None, None),
+        ("no trailing newline", Framing::NoTrailingNewline, None, None),
         (
             "a two-certificate chain",
             Framing::Canonical,
+            Some(&chain_intermediate),
             Some(format!(
                 "{}{}",
-                certificate_pem("an-intermediate"),
-                certificate_pem("a-root")
+                chain_intermediate.chain(),
+                chain_root.chain()
             )),
         ),
-        ("an empty chain", Framing::Canonical, Some(String::new())),
+        ("an empty chain", Framing::Canonical, None, Some(String::new())),
     ];
-    for (case, framing, chain) in accepted {
+    for (case, framing, signer, chain) in accepted {
         let created = emulator
             .ok(case, "CreateCertificateAuthority", &root_ca_request("pem-root"))
             .await;
         let arn = string(&created, "CertificateAuthorityArn", case);
         wait_for_the_clock();
-        let own = own_ca_certificate(&emulator, case, &arn).await;
+        let published = emulator
+            .ok(
+                case,
+                "GetCertificateAuthorityCsr",
+                &json!({"CertificateAuthorityArn": arn}),
+            )
+            .await;
+        let published = string(&published, "Csr", case);
+        // A row with no chain presents the self-signed certificate of the CA's own request;
+        // a row with one presents the certificate the authority above that chain issued for
+        // the same request.
+        let own = match signer {
+            Some(signer) => signer.certificate_for(&published),
+            None => ca_certificate_for(&published),
+        };
         let own_body = certificate_der(&own, case);
         let body = framing.apply(&own);
         let mut import = json!({"CertificateAuthorityArn": arn, "Certificate": blob(&body)});

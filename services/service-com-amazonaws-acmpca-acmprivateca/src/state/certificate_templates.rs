@@ -66,6 +66,22 @@ pub struct BasicConstraintsDefinition {
 /// template." (`IssueCertificateRequest$TemplateArn` docs.)
 pub const DEFAULT_TEMPLATE_NAME: &str = "EndEntityCertificate";
 
+/// The version portion of the template ARN that documentation publishes for that default.
+const DEFAULT_TEMPLATE_VERSION: &str = "V1";
+
+/// The `TemplateArn` of the template a request that named none was answered under, which is
+/// what a certificate issued by such a request was issued under
+/// ([`DEFAULT_TEMPLATE_NAME`]).
+///
+/// A template is a definition of this service rather than a resource of an account, so its
+/// ARN names no region and no account, exactly as the published `TemplateArn` values do.
+pub fn default_template_arn() -> String {
+    format!(
+        "arn:aws:{}:::template/{DEFAULT_TEMPLATE_NAME}/{DEFAULT_TEMPLATE_VERSION}",
+        super::ARN_SERVICE
+    )
+}
+
 /// The template kind that defines a ROOT CA's own certificate.
 const ROOT_CA_TEMPLATE_KIND: &str = "RootCACertificate";
 

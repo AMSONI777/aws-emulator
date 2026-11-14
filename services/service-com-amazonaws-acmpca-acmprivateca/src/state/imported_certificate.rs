@@ -8,7 +8,9 @@
 //! published ([`super::derive_csr_pem`]): the same subject, over the same public key.
 //! A certificate for another entity, or over another key, is the modelled mismatch
 //! ([`CertificateMismatch`]), and importing it would leave the CA holding a certificate
-//! whose private key this service does not have.
+//! whose private key this service does not have. The third mismatch the same error reports
+//! is about where that certificate sits rather than what it is over, and lives beside this
+//! one ([`super::chains_up_to`]).
 //!
 //! The shape check above it belongs to the same surface: the certificate member of a
 //! request is published with a PEM shape ([`CERTIFICATE_PEM_PATTERN`]), and a body outside
@@ -64,10 +66,11 @@ pub fn is_published_certificate_pem(value: &[u8]) -> bool {
 }
 
 /// What tells a presented CA certificate apart from the certification request the CA
-/// published, when something does.
+/// published, or from the chain presented with it, when something does.
 ///
-/// Both are `CertificateMismatchException`, and a caller tells them apart by the sentence:
-/// one says the certificate is for another entity, the other that it is over another key.
+/// All of them are `CertificateMismatchException`, and a caller tells them apart by the
+/// sentence: one says the certificate is for another entity, one that it is over another
+/// key, and one that it does not sit under the chain supplied beside it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CertificateMismatch {
     /// The certificate's subject is not the subject of the CA's certification request.
@@ -75,12 +78,16 @@ pub enum CertificateMismatch {
     /// The subject matches, and the certificate's `SubjectPublicKeyInfo` is not the one the
     /// CA's certification request published.
     PublicKey,
+    /// The certificate is the one the CA's certification request asked for, and it does not
+    /// chain up to the `CertificateChain` presented with it
+    /// ([`super::chains_up_to`]).
+    Chain,
 }
 
 impl CertificateMismatch {
     /// What Amazon Web Services Private CA answers for this mismatch: one sentence naming
-    /// the field of the certificate that diverges from the certification request, wholly
-    /// fixed text that interpolates no value from the request or the store.
+    /// what diverges — a field of the certificate, or the chain it was presented with —
+    /// wholly fixed text that interpolates no value from the request or the store.
     pub fn message(self) -> &'static str {
         match self {
             Self::Subject => {
@@ -91,6 +98,7 @@ impl CertificateMismatch {
                 "The certificate subject public key info field contains a different public \
                  key or key algorithm than the CA certificate signing request."
             }
+            Self::Chain => "Certificate does not chain up to certificate chain provided.",
         }
     }
 }
@@ -111,7 +119,8 @@ impl CertificateAuthorityRecord {
     ///
     /// The subject is judged first and the public key second, so a certificate that is for
     /// another entity is reported as that rather than as the key difference that follows
-    /// from it.
+    /// from it. What the certificate was PRESENTED with is a question about neither, and is
+    /// answered beside this one ([`super::chains_up_to`]).
     pub fn certificate_mismatch(
         &self,
         certificate: &Certificate,
@@ -140,7 +149,11 @@ impl CertificateAuthorityRecord {
 /// attribute was grouped into. Two writers of one subject choose that grouping and that
 /// order differently, and a certificate issued for a certification request is for the same
 /// entity either way.
-fn same_distinguished_name(left: &Name, right: &Name) -> bool {
+///
+/// The same comparison answers whether one certificate names another's subject as its
+/// issuer ([`super::chains_up_to`]), which is the other place one name of this service's is
+/// matched against a name another writer wrote.
+pub fn same_distinguished_name(left: &Name, right: &Name) -> bool {
     comparable_name(left) == comparable_name(right)
 }
 

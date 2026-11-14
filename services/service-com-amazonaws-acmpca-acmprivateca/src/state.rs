@@ -9,19 +9,25 @@
 //!
 //! Several concerns of the store live in files of their own beside this one, and are
 //! re-exported from here so every handler still reaches them as `crate::state::*`: the key
-//! pair a CA signs with ([`key_material`]), what makes a presented certificate the CA's own
-//! ([`imported_certificate`]), the audit reports a CA produces over the certificates it
+//! pair a CA signs with ([`key_material`]), the extensions the certification request it
+//! publishes asks for ([`csr_extensions`]), what makes a presented certificate the CA's own
+//! ([`imported_certificate`]) and what makes it chain up to the chain presented with it
+//! ([`certificate_chain`]), the audit reports a CA produces over the certificates it
 //! has issued ([`audit_reports`]) and the CloudWatch series a CA publishes about the
 //! certificates it issues ([`issuance_metrics`]).
 
 mod audit_reports;
+mod certificate_chain;
 mod certificate_templates;
+mod csr_extensions;
 mod imported_certificate;
 mod issuance_metrics;
 mod key_material;
 
 pub use audit_reports::*;
+pub use certificate_chain::*;
 pub use certificate_templates::*;
+pub use csr_extensions::*;
 pub use imported_certificate::*;
 pub use issuance_metrics::*;
 pub use key_material::*;
@@ -45,7 +51,8 @@ use x509_cert::{Certificate, TbsCertificate, Version};
 
 use crate::ops::types::{
     ApiPassthrough, ASN1Subject, CertificateAuthority, CertificateAuthorityConfiguration,
-    CrlConfiguration, Permission, RevocationConfiguration, Tag, Validity,
+    CrlConfiguration, CsrExtensions, KeyUsage, Permission, RevocationConfiguration, Tag,
+    Validity,
 };
 
 /// A PKCS#10 certification request, as this service reads and writes one.
@@ -2527,6 +2534,34 @@ pub fn normalized_serial(serial: &str) -> Option<String> {
     })
 }
 
+/// `serial` as the octet pairs X.509 tooling renders a certificate serial number in: pairs
+/// of lower-case hexadecimal digits separated by colons (`0a:1b:2c:3d`).
+///
+/// This is the rendering `openssl x509 -serial`/`-text` prints and the one
+/// `RevokeCertificateRequest$CertificateSerial`'s docs have a serial copied out of, so it is
+/// the form a client holds a serial in once it has read the certificate itself — which is
+/// what lets it join a serial it holds to what this service states about that certificate.
+/// The value is unchanged: only the separators between its octets are written, and a
+/// spelling with an odd number of digits names a leading nibble of a leading zero octet.
+pub fn serial_octets(serial: &str) -> String {
+    let digits: String = serial
+        .chars()
+        .filter(|character| !SERIAL_SEPARATORS.contains(character))
+        .map(|digit| digit.to_ascii_lowercase())
+        .collect();
+    let digits = if digits.len().is_multiple_of(2) {
+        digits
+    } else {
+        format!("0{digits}")
+    };
+    digits
+        .as_bytes()
+        .chunks(2)
+        .map(|pair| String::from_utf8_lossy(pair).to_string())
+        .collect::<Vec<String>>()
+        .join(":")
+}
+
 /// The character that separates the octets of a serial number rather than spelling its
 /// value: the colon `openssl x509 -text` prints between them, which is the listing
 /// `RevokeCertificateRequest$CertificateSerial`'s docs have the serial copied out of.
@@ -2780,15 +2815,6 @@ mod oid {
         ObjectIdentifier::new_unwrap("2.16.840.1.101.3.4.3.19");
 }
 
-/// Whether `der` is a well-formed X.509 certificate.
-///
-/// The structure RFC 5280 section 4.1 defines, decoded by `x509-cert`: a body that is not
-/// one is what `MalformedCertificateException` answers. Nothing here verifies the
-/// signature — the emulator holds no issuer key to verify it against.
-pub fn is_x509_certificate(der: &[u8]) -> bool {
-    parse_x509_certificate(der).is_some()
-}
-
 /// The X.509 certificate `der` carries (RFC 5280 section 4.1), or `None` when it is not one
 /// — what `MalformedCertificateException` answers.
 pub fn parse_x509_certificate(der: &[u8]) -> Option<Certificate> {
@@ -2828,10 +2854,11 @@ pub fn certificate_validity_window(certificate: &Certificate) -> (SystemTime, Sy
 ///
 /// A real PKCS#10 `CertificationRequest` (RFC 2986 section 4) over the key pair the CA was
 /// minted with: its subject is the CA's own configured subject, its `SubjectPublicKeyInfo`
-/// is that key pair's public key, and its signature is made with the key pair's private
-/// half under the `SigningAlgorithm` the CA was created with — so a signing authority can
-/// read the key out of it, verify it, and sign a certificate for it, and the certificate
-/// this service issues for it (below) carries the same key.
+/// is that key pair's public key, the extensions it asks for are the ones its configured
+/// `CsrExtensions` names ([`requested_extension_attributes`]), and its signature is made
+/// with the key pair's private half under the `SigningAlgorithm` the CA was created with —
+/// so a signing authority can read the key out of it, verify it, and sign a certificate for
+/// it, and the certificate this service issues for it (below) carries the same key.
 ///
 /// For a `KeyAlgorithm` the in-process provider cannot mint a key pair for
 /// ([`generate_key_pair`]) the CA holds none, and the request falls back to the stand-in
@@ -2851,7 +2878,10 @@ pub fn derive_csr_pem(
             Some(key_pair) => key_pair.public_key_info()?,
             None => stand_in_public_key_info(&configuration.key_algorithm, arn)?,
         },
-        attributes: SetOfVec::new(),
+        // The extensions the request ASKS FOR are the ones the CA's `CsrExtensions`
+        // configures ([`requested_extension_attributes`]).
+        attributes: requested_extension_attributes(configuration.csr_extensions.as_ref())
+            .unwrap_or_default(),
     };
     let algorithm = signature_algorithm_identifier(&configuration.signing_algorithm)?;
     let signature = object_signature(
