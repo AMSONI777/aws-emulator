@@ -2783,11 +2783,12 @@ mod bedrock_agent_ingestion_populates_its_s3_vectors_index;
 // `cloudformation_scripted_queue_deploy` are each declared once in the sorted spans above: a
 // above: a module may be declared only once, and two branches landing in the same window each
 // declared it here as well.)
-//! suite left at the top level of `tests/` fails the build. Declare each suite exactly
-//! ONCE: this is one crate root, so a second `mod` for the same name is `E0428` and fails
-//! every suite in this target. `all/all_rs_declares_each_suite_once.rs` checks that for
-//! this file and for every service crate's `tests/all.rs`, so check there rather than
-//! leaving a note here.
+// A suite left at the top level of `tests/` fails the build. Declare each suite exactly
+// ONCE: this is one crate root, so a second `mod` for the same name is `E0428` and fails
+// every suite in this target. `all/all_rs_declares_each_suite_once.rs` checks that for
+// this file and for every service crate's `tests/all.rs`, so check there rather than
+// leaving a note here. (This note sits mid-file, so it is a plain comment: an inner doc
+// comment is only accepted before the first item of a module.)
 // Declared here, in the appended tail: WAFv2 protection a stack provisions.
 // Declared here, in this head region, for the reason those entries record: the appended tail
 // at the end of this file and the `e…` span are where every suite landing in the same window

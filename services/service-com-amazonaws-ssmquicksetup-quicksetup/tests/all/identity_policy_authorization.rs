@@ -656,6 +656,181 @@ async fn a_refused_mutation_changes_nothing() {
     );
 }
 
+/// One row of the table below: a call this service serves, the operation IAM judges it as,
+/// and the resource a refusal of it names.
+struct DeniedCall {
+    case: &'static str,
+    operation: &'static str,
+    method: &'static str,
+    path: String,
+    body: Option<Value>,
+    resource: String,
+}
+
+/// RULE: an explicit `Deny` decides only the action its statement names, so whichever
+/// operation of this endpoint it withholds, every OTHER action the same principal is
+/// granted keeps answering — and a resource the principal may not reach through the denied
+/// action is still reported in full by the reads it may call.
+///
+/// The rows span the operations the rule generalises over: a read of one resource, the tag
+/// read, a mutation, and the three calls that address no resource of their own (so the
+/// refusal names IAM's `*`). Each row is judged on its OWN principal, and after each
+/// refusal the listing that principal still holds must report the manager the deny was
+/// written about, which is the invariant a service-wide gate would break.
+#[tokio::test]
+async fn a_deny_withholds_only_the_action_it_names() {
+    let aws = Emulator::new();
+    let manager = create_manager(&aws, "scoped-deny").await;
+    let label = manager.replace('/', "%2F");
+
+    let rows = [
+        DeniedCall {
+            case: "the read of one manager",
+            operation: "GetConfigurationManager",
+            method: "GET",
+            path: format!("/configurationManager/{label}"),
+            body: None,
+            resource: manager.clone(),
+        },
+        DeniedCall {
+            case: "the tag read of that manager",
+            operation: "ListTagsForResource",
+            method: "GET",
+            path: format!("/tags/{label}"),
+            body: None,
+            resource: manager.clone(),
+        },
+        DeniedCall {
+            case: "the update of that manager",
+            operation: "UpdateConfigurationManager",
+            method: "PUT",
+            path: format!("/configurationManager/{label}"),
+            body: Some(json!({ "Description": "denied" })),
+            resource: manager.clone(),
+        },
+        DeniedCall {
+            case: "the listing of configurations, which addresses no resource",
+            operation: "ListConfigurations",
+            method: "POST",
+            path: "/listConfigurations".to_string(),
+            body: Some(json!({})),
+            resource: ANY_RESOURCE.to_string(),
+        },
+        DeniedCall {
+            case: "the published type catalog, which addresses no resource",
+            operation: "ListQuickSetupTypes",
+            method: "GET",
+            path: "/listQuickSetupTypes".to_string(),
+            body: None,
+            resource: ANY_RESOURCE.to_string(),
+        },
+        DeniedCall {
+            case: "the service settings read, which addresses no resource",
+            operation: "GetServiceSettings",
+            method: "GET",
+            path: "/serviceSettings".to_string(),
+            body: None,
+            resource: ANY_RESOURCE.to_string(),
+        },
+    ];
+
+    for (index, row) in rows.iter().enumerate() {
+        // Each row is judged on its own principal, so no case can be decided by another's
+        // document.
+        let DeniedCall {
+            case,
+            operation,
+            method,
+            path,
+            body,
+            resource,
+        } = row;
+        let principal = assumed_role(
+            &aws,
+            &format!("denied-{index}"),
+            &[allow_all_but(operation, ANY_RESOURCE)],
+        )
+        .await;
+        let (status, answer) = aws
+            .call_as(&principal.access_key_id, method, path, body.as_ref())
+            .await;
+        assert_refused(
+            case,
+            status,
+            &answer,
+            &not_authorized(&principal.arn, operation, resource, EXPLICIT_DENY),
+        );
+
+        // Scoped to the one action: the listing this same principal still holds answers,
+        // and it still reports the manager the deny was written about.
+        let (status, answer) = aws
+            .call_as(
+                &principal.access_key_id,
+                "POST",
+                "/listConfigurationManagers",
+                Some(&json!({})),
+            )
+            .await;
+        assert_eq!(
+            status, 200,
+            "case {case:?}: expected the listing the deny does not name to be served, got \
+             {status} / {answer:?}"
+        );
+        let listed: Vec<&str> = answer
+            .get("ConfigurationManagersList")
+            .and_then(Value::as_array)
+            .unwrap_or_else(|| {
+                panic!("case {case:?}: expected a ConfigurationManagersList, got {answer:?}")
+            })
+            .iter()
+            .filter_map(|entry| entry.get("ManagerArn").and_then(Value::as_str))
+            .collect();
+        assert!(
+            listed.contains(&manager.as_str()),
+            "case {case:?}: expected the listing to still report {manager:?}, got {listed:?}"
+        );
+    }
+
+    // The positive control: a principal granted every action of this service reads the
+    // manager back in full, so nothing above withheld it from a caller IAM permits.
+    let permitted = assumed_role(
+        &aws,
+        "permitted",
+        &[statement(
+            "Allow",
+            &[&format!("{ACTION_PREFIX}:*")],
+            ANY_RESOURCE,
+        )],
+    )
+    .await;
+    let (status, answer) = aws
+        .call_as(
+            &permitted.access_key_id,
+            "GET",
+            &format!("/configurationManager/{label}"),
+            None,
+        )
+        .await;
+    assert_eq!(
+        status, 200,
+        "case \"a fully permissioned principal\": expected the read to be served, got \
+         {status} / {answer:?}"
+    );
+    assert_eq!(
+        answer.get("ManagerArn").and_then(Value::as_str),
+        Some(manager.as_str()),
+        "case \"a fully permissioned principal\": expected the manager that was read back, \
+         got {answer:?}"
+    );
+    // The refused update above wrote nothing: the manager still carries the description
+    // the create left it with, which is none at all.
+    assert_eq!(
+        answer.get("Description").and_then(Value::as_str),
+        None,
+        "case \"after the refused update\": expected no description, got {answer:?}"
+    );
+}
+
 /// RULE: the account's own published credential is not a principal the IAM store holds
 /// policies for — the position AWS account root credentials are in — so every operation
 /// stays served for it, whatever documents other principals carry.
