@@ -33,7 +33,7 @@ use serde_json::{json, Value};
 use smithy_server_runtime::MultiServiceRouter;
 
 use super::dashboard_lifecycle::{
-    call, emulator, ok_call, router_without_event_bus, timestamp,
+    call, call_signed_in_region, emulator, ok_call, router_without_event_bus, timestamp,
 };
 use super::scheduled_report_execution::{
     create_report, listed_summary, stored_report, HEALTHY, UNHEALTHY,
@@ -280,6 +280,71 @@ async fn a_triggered_execution_delivers_one_notification_to_the_default_bus() {
             (event.time - last_execution_at).abs() < 1.0,
             "case {label}: the notification's time {} is not the execution instant {last_execution_at}",
             event.time
+        );
+    }
+}
+
+/// The account's event buses are regional, so a delivery belongs to the Region the caller
+/// addressed — which only the request's SigV4 credential scope names. A scope field that is
+/// not a Region identifier names no Region, and the delivery is then made the way a request
+/// carrying no scope at all is made: the execution still puts its one notification on the
+/// account's default bus, and nothing a caller writes decides where the delivery is
+/// addressed.
+#[tokio::test]
+async fn the_delivery_region_comes_from_the_scope_only_when_it_names_one() {
+    // (label, the Region field of the credential scope the execution is signed under)
+    let cases: [(&str, &str); 4] = [
+        ("the Region the other rows sign in", "us-east-1"),
+        ("another Region identifier", "eu-west-2"),
+        ("a host-shaped value", "us-east-1.attacker.example"),
+        ("an upper-cased value", "US-EAST-1"),
+    ];
+
+    for (label, scope_region) in cases {
+        let (router, engine) = emulator();
+        let (dashboard_arn, _) = source_dashboard(&router, "ScopeRegionSource").await;
+        let arn = create_report(&router, &dashboard_arn, "Scope Region", None, None).await;
+
+        let (status, answered) = call_signed_in_region(
+            &router,
+            "ExecuteScheduledReport",
+            &json!({"arn": arn}),
+            scope_region,
+        )
+        .await;
+        assert_eq!(
+            status, 200,
+            "case {label}: the execution is served, got {status}: {answered}"
+        );
+        assert_eq!(
+            answered.get("executionTriggered").and_then(Value::as_bool),
+            Some(true),
+            "case {label}: the execution is triggered, got {answered}"
+        );
+        assert_eq!(
+            answered
+                .pointer("/healthStatus/statusCode")
+                .and_then(Value::as_str),
+            Some(HEALTHY),
+            "case {label}: a delivered notification leaves the report healthy, got {answered}"
+        );
+
+        let delivered = published(&engine);
+        assert_eq!(
+            delivered.len(),
+            1,
+            "case {label}: expected exactly one notification, got {delivered:?}"
+        );
+        let event = delivered
+            .first()
+            .unwrap_or_else(|| panic!("case {label}: the one notification"));
+        assert_eq!(
+            event.bus, DEFAULT_BUS,
+            "case {label}: expected the notification on the {DEFAULT_BUS} bus, got {event:?}"
+        );
+        assert_eq!(
+            event.source, EVENT_SOURCE,
+            "case {label}: expected source {EVENT_SOURCE}, got {event:?}"
         );
     }
 }

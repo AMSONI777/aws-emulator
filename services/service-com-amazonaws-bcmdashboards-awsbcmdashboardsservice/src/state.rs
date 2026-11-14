@@ -33,24 +33,27 @@
 //! work an execution does under it.
 
 use std::collections::btree_map::Entry;
-use std::collections::{BTreeMap, BTreeSet, HashMap};
+use std::collections::{BTreeMap, BTreeSet};
 use std::ops::Bound;
 use std::time::{Duration, SystemTime};
 
 use ::aws_smithy_schema_server::{envelope, Violation, ViolationKind};
 
 use crate::ops::types::{
-    CostAndUsageQuery, DashboardReference, DateTimeRange, DateTimeValue, DisplayConfig,
-    GraphDisplayConfig, GroupDefinition, HealthStatus, QueryParameters, ReservationUtilizationQuery,
-    ResourceTag, SavingsPlansCoverageQuery, ScheduleConfig, SchedulePeriod, ScheduledReport,
-    ScheduledReportSummary, TableDisplayConfigStruct, Widget, WidgetConfig,
+    DashboardReference, DateTimeRange, DateTimeValue, HealthStatus, QueryParameters, ResourceTag,
+    ScheduleConfig, SchedulePeriod, ScheduledReport, ScheduledReportSummary, Widget,
 };
 
 /// What the account's IAM shows about the role a scheduled report executes as, which the
 /// health derivation below is one half of.
 pub mod execution_role;
 
+/// The AWS-managed dashboard catalog every account already holds, which a fresh store is
+/// seeded with ([`ComAmazonawsBcmdashboardsAwsbcmdashboardsserviceState::default`]).
+pub mod managed_catalog;
+
 pub use execution_role::ExecutionRoleFaults;
+pub use managed_catalog::managed_dashboard_catalog;
 
 /// The only `DashboardType` the model declares (`DASHBOARD_TYPE_VALUES`), and the
 /// type every dashboard a client creates through this API carries.
@@ -258,26 +261,6 @@ impl Dashboard {
     }
 }
 
-/// The resource-id prefix of every AWS-managed dashboard's ARN, which is what tells one
-/// apart from a dashboard a caller created: the catalog's ARNs are
-/// `arn:aws:bcm-dashboards::<account>:dashboard/managed-<32 hex>`, while
-/// [`ComAmazonawsBcmdashboardsAwsbcmdashboardsserviceState::mint_dashboard_arn`] mints a
-/// bare 32-hex resource id. Both spellings satisfy `DashboardArn`'s `[-a-z0-9]+` resource
-/// segment.
-const MANAGED_DASHBOARD_ID_PREFIX: &str = "managed-";
-
-/// When the AWS-managed catalog this service seeds was published, and when it was last
-/// revised, as seconds since the Unix epoch.
-///
-/// The catalog is Amazon Web Services' own data, not the account's: its dashboards exist
-/// before a caller writes anything, so their `createdAt`/`updatedAt` are the instants AWS
-/// published and last revised the catalog rather than anything this emulator's clock
-/// produced — which is why they are stored constants and are stable across reads and
-/// across restarts. A dashboard a CALLER creates is stamped from the clock
-/// (`CreateDashboard`), as its own record's instants.
-const MANAGED_CATALOG_CREATED_AT: u64 = 1_786_644_000;
-const MANAGED_CATALOG_UPDATED_AT: u64 = 1_787_079_600;
-
 /// The `DateTimeType` (`DATE_TIME_TYPE_VALUES`) a widget's time range uses when its
 /// bounds are offsets from the instant the widget is rendered rather than fixed dates.
 const DATE_TIME_TYPE_RELATIVE: &str = "RELATIVE";
@@ -285,265 +268,6 @@ const DATE_TIME_TYPE_RELATIVE: &str = "RELATIVE";
 /// The `DateTimeType` (`DATE_TIME_TYPE_VALUES`) a time range uses when its bounds are
 /// fixed dates rather than offsets.
 const DATE_TIME_TYPE_ABSOLUTE: &str = "ABSOLUTE";
-
-/// The `Granularity` (`GRANULARITY_VALUES`) every widget in the AWS-managed catalog
-/// aggregates at: a month, which is the period a bill covers.
-const GRANULARITY_MONTHLY: &str = "MONTHLY";
-
-/// The `GroupDefinitionType` (`GROUP_DEFINITION_TYPE_VALUES`) a grouping by a cost
-/// dimension carries — also the member's modelled `@default`.
-const GROUP_DEFINITION_TYPE_DIMENSION: &str = "DIMENSION";
-
-/// A widget time range running from `start` to `end`, both relative offsets (ISO 8601
-/// durations, as `DateTimeValue$value` carries them for a `RELATIVE` bound).
-fn relative_range(start: &str, end: &str) -> DateTimeRange {
-    DateTimeRange {
-        start_time: DateTimeValue {
-            r#type: DATE_TIME_TYPE_RELATIVE.to_string(),
-            value: start.to_string(),
-        },
-        end_time: DateTimeValue {
-            r#type: DATE_TIME_TYPE_RELATIVE.to_string(),
-            value: end.to_string(),
-        },
-    }
-}
-
-/// A `DisplayConfig` drawing one metric as `visual_type` (a `VisualType`:
-/// `VISUAL_TYPE_VALUES` are `LINE`, `BAR`, `STACK`).
-fn graph_display(metric: &str, visual_type: &str) -> DisplayConfig {
-    DisplayConfig::Graph(HashMap::from([(
-        metric.to_string(),
-        GraphDisplayConfig {
-            visual_type: visual_type.to_string(),
-        },
-    )]))
-}
-
-/// A `DisplayConfig` drawing the query's result as a table.
-fn table_display() -> DisplayConfig {
-    DisplayConfig::Table(TableDisplayConfigStruct {})
-}
-
-/// One widget of the AWS-managed catalog: the members a caller's widget carries too,
-/// with the model's declared `width`/`height`/`horizontalOffset` defaults (4, 7, 0)
-/// unless the catalog entry states its own.
-struct ManagedWidget {
-    id: &'static str,
-    title: &'static str,
-    description: &'static str,
-    width: i32,
-    height: i32,
-    configs: Vec<WidgetConfig>,
-}
-
-impl ManagedWidget {
-    /// This catalog widget as the modelled [`Widget`] every reader projects.
-    fn widget(self) -> Widget {
-        Widget {
-            id: Some(self.id.to_string()),
-            title: self.title.to_string(),
-            description: Some(self.description.to_string()),
-            width: self.width,
-            height: self.height,
-            horizontal_offset: 0,
-            configs: self.configs,
-        }
-    }
-}
-
-/// The widgets of the `Cost Overview and Trends` catalog entry.
-fn cost_overview_widgets() -> Vec<Widget> {
-    vec![ManagedWidget {
-        id: "a18b58807f3934dbcfebd21ad359afaa",
-        title: "Total Current And Forecasted Cost",
-        description: "Historical monthly unblended cost with forecasted cost.",
-        width: 2,
-        height: 4,
-        configs: vec![WidgetConfig {
-            query_parameters: QueryParameters::costAndUsage(CostAndUsageQuery {
-                metrics: vec!["UnblendedCost".to_string()],
-                time_range: relative_range("-P12M", "P4M"),
-                granularity: GRANULARITY_MONTHLY.to_string(),
-                group_by: Some(Vec::new()),
-                filter: None,
-            }),
-            display_config: graph_display("UnblendedCost", "BAR"),
-        }],
-    }
-    .widget()]
-}
-
-/// The widgets of a catalog entry that reports cost and usage grouped by one
-/// `Dimension` (`DIMENSION_VALUES`) — the shape the `Compute` and `Database` entries
-/// take, each over its own dimension.
-fn cost_by_dimension_widgets(
-    id: &'static str,
-    title: &'static str,
-    description: &'static str,
-    dimension: &'static str,
-) -> Vec<Widget> {
-    vec![ManagedWidget {
-        id,
-        title,
-        description,
-        width: 4,
-        height: 7,
-        configs: vec![WidgetConfig {
-            query_parameters: QueryParameters::costAndUsage(CostAndUsageQuery {
-                metrics: vec!["UnblendedCost".to_string()],
-                time_range: relative_range("-P6M", "P1M"),
-                granularity: GRANULARITY_MONTHLY.to_string(),
-                group_by: Some(vec![GroupDefinition {
-                    key: dimension.to_string(),
-                    r#type: GROUP_DEFINITION_TYPE_DIMENSION.to_string(),
-                }]),
-                filter: None,
-            }),
-            display_config: graph_display("UnblendedCost", "STACK"),
-        }],
-    }
-    .widget()]
-}
-
-/// The widgets of the `Reservations` catalog entry: how much of the account's
-/// reservations were used.
-fn reservation_widgets() -> Vec<Widget> {
-    vec![ManagedWidget {
-        id: "c5a7d0b3e19f4c82a6d4b8e01f3c7a95",
-        title: "Reservation Utilization",
-        description: "Monthly utilization of your Reserved Instances.",
-        width: 4,
-        height: 7,
-        configs: vec![WidgetConfig {
-            query_parameters: QueryParameters::reservationUtilization(
-                ReservationUtilizationQuery {
-                    time_range: relative_range("-P6M", "P0M"),
-                    group_by: None,
-                    granularity: Some(GRANULARITY_MONTHLY.to_string()),
-                    filter: None,
-                },
-            ),
-            display_config: table_display(),
-        }],
-    }
-    .widget()]
-}
-
-/// The widgets of the `Savings Plans` catalog entry: how much of the account's eligible
-/// spend the Savings Plans it holds covered.
-fn savings_plans_widgets() -> Vec<Widget> {
-    vec![ManagedWidget {
-        id: "d6b8e1c4f20a5d93b7e5c9f12a4d8b06",
-        title: "Savings Plans Coverage",
-        description: "Monthly share of eligible spend covered by your Savings Plans.",
-        width: 4,
-        height: 7,
-        configs: vec![WidgetConfig {
-            query_parameters: QueryParameters::savingsPlansCoverage(SavingsPlansCoverageQuery {
-                time_range: relative_range("-P6M", "P0M"),
-                metrics: Some(vec!["SpendCoveredBySavingsPlans".to_string()]),
-                granularity: Some(GRANULARITY_MONTHLY.to_string()),
-                group_by: None,
-                filter: None,
-            }),
-            display_config: table_display(),
-        }],
-    }
-    .widget()]
-}
-
-/// One stored dashboard of the AWS-managed catalog, built the same way a created one is:
-/// the record carries its own ARN, name, description, type and widgets, and every reader
-/// projects it from the store.
-fn managed_dashboard(
-    resource_id: &str,
-    name: &str,
-    description: &str,
-    widgets: Vec<Widget>,
-) -> Dashboard {
-    Dashboard {
-        arn: ::engine::emulator_arn(
-            ARN_NAMESPACE,
-            "",
-            &format!("{DASHBOARD_RESOURCE_TYPE}/{MANAGED_DASHBOARD_ID_PREFIX}{resource_id}"),
-        ),
-        name: name.to_string(),
-        description: Some(description.to_string()),
-        dashboard_type: DASHBOARD_TYPE_AWS_MANAGED.to_string(),
-        widgets,
-        created_at: SystemTime::UNIX_EPOCH + Duration::from_secs(MANAGED_CATALOG_CREATED_AT),
-        updated_at: SystemTime::UNIX_EPOCH + Duration::from_secs(MANAGED_CATALOG_UPDATED_AT),
-        // The catalog carries no tags and no resource-based policy: a tag is an
-        // account's own metadata, and this model declares no operation that attaches a
-        // policy at all.
-        resource_tags: Vec::new(),
-        resource_policy: None,
-    }
-}
-
-/// The AWS-managed dashboard catalog every account already holds, keyed by ARN exactly
-/// as a created dashboard is.
-///
-/// These dashboards are the service's OWN data rather than the account's: an account that
-/// has created nothing still lists them, and `GetDashboard` reads one back with its
-/// widgets, which is the first call a console-like client makes. They are therefore
-/// SEEDED into the store ([`ComAmazonawsBcmdashboardsAwsbcmdashboardsserviceState::default`])
-/// and read back through the same map, the same projection and the same pagination as a
-/// dashboard a caller created — no handler branches on whether a dashboard is managed, and
-/// nothing about the catalog is derived from a request.
-///
-/// `pub` so a test can state the catalog a listing must report alongside its own
-/// dashboards from the one place that defines it.
-pub fn managed_dashboard_catalog() -> BTreeMap<String, Dashboard> {
-    [
-        managed_dashboard(
-            "4dc5619130f2463687fc45e003e4b930",
-            "Cost Overview and Trends",
-            "High-level view of your AWS costs, usage trends, and forecasts",
-            cost_overview_widgets(),
-        ),
-        managed_dashboard(
-            "6b1f0c5d2a8e4f3b9c7d1e0a5f8b2c4d",
-            "Compute",
-            "Cost and usage of your compute services, including Amazon EC2, AWS Lambda and \
-             AWS Fargate",
-            cost_by_dimension_widgets(
-                "b29c69918a0f45e3d7fce32be46a0bb6",
-                "Compute Cost By Instance Type",
-                "Monthly unblended cost of your compute usage, grouped by instance type.",
-                "INSTANCE_TYPE",
-            ),
-        ),
-        managed_dashboard(
-            "7c2a1d4e9b0f5a3c8d6e2f1b4a7c9d0e",
-            "Database",
-            "Cost and usage of your database services, including Amazon RDS, Amazon DynamoDB \
-             and Amazon ElastiCache",
-            cost_by_dimension_widgets(
-                "e7c9f2a5b38d4e06c1a9f7b2d5e8c304",
-                "Database Cost By Engine",
-                "Monthly unblended cost of your database usage, grouped by database engine.",
-                "DATABASE_ENGINE",
-            ),
-        ),
-        managed_dashboard(
-            "8d3b2e5f0c1a6b4d9e7f3a2c5b8d0e1f",
-            "Reservations",
-            "Utilization and coverage of the Reserved Instances in your account",
-            reservation_widgets(),
-        ),
-        managed_dashboard(
-            "9e4c3f6a1d2b7c5e0f8a4b3d6c9e1f2a",
-            "Savings Plans",
-            "Utilization and coverage of the Savings Plans in your account",
-            savings_plans_widgets(),
-        ),
-    ]
-    .into_iter()
-    .map(|dashboard| (dashboard.arn.clone(), dashboard))
-    .collect()
-}
 
 /// The most scheduled reports this emulator stores for the account before
 /// `CreateScheduledReport` answers its modelled `ServiceQuotaExceededException`.
@@ -2733,9 +2457,19 @@ const DEFAULT_REGION: &str = "us-east-1";
 ///
 /// This service's own ARNs carry no Region (the model's ARN patterns have an empty Region
 /// segment), so the scope is the only thing that names one.
+///
+/// The scope travels in a request header, so what it names is CHECKED before it is used:
+/// a Region identifier is a run of `[-a-z0-9]` ([`is_arn_label`], the class every AWS
+/// Region id is written in), and anything else — a value carrying a URL delimiter among
+/// them — names no Region and is answered with [`DEFAULT_REGION`], exactly as a request
+/// that carried no scope at all is. So nothing a caller writes can reach the authority of
+/// the endpoint the delivery client is built on
+/// ([`deliver_execution_notification`]) or the scope that request is signed under.
 fn request_region(ctx: &::smithy_server_runtime::OperationContext<'_>) -> String {
     ::emulator_server::sigv4_credential_scope(&ctx.parts().headers)
-        .map_or_else(|| DEFAULT_REGION.to_string(), |scope| scope.region)
+        .map(|scope| scope.region)
+        .filter(|region| !region.is_empty() && is_arn_label(region))
+        .unwrap_or_else(|| DEFAULT_REGION.to_string())
 }
 
 /// Render `at` as the RFC 3339 instant an event's `detail` carries, through the one

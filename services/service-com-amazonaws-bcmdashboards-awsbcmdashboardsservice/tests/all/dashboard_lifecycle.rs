@@ -65,6 +65,18 @@ pub(crate) async fn call(
     operation: &str,
     body: &Value,
 ) -> (u16, Value) {
+    call_signed_in_region(router, operation, body, "us-east-1").await
+}
+
+/// [`call`], with the Region field of the request's SigV4 credential scope chosen by the
+/// caller: that scope is the only thing naming the Region a request addressed, so a suite
+/// whose subject is what the service does with it states it per call.
+pub(crate) async fn call_signed_in_region(
+    router: &MultiServiceRouter,
+    operation: &str,
+    body: &Value,
+    scope_region: &str,
+) -> (u16, Value) {
     let request = http::Request::builder()
         .method("POST")
         .uri("/")
@@ -73,8 +85,11 @@ pub(crate) async fn call(
         // for this router, so the signature itself is never checked.
         .header(
             "authorization",
-            "AWS4-HMAC-SHA256 Credential=AKIDEXAMPLE/20250818/us-east-1/bcm-dashboards/aws4_request, \
-             SignedHeaders=host;x-amz-date;x-amz-target, Signature=0000",
+            format!(
+                "AWS4-HMAC-SHA256 \
+                 Credential=AKIDEXAMPLE/20250818/{scope_region}/bcm-dashboards/aws4_request, \
+                 SignedHeaders=host;x-amz-date;x-amz-target, Signature=0000"
+            ),
         )
         .header("host", "bcm-dashboards.us-east-1.amazonaws.com")
         .header("content-type", "application/x-amz-json-1.0")

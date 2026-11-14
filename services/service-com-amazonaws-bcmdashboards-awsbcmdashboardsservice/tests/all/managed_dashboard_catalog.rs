@@ -30,7 +30,7 @@ use smithy_server_runtime::MultiServiceRouter;
 use super::dashboard_lifecycle::{graph_config, ok_call, router};
 
 /// The `DashboardType` the catalog's entries carry on the wire.
-const AWS_MANAGED: &str = "AWS_MANAGED";
+pub(crate) const AWS_MANAGED: &str = "AWS_MANAGED";
 
 /// The `DashboardType` a dashboard a caller creates carries — the only value the model's
 /// enum declares.
@@ -48,7 +48,7 @@ const CATALOG_NAMES: [&str; 5] = [
 
 /// Whether `id` is 32 lowercase hexadecimal characters — `WidgetId`'s modelled
 /// `@pattern` `^[0-9a-f]{32}$` and its 32..32 `@length`.
-fn is_widget_id(id: &str) -> bool {
+pub(crate) fn is_widget_id(id: &str) -> bool {
     id.len() == 32 && id.chars().all(|c| c.is_ascii_digit() || ('a'..='f').contains(&c))
 }
 
@@ -71,7 +71,7 @@ fn is_managed_dashboard_arn(arn: &str) -> bool {
 }
 
 /// Every dashboard reference `ListDashboards` reports, walking every page.
-async fn every_reference(router: &MultiServiceRouter, page_size: usize) -> Vec<Value> {
+pub(crate) async fn every_reference(router: &MultiServiceRouter, page_size: usize) -> Vec<Value> {
     let mut references: Vec<Value> = Vec::new();
     let mut token: Option<String> = None;
     loop {
