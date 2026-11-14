@@ -1,15 +1,17 @@
 // SPDX-License-Identifier: CC0-1.0
 
 //! @op DescribeDaemonRevisions
-//! SCAFFOLDED, NOT IMPLEMENTED: this operation answers HTTP 501 `NotImplemented` and
-//! asserts NOTHING about `DescribeDaemonRevisions`'s real behaviour. Implement it here — this is
-//! the ONLY file to touch for this operation.
+//! Describes the daemon revisions the request names: "A daemon revision is a snapshot of a
+//! daemon's configuration at the time a deployment was initiated", so each one reports the
+//! daemon task definition, container images, tag propagation and execute-command settings
+//! the rollout that captured it was deploying — never what the daemon happens to run now.
+//! "Daemon revisions are immutable": nothing rewrites one.
 //!
-//! A 501 from this operation means "nobody has written it yet", never "the emulator is
-//! broken". Replace the `Err(..)` in [`DescribeDaemonRevisions::handle`] with real behaviour and
-//! delete the SCAFFOLDED marker line above; that line is the machine-readable record of
-//! which operations are still stubs (`grep -rl '^//! SCAFFOLDED, NOT IMPLEMENTED:' */src/ops/`),
-//! so leaving it on an implemented operation under-reports progress.
+//! A daemon-revision ARN carries the cluster whose daemon the revision belongs to
+//! (`daemon-revision/<cluster>/<daemon>/<id>`), so this read resolves that cluster before it
+//! reports on anything; an ARN under a cluster that IS there naming no stored revision is a
+//! `MISSING` failure of its own entry rather than a refusal that would lose the revisions
+//! the request did resolve.
 //!
 //! ## Shape of an operation
 //!
@@ -155,20 +157,64 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
     async fn handle(
         &self,
         input: Self::Input,
-        ctx: &smithy_server_runtime::OperationContext<'_>,
+        _ctx: &smithy_server_runtime::OperationContext<'_>,
     ) -> Result<Self::Output, Self::Error> {
-        // The engine is reachable from `&self` (constructor-injected); `ctx` carries
-        // request metadata. Both are bound here so an implementer has them in scope.
-        let _ = (&input, ctx, &self.engine);
-        // Implement `DescribeDaemonRevisions` here, then delete the SCAFFOLDED marker at the top of
-        // this file. Return modeled failures as
-        // `Err(DescribeDaemonRevisionsErrorModeled::Variant(..).into())` — the `From` impl above lifts it.
-        //
-        // To refuse a bad request this operation models no error for, return
-        // `Err(crate::scaffolded::Scaffolded::validation("..."))` — a 400
-        // `ValidationException`. Do NOT answer 501 for it: 501 means "not written yet",
-        // not "bad request". Modeled constraints are already refused BEFORE this
-        // handler runs, so reaching here means the input satisfies every one of them.
-        Err(crate::scaffolded::Scaffolded::not_implemented("DescribeDaemonRevisions"))
+        let state = crate::state::service_state(&*self.engine).ok_or_else(|| {
+            DescribeDaemonRevisionsErrorModeled::ServerException(ServerException {
+                message: Some("the ECS store is unavailable".to_string()),
+            })
+        })?;
+
+        // "You can specify up to 20 ARNs."
+        if input.daemon_revision_arns.len() > crate::state::MAX_DESCRIBE_DAEMON_REVISIONS {
+            return Err(
+                DescribeDaemonRevisionsErrorModeled::InvalidParameterException(
+                    InvalidParameterException {
+                        message: Some(crate::state::at_most_items_message(
+                            "daemon revisions",
+                            crate::state::MAX_DESCRIBE_DAEMON_REVISIONS,
+                        )),
+                    },
+                )
+                .into(),
+            );
+        }
+
+        let mut guard = state.lock();
+        guard.advance_clock(::std::time::SystemTime::now());
+
+        if guard.names_a_missing_cluster(
+            input.daemon_revision_arns.iter().map(String::as_str),
+            crate::state::DAEMON_REVISION_RESOURCE_TYPE,
+        ) {
+            return Err(
+                DescribeDaemonRevisionsErrorModeled::ClusterNotFoundException(
+                    ClusterNotFoundException {
+                        message: Some(crate::state::CLUSTER_NOT_FOUND_MESSAGE.to_string()),
+                    },
+                )
+                .into(),
+            );
+        }
+
+        let mut daemon_revisions = Vec::new();
+        let mut failures = Vec::new();
+        // A revision is reported once however many times the request names it.
+        let mut seen = ::std::collections::HashSet::new();
+        for reference in &input.daemon_revision_arns {
+            let reference = reference.trim();
+            if !seen.insert(reference.to_string()) {
+                continue;
+            }
+            match guard.daemon_revisions.get(reference) {
+                Some(record) => daemon_revisions.push(record.view()),
+                None => failures.push(crate::state::missing_failure(reference)),
+            }
+        }
+
+        Ok(DescribeDaemonRevisionsOutput {
+            daemon_revisions: Some(daemon_revisions),
+            failures: Some(failures),
+        })
     }
 }

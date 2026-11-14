@@ -326,88 +326,72 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         // Managed Daemons is only supported for Amazon ECS Managed Instances Capacity
         // Providers". A provider of any other kind — the Fargate providers Amazon ECS
         // publishes, or one bound onto a caller's Auto Scaling group — cannot carry a
-        // daemon, so the whole call is refused and nothing is stored.
-        let mut capacity_provider_names = Vec::with_capacity(input.capacity_provider_arns.len());
-        for reference in &input.capacity_provider_arns {
-            let name = crate::state::capacity_provider_name_from_reference(reference);
-            let Some(provider) = guard.capacity_provider(&name, &region) else {
+        // daemon, so the whole call is refused and nothing is stored. The one resolution
+        // `UpdateDaemon` makes too
+        // ([`crate::state::ComAmazonawsEcsAmazonec2containerservicev20141113State::resolve_daemon_capacity_providers`]).
+        let capacity_provider_names = match guard
+            .resolve_daemon_capacity_providers(&input.capacity_provider_arns, &region)
+        {
+            Ok(names) => names,
+            Err(refusal) => {
+                let message = match refusal {
+                    crate::state::DaemonCapacityRefusal::NotFound => {
+                        crate::state::CAPACITY_PROVIDER_NOT_FOUND_MESSAGE
+                    }
+                    crate::state::DaemonCapacityRefusal::NotManagedInstances => {
+                        crate::state::DAEMON_MANAGED_INSTANCES_REQUIRED_MESSAGE
+                    }
+                };
                 return Err(CreateDaemonErrorModeled::InvalidParameterException(
                     InvalidParameterException {
-                        message: Some(
-                            crate::state::CAPACITY_PROVIDER_NOT_FOUND_MESSAGE.to_string(),
-                        ),
-                    },
-                )
-                .into());
-            };
-            if provider.provider_type.as_deref()
-                != Some(crate::state::CAPACITY_PROVIDER_TYPE_MANAGED_INSTANCES)
-            {
-                return Err(CreateDaemonErrorModeled::InvalidParameterException(
-                    InvalidParameterException {
-                        message: Some(
-                            crate::state::DAEMON_MANAGED_INSTANCES_REQUIRED_MESSAGE.to_string(),
-                        ),
+                        message: Some(message.to_string()),
                     },
                 )
                 .into());
             }
-            capacity_provider_names.push(provider.name);
-        }
+        };
 
         // "The Amazon Resource Name (ARN) of the daemon task definition to use for the
         // daemon": the revision is resolved ONCE, here, so a registration made later in
-        // the same family does not move the daemon onto it.
-        let reference = input.daemon_task_definition_arn.as_str();
-        // Every form of the reference carries a FAMILY, and a family is a name of the
-        // documented character set, so a value whose family part is not one is refused as
-        // invalid input stating the pattern a family has to match.
-        if let Some(message) = crate::state::daemon_task_definition_family_violation(reference) {
-            return Err(CreateDaemonErrorModeled::InvalidParameterException(
-                InvalidParameterException {
-                    message: Some(message.to_string()),
-                },
-            )
-            .into());
-        }
-        let Some((family, revision)) =
-            crate::state::parse_daemon_task_definition_reference(reference)
-        else {
-            return Err(CreateDaemonErrorModeled::ClientException(ClientException {
-                message: Some(crate::state::daemon_task_definition_reference_message(
-                    reference,
-                )),
-            })
-            .into());
-        };
-        let resolved = match revision {
-            Some(revision) => guard.daemon_task_definitions.get(&(family, revision)),
-            // A reference that names no revision takes the latest ACTIVE one, as the
-            // family alone does everywhere this resource is read.
-            None => guard.latest_active_daemon_revision(&family),
-        };
-        let Some(resolved) = resolved else {
-            return Err(CreateDaemonErrorModeled::ClientException(ClientException {
-                message: Some(
-                    crate::state::DAEMON_TASK_DEFINITION_NOT_FOUND_TO_RUN_MESSAGE.to_string(),
-                ),
-            })
-            .into());
-        };
-        // A revision whose delete has been requested or carried out is still readable but
-        // can run no new work, so it names an existing resource in a status this call
-        // cannot accept — a bad parameter rather than an unknown identifier.
-        if resolved.status != crate::state::DAEMON_TASK_DEFINITION_ACTIVE {
-            return Err(CreateDaemonErrorModeled::InvalidParameterException(
-                InvalidParameterException {
+        // the same family does not move the daemon onto it — the one resolution
+        // `UpdateDaemon` makes too.
+        let daemon_task_definition_arn = match guard
+            .resolve_daemon_task_definition(&input.daemon_task_definition_arn)
+        {
+            Ok(arn) => arn,
+            Err(crate::state::DaemonDefinitionRefusal::FamilyPattern(message)) => {
+                return Err(CreateDaemonErrorModeled::InvalidParameterException(
+                    InvalidParameterException {
+                        message: Some(message.to_string()),
+                    },
+                )
+                .into())
+            }
+            Err(crate::state::DaemonDefinitionRefusal::Malformed(message)) => {
+                return Err(CreateDaemonErrorModeled::ClientException(ClientException {
+                    message: Some(message),
+                })
+                .into())
+            }
+            Err(crate::state::DaemonDefinitionRefusal::NotFound) => {
+                return Err(CreateDaemonErrorModeled::ClientException(ClientException {
                     message: Some(
-                        crate::state::DAEMON_TASK_DEFINITION_INACTIVE_MESSAGE.to_string(),
+                        crate::state::DAEMON_TASK_DEFINITION_NOT_FOUND_TO_RUN_MESSAGE.to_string(),
                     ),
-                },
-            )
-            .into());
-        }
-        let daemon_task_definition_arn = resolved.arn.clone();
+                })
+                .into())
+            }
+            Err(crate::state::DaemonDefinitionRefusal::Inactive) => {
+                return Err(CreateDaemonErrorModeled::InvalidParameterException(
+                    InvalidParameterException {
+                        message: Some(
+                            crate::state::DAEMON_TASK_DEFINITION_INACTIVE_MESSAGE.to_string(),
+                        ),
+                    },
+                )
+                .into())
+            }
+        };
 
         // A daemon ARN carries its cluster and its name, so it is the key a daemon of
         // this name in this cluster is held under.
@@ -444,11 +428,10 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
             .into());
         }
 
-        let created_at = crate::state::now();
-        // "The Amazon Resource Name (ARN) of the initial daemon deployment": the create
-        // mints it with the daemon, so the daemon and the response name the same one.
-        let deployment_arn =
-            guard.next_daemon_deployment_arn(&region, &cluster_name, &input.daemon_name);
+        // The instant of THIS call, as the wire timestamp type: the same instant the rollout
+        // this create starts is dated by, so the daemon's `createdAt` and the `updatedAt`
+        // that rollout stamps on it are one instant rather than two readings of the clock.
+        let created_at = ::aws_smithy_types::DateTime::from(now);
         let record = crate::state::DaemonRecord {
             name: input.daemon_name.clone(),
             arn: arn.clone(),
@@ -473,13 +456,43 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
                 .unwrap_or(crate::state::DAEMON_CRITICAL_DEFAULT),
             tags: input.tags.clone().unwrap_or_default(),
             client_token: input.client_token.clone(),
-            deployment_arn: deployment_arn.clone(),
+            // Both are filled in by the rollout this create starts, which is what mints
+            // them ([`crate::state::ComAmazonawsEcsAmazonec2containerservicev20141113State::start_daemon_deployment`]).
+            deployment_arn: String::new(),
+            current_revision_arn: None,
+            // Nothing has asked for this daemon to be deleted.
+            removal_due_at: None,
             created_at,
             // Nothing has updated the daemon yet, so it was last changed when it was
             // created.
             updated_at: created_at,
         };
         guard.daemons.insert(arn.clone(), record);
+        // "The Amazon Resource Name (ARN) of the initial daemon deployment. This deployment
+        // places daemon tasks on each container instance of the specified capacity
+        // providers": the create captures the daemon's configuration as its first daemon
+        // revision and starts the rollout of it, which is the deployment this answers with.
+        let deployment_arn = guard
+            .start_daemon_deployment(&arn, &region, now)
+            .map(|(deployment_arn, _)| deployment_arn)
+            .ok_or_else(|| {
+                CreateDaemonErrorModeled::ServerException(ServerException {
+                    message: Some("the ECS store is unavailable".to_string()),
+                })
+            })?;
+        drop(guard);
+        // The steps a task this daemon's rollout places needs taken before its containers
+        // start are settled here: the execution role is assumed and the image fetch is
+        // attempted from where the scheduler placed it. Read with OUR guard dropped, since
+        // it takes the IAM, Amazon EC2 and Amazon ECR stores' locks
+        // ([`crate::state::settle_task_launches`]).
+        crate::state::settle_task_launches(&*self.engine);
+        // The rollout this create started is carried on by the CLOCK — it begins replacing
+        // tasks one transition span from now, and the statuses its placements reach are
+        // `ECS Task State Change` events on the account's default event bus, published as
+        // they fall due ([`crate::state::publish_task_state_changes`]). That is also what
+        // leaves the daemon converging with no further call from anybody.
+        crate::state::publish_task_state_changes(ctx, &self.engine, &region);
 
         Ok(CreateDaemonOutput {
             daemon_arn: Some(arn),

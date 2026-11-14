@@ -1,15 +1,16 @@
 // SPDX-License-Identifier: CC0-1.0
 
 //! @op ListDaemonDeployments
-//! SCAFFOLDED, NOT IMPLEMENTED: this operation answers HTTP 501 `NotImplemented` and
-//! asserts NOTHING about `ListDaemonDeployments`'s real behaviour. Implement it here — this is
-//! the ONLY file to touch for this operation.
+//! Lists the daemon deployments of ONE daemon — its rollout HISTORY, so a finished
+//! deployment is reported beside the one under way — narrowed by the statuses and the
+//! creation window the request names, NEWEST first, and paged by `maxResults`/`nextToken`.
 //!
-//! A 501 from this operation means "nobody has written it yet", never "the emulator is
-//! broken". Replace the `Err(..)` in [`ListDaemonDeployments::handle`] with real behaviour and
-//! delete the SCAFFOLDED marker line above; that line is the machine-readable record of
-//! which operations are still stubs (`grep -rl '^//! SCAFFOLDED, NOT IMPLEMENTED:' */src/ops/`),
-//! so leaving it on an implemented operation under-reports progress.
+//! A daemon ARN carries the cluster that hosts it, and this listing is of that cluster's
+//! work: a `daemonArn` whose cluster this account does not hold is refused about the cluster
+//! (`ClusterNotFoundException`). It models no not-found error of its own for the daemon, so
+//! an ARN under a cluster that IS there naming no stored daemon — and a value that is no
+//! daemon ARN at all — is answered as the identifier that is not valid it is
+//! (`ClientException`).
 //!
 //! ## Shape of an operation
 //!
@@ -175,18 +176,166 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         input: Self::Input,
         ctx: &smithy_server_runtime::OperationContext<'_>,
     ) -> Result<Self::Output, Self::Error> {
-        // The engine is reachable from `&self` (constructor-injected); `ctx` carries
-        // request metadata. Both are bound here so an implementer has them in scope.
-        let _ = (&input, ctx, &self.engine);
-        // Implement `ListDaemonDeployments` here, then delete the SCAFFOLDED marker at the top of
-        // this file. Return modeled failures as
-        // `Err(ListDaemonDeploymentsErrorModeled::Variant(..).into())` — the `From` impl above lifts it.
-        //
-        // To refuse a bad request this operation models no error for, return
-        // `Err(crate::scaffolded::Scaffolded::validation("..."))` — a 400
-        // `ValidationException`. Do NOT answer 501 for it: 501 means "not written yet",
-        // not "bad request". Modeled constraints are already refused BEFORE this
-        // handler runs, so reaching here means the input satisfies every one of them.
-        Err(crate::scaffolded::Scaffolded::not_implemented("ListDaemonDeployments"))
+        let state = crate::state::service_state(&*self.engine).ok_or_else(|| {
+            ListDaemonDeploymentsErrorModeled::ServerException(ServerException {
+                message: Some("the ECS store is unavailable".to_string()),
+            })
+        })?;
+
+        // "This value can be between 1 and 100." Either end of that range is the same
+        // violation of the one documented rule, so both earn the sentence stating it.
+        if let Some(message) = input.max_results.and_then(|max_results| {
+            crate::state::page_size_range_violation(
+                max_results,
+                crate::state::MIN_LIST_PAGE_SIZE,
+                crate::state::MAX_LIST_PAGE_SIZE,
+            )
+        }) {
+            return Err(ListDaemonDeploymentsErrorModeled::InvalidParameterException(
+                InvalidParameterException {
+                    message: Some(message),
+                },
+            )
+            .into());
+        }
+
+        // An ARN is a WHOLE identifier, Region and account included, so both segments are
+        // checked before the identifier is resolved
+        // ([`crate::state::request_arn_violation`]).
+        if let Some(message) = crate::state::request_arn_violation(ctx, Some(input.daemon_arn.as_str())) {
+            return Err(ListDaemonDeploymentsErrorModeled::InvalidParameterException(
+                InvalidParameterException {
+                    message: Some(message.to_string()),
+                },
+            )
+            .into());
+        }
+
+        // Everything the CLOCK owes this read, materialised before the deployments are
+        // listed: the rollout that starts or ends, the daemon tasks its placements and
+        // stops move, and the launch steps the START of such a task waits on — the whole
+        // pass, exactly as the clock pump runs it
+        // ([`crate::state::advance_task_clock`]), with NO guard of this store held.
+        let now = ::std::time::SystemTime::now();
+        crate::state::advance_task_clock(&*self.engine, now);
+
+        let mut guard = state.lock();
+        guard.advance_clock(now);
+
+        // A daemon's deployments are its cluster's work, and this listing models
+        // `ClusterNotFoundException` and no not-found error for the daemon — so the cluster
+        // the ARN carries is resolved first and a cluster this account does not hold is
+        // what the listing is refused about.
+        if let Some(cluster_name) = guard.daemon_arn_cluster_refusal(&input.daemon_arn) {
+            return Err(
+                ListDaemonDeploymentsErrorModeled::ClusterNotFoundException(
+                    ClusterNotFoundException {
+                        message: Some(crate::state::cluster_refusal_message(
+                            guard.clusters.get(&cluster_name),
+                        )),
+                    },
+                )
+                .into(),
+            );
+        }
+        let daemon_arn = match guard.daemon_from_arn(&input.daemon_arn) {
+            Some(daemon) => daemon.arn.clone(),
+            // The deployments listed are ONE daemon's history, so an ARN that resolves to
+            // no stored daemon names no history either. This operation models no not-found
+            // error for a daemon, so such an identifier is answered as the identifier that
+            // is not valid it is ("it might be specifying an identifier that isn't valid"),
+            // with the sentence the daemon surface words for a daemon that is not there.
+            None => {
+                return Err(ListDaemonDeploymentsErrorModeled::ClientException(
+                    ClientException {
+                        message: Some(crate::state::daemon_not_found_message(&input.daemon_arn)),
+                    },
+                )
+                .into())
+            }
+        };
+
+        // "An optional filter to narrow the ListDaemonDeployments results by creation
+        // time", as a `before`/`after` window on each deployment's own `createdAt`. A bound
+        // the request omits bounds nothing.
+        let created_before = input
+            .created_at
+            .as_ref()
+            .and_then(|window| window.before)
+            .map(crate::state::timestamp_key);
+        let created_after = input
+            .created_at
+            .as_ref()
+            .and_then(|window| window.after)
+            .map(crate::state::timestamp_key);
+
+        let mut matching: Vec<&crate::state::DaemonDeploymentRecord> = guard
+            .daemon_deployments
+            .values()
+            .filter(|deployment| deployment.daemon_arn == daemon_arn)
+            // "An optional filter to narrow the ListDaemonDeployments results by deployment
+            // status. If you don't specify a status, all deployments are returned." A status
+            // list the request STATES is the set it asks for, so an empty one asks for no
+            // status and selects nothing; only an absent filter widens.
+            .filter(|deployment| {
+                input
+                    .status
+                    .as_ref()
+                    .is_none_or(|wanted| wanted.contains(&deployment.status))
+            })
+            // The instant itself is on neither side of its own bound, so a bound never
+            // selects the deployment it was read off.
+            .filter(|deployment| {
+                let created = crate::state::timestamp_key(deployment.created_at);
+                created_before.is_none_or(|before| created < before)
+                    && created_after.is_none_or(|after| created > after)
+            })
+            .collect();
+        // The history reads NEWEST first: the deployment a caller wants after listing is
+        // the one that is running or just ran, and `createdAt` is what dates it
+        // ([`crate::state::DaemonDeploymentRecord::order_key`] breaks a tie on the ARN's own
+        // monotonic id).
+        matching.sort_by(|left, right| right.order_key().cmp(&left.order_key()));
+
+        let page_size = input
+            .max_results
+            .and_then(|max_results| usize::try_from(max_results).ok())
+            .unwrap_or(crate::state::DEFAULT_LIST_DAEMON_DEPLOYMENTS_PAGE_SIZE);
+        // The token this operation mints is the ARN of the deployment the next page starts
+        // at — "an opaque identifier that is only used to retrieve the next items in a
+        // list" — so a page is unaffected by deployments started before it. A value that
+        // names no deployment of this daemon names no page: a `ClientException`, the error
+        // for a request "specifying an identifier that isn't valid", rather than some
+        // insertion point in the sequence.
+        let start = match input.next_token.as_deref() {
+            None => 0,
+            Some(token) => {
+                let Some(resume) = matching
+                    .iter()
+                    .find(|deployment| deployment.arn == token)
+                    .map(|deployment| deployment.order_key())
+                else {
+                    return Err(ListDaemonDeploymentsErrorModeled::ClientException(
+                        ClientException {
+                            message: Some(crate::state::INVALID_NEXT_TOKEN_MESSAGE.to_string()),
+                        },
+                    )
+                    .into());
+                };
+                matching.partition_point(|deployment| deployment.order_key() > resume)
+            }
+        };
+        let end = start.saturating_add(page_size).min(matching.len());
+        let daemon_deployments = matching[start..end]
+            .iter()
+            .map(|deployment| deployment.summary())
+            .collect();
+        // "This value is null when there are no more results to return."
+        let next_token = matching.get(end).map(|deployment| deployment.arn.clone());
+
+        Ok(ListDaemonDeploymentsOutput {
+            daemon_deployments: Some(daemon_deployments),
+            next_token,
+        })
     }
 }

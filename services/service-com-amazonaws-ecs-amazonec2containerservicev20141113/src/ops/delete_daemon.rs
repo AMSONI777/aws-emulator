@@ -1,15 +1,25 @@
 // SPDX-License-Identifier: CC0-1.0
 
 //! @op DeleteDaemon
-//! SCAFFOLDED, NOT IMPLEMENTED: this operation answers HTTP 501 `NotImplemented` and
-//! asserts NOTHING about `DeleteDaemon`'s real behaviour. Implement it here — this is
-//! the ONLY file to touch for this operation.
+//! Deletes the daemon a `daemonArn` names: "Deleting a daemon stops all running daemon
+//! tasks on the associated container instances", so the call asks every task of the daemon
+//! to stop and starts the daemon deployment that drains them
+//! (`DeleteDaemonResponse$deploymentArn`).
 //!
-//! A 501 from this operation means "nobody has written it yet", never "the emulator is
-//! broken". Replace the `Err(..)` in [`DeleteDaemon::handle`] with real behaviour and
-//! delete the SCAFFOLDED marker line above; that line is the machine-readable record of
-//! which operations are still stubs (`grep -rl '^//! SCAFFOLDED, NOT IMPLEMENTED:' */src/ops/`),
-//! so leaving it on an implemented operation under-reports progress.
+//! The delete is answered while it is being carried out — `DaemonStatus` carries
+//! `DELETE_IN_PROGRESS` for exactly that, and the daemon is reported in it with the instant
+//! of this call as its `updatedAt` — and the daemon itself is gone one transition span
+//! later, on the clock, which is what makes `ListDaemons` reflect the delete without
+//! anybody calling in between. The delete ACTS in the daemon's cluster — it stops what runs
+//! there — so a `daemonArn` whose cluster this account does not hold is refused about the
+//! cluster (`ClusterNotFoundException`), and an ARN under a cluster that IS there naming no
+//! stored daemon is `DaemonNotFoundException`.
+//!
+//! The model's `@idempotent` trait decides a REPEAT: a delete of a daemon whose delete is
+//! already under way is the call already having had its effect, so it answers the stored
+//! record and the drain the first call started, and asks for nothing a second time. Those
+//! two are the only statuses `DaemonStatus` holds, so no delete reaches the not-active
+//! refusal.
 //!
 //! ## Shape of an operation
 //!
@@ -174,18 +184,83 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         input: Self::Input,
         ctx: &smithy_server_runtime::OperationContext<'_>,
     ) -> Result<Self::Output, Self::Error> {
-        // The engine is reachable from `&self` (constructor-injected); `ctx` carries
-        // request metadata. Both are bound here so an implementer has them in scope.
-        let _ = (&input, ctx, &self.engine);
-        // Implement `DeleteDaemon` here, then delete the SCAFFOLDED marker at the top of
-        // this file. Return modeled failures as
-        // `Err(DeleteDaemonErrorModeled::Variant(..).into())` — the `From` impl above lifts it.
-        //
-        // To refuse a bad request this operation models no error for, return
-        // `Err(crate::scaffolded::Scaffolded::validation("..."))` — a 400
-        // `ValidationException`. Do NOT answer 501 for it: 501 means "not written yet",
-        // not "bad request". Modeled constraints are already refused BEFORE this
-        // handler runs, so reaching here means the input satisfies every one of them.
-        Err(crate::scaffolded::Scaffolded::not_implemented("DeleteDaemon"))
+        let state = crate::state::service_state(&*self.engine).ok_or_else(|| {
+            DeleteDaemonErrorModeled::ServerException(ServerException {
+                message: Some("the ECS store is unavailable".to_string()),
+            })
+        })?;
+
+        // An ARN is a WHOLE identifier, Region and account included, so both segments are
+        // checked before the identifier is resolved
+        // ([`crate::state::request_arn_violation`]).
+        if let Some(message) = crate::state::request_arn_violation(ctx, Some(input.daemon_arn.as_str())) {
+            return Err(DeleteDaemonErrorModeled::InvalidParameterException(
+                InvalidParameterException {
+                    message: Some(message.to_string()),
+                },
+            )
+            .into());
+        }
+
+        let now = ::std::time::SystemTime::now();
+        let mut guard = state.lock();
+        guard.advance_clock(now);
+
+        // "Deleting a daemon stops all running daemon tasks on the associated container
+        // instances. Amazon ECS drains existing container instances": the delete ACTS in
+        // the daemon's cluster, so that cluster is resolved first and a cluster this
+        // account does not hold is what the call is refused about.
+        if let Some(cluster_name) = guard.daemon_arn_cluster_refusal(&input.daemon_arn) {
+            return Err(DeleteDaemonErrorModeled::ClusterNotFoundException(
+                ClusterNotFoundException {
+                    message: Some(crate::state::cluster_refusal_message(
+                        guard.clusters.get(&cluster_name),
+                    )),
+                },
+            )
+            .into());
+        }
+        let daemon = match guard.daemon_from_arn(&input.daemon_arn) {
+            Some(daemon) => daemon.clone(),
+            // The ARN identifies the daemon by itself, so anything it does not resolve to
+            // is a daemon that is not there — the one refusal every operation addressed to
+            // one daemon answers.
+            None => {
+                return Err(DeleteDaemonErrorModeled::DaemonNotFoundException(
+                    DaemonNotFoundException {
+                        message: Some(crate::state::daemon_not_found_message(&input.daemon_arn)),
+                    },
+                )
+                .into())
+            }
+        };
+
+        let deployment_arn = guard.request_daemon_delete(&daemon.arn, now);
+        // The record as the delete left it: the status it moved to and the instant it moved
+        // at are read back out of the store rather than assembled here, so the response and
+        // a `DescribeDaemon` that follows it cannot disagree.
+        let Some(stored) = guard.daemons.get(&daemon.arn) else {
+            return Err(DeleteDaemonErrorModeled::DaemonNotFoundException(
+                DaemonNotFoundException {
+                    message: Some(crate::state::daemon_not_found_message(&input.daemon_arn)),
+                },
+            )
+            .into());
+        };
+        let answer = DeleteDaemonOutput {
+            daemon_arn: Some(stored.arn.clone()),
+            status: Some(stored.status.clone()),
+            created_at: Some(stored.created_at),
+            updated_at: Some(stored.updated_at),
+            deployment_arn: deployment_arn.or_else(|| Some(stored.deployment_arn.clone())),
+        };
+        drop(guard);
+        // The stops this delete asked for leave their tasks `DEACTIVATING` with `STOPPED`
+        // owed by the clock, and each status is an `ECS Task State Change` event published
+        // as it falls due ([`crate::state::publish_task_state_changes`]) — which is also
+        // what carries the delete itself out with no further call from anybody.
+        let region = crate::state::request_region(ctx);
+        crate::state::publish_task_state_changes(ctx, &self.engine, &region);
+        Ok(answer)
     }
 }

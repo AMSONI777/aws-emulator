@@ -109,9 +109,9 @@ impl ComAmazonawsEcsAmazonec2containerservicev20141113State {
                             // A task placed on its own runs the work it was placed for
                             // and then ends, so the instant that work is finished is owed
                             // from the instant it started ([`CONTAINER_WORK_SPAN`]); a
-                            // task a service's scheduler placed is kept in place by that
-                            // scheduler instead.
-                            if task.service_name.is_none() {
+                            // task a service's or a daemon's scheduler placed is kept in
+                            // place by that scheduler instead.
+                            if task.service_name.is_none() && task.daemon_arn.is_none() {
                                 task.work_done_due_at = Some(due + CONTAINER_WORK_SPAN);
                             }
                             // The containers of a task that has started are the containers
@@ -247,6 +247,11 @@ impl ComAmazonawsEcsAmazonec2containerservicev20141113State {
         // starts is carried out by the same pass once it falls due.
         self.advance_deployment_circuit_breakers(now);
         self.advance_service_deployments(now);
+        // The DAEMON rollouts the clock owes: the one that starts replacing tasks, the one
+        // that reaches its end, and the daemon whose delete has been carried out
+        // ([`super::daemon_scheduling`]). Run before the placement pass below, so a rollout
+        // that has just started has its tasks placed by the same pass.
+        self.advance_daemon_deployments(now);
         self.settle_services(now);
         // The scheduler's steady-state work: a service that is short of the tasks its
         // caller asked it to maintain has the shortfall placed, which was owed from the
@@ -254,6 +259,12 @@ impl ComAmazonawsEcsAmazonec2containerservicev20141113State {
         // pass materialised, so a task that has just reached `STOPPED` is already out of
         // the count its replacement is weighed against.
         self.maintain_service_task_counts(now);
+        // The daemon scheduler's own steady-state work: "Amazon ECS deploys exactly one
+        // daemon task on each container instance of the specified capacity providers. When a
+        // container instance registers with the cluster, Amazon ECS automatically starts
+        // daemon tasks" — so the placement an instance that joined is owed, and the stop a
+        // task whose instance is gone earns, are materialised here.
+        self.maintain_daemon_tasks(now);
         // Every status a task moved into during THIS pass becomes an event here, under the
         // same lock that materialised it. A transition the clock owes is observable for one
         // span only, so a pass that materialises one and a later writer that supersedes it
@@ -1619,21 +1630,22 @@ impl ComAmazonawsEcsAmazonec2containerservicev20141113State {
             .collect()
     }
 
-    /// Mint the container records of ONE task of `definition`, each with its own ARN and
-    /// id. Shared by every path that places a task — `RunTask` and the service
-    /// scheduler — so a task's containers are derived from the stored revision the same
-    /// way whoever placed it.
+    /// Mint the container records of ONE task from `container_definitions`, each with its
+    /// own ARN and id. Shared by every path that places a task — `RunTask`, the service
+    /// scheduler and the DAEMON scheduler
+    /// ([`super::daemon_scheduling`], which maps a daemon revision's own container
+    /// definitions onto this one shape) — so a task's containers are derived from the
+    /// stored definitions the same way whoever placed it.
     pub fn mint_containers(
         &mut self,
         region: &str,
         cluster_name: &str,
         task_id: &str,
         task_arn: &str,
-        definition: &TaskDefinitionRecord,
+        container_definitions: &[ContainerDefinition],
         last_status: &str,
     ) -> Vec<ContainerRecord> {
-        definition
-            .container_definitions
+        container_definitions
             .iter()
             .map(|container| {
                 let container_id = self.next_container_id();
@@ -1710,6 +1722,20 @@ impl ComAmazonawsEcsAmazonec2containerservicev20141113State {
         self.container_instances
             .values()
             .filter(|instance| instance.cluster_name == cluster_name && instance.is_registered())
+            .count()
+    }
+
+    /// How many container instances of `cluster_name` a placement can be made on at all:
+    /// the capacity a DAEMON-scheduled workload runs one task on each of
+    /// ([`ContainerInstanceRecord::accepts_task_placement`], which excludes a `DRAINING`
+    /// instance — "prevents new tasks from being scheduled for placement on the container
+    /// instance" — and one whose agent is gone).
+    pub fn placeable_container_instances(&self, cluster_name: &str) -> usize {
+        self.container_instances
+            .values()
+            .filter(|instance| {
+                instance.cluster_name == cluster_name && instance.accepts_task_placement()
+            })
             .count()
     }
 
@@ -3408,7 +3434,7 @@ impl ComAmazonawsEcsAmazonec2containerservicev20141113State {
             &service.cluster_name,
             &task_id,
             &task_arn,
-            definition,
+            &definition.container_definitions,
             schedule.last_status,
         );
         // "Determines whether to propagate the tags from the task definition or the
@@ -3447,6 +3473,10 @@ impl ComAmazonawsEcsAmazonec2containerservicev20141113State {
             // for a service's task is `service:<service name>`.
             group: format!("service:{}", service.name),
             service_name: Some(service.name.clone()),
+            // A service's task belongs to no daemon: the two schedulers place their own
+            // tasks and neither maintains the other's.
+            daemon_arn: None,
+            daemon_revision_arn: None,
             tags,
             enable_execute_command: service.enable_execute_command,
             created_at: DateTime::from(now),

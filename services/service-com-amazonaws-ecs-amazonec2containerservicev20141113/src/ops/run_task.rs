@@ -715,7 +715,7 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
                 &cluster_name,
                 &task_id,
                 &task_arn,
-                &definition,
+                &definition.container_definitions,
                 schedule.last_status,
             );
 
@@ -744,9 +744,12 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
                 platform_version: input.platform_version.clone(),
                 started_by: input.started_by.clone(),
                 group: group.clone(),
-                // Nothing but the service scheduler places a task for a service, so a
-                // task a client ran stands alone.
+                // Nothing but the service scheduler places a task for a service, and
+                // nothing but the daemon scheduler places one for a daemon, so a task a
+                // client ran stands alone.
                 service_name: None,
+                daemon_arn: None,
+                daemon_revision_arn: None,
                 tags: tags.clone(),
                 enable_execute_command: input.enable_execute_command,
                 created_at,

@@ -958,10 +958,12 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         }
 
         // "The daemon scheduling strategy deploys exactly one task on each active
-        // container instance", so a daemon's desired count is the capacity registered to
-        // the cluster rather than a number the request carries.
+        // container instance", so a daemon's desired count is the capacity its cluster
+        // holds that a placement can be made on rather than a number the request carries
+        // — the same reading the scheduler's steady-state pass keeps it at
+        // ([`crate::state::ComAmazonawsEcsAmazonec2containerservicev20141113State::placeable_container_instances`]).
         let desired_count = if daemon {
-            i32::try_from(guard.registered_container_instances(&cluster_name)).unwrap_or(i32::MAX)
+            i32::try_from(guard.placeable_container_instances(&cluster_name)).unwrap_or(i32::MAX)
         } else {
             input.desired_count.unwrap_or_default()
         };

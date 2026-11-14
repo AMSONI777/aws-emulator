@@ -318,6 +318,16 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         let host_instance_arn = input.container_instance.as_deref().map(|reference| {
             crate::state::container_instance_arn_from_reference(&region, &cluster_name, reference)
         });
+        // "Specifying a daemonName limits the results to tasks that belong to that daemon":
+        // a daemon is named by its own name within the cluster, and a daemon ARN carries
+        // both ([`crate::state::daemon_arn`]), so the filter is the ARN the daemon's tasks
+        // record. Like the container-instance filter above it SELECTS what it matches: a
+        // name no daemon of the cluster answers to is matched by no task, and this listing
+        // models no not-found error for a daemon to refuse it with.
+        let daemon_arn = input
+            .daemon_name
+            .as_deref()
+            .map(|name| crate::state::daemon_arn(&region, &cluster_name, name));
 
         let mut matching: Vec<String> = guard
             .tasks
@@ -347,9 +357,13 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
                     .as_deref()
                     .is_none_or(|name| task.service_name.as_deref() == Some(name))
             })
-            // A daemon cannot exist in this slice, so no task belongs to one and a
-            // `daemonName` filter selects nothing.
-            .filter(|_| input.daemon_name.is_none())
+            // The tasks that belong to the named daemon: the ones its scheduler placed,
+            // which is the daemon each task records.
+            .filter(|task| {
+                daemon_arn
+                    .as_deref()
+                    .is_none_or(|arn| task.daemon_arn.as_deref() == Some(arn))
+            })
             // The tasks that belong to the named container instance: the ones a
             // placement put ON it, which is the instance each task records.
             .filter(|task| {

@@ -1,15 +1,29 @@
 // SPDX-License-Identifier: CC0-1.0
 
 //! @op UpdateDaemon
-//! SCAFFOLDED, NOT IMPLEMENTED: this operation answers HTTP 501 `NotImplemented` and
-//! asserts NOTHING about `UpdateDaemon`'s real behaviour. Implement it here — this is
-//! the ONLY file to touch for this operation.
+//! Updates the daemon a `daemonArn` names and starts the rollout of the change: "When you
+//! update a daemon, a new deployment is triggered that progressively rolls out the changes
+//! to the container instances associated with the daemon's capacity providers."
 //!
-//! A 501 from this operation means "nobody has written it yet", never "the emulator is
-//! broken". Replace the `Err(..)` in [`UpdateDaemon::handle`] with real behaviour and
-//! delete the SCAFFOLDED marker line above; that line is the machine-readable record of
-//! which operations are still stubs (`grep -rl '^//! SCAFFOLDED, NOT IMPLEMENTED:' */src/ops/`),
-//! so leaving it on an implemented operation under-reports progress.
+//! So the update writes the configuration the request carries onto the stored daemon,
+//! captures it as a new DAEMON REVISION, and starts the DAEMON DEPLOYMENT that replaces the
+//! daemon task on each container instance with one of that revision
+//! ([`crate::state::ComAmazonawsEcsAmazonec2containerservicev20141113State::start_daemon_deployment`]).
+//! The rollout is not finished when this call answers: the deployment it mints is reported
+//! `PENDING` and the clock takes it on.
+//!
+//! "ECS Managed Daemons is only supported for Amazon ECS Managed Instances Capacity
+//! Providers" and the revision an update points the daemon at has to be one that can run
+//! work, so both lists are resolved by the same readings `CreateDaemon` makes
+//! ([`crate::state::ComAmazonawsEcsAmazonec2containerservicev20141113State::resolve_daemon_capacity_providers`],
+//! [`crate::state::ComAmazonawsEcsAmazonec2containerservicev20141113State::resolve_daemon_task_definition`])
+//! — a request either of them refuses changes nothing.
+//!
+//! The update ACTS in the daemon's cluster — it replaces what runs there — so a `daemonArn`
+//! whose cluster this account does not hold is refused about the cluster
+//! (`ClusterNotFoundException`), an ARN under a cluster that IS there naming no stored
+//! daemon is `DaemonNotFoundException`, and a daemon whose delete has been asked for is
+//! `DaemonNotActiveException`.
 //!
 //! ## Shape of an operation
 //!
@@ -204,18 +218,217 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         input: Self::Input,
         ctx: &smithy_server_runtime::OperationContext<'_>,
     ) -> Result<Self::Output, Self::Error> {
-        // The engine is reachable from `&self` (constructor-injected); `ctx` carries
-        // request metadata. Both are bound here so an implementer has them in scope.
-        let _ = (&input, ctx, &self.engine);
-        // Implement `UpdateDaemon` here, then delete the SCAFFOLDED marker at the top of
-        // this file. Return modeled failures as
-        // `Err(UpdateDaemonErrorModeled::Variant(..).into())` — the `From` impl above lifts it.
-        //
-        // To refuse a bad request this operation models no error for, return
-        // `Err(crate::scaffolded::Scaffolded::validation("..."))` — a 400
-        // `ValidationException`. Do NOT answer 501 for it: 501 means "not written yet",
-        // not "bad request". Modeled constraints are already refused BEFORE this
-        // handler runs, so reaching here means the input satisfies every one of them.
-        Err(crate::scaffolded::Scaffolded::not_implemented("UpdateDaemon"))
+        let state = crate::state::service_state(&*self.engine).ok_or_else(|| {
+            UpdateDaemonErrorModeled::ServerException(ServerException {
+                message: Some("the ECS store is unavailable".to_string()),
+            })
+        })?;
+
+        // An ARN is a WHOLE identifier, Region and account included, so both segments are
+        // checked before the identifier is resolved
+        // ([`crate::state::request_arn_violation`]).
+        if let Some(message) = crate::state::request_arn_violation(ctx, Some(input.daemon_arn.as_str())) {
+            return Err(UpdateDaemonErrorModeled::InvalidParameterException(
+                InvalidParameterException {
+                    message: Some(message.to_string()),
+                },
+            )
+            .into());
+        }
+
+        // "Amazon ECS deploys exactly one daemon task on each container instance of the
+        // specified capacity providers": the providers ARE the capacity the daemon runs
+        // on, so a request that names none describes no deployment at all — and the list is
+        // bounded before any per-entry work, because a daemon's providers all belong to the
+        // one cluster it lives in, which holds at most this many of them.
+        if input.capacity_provider_arns.is_empty() {
+            return Err(UpdateDaemonErrorModeled::InvalidParameterException(
+                InvalidParameterException {
+                    message: Some(
+                        "capacityProviderArns must name at least one capacity provider"
+                            .to_string(),
+                    ),
+                },
+            )
+            .into());
+        }
+        if input.capacity_provider_arns.len() > crate::state::MAX_CLUSTER_CAPACITY_PROVIDERS {
+            return Err(UpdateDaemonErrorModeled::InvalidParameterException(
+                InvalidParameterException {
+                    message: Some(crate::state::at_most_items_message(
+                        "capacity providers",
+                        crate::state::MAX_CLUSTER_CAPACITY_PROVIDERS,
+                    )),
+                },
+            )
+            .into());
+        }
+
+        let region = crate::state::request_region(ctx);
+        let now = ::std::time::SystemTime::now();
+        let mut guard = state.lock();
+        guard.advance_clock(now);
+
+        // "Amazon ECS drains existing container instances and provisions new instances with
+        // the updated daemon": the update ACTS in the daemon's cluster, so that cluster is
+        // resolved first and a cluster this account does not hold is what the call is
+        // refused about.
+        if let Some(cluster_name) = guard.daemon_arn_cluster_refusal(&input.daemon_arn) {
+            return Err(UpdateDaemonErrorModeled::ClusterNotFoundException(
+                ClusterNotFoundException {
+                    message: Some(crate::state::cluster_refusal_message(
+                        guard.clusters.get(&cluster_name),
+                    )),
+                },
+            )
+            .into());
+        }
+        let daemon = match guard.daemon_from_arn(&input.daemon_arn) {
+            Some(daemon) => daemon.clone(),
+            // The ARN identifies the daemon by itself, so anything it does not resolve to
+            // is a daemon that is not there — the one refusal every operation addressed to
+            // one daemon answers.
+            None => {
+                return Err(UpdateDaemonErrorModeled::DaemonNotFoundException(
+                    DaemonNotFoundException {
+                        message: Some(crate::state::daemon_not_found_message(&input.daemon_arn)),
+                    },
+                )
+                .into())
+            }
+        };
+        // "The specified daemon isn't active. You can't update a daemon that's inactive" —
+        // which is a daemon whose delete has been asked for: it is on its way out, so there
+        // is no rollout to start on it.
+        if daemon.status != crate::state::DAEMON_ACTIVE {
+            return Err(UpdateDaemonErrorModeled::DaemonNotActiveException(
+                DaemonNotActiveException {
+                    message: Some(crate::state::DAEMON_NOT_ACTIVE_MESSAGE.to_string()),
+                },
+            )
+            .into());
+        }
+
+        let capacity_provider_names = match guard
+            .resolve_daemon_capacity_providers(&input.capacity_provider_arns, &region)
+        {
+            Ok(names) => names,
+            Err(refusal) => {
+                let message = match refusal {
+                    crate::state::DaemonCapacityRefusal::NotFound => {
+                        crate::state::CAPACITY_PROVIDER_NOT_FOUND_MESSAGE
+                    }
+                    crate::state::DaemonCapacityRefusal::NotManagedInstances => {
+                        crate::state::DAEMON_MANAGED_INSTANCES_REQUIRED_MESSAGE
+                    }
+                };
+                return Err(UpdateDaemonErrorModeled::InvalidParameterException(
+                    InvalidParameterException {
+                        message: Some(message.to_string()),
+                    },
+                )
+                .into());
+            }
+        };
+        let daemon_task_definition_arn = match guard
+            .resolve_daemon_task_definition(&input.daemon_task_definition_arn)
+        {
+            Ok(arn) => arn,
+            Err(crate::state::DaemonDefinitionRefusal::FamilyPattern(message)) => {
+                return Err(UpdateDaemonErrorModeled::InvalidParameterException(
+                    InvalidParameterException {
+                        message: Some(message.to_string()),
+                    },
+                )
+                .into())
+            }
+            Err(crate::state::DaemonDefinitionRefusal::Malformed(message)) => {
+                return Err(UpdateDaemonErrorModeled::ClientException(ClientException {
+                    message: Some(message),
+                })
+                .into())
+            }
+            Err(crate::state::DaemonDefinitionRefusal::NotFound) => {
+                return Err(UpdateDaemonErrorModeled::ClientException(ClientException {
+                    message: Some(
+                        crate::state::DAEMON_TASK_DEFINITION_NOT_FOUND_TO_RUN_MESSAGE.to_string(),
+                    ),
+                })
+                .into())
+            }
+            Err(crate::state::DaemonDefinitionRefusal::Inactive) => {
+                return Err(UpdateDaemonErrorModeled::InvalidParameterException(
+                    InvalidParameterException {
+                        message: Some(
+                            crate::state::DAEMON_TASK_DEFINITION_INACTIVE_MESSAGE.to_string(),
+                        ),
+                    },
+                )
+                .into())
+            }
+        };
+
+        // Every member this request carries is one the updated daemon runs under, so the
+        // stored record takes them all: `UpdateDaemon` states the whole configuration
+        // (`daemonTaskDefinitionArn` and `capacityProviderArns` are required, and the
+        // Boolean members carry the model's own default when the request omits them)
+        // rather than patching one member of it.
+        if let Some(stored) = guard.daemons.get_mut(&daemon.arn) {
+            stored.daemon_task_definition_arn = daemon_task_definition_arn;
+            stored.capacity_provider_names = capacity_provider_names;
+            stored.deployment_configuration = input.deployment_configuration.clone();
+            // "If you don't specify a value, the tags aren't propagated."
+            stored.propagate_tags = input
+                .propagate_tags
+                .clone()
+                .unwrap_or_else(|| crate::state::PROPAGATE_TAGS_NONE.to_string());
+            stored.enable_ecs_managed_tags = input.enable_ecs_managed_tags;
+            stored.enable_execute_command = input.enable_execute_command;
+            // "The default value is true."
+            stored.critical = input
+                .critical
+                .unwrap_or(crate::state::DAEMON_CRITICAL_DEFAULT);
+        }
+        // The rollout of what this call wrote: it captures the daemon as a new revision and
+        // records the deployment that replaces the tasks of the revision before it, which is
+        // the deployment this answers with (`deploymentArn`: "the daemon deployment that was
+        // triggered by the update").
+        let deployment_arn = guard
+            .start_daemon_deployment(&daemon.arn, &region, now)
+            .map(|(deployment_arn, _)| deployment_arn)
+            .ok_or_else(|| {
+                UpdateDaemonErrorModeled::ServerException(ServerException {
+                    message: Some("the ECS store is unavailable".to_string()),
+                })
+            })?;
+
+        // The record as the update left it, read back out of the store, so the response and
+        // a `DescribeDaemon` that follows it cannot disagree.
+        let Some(stored) = guard.daemons.get(&daemon.arn) else {
+            return Err(UpdateDaemonErrorModeled::DaemonNotFoundException(
+                DaemonNotFoundException {
+                    message: Some(crate::state::daemon_not_found_message(&input.daemon_arn)),
+                },
+            )
+            .into());
+        };
+        let answer = UpdateDaemonOutput {
+            daemon_arn: Some(stored.arn.clone()),
+            status: Some(stored.status.clone()),
+            created_at: Some(stored.created_at),
+            updated_at: Some(stored.updated_at),
+            deployment_arn: Some(deployment_arn),
+        };
+        drop(guard);
+        // The steps a task the rollout places needs taken before its containers start, read
+        // with OUR guard dropped since they take the IAM, Amazon EC2 and Amazon ECR stores'
+        // locks ([`crate::state::settle_task_launches`]).
+        crate::state::settle_task_launches(&*self.engine);
+        // The rollout this update started is carried on by the CLOCK, and the statuses its
+        // placements and its stops reach are `ECS Task State Change` events published as
+        // they fall due ([`crate::state::publish_task_state_changes`]) — which is what
+        // leaves the daemon converging with no further call from anybody.
+        crate::state::publish_task_state_changes(ctx, &self.engine, &region);
+        Ok(answer)
     }
 }

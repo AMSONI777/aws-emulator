@@ -3127,3 +3127,11 @@ mod ecr_scan_on_push_event_reaches_its_queue_target;
 // ONCE, since this is one crate root and a second `mod` for the same name is `E0428` and
 // fails every suite in this target. `all/all_rs_declares_each_suite_once.rs` checks both,
 // for this file and for every service crate's `tests/all.rs`.)
+// (`cloudformation_provisions_cloudfront_resources` is declared ONCE, in the head region
+// which compiles neither, so the duplicate is removed and the first declaration stands.)
+// head of this file: two branches landing in the same window appended a second declaration
+// of each here, which compiles neither, so the duplicates are removed and the first
+// this tail already: a module may be declared only once, and two branches landing at once
+// above: two branches landing at once appended it here as well, and a module declared twice
+// (`cloudformation_kms_encrypted_sns_sqs_pipeline` is declared ONCE, further up this tail:
+// two landings each appended their own copy, and a module declared twice compiles neither.)

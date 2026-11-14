@@ -1,15 +1,16 @@
 // SPDX-License-Identifier: CC0-1.0
 
 //! @op DescribeDaemon
-//! SCAFFOLDED, NOT IMPLEMENTED: this operation answers HTTP 501 `NotImplemented` and
-//! asserts NOTHING about `DescribeDaemon`'s real behaviour. Implement it here — this is
-//! the ONLY file to touch for this operation.
+//! Reports the daemon a `daemonArn` names: what the create and every update wrote, the
+//! most recent daemon deployment, and the revisions the daemon is RUNNING with the task
+//! counts each of them adds up to per capacity provider — counted off the task and
+//! container-instance maps, so a reported count cannot drift from the tasks that exist.
 //!
-//! A 501 from this operation means "nobody has written it yet", never "the emulator is
-//! broken". Replace the `Err(..)` in [`DescribeDaemon::handle`] with real behaviour and
-//! delete the SCAFFOLDED marker line above; that line is the machine-readable record of
-//! which operations are still stubs (`grep -rl '^//! SCAFFOLDED, NOT IMPLEMENTED:' */src/ops/`),
-//! so leaving it on an implemented operation under-reports progress.
+//! "Amazon ECS daemons are cluster specific and Region specific" and a daemon ARN carries
+//! the cluster that hosts it, so that one identifier is the whole lookup: an ARN it does
+//! not resolve to a stored daemon is `DaemonNotFoundException`, whether the cluster it
+//! carries was never created, the cluster holds no daemon of that name, or the value is no
+//! daemon ARN at all.
 //!
 //! ## Shape of an operation
 //!
@@ -158,18 +159,55 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         input: Self::Input,
         ctx: &smithy_server_runtime::OperationContext<'_>,
     ) -> Result<Self::Output, Self::Error> {
-        // The engine is reachable from `&self` (constructor-injected); `ctx` carries
-        // request metadata. Both are bound here so an implementer has them in scope.
-        let _ = (&input, ctx, &self.engine);
-        // Implement `DescribeDaemon` here, then delete the SCAFFOLDED marker at the top of
-        // this file. Return modeled failures as
-        // `Err(DescribeDaemonErrorModeled::Variant(..).into())` — the `From` impl above lifts it.
-        //
-        // To refuse a bad request this operation models no error for, return
-        // `Err(crate::scaffolded::Scaffolded::validation("..."))` — a 400
-        // `ValidationException`. Do NOT answer 501 for it: 501 means "not written yet",
-        // not "bad request". Modeled constraints are already refused BEFORE this
-        // handler runs, so reaching here means the input satisfies every one of them.
-        Err(crate::scaffolded::Scaffolded::not_implemented("DescribeDaemon"))
+        let state = crate::state::service_state(&*self.engine).ok_or_else(|| {
+            DescribeDaemonErrorModeled::ServerException(ServerException {
+                message: Some("the ECS store is unavailable".to_string()),
+            })
+        })?;
+
+        // An ARN is a WHOLE identifier, Region and account included, so both segments are
+        // checked before the identifier is resolved
+        // ([`crate::state::request_arn_violation`]).
+        if let Some(message) = crate::state::request_arn_violation(ctx, Some(input.daemon_arn.as_str())) {
+            return Err(DescribeDaemonErrorModeled::InvalidParameterException(
+                InvalidParameterException {
+                    message: Some(message.to_string()),
+                },
+            )
+            .into());
+        }
+
+        // Everything the CLOCK owes this read, materialised before the daemon is reported:
+        // the capacity the account's Amazon EC2 instances owe their clusters, the daemon
+        // tasks the scheduler then places on the instances that are owed them, and the
+        // launch steps the START of such a task waits on — the whole pass, exactly as the
+        // clock pump runs it ([`crate::state::advance_task_clock`]). Made with NO guard of
+        // this store held, since each half reads another service's store under that store's
+        // own lock.
+        let now = ::std::time::SystemTime::now();
+        crate::state::advance_task_clock(&*self.engine, now);
+
+        let mut guard = state.lock();
+        guard.advance_clock(now);
+
+        let daemon = match guard.daemon_from_arn(&input.daemon_arn) {
+            Some(daemon) => daemon.clone(),
+            // "The specified daemon wasn't found. ... Amazon ECS daemons are cluster
+            // specific and Region specific": the ARN identifies the daemon by itself, so
+            // anything it does not resolve to is a daemon that is not there — whether the
+            // cluster it carries was never created, the cluster holds no daemon of that
+            // name, or the value is no daemon ARN at all.
+            None => {
+                return Err(DescribeDaemonErrorModeled::DaemonNotFoundException(
+                    DaemonNotFoundException {
+                        message: Some(crate::state::daemon_not_found_message(&input.daemon_arn)),
+                    },
+                )
+                .into())
+            }
+        };
+        Ok(DescribeDaemonOutput {
+            daemon: Some(guard.daemon_detail(&daemon)),
+        })
     }
 }

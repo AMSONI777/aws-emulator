@@ -1,15 +1,17 @@
 // SPDX-License-Identifier: CC0-1.0
 
 //! @op DescribeDaemonDeployments
-//! SCAFFOLDED, NOT IMPLEMENTED: this operation answers HTTP 501 `NotImplemented` and
-//! asserts NOTHING about `DescribeDaemonDeployments`'s real behaviour. Implement it here — this is
-//! the ONLY file to touch for this operation.
+//! Describes the daemon deployments the request names: what the call that started each
+//! rollout wrote, the revisions it moves the daemon between with the instance counts each
+//! of them adds up to per capacity provider, and the state of the failure detectors its own
+//! deployment configuration turned on.
 //!
-//! A 501 from this operation means "nobody has written it yet", never "the emulator is
-//! broken". Replace the `Err(..)` in [`DescribeDaemonDeployments::handle`] with real behaviour and
-//! delete the SCAFFOLDED marker line above; that line is the machine-readable record of
-//! which operations are still stubs (`grep -rl '^//! SCAFFOLDED, NOT IMPLEMENTED:' */src/ops/`),
-//! so leaving it on an implemented operation under-reports progress.
+//! A daemon-deployment ARN carries the cluster whose daemon the rollout belongs to
+//! (`daemon-deployment/<cluster>/<daemon>/<id>`), so this read resolves that cluster before
+//! it reports on anything — a cluster this account holds no record of leaves the read
+//! nothing to answer about, which is the condition `ClusterNotFoundException` states. An ARN
+//! under a cluster that IS there naming no stored rollout is a `MISSING` failure of its own
+//! entry rather than a refusal that would lose the deployments the request did resolve.
 //!
 //! ## Shape of an operation
 //!
@@ -155,20 +157,75 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
     async fn handle(
         &self,
         input: Self::Input,
-        ctx: &smithy_server_runtime::OperationContext<'_>,
+        _ctx: &smithy_server_runtime::OperationContext<'_>,
     ) -> Result<Self::Output, Self::Error> {
-        // The engine is reachable from `&self` (constructor-injected); `ctx` carries
-        // request metadata. Both are bound here so an implementer has them in scope.
-        let _ = (&input, ctx, &self.engine);
-        // Implement `DescribeDaemonDeployments` here, then delete the SCAFFOLDED marker at the top of
-        // this file. Return modeled failures as
-        // `Err(DescribeDaemonDeploymentsErrorModeled::Variant(..).into())` — the `From` impl above lifts it.
-        //
-        // To refuse a bad request this operation models no error for, return
-        // `Err(crate::scaffolded::Scaffolded::validation("..."))` — a 400
-        // `ValidationException`. Do NOT answer 501 for it: 501 means "not written yet",
-        // not "bad request". Modeled constraints are already refused BEFORE this
-        // handler runs, so reaching here means the input satisfies every one of them.
-        Err(crate::scaffolded::Scaffolded::not_implemented("DescribeDaemonDeployments"))
+        let state = crate::state::service_state(&*self.engine).ok_or_else(|| {
+            DescribeDaemonDeploymentsErrorModeled::ServerException(ServerException {
+                message: Some("the ECS store is unavailable".to_string()),
+            })
+        })?;
+
+        // "You can specify up to 20 ARNs."
+        if input.daemon_deployment_arns.len() > crate::state::MAX_DESCRIBE_DAEMON_DEPLOYMENTS {
+            return Err(
+                DescribeDaemonDeploymentsErrorModeled::InvalidParameterException(
+                    InvalidParameterException {
+                        message: Some(crate::state::at_most_items_message(
+                            "daemon deployments",
+                            crate::state::MAX_DESCRIBE_DAEMON_DEPLOYMENTS,
+                        )),
+                    },
+                )
+                .into(),
+            );
+        }
+
+        // Everything the CLOCK owes this read, materialised before the rollouts are
+        // reported: the rollout that starts or ends, the daemon tasks its placements and
+        // stops move, and the launch steps the START of such a task waits on — the whole
+        // pass, exactly as the clock pump runs it
+        // ([`crate::state::advance_task_clock`]), with NO guard of this store held.
+        let now = ::std::time::SystemTime::now();
+        crate::state::advance_task_clock(&*self.engine, now);
+
+        let mut guard = state.lock();
+        guard.advance_clock(now);
+
+        if guard.names_a_missing_cluster(
+            input.daemon_deployment_arns.iter().map(String::as_str),
+            crate::state::DAEMON_DEPLOYMENT_RESOURCE_TYPE,
+        ) {
+            return Err(
+                DescribeDaemonDeploymentsErrorModeled::ClusterNotFoundException(
+                    ClusterNotFoundException {
+                        message: Some(crate::state::CLUSTER_NOT_FOUND_MESSAGE.to_string()),
+                    },
+                )
+                .into(),
+            );
+        }
+
+        let mut daemon_deployments = Vec::new();
+        let mut failures = Vec::new();
+        // A deployment is reported once however many times the request names it: the same
+        // ARN repeated names the same rollout, so it is one answer, not one per entry.
+        let mut seen = ::std::collections::HashSet::new();
+        for reference in &input.daemon_deployment_arns {
+            let reference = reference.trim();
+            if !seen.insert(reference.to_string()) {
+                continue;
+            }
+            match guard.daemon_deployments.get(reference) {
+                Some(record) => daemon_deployments.push(guard.daemon_deployment_view(record)),
+                // An entry that names no stored rollout is a failure of its own entry,
+                // naming the ARN the caller sent.
+                None => failures.push(crate::state::missing_failure(reference)),
+            }
+        }
+
+        Ok(DescribeDaemonDeploymentsOutput {
+            daemon_deployments: Some(daemon_deployments),
+            failures: Some(failures),
+        })
     }
 }

@@ -61,6 +61,8 @@ mod container_secret_injection;
 mod continue_service_deployment_validation;
 #[path = "all/daemon_reference_family_refusals.rs"]
 mod daemon_reference_family_refusals;
+#[path = "all/daemon_scheduling.rs"]
+mod daemon_scheduling;
 #[path = "all/daemon_task_definition_deletion.rs"]
 mod daemon_task_definition_deletion;
 #[path = "all/daemon_task_definitions.rs"]

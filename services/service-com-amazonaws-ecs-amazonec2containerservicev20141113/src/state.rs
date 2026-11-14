@@ -65,8 +65,11 @@
 //! — has the shortfall placed by the clock pass
 //! ([`ComAmazonawsEcsAmazonec2containerservicev20141113State::maintain_service_task_counts`],
 //! see [`service_steady_state`]), which is why a stopped SERVICE task is replaced and a
-//! stopped STANDALONE task is not. The scheduler's steady-state work beyond that —
-//! re-placing a daemon's task when a container instance registers later — is not modelled.
+//! stopped STANDALONE task is not. The same pass keeps a DAEMON-scheduled service's count
+//! at the capacity its cluster holds — "the daemon scheduling strategy deploys exactly one
+//! task on each active container instance" — and the MANAGED DAEMON resource's one task per
+//! container instance beside it ([`daemon_scheduling`]), so an instance that registers
+//! later is given the daemon tasks it is owed.
 //!
 //! ## The containers that RUN
 //!
@@ -122,8 +125,10 @@ use crate::ops::types::{
     CapacityProviderStrategyItem, Cluster, ClusterConfiguration, ClusterServiceConnectDefaults,
     ClusterSetting, Container, ContainerDefinition, ContainerDependency, ContainerImage,
     ContainerInstance,
-    DaemonContainerDefinition,
-    DaemonDeploymentConfiguration, DaemonSummary,
+    DaemonCapacityProvider, DaemonCircuitBreaker, DaemonContainerDefinition, DaemonContainerImage,
+    DaemonDeployment, DaemonDeploymentAlarms, DaemonDeploymentCapacityProvider,
+    DaemonDeploymentConfiguration, DaemonDeploymentRevisionDetail, DaemonDeploymentSummary,
+    DaemonDetail, DaemonRevision, DaemonRevisionDetail, DaemonSummary,
     DaemonTaskDefinition, DaemonTaskDefinitionSummary, DaemonVolume, Defaulted, Deployment,
     DeploymentCircuitBreaker, DeploymentConfiguration, DeploymentController,
     DeploymentLifecycleHookDetail,
@@ -321,6 +326,12 @@ mod service_steady_state;
 /// the container agent on that instance makes.
 mod ec2_capacity;
 pub use ec2_capacity::*;
+
+/// The ECS MANAGED DAEMON scheduler: the revisions a daemon's configuration is captured as,
+/// the deployments that roll them out, and the one daemon task each container instance of
+/// the daemon's capacity providers runs.
+mod daemon_scheduling;
+pub use daemon_scheduling::*;
 
 /// The region an ARN carries when the request is unsigned (so it has no SigV4
 /// credential scope to read a region from). `emulator_arn`'s own documented default.
@@ -2039,6 +2050,11 @@ pub const PROPAGATE_TAGS_SERVICE: &str = "SERVICE";
 /// See [`PROPAGATE_TAGS_NONE`]: propagate the task DEFINITION's tags to the task.
 pub const PROPAGATE_TAGS_TASK_DEFINITION: &str = "TASK_DEFINITION";
 
+/// `DaemonPropagateTags` for a daemon that propagates ITS tags to its daemon tasks. The
+/// member's doc: "Specifies whether to propagate the tags from the daemon to the daemon
+/// tasks"; the other value of that enum is the `NONE` [`PROPAGATE_TAGS_NONE`] spells.
+pub const PROPAGATE_TAGS_DAEMON: &str = "DAEMON";
+
 /// `InvalidParameterException$message` for a placement that asks for the SERVICE tag set
 /// on a task no service placed. `RunTask$propagateTags`: "An error will be received if
 /// you specify the SERVICE option when running a task" — a task a client places itself
@@ -3598,8 +3614,18 @@ pub struct DaemonRecord {
     /// with the stored daemon instead of a second one.
     pub client_token: Option<String>,
     /// `CreateDaemonResponse$deploymentArn`: "The Amazon Resource Name (ARN) of the
-    /// initial daemon deployment", minted with the daemon.
+    /// initial daemon deployment", minted with the daemon — and the MOST RECENT one from
+    /// then on, which is what `DaemonDetail$deploymentArn` reports ("the most recent daemon
+    /// deployment").
     pub deployment_arn: String,
+    /// The daemon REVISION the daemon is deploying now: the snapshot the latest rollout
+    /// captured ([`DaemonRevisionRecord`]). `None` only for a daemon no rollout has been
+    /// started for.
+    pub current_revision_arn: Option<String>,
+    /// When the daemon RECORD itself is gone, for a daemon whose delete has been asked for
+    /// — and `None` for every other daemon. Stored and compared, never slept on
+    /// ([`ComAmazonawsEcsAmazonec2containerservicev20141113State::advance_daemon_deployments`]).
+    pub removal_due_at: Option<SystemTime>,
     pub created_at: DateTime,
     /// `DaemonSummary$updatedAt`: "when the daemon was last updated" — the creation
     /// instant until something updates the daemon.
@@ -3652,6 +3678,14 @@ pub struct TaskRecord {
     /// `RunTask`/`StartTask` task, so a service's counts are read off the tasks its own
     /// scheduler placed rather than off whatever shares its `group`.
     pub service_name: Option<String>,
+    /// The DAEMON whose scheduler placed this task, by ARN, and `None` for every task no
+    /// daemon placed — read the same way a service's `service_name` is: a daemon's counts
+    /// are the tasks its own scheduler placed rather than whatever shares its `group`.
+    pub daemon_arn: Option<String>,
+    /// The daemon REVISION this task runs, and `None` for every task no daemon placed. It
+    /// is what tells the tasks of a superseded revision from the ones a rollout is putting
+    /// in their place ([`ComAmazonawsEcsAmazonec2containerservicev20141113State::maintain_daemon_tasks`]).
+    pub daemon_revision_arn: Option<String>,
     pub tags: Vec<Tag>,
     pub enable_execute_command: bool,
     pub created_at: DateTime,
@@ -4029,6 +4063,14 @@ pub struct ComAmazonawsEcsAmazonec2containerservicev20141113State {
     /// daemon's own name (`daemon/<cluster>/<name>`), so this one key is what makes a
     /// daemon name unique within its cluster and free in every other.
     pub daemons: HashMap<String, DaemonRecord>,
+    /// `daemonDeploymentArn` -> the daemon deployment. A daemon's rollouts are its HISTORY,
+    /// so a record outlives the rollout it names (`ListDaemonDeployments` lists finished
+    /// deployments as well as the one under way) and the key is the ARN the listing reports.
+    pub daemon_deployments: HashMap<String, DaemonDeploymentRecord>,
+    /// `daemonRevisionArn` -> the daemon revision. "A daemon revision is a snapshot of the
+    /// daemon's configuration at the time a deployment was initiated", so an entry is never
+    /// rewritten: a later rollout captures another revision instead.
+    pub daemon_revisions: HashMap<String, DaemonRevisionRecord>,
     /// `taskArn` -> the task.
     pub tasks: HashMap<String, TaskRecord>,
     /// `containerInstanceArn` -> the registered container instance.
@@ -4094,6 +4136,9 @@ pub struct ComAmazonawsEcsAmazonec2containerservicev20141113State {
     /// Monotonic source of daemon-deployment ids, so every deployment of every daemon is
     /// distinct.
     next_daemon_deployment_seq: u64,
+    /// Monotonic source of daemon-revision ids, so every revision of every daemon is
+    /// distinct.
+    next_daemon_revision_seq: u64,
     /// Monotonic source of attachment ids, so every attachment of every task is distinct.
     next_attachment_seq: u64,
     /// Monotonic source of the names Amazon ECS generates for an Express service whose

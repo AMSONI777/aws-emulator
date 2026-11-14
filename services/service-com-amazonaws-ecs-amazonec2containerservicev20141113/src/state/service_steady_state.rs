@@ -18,6 +18,12 @@
 //! module: it needs no code of its own, because a replacement is only ever placed for a
 //! count a SERVICE wants.
 //!
+//! A DAEMON-scheduled service is the same work over a count nobody states: "The daemon
+//! scheduling strategy deploys exactly one task on each active container instance", so its
+//! `desiredCount` IS the capacity registered to its cluster and it moves as instances
+//! register and leave — which this pass keeps, so an instance that joins gets a task of
+//! every daemon service of its cluster without a further call.
+//!
 //! # Why the clock owes it
 //!
 //! The reconcile is the work the scheduler was already doing when the task stopped: the
@@ -82,6 +88,21 @@ impl ComAmazonawsEcsAmazonec2containerservicev20141113State {
             let region = super::request_arn::RequestArn::parse(&service.cluster_arn)
                 .map(|arn| arn.region.to_string())
                 .unwrap_or_else(|| DEFAULT_REGION.to_string());
+            // "The daemon scheduling strategy deploys exactly one task on each ACTIVE
+            // container instance that meets all of the task placement constraints" — so a
+            // DAEMON service's desired count is not a number its caller gave: it is the
+            // capacity its cluster holds that a placement can be made on at all
+            // ([`ContainerInstanceRecord::accepts_task_placement`], the same capacity the
+            // MANAGED DAEMON resource places one task on, so the two schedulers count one
+            // cluster the same way), and it MOVES as instances register, drain and leave.
+            // Keeping it is this pass's work, exactly as keeping the task set at it is: an
+            // instance that joined was owed a task of every daemon service of its cluster
+            // from the instant it joined, whether or not anybody called.
+            if service.scheduling_strategy == SCHEDULING_DAEMON {
+                let capacity = i32::try_from(self.placeable_container_instances(&key.0))
+                    .unwrap_or(i32::MAX);
+                let _ = self.scale_service_to(&key, capacity, &region, now);
+            }
             let _ = self.scale_service(&key, &definition, &region, now);
         }
     }
