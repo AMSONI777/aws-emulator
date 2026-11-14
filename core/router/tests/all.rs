@@ -2912,3 +2912,18 @@ mod cloudformation_firehose_stream_direct_put_delivers;
 // (`cloudformation_provisions_cloudfront_resources` is declared ONCE, further up this tail: a
 // module may be declared only once, and two branches landing in the same window each appended
 // their own copy here.)
+// are declared once, a few lines above this one: two branches each re-added the pair here
+// while both were landing, which declares each of them twice and compiles neither.)
+// Declared once, in the sorted block beside the other CloudTrail suites above: the tail is
+// where every suite landing in the same window appends, so a second copy there declares it
+// twice and loads the same file twice, which compiles neither.
+// (`cloudtrail_read_only_api_calls` and `zz_probe` are each declared once, in the sorted
+// block and the head region above: a module may be declared only once.)
+// (`cloudwatch_alarm_ssm_ops_item_action` and `cloudformation_metric_stream_filter_update`
+// are each declared once, in the head region above: a module declared twice in this file
+// loads the same file twice, which compiles nowhere.)
+// (`cloudformation_metric_stream_filter_update` is declared once, a few lines up in this same
+// appended tail: a module may be declared only once.)
+// tail, for the same reason.)
+// (`apigatewaymanagementapi_manage_connections_authorization` is declared once, in the span
+// above, for that same reason.)

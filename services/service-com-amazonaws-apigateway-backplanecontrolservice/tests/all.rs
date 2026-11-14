@@ -18,6 +18,11 @@
 // reason; the suite itself is an ordinary `tests/all/<name>.rs` file.
 #[path = "all/documentation_part_creation.rs"]
 mod documentation_part_creation;
+// Declared here, at the head, for the reason the entry above records: what a `CreateDeployment`
+// naming a stage the api has no stage for does to the invoke URL that was refused for want of
+// it.
+#[path = "all/deployment_mints_the_missing_stage.rs"]
+mod deployment_mints_the_missing_stage;
 // Declared here, at the head, for the reason the entry above records.
 #[path = "all/stage_lambda_proxy_integration.rs"]
 mod stage_lambda_proxy_integration;

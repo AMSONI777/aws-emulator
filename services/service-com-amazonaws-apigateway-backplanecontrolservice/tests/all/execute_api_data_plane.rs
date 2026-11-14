@@ -360,7 +360,10 @@ pub(crate) async fn mock_resource(
 
 /// One `MOCK` method on an existing resource: the method, its integration, the integration
 /// response that maps the call and the method response the status is declared by.
-async fn mock_method(
+///
+/// `pub(crate)` for the sibling suites that stand one up on a resource they did not create
+/// — the api's ROOT resource, which every api is created with (`deployment_mints_the_missing_stage`).
+pub(crate) async fn mock_method(
     gateway: &Gateway,
     api: &str,
     resource: &str,
