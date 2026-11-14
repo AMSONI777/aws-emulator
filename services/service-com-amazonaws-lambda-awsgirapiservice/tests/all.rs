@@ -113,6 +113,8 @@ mod durable_execution_start;
 mod durable_execution_status_events;
 #[path = "all/durable_execution_stop.rs"]
 mod durable_execution_stop;
+#[path = "all/dynamodb_stream_event_source_batch_size.rs"]
+mod dynamodb_stream_event_source_batch_size;
 #[path = "all/dynamodb_stream_event_source_delivery.rs"]
 mod dynamodb_stream_event_source_delivery;
 #[path = "all/environment_variable_key_state.rs"]

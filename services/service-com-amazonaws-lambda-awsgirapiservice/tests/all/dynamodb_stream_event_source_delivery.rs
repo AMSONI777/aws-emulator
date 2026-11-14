@@ -71,9 +71,9 @@ const REPORT_BATCH_ITEM_FAILURES: &str = "ReportBatchItemFailures";
 /// is supported only for Amazon Kinesis streams, Amazon DocumentDB, Amazon MSK, and
 /// self-managed Apache Kafka" (`CreateEventSourceMappingInput$StartingPosition`), so the
 /// other two of the model's `EventSourcePosition` enum are what this source admits.
-const TRIM_HORIZON: &str = "TRIM_HORIZON";
+pub(crate) const TRIM_HORIZON: &str = "TRIM_HORIZON";
 /// See [`TRIM_HORIZON`].
-const LATEST: &str = "LATEST";
+pub(crate) const LATEST: &str = "LATEST";
 
 /// The `StreamViewType` values the model declares
 /// (`smithy_query(query="shape", shape="StreamViewType")`, DynamoDB): what the stream
@@ -84,7 +84,7 @@ const NEW_IMAGE: &str = "NEW_IMAGE";
 /// See [`KEYS_ONLY`].
 const OLD_IMAGE: &str = "OLD_IMAGE";
 /// See [`KEYS_ONLY`].
-const NEW_AND_OLD_IMAGES: &str = "NEW_AND_OLD_IMAGES";
+pub(crate) const NEW_AND_OLD_IMAGES: &str = "NEW_AND_OLD_IMAGES";
 
 /// The `OperationType` a stream record reports for each kind of change
 /// (`smithy_query(query="shape", shape="OperationType")`, DynamoDB Streams).
@@ -96,7 +96,7 @@ const REMOVE: &str = "REMOVE";
 
 /// What `LastProcessingResult` reports for an attempt that processed the batch, and for one
 /// that did not (`EventSourceMappingConfiguration$LastProcessingResult`).
-const RESULT_OK: &str = "OK";
+pub(crate) const RESULT_OK: &str = "OK";
 /// See [`RESULT_OK`].
 const RESULT_FUNCTION_CALL_FAILED: &str = "PROBLEM: Function call failed";
 
@@ -115,13 +115,13 @@ const FUNCTION_DIMENSION: &str = "FunctionName";
 /// How long a wait for work the mapping has to do is given before the row is a failure.
 /// Well above the table's and the stream's own settle spans and the poller's interval, so a
 /// row fails only when the mapping did not do the work at all.
-const BUDGET: Duration = Duration::from_secs(45);
+pub(crate) const BUDGET: Duration = Duration::from_secs(45);
 
 /// How long between two looks while waiting.
-const LOOK_AGAIN: Duration = Duration::from_millis(100);
+pub(crate) const LOOK_AGAIN: Duration = Duration::from_millis(100);
 
 /// The partition key every table below is keyed on.
-const KEY: &str = "pk";
+pub(crate) const KEY: &str = "pk";
 
 /// The key value whose record the handler reports as one it did not process, and the one
 /// that makes it raise instead. Nothing in the emulator reads either: they are read by the
@@ -133,7 +133,7 @@ const RAISE: &str = "raise";
 /// Lambda, DynamoDB, DynamoDB Streams and CloudWatch on one engine: the mapping's event
 /// source is a table's stream and the series it publishes is CloudWatch's, so all of them
 /// are reached in-process — the shape `core/router/src/lib.rs` mounts them in.
-fn emulator() -> MultiServiceRouter {
+pub(crate) fn emulator() -> MultiServiceRouter {
     let engine: Arc<engine::InMemoryEngine> = Arc::new(engine::InMemoryEngine::new());
     let mut router = MultiServiceRouter::new();
     router.set_request_authentication(false);
@@ -228,7 +228,7 @@ async fn rpc(
 }
 
 /// One DynamoDB call.
-async fn dynamodb(
+pub(crate) async fn dynamodb(
     router: &MultiServiceRouter,
     operation: &str,
     body: &Value,
@@ -264,7 +264,7 @@ async fn cloudwatch(
 /// A table keyed on [`KEY`], with a stream capturing `view_type` when one is named, waited
 /// out to `ACTIVE`; answers the table's `LatestStreamArn` (empty for a table with no
 /// stream).
-async fn given_table(
+pub(crate) async fn given_table(
     router: &MultiServiceRouter,
     case: &str,
     name: &str,
@@ -327,7 +327,7 @@ fn package(source: &str) -> Vec<u8> {
 
 /// A function whose package RUNS `source`, told `environment` about what it must see,
 /// waited out to `Active`.
-async fn given_function(
+pub(crate) async fn given_function(
     router: &MultiServiceRouter,
     case: &str,
     name: &str,
@@ -380,7 +380,7 @@ async fn given_function(
 }
 
 /// Create the mapping between `function` and `stream_arn`, answering its UUID.
-async fn given_mapping(
+pub(crate) async fn given_mapping(
     router: &MultiServiceRouter,
     case: &str,
     function: &str,
@@ -435,7 +435,7 @@ async fn get_mapping(router: &MultiServiceRouter, case: &str, uuid: &str) -> Val
 /// with: "When you delete an event source mapping, it enters a `Deleting` state"
 /// (`EventSourceMappingConfiguration$State`), so the mapping reports that state and reads
 /// nothing more off its source.
-async fn stop_mapping(router: &MultiServiceRouter, case: &str, uuid: &str) {
+pub(crate) async fn stop_mapping(router: &MultiServiceRouter, case: &str, uuid: &str) {
     let (status, deleted) = lambda(
         router,
         "DELETE",
@@ -456,7 +456,7 @@ async fn stop_mapping(router: &MultiServiceRouter, case: &str, uuid: &str) {
 
 /// Wait until the mapping reports `expected` as its `LastProcessingResult`, answering every
 /// result it reported on the way.
-async fn results_until(
+pub(crate) async fn results_until(
     router: &MultiServiceRouter,
     case: &str,
     uuid: &str,
@@ -588,7 +588,7 @@ def lambda_handler(event, context):
 
 /// What one item write of a row is, and what change it makes to the table.
 #[derive(Debug, Clone, Copy)]
-enum Write {
+pub(crate) enum Write {
     /// `PutItem` of an item that was not there: an `INSERT`.
     Insert,
     /// `PutItem` over an item that was: a `MODIFY`.
@@ -600,7 +600,7 @@ enum Write {
 }
 
 /// Make one change to `table` for the item `key` names.
-async fn write_item(
+pub(crate) async fn write_item(
     router: &MultiServiceRouter,
     case: &str,
     table: &str,
