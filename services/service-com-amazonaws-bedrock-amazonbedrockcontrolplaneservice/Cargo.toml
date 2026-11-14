@@ -61,6 +61,10 @@ service-com-amazonaws-s3-amazons3 = { workspace = true }
 service-com-amazonaws-cloudwatchlogs-logs-20140328 = { workspace = true }
 # The execution suite waits out the clock-owed span after which a submitted job has begun.
 tokio = { workspace = true, features = ["time"] }
+# A delivered model-invocation-logging object IS a gzip stream, so the suite that asserts
+# what a logging destination holds decompresses it with the same maintained codec the
+# delivery frames it with.
+flate2 = "1"
 
 [lints]
 workspace = true

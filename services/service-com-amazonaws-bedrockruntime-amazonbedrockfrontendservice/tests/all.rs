@@ -31,6 +31,8 @@ mod bedrock_runtime_request_claim;
 mod bedrock_runtime_streaming;
 #[path = "all/catalogued_model_inference.rs"]
 mod catalogued_model_inference;
+#[path = "all/converse_guardrail_resolution.rs"]
+mod converse_guardrail_resolution;
 #[path = "all/converse_guardrail_trace.rs"]
 mod converse_guardrail_trace;
 #[path = "all/converse_prompt_cache.rs"]
@@ -61,6 +63,8 @@ mod inference_stop_sequences;
 mod inline_guardrail_error_taxonomy;
 #[path = "all/invoke_model_malformed_body_refusal.rs"]
 mod invoke_model_malformed_body_refusal;
+#[path = "all/model_invocation_log_delivery.rs"]
+mod model_invocation_log_delivery;
 #[path = "all/resource_reference_refusals.rs"]
 mod resource_reference_refusals;
 #[path = "all/state_roundtrip.rs"]

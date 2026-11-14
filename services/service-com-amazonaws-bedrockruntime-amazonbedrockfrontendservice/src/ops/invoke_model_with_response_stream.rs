@@ -120,10 +120,14 @@ impl<Eng> InvokeModelWithResponseStream<Eng> {
 impl<Eng: Send + Sync + 'static> InvokeModelWithResponseStream<Eng> {
     /// The whole request: validate it, serve the inference, record it in the
     /// inference log, and frame the model's response payload as the event stream.
+    ///
+    /// `region` is the Region the request was signed for, which is where this
+    /// account's invocation records are delivered from.
     fn respond(
         &self,
         protocol: &dyn ServerHttpProtocol,
         req: &Request,
+        region: &str,
     ) -> Result<Response, InvokeModelWithResponseStreamErrorModeled> {
         let started = std::time::Instant::now();
         let input: InvokeModelWithResponseStreamInput =
@@ -227,6 +231,25 @@ impl<Eng: Send + Sync + 'static> InvokeModelWithResponseStream<Eng> {
             at_millis: crate::state::now_millis(),
         };
         state.lock().log_invocation(logged.clone());
+        // The invocation-logging stage every inference surface runs: while this
+        // account has a logging destination installed, the call that was just
+        // served delivers its own record there, carrying the native body it
+        // arrived with and the one its events deliver
+        // (see `crate::state::invocation_logging`).
+        crate::state::invocation_logging::deliver(
+            &*self.engine,
+            &crate::state::invocation_logging::LoggedInvocation {
+                operation:
+                    crate::state::invocation_logging::OPERATION_INVOKE_MODEL_WITH_RESPONSE_STREAM,
+                model_id: model.model_id.clone(),
+                region: region.to_string(),
+                input_body: serde_json::from_slice(body).ok(),
+                output_body: Some(turn.response.clone()),
+                input_tokens: turn.input_tokens,
+                output_tokens: turn.output_tokens,
+                at_millis: logged.at_millis,
+            },
+        );
         // The duration this call reports in the family's own metrics event,
         // measured over serving the inference.
         let invocation_latency_ms = crate::state::latency_ms(started.elapsed());
@@ -304,7 +327,7 @@ impl<Eng: Send + Sync + 'static> service_common::event_stream::EventStreamOperat
     ) -> BoxFuture<'r, Response> {
         Box::pin(async move {
             let protocol = svc.definition().protocol();
-            let response = match self.respond(protocol, req) {
+            let response = match self.respond(protocol, req, &crate::state::request_region(ctx.parts())) {
                 Ok(response) => response,
                 Err(error) => error_response(protocol, &error),
             };

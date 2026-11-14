@@ -220,7 +220,14 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
                 .into(),
             );
         };
+        // The destination the records themselves go to, put in force on the inference
+        // plane: a configuration this call stores is one every invocation served after it
+        // delivers its record to (see `crate::state::deliver_invocation_logs_to`). Read
+        // apart from the stored copy, so no guard of this service is held while the
+        // inference plane's store is written.
+        let installed = input.logging_config.clone();
         state.lock().model_invocation_logging = Some(input.logging_config);
+        crate::state::deliver_invocation_logs_to(&*self.engine, Some(&installed));
 
         Ok(PutModelInvocationLoggingConfigurationOutput {})
     }

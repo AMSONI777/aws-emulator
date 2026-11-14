@@ -135,10 +135,14 @@ impl<Eng: Send + Sync + 'static> ConverseStream<Eng> {
     /// `async` for one reason: the guardrail stage is CPU-bound work over
     /// caller-supplied text, so it is awaited off the async worker exactly as
     /// `Converse` and `ApplyGuardrail` await it.
+    ///
+    /// `region` is the Region the request was signed for, which is where this
+    /// account's invocation records are delivered from.
     async fn respond(
         &self,
         protocol: &dyn ServerHttpProtocol,
         req: &Request,
+        region: &str,
     ) -> Result<Response, ConverseStreamErrorModeled> {
         let started = std::time::Instant::now();
         let input: ConverseStreamInput =
@@ -301,6 +305,31 @@ impl<Eng: Send + Sync + 'static> ConverseStream<Eng> {
             at_millis: crate::state::now_millis(),
         };
         state.lock().log_invocation(logged.clone());
+        // The invocation-logging stage every inference surface runs: while this
+        // account has a logging destination installed, the call that was just
+        // served delivers its own record there, carrying the request it arrived
+        // with and the very turn its events deliver
+        // (see `crate::state::invocation_logging`).
+        crate::state::invocation_logging::deliver(
+            &*self.engine,
+            &crate::state::invocation_logging::LoggedInvocation {
+                operation: crate::state::invocation_logging::OPERATION_CONVERSE_STREAM,
+                model_id: model.model_id.clone(),
+                region: region.to_string(),
+                input_body: crate::state::invocation_logging::converse_request_body(
+                    &ConverseStreamInput::SCHEMA,
+                    &input,
+                ),
+                output_body: crate::state::invocation_logging::converse_answer_body(
+                    turn.content(),
+                    turn.stop_reason(),
+                    &turn.usage(),
+                ),
+                input_tokens: turn.input_tokens,
+                output_tokens: turn.output_tokens,
+                at_millis: logged.at_millis,
+            },
+        );
         // The duration this call reports in its metadata event, measured over
         // serving the turn.
         let latency_ms = crate::state::latency_ms(started.elapsed());
@@ -453,7 +482,10 @@ impl<Eng: Send + Sync + 'static> service_common::event_stream::EventStreamOperat
     ) -> BoxFuture<'r, Response> {
         Box::pin(async move {
             let protocol = svc.definition().protocol();
-            let response = match self.respond(protocol, req).await {
+            let response = match self
+                .respond(protocol, req, &crate::state::request_region(ctx.parts()))
+                .await
+            {
                 Ok(response) => response,
                 Err(error) => error_response(protocol, &error),
             };

@@ -234,7 +234,6 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         input: Self::Input,
         ctx: &smithy_server_runtime::OperationContext<'_>,
     ) -> Result<Self::Output, Self::Error> {
-        let _ = ctx;
         // When serving this request began: the span `InvocationLatency` is the
         // measurement of, as the streaming surface times its own.
         let started = ::std::time::Instant::now();
@@ -335,6 +334,10 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         if let Some(action) = guardrail_action {
             crate::state::enforced_guardrail::report_action(&mut response, action);
         }
+        // The native body this call carried, as the record a logging destination
+        // is delivered reports it — read apart before the response body shadows
+        // it.
+        let request_body: Option<serde_json::Value> = serde_json::from_slice(body).ok();
         let body = serde_json::to_vec(&response).map_err(|error| {
             InvokeModelError::from(InvokeModelErrorModeled::InternalServerException(
                 InternalServerException {
@@ -351,6 +354,23 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
             at_millis: crate::state::now_millis(),
         };
         state.lock().log_invocation(logged.clone());
+        // The invocation-logging stage: while this account has a logging
+        // destination installed, the call that was just served delivers its own
+        // record there — the native body it carried and the one it is about to
+        // answer with (see `crate::state::invocation_logging`).
+        crate::state::invocation_logging::deliver(
+            &*self.engine,
+            &crate::state::invocation_logging::LoggedInvocation {
+                operation: crate::state::invocation_logging::OPERATION_INVOKE_MODEL,
+                model_id: model.model_id.clone(),
+                region: crate::state::request_region(ctx.parts()),
+                input_body: request_body,
+                output_body: Some(response.clone()),
+                input_tokens,
+                output_tokens,
+                at_millis: logged.at_millis,
+            },
+        );
         // The token volume this call reports in the model family's own response
         // envelope, and the duration measured for serving it, are also its
         // contribution to the `AWS/Bedrock` series dimensioned on the invoked

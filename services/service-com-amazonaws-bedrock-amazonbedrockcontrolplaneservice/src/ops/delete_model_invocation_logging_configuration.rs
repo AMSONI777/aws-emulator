@@ -127,6 +127,9 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
             );
         };
         state.lock().model_invocation_logging = None;
+        // The delivery stops with the configuration: an invocation served after this call
+        // writes no record (see `crate::state::deliver_invocation_logs_to`).
+        crate::state::deliver_invocation_logs_to(&*self.engine, None);
 
         Ok(DeleteModelInvocationLoggingConfigurationOutput {})
     }

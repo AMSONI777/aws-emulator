@@ -1,8 +1,7 @@
 Issue-Severity: HIGH
 Issue-Corpus: simparity-behavioral-aws-v1
 Issue-Corpus-Kind: behavioral
-Issue-Trace-Ids: bedrock.bedrock-concurrent-converse-calls-do-not-cross-contaminate-responses bedrock.bedrock-converse-with-a-nonexistent-guardrail-version-rejected bedrock.bedrock-guardrail-blocked-input-never-reaches-the-model bedrock.bedrock-model-invocation-logging-records-the-prompt-and-the-completion bedrock.e2e-enforced-guardrail-blocks-then-lifts bedrock.stop-evaluation-job-terminal-state-rejected
-Issue-Key: bedrock.bedrock-concurrent-converse-calls-do-not-cross-contaminate-responses|run#6|AssertionError|assert nonce in answer, (
+Issue-Trace-Ids: bedrock.bedrock-converse-with-a-nonexistent-guardrail-version-rejected bedrock.bedrock-guardrail-blocked-input-never-reaches-the-model bedrock.bedrock-model-invocation-logging-records-the-prompt-and-the-completion bedrock.e2e-enforced-guardrail-blocks-then-lifts bedrock.stop-evaluation-job-terminal-state-rejected
 Issue-Key: bedrock.bedrock-converse-with-a-nonexistent-guardrail-version-rejected|_error#11|_UnexpectedSuccess|raise _UnexpectedSuccess(
 Issue-Key: bedrock.bedrock-guardrail-blocked-input-never-reaches-the-model|run#11|AssertionError|assert blocked["stopReason"] == "guardrail_intervened", (
 Issue-Key: bedrock.bedrock-model-invocation-logging-records-the-prompt-and-the-completion|run#25|Timeout|time.sleep(10)
@@ -13,6 +12,8 @@ Issue-Commit: d7c92a359e65b119da339df847b0735e9ef403e3
 # bedrock: Converse serves a constant notice string, inline and account-enforced guardrails are never applied, a nonexistent guardrailVersion is accepted, invocation logging delivers no records, and CreateEvaluationJob admits a same-account pass role
 
 > _Note: this issue was identified against the code base at commit `d7c92a359e65b119da339df847b0735e9ef403e3`. If you are an issue fixer working on this, the code base you are currently working in can have drifted, so you might need to trace the issue back to the current code base._
+
+> _Resolution: causes 2, 3, 4, 5 and 6 are fixed. Cause 1 — the generation stage serving one constant notice string for every prompt — is UNFIXED: nothing in this platform can run a language model, so it is re-filed with its own `Issue-Key` and trace id as `issues/things-that-do-not-work/20261111T152000Z-bedrock-converse-serves-one-constant-notice-string-for-every-prompt.md` rather than recorded as working here. Both moved with it._
 
 ## Operation
 Converse

@@ -93,6 +93,10 @@ pub mod context_window;
 /// the settle that delivers it.
 pub mod async_invoke_output;
 
+/// The invocation-logging record a served inference delivers to the destination the
+/// control plane's logging configuration installed.
+pub mod invocation_logging;
+
 /// The OpenAI-compatible chat-completions `InvokeModel` envelope, which is the request and
 /// response shape of the providers Amazon Bedrock serves on that schema.
 pub mod openai_chat;
@@ -189,6 +193,12 @@ pub struct ComAmazonawsBedrockruntimeAmazonbedrockfrontendserviceState {
     /// absent, which is what makes a request naming one answer that it was not
     /// found.
     pub guardrails: BTreeMap<String, guardrail_registry::PublishedGuardrail>,
+    /// Where this account's invocation records are delivered, as the Bedrock
+    /// control plane's `PutModelInvocationLoggingConfiguration` installed it
+    /// ([`invocation_logging`]). `None` while the account has configured no
+    /// logging, which is what leaves a served invocation writing no record at
+    /// all.
+    pub invocation_log_delivery: Option<invocation_logging::InvocationLogDelivery>,
     /// Monotonic counter mixed into every id this service mints (an async
     /// invocation's, a tool request's).
     pub next_id: u64,
@@ -209,6 +219,7 @@ impl Default for ComAmazonawsBedrockruntimeAmazonbedrockfrontendserviceState {
             prompt_cache: BTreeMap::new(),
             enforced_guardrail: None,
             guardrails: BTreeMap::new(),
+            invocation_log_delivery: None,
             next_id: 0,
         }
     }

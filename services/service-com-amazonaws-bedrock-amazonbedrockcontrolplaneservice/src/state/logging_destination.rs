@@ -60,6 +60,66 @@ use crate::ops::types::LoggingConfig;
 
 use super::model_invocation_run::s3_client;
 
+/// The INFERENCE plane's invocation-logging destination: the one home of where this
+/// account's invocation records are delivered, which this control plane writes on the put
+/// that installs a logging configuration ([`deliver_invocation_logs_to`]) and the Bedrock
+/// Runtime emulator's invocation surfaces read on every call they serve.
+use ::service_com_amazonaws_bedrockruntime_amazonbedrockfrontendservice::state::invocation_logging as runtime_logging;
+
+/// Whether a delivery switch a configuration does not name is one it turned off: it is
+/// not. The switches exist to WITHHOLD a kind of data from the records, so a
+/// configuration that says nothing about a kind withholds nothing.
+const DELIVERY_ENABLED_BY_DEFAULT: bool = true;
+
+/// Point this account's invocation records at the destination `config` names, or withdraw
+/// whatever stood before it with `None` — which the delete of the configuration does.
+///
+/// Storing the configuration and DELIVERING to it are two different things: the record
+/// this control plane keeps is what its own `Get` echoes back, and what the inference
+/// path needs is the destination to write each served invocation's record into. One put
+/// settles both, so an operator cannot be shown a configuration that nothing delivers to.
+///
+/// Answers whether the inference plane's store was reached: an emulator assembled without
+/// the Bedrock Runtime data plane delivers nothing, and this control plane's own record of
+/// the configuration is unaffected either way.
+///
+/// Call it with NO store of this service held, so two services' stores are never locked at
+/// once.
+pub fn deliver_invocation_logs_to<Eng: Send + Sync + 'static>(
+    engine: &Eng,
+    config: Option<&LoggingConfig>,
+) -> bool {
+    runtime_logging::install(engine, config.and_then(invocation_log_delivery))
+}
+
+/// The DESTINATION a stored logging configuration is, as the inference plane delivers to
+/// it, or `None` for a configuration that names no object destination at all.
+///
+/// Only `loggingConfig.s3Config` is an object destination for the records themselves;
+/// `cloudWatchConfig.largeDataDeliveryS3Config` is where a CloudWatch Logs destination
+/// spills a record too large for a log event, which is that destination's business rather
+/// than a place the records are delivered.
+///
+/// All three per-datatype switches are projected because the configuration carries all
+/// three; which of them the delivered records are gated on is the inference plane's own
+/// business ([`runtime_logging`]).
+fn invocation_log_delivery(config: &LoggingConfig) -> Option<runtime_logging::InvocationLogDelivery> {
+    let s3_config = config.s3_config.as_ref()?;
+    Some(runtime_logging::InvocationLogDelivery {
+        bucket: s3_config.bucket_name.clone(),
+        key_prefix: s3_config.key_prefix.clone(),
+        text_data_delivery_enabled: config
+            .text_data_delivery_enabled
+            .unwrap_or(DELIVERY_ENABLED_BY_DEFAULT),
+        image_data_delivery_enabled: config
+            .image_data_delivery_enabled
+            .unwrap_or(DELIVERY_ENABLED_BY_DEFAULT),
+        embedding_data_delivery_enabled: config
+            .embedding_data_delivery_enabled
+            .unwrap_or(DELIVERY_ENABLED_BY_DEFAULT),
+    })
+}
+
 /// What Amazon Bedrock answers for a CloudWatch Logs destination whose delivery permissions
 /// it could not validate.
 ///

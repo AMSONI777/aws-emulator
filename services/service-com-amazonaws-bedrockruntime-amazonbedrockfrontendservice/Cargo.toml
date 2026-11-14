@@ -32,6 +32,13 @@ tracing = { workspace = true }
 aws-smithy-eventstream = "0.60"
 # Mints the 12-character async-invoke id embedded in an `invocationArn`.
 sha2 = { workspace = true }
+# The gzip framing of a delivered invocation-logging object (`state::invocation_logging`):
+# a vended-log file IS a gzip stream, so it is written with the maintained DEFLATE
+# implementation this workspace already frames its other delivered logs with.
+flate2 = "1"
+# The UTC calendar fields a delivered invocation-logging object's key is partitioned by,
+# read with the maintained calendar crate rather than by slicing a rendered stamp.
+chrono = { version = "0.4", default-features = false, features = ["std"] }
 # Encodes the opaque `ListAsyncInvokes` page token.
 hex = { workspace = true }
 

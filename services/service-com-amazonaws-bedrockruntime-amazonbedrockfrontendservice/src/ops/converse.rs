@@ -6,7 +6,9 @@
 //! [`crate::state`] (the same one `CountTokens` uses) and refuses an input past
 //! the model's context window ([`crate::state::context_window`]), answers with
 //! an assistant message derived from the supplied conversation, and records the
-//! call in the inference log.
+//! call in the inference log — and, where this account installed a logging
+//! destination, delivers the call's own invocation-logging record there
+//! ([`crate::state::invocation_logging`]).
 //!
 //! No language model runs in this emulator, so the assistant message says so
 //! (see [`crate::state::emulated_completion_text`]); the turn semantics, the
@@ -284,7 +286,6 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         input: Self::Input,
         ctx: &smithy_server_runtime::OperationContext<'_>,
     ) -> Result<Self::Output, Self::Error> {
-        let _ = ctx;
         let started = ::std::time::Instant::now();
         let Some(state) = crate::state::service_state(&*self.engine) else {
             return Err(ConverseErrorModeled::InternalServerException(
@@ -470,6 +471,30 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
             at_millis: crate::state::now_millis(),
         };
         state.lock().log_invocation(logged.clone());
+        // The invocation-logging stage: while this account has a logging
+        // destination installed, the call that was just served delivers its own
+        // record there — the bodies it carried and the counts it is about to
+        // report inline (see `crate::state::invocation_logging`).
+        crate::state::invocation_logging::deliver(
+            &*self.engine,
+            &crate::state::invocation_logging::LoggedInvocation {
+                operation: crate::state::invocation_logging::OPERATION_CONVERSE,
+                model_id: model.model_id.clone(),
+                region: crate::state::request_region(ctx.parts()),
+                input_body: crate::state::invocation_logging::converse_request_body(
+                    super::types::CONVERSE_INPUT_SCHEMA,
+                    &input,
+                ),
+                output_body: crate::state::invocation_logging::converse_answer_body(
+                    turn.content(),
+                    turn.stop_reason(),
+                    &turn.usage(),
+                ),
+                input_tokens: turn.input_tokens,
+                output_tokens: turn.output_tokens,
+                at_millis: logged.at_millis,
+            },
+        );
         // The duration this call reports inline, measured over serving the turn.
         let latency_ms = crate::state::latency_ms(started.elapsed());
         // The token volume and the latency this call reports inline are also its
