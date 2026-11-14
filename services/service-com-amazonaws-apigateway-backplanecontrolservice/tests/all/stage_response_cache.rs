@@ -831,10 +831,15 @@ async fn an_unauthorized_cache_control_ask_is_answered_as_the_stages_strategy_sa
             None if *signed => {
                 // A caller that PRESENTED a credential names a principal the api's policy
                 // decided against, so the refusal is the IAM-shaped sentence naming the
-                // action it asked for and the method it asked for.
+                // action it asked for and the method it asked for — reported, as every
+                // `execute-api` refusal reports a resource, with the account masked.
                 assert!(
                     answered.body.contains(REFUSED_SIGNED_ACTION)
-                        && answered.body.contains(&deployed.method_arn()),
+                        && answered.body.contains(
+                            &crate::stage_invoke_identity_policy::reported_resource(
+                                &deployed.method_arn()
+                            )
+                        ),
                     "case {case}: expected the IAM-shaped refusal sentence naming \
                      {REFUSED_SIGNED_ACTION}, got {:?}",
                     answered.body

@@ -140,6 +140,18 @@ pub struct SigningCaller {
 }
 
 impl SigningCaller {
+    /// Every spelling of this caller a statement's `Principal` element may name it by: the
+    /// session ARN STS reports, and the ARN of the IAM role behind an assumed-role session.
+    ///
+    /// Read by the api's own RESOURCE policy beside this gate
+    /// ([`super::super::resource_policy::Caller::Signed`]), because a resource-based
+    /// statement naming a ROLE is about every session of that role — so both decisions are
+    /// taken about one caller rather than about two different readings of it.
+    #[must_use]
+    pub fn spellings(&self) -> &[String] {
+        &self.spellings
+    }
+
     /// Whether nothing the identity-based decision found can refuse this caller once no
     /// readable document DENIES the action (see the module docs).
     fn identity_is_unbounded(&self) -> bool {
@@ -281,6 +293,9 @@ pub fn refusal(
         return Some(expired);
     }
     let method_arn = call.method_arn();
+    // The resource the SENTENCE reports is the masked one the endpoint publishes, while the
+    // DECISION is taken about the method's own ARN — which is what a statement names it by.
+    let reported = call.reported_resource();
     let request = iam::Request::new(INVOKE_ACTION, &method_arn, &caller.spellings);
     let identity_said = iam::identity_decision(&caller.documents, &request);
     // The decision is taken FIRST, so an explicit `Deny` in a document that CAN be read refuses
@@ -289,7 +304,7 @@ pub fn refusal(
     if identity_said == Decision::Denied {
         return Some(not_authorized(
             &caller.arn,
-            &method_arn,
+            &reported,
             IDENTITY_EXPLICIT_DENY,
         ));
     }
@@ -299,7 +314,7 @@ pub fn refusal(
     if !granted {
         return Some(not_authorized(
             &caller.arn,
-            &method_arn,
+            &reported,
             &no_policy_allows(IDENTITY_POLICY_CLASS, INVOKE_ACTION),
         ));
     }
@@ -318,14 +333,15 @@ pub fn refusal(
             Decision::Denied => BOUNDARY_EXPLICIT_DENY.to_string(),
             Decision::NotStated => no_policy_allows(BOUNDARY_POLICY_CLASS, INVOKE_ACTION),
         };
-        return Some(not_authorized(&caller.arn, &method_arn, &reason));
+        return Some(not_authorized(&caller.arn, &reported, &reason));
     }
     None
 }
 
 /// The sentence the `execute-api` endpoint refuses an unauthorized invoke with: the principal
-/// that asked, the action it asked for, the method it asked for and `reason` — the clause
-/// naming WHICH of the documents consulted refused it and whether that deny was explicit.
+/// that asked, the action it asked for, the method it asked for as the endpoint REPORTS it
+/// ([`resource_policy::Call::reported_resource`]) and `reason` — the clause naming WHICH of the
+/// documents consulted refused it and whether that deny was explicit.
 ///
 /// The part up to the resource IS the sentence the api's own resource policy refuses a call
 /// with — the one formatter [`resource_policy::not_authorized`] owns, called rather than
@@ -333,10 +349,10 @@ pub fn refusal(
 /// What this adds is the reason clause, which is a fact about the IDENTITY-based decision
 /// taken here: a caller reading it can tell an implicit deny, which a grant would lift, from
 /// an explicit one, which no grant lifts.
-fn not_authorized(principal: &str, method_arn: &str, reason: &str) -> String {
+fn not_authorized(principal: &str, reported_resource: &str, reason: &str) -> String {
     format!(
         "{sentence} {reason}",
-        sentence = resource_policy::not_authorized(INVOKE_ACTION, principal, method_arn)
+        sentence = resource_policy::not_authorized(INVOKE_ACTION, principal, reported_resource)
     )
 }
 
@@ -348,8 +364,9 @@ mod tests {
 
     use super::*;
 
-    /// One invoke of `GET /orders` on stage `prod` of api `abc1230000`, speaking for `arn`.
-    fn call<'a>(arn: &'a str) -> resource_policy::Call<'a> {
+    /// One invoke of `GET /orders` on stage `prod` of api `abc1230000`, speaking for the
+    /// session `spellings` names.
+    fn call<'a>(spellings: &'a [String]) -> resource_policy::Call<'a> {
         resource_policy::Call {
             region: "us-east-1",
             api_id: "abc1230000",
@@ -358,7 +375,11 @@ mod tests {
             resource_path: "/orders",
             request_path: "/orders",
             source_vpce: None,
-            caller: resource_policy::Caller::Signed(arn),
+            source_ip: Some("198.51.100.17"),
+            caller: resource_policy::Caller::Signed {
+                named: &spellings[0],
+                spellings,
+            },
         }
     }
 
@@ -425,7 +446,7 @@ mod tests {
         ];
         for (case, documents, by_resource_policy, admitted) in rows {
             let caller = session(documents);
-            let refused = refusal(&caller, &call(&caller.arn.clone()), *by_resource_policy);
+            let refused = refusal(&caller, &call(&caller.spellings.clone()), *by_resource_policy);
             assert_eq!(
                 refused.is_none(),
                 *admitted,
@@ -454,7 +475,7 @@ mod tests {
         for (case, boundary, admitted) in rows {
             let mut caller = session(&[allow_every_invoke]);
             caller.boundary = boundary.map(str::to_string);
-            let refused = refusal(&caller, &call(&caller.arn.clone()), false);
+            let refused = refusal(&caller, &call(&caller.spellings.clone()), false);
             assert_eq!(
                 refused.is_none(),
                 *admitted,
@@ -478,7 +499,7 @@ mod tests {
                               other/prod/GET/orders\"}]}";
         let sentence = "User: arn:aws:sts::000000000000:assumed-role/pool-authenticated/\
                         CognitoIdentity is not authorized to perform: execute-api:Invoke on \
-                        resource: arn:aws:execute-api:us-east-1:000000000000:\
+                        resource: arn:aws:execute-api:us-east-1:********0000:\
                         abc1230000/prod/GET/orders";
         // Rows differ along WHICH document class refused the invoke and along whether that
         // class stated an explicit deny or merely failed to allow — the four readings this
@@ -518,7 +539,7 @@ mod tests {
         for (case, documents, boundary, reason) in rows {
             let mut caller = session(documents);
             caller.boundary = boundary.map(str::to_string);
-            let refused = refusal(&caller, &call(&caller.arn.clone()), false)
+            let refused = refusal(&caller, &call(&caller.spellings.clone()), false)
                 .unwrap_or_else(|| panic!("case {case:?}: an unauthorized invoke is refused"));
             assert_eq!(
                 refused,
@@ -534,7 +555,7 @@ mod tests {
     fn the_accounts_own_published_credential_is_not_bounded() {
         let mut caller = session(&[]);
         caller.account_credential = true;
-        let refused = refusal(&caller, &call(&caller.arn.clone()), false);
+        let refused = refusal(&caller, &call(&caller.spellings.clone()), false);
         assert!(
             refused.is_none(),
             "case \"the account's own credential\": expected the invoke to be admitted, got \

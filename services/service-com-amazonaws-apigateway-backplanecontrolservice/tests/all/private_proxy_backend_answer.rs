@@ -288,9 +288,19 @@ async fn repin_policy(gateway: &Gateway, api: &str, case: &str, endpoint: &str) 
         "case {case:?}: expected GetRestApi to answer 200, got {} with {:?}",
         read.status, read.body
     );
-    let reported = string_member(&read.body, "policy", case);
+    let reported = crate::execute_api_data_plane::policy_document_of(
+        &string_member(&read.body, "policy", case),
+        case,
+    );
     assert_eq!(
-        reported, document,
+        reported,
+        crate::execute_api_data_plane::stored_policy_document(
+            &serde_json::from_str::<Value>(&document).expect("the document is JSON"),
+            &format!(
+                "arn:aws:execute-api:{REGION}:{account}:{api}",
+                account = ::engine::emulator_account_id()
+            )
+        ),
         "case {case:?}: expected GetRestApi to report the policy that was set, got \
          {reported:?}"
     );
@@ -374,7 +384,9 @@ async fn a_private_proxy_serves_the_backends_own_answer_behind_its_endpoint_gate
                 let expected = format!(
                     "User: {ANONYMOUS} is not authorized to perform: execute-api:Invoke on \
                      resource: {arn}",
-                    arn = method_arn(&backend, path_part)
+                    arn = crate::stage_invoke_identity_policy::reported_resource(&method_arn(
+                        &backend, path_part
+                    ))
                 );
                 assert_eq!(
                     message, expected,

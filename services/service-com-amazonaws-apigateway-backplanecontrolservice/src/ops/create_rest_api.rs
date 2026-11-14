@@ -282,7 +282,13 @@ impl From<&RestApiEntry> for CreateRestApiOutput {
             minimum_compression_size: entry.minimum_compression_size,
             api_key_source: entry.api_key_source.clone(),
             endpoint_configuration: entry.endpoint_configuration.clone(),
-            policy: entry.policy.clone(),
+            // "A STRINGIFIED JSON policy document": the member carries the document's text
+            // encoded as a JSON string, which is not the text the api holds
+            // ([`crate::state::stringified_policy`]).
+            policy: entry
+                .policy
+                .as_deref()
+                .map(crate::state::stringified_policy),
             // The collection of tags is ALWAYS reported, empty when the API carries
             // none: `tags` is "the collection of tags" of the resource, which is an
             // empty map on an API that has none, not an absent one.
@@ -490,6 +496,15 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
             },
         );
 
+        // API Gateway NORMALIZES the resource policy it stores: a `Resource` written in the
+        // `execute-api:/…` shorthand is expanded to the method ARN it names, which is the
+        // spelling every later read reports
+        // ([`crate::state::expanded_policy_resources`]).
+        let policy = input
+            .policy
+            .as_deref()
+            .map(|document| crate::state::expanded_policy_resources(document, &region, &id));
+
         let mut entry = RestApiEntry {
             id: id.clone(),
             name: input.name,
@@ -512,7 +527,7 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
             endpoint_configuration: Some(crate::state::defaulted_endpoint_configuration(
                 input.endpoint_configuration,
             )),
-            policy: input.policy,
+            policy,
             security_policy: Some(
                 input
                     .security_policy

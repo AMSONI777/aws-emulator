@@ -131,7 +131,11 @@ pub(crate) fn served_body() -> String {
 }
 
 /// The ARN the account holds the seeded role under.
-fn role_arn() -> String {
+///
+/// `pub(crate)` because a statement of the api's own resource policy may name the ROLE
+/// rather than the session, and that is about the same caller — the sibling
+/// `stage_resource_policy_source_ip` suite drives that spelling.
+pub(crate) fn role_arn() -> String {
     format!(
         "arn:aws:iam::{}:role/{ROLE}",
         ::engine::emulator_account_id()
@@ -381,6 +385,7 @@ impl Deployed {
     /// `UpdateRestApi` replacing `/policy` with `document`, then `CreateDeployment` so the
     /// stage serves the api as it now stands.
     async fn set_policy(&self, gateway: &Gateway, case: &str, document: &Value) {
+        let arn_prefix = self.execute_api_arn("");
         let patch = json!({
             "patchOperations": [
                 { "op": "replace", "path": "/policy", "value": document.to_string() }
@@ -398,8 +403,14 @@ impl Deployed {
             .call("GET", &format!("/restapis/{}", self.api), None)
             .await;
         assert_eq!(
-            string_member(&read.body, "policy", case),
-            document.to_string(),
+            crate::execute_api_data_plane::policy_document_of(
+                &string_member(&read.body, "policy", case),
+                case
+            ),
+            crate::execute_api_data_plane::stored_policy_document(
+                document,
+                arn_prefix.trim_end_matches('/')
+            ),
             "case {case}: expected GetRestApi to report the policy that was set"
         );
         deploy(gateway, &self.api, STAGE).await;
@@ -474,14 +485,13 @@ pub(crate) enum Reason {
     IdentityDeny,
     /// The ceiling in force on the principal does not allow what its policies granted.
     NoBoundaryGrant,
-    /// The api's own RESOURCE policy refused the call — the decision the gate beside the
-    /// identity one takes, whose sentence ends at the resource.
-    ResourcePolicy,
+    /// The api's own RESOURCE policy explicitly DENIED the call — the decision the gate
+    /// beside the identity one takes, which no grant lifts either.
+    ResourceDeny,
 }
 
 impl Reason {
-    /// The clause this refusal closes with, or `None` for the one decided against the api's
-    /// own document.
+    /// The clause this refusal closes with.
     fn clause(self) -> Option<String> {
         match self {
             Self::NoIdentityGrant => {
@@ -493,9 +503,26 @@ impl Reason {
             Self::NoBoundaryGrant => {
                 Some(format!("because no permissions boundary allows the {INVOKE_ACTION} action"))
             }
-            Self::ResourcePolicy => None,
+            Self::ResourceDeny => {
+                Some("with an explicit deny in a resource-based policy".to_string())
+            }
         }
     }
+}
+
+/// The resource an `execute-api` refusal REPORTS for the method `method_arn` names: the ARN
+/// with all but the last four digits of its account masked by `*`, which is how the endpoint
+/// publishes a resource in the sentence it refuses an unauthorized call with.
+///
+/// `pub(crate)` because every suite asserting that sentence names the same resource.
+pub(crate) fn reported_resource(method_arn: &str) -> String {
+    let account = ::engine::emulator_account_id();
+    let masked = format!(
+        "{mask}{tail}",
+        mask = "*".repeat(account.len().saturating_sub(4)),
+        tail = &account[account.len().saturating_sub(4)..],
+    );
+    method_arn.replacen(&format!(":{account}:"), &format!(":{masked}:"), 1)
 }
 
 /// Assert the invoke was refused as unauthorized: `403`, the `AccessDeniedException` class,
@@ -529,7 +556,8 @@ pub(crate) fn assert_refused(
         message,
         format!(
             "User: {principal} is not authorized to perform: {INVOKE_ACTION} on resource: \
-             {method_arn}{closing}"
+             {reported}{closing}",
+            reported = reported_resource(method_arn)
         ),
         "case {case}: expected the {INVOKE_ACTION} authorization sentence closed by \
          {reason:?}, got {message:?}"
@@ -734,7 +762,7 @@ async fn either_grant_suffices_and_either_deny_refuses() {
         &refused,
         &session_arn(),
         &method,
-        Reason::ResourcePolicy,
+        Reason::ResourceDeny,
     );
 }
 

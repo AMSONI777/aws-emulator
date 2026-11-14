@@ -152,7 +152,17 @@ fn apply_patch(entry: &mut RestApiEntry, patch: &Patch) -> Result<(), PatchFailu
         "name" => crate::state::patch_required_string(&mut entry.name, patch, MAX_STRING_CHARS),
         "description" => patch_optional_string(&mut entry.description, patch, MAX_STRING_CHARS),
         "version" => patch_optional_string(&mut entry.version, patch, MAX_STRING_CHARS),
-        "policy" => patch_optional_string(&mut entry.policy, patch, MAX_POLICY_CHARS),
+        // API Gateway NORMALIZES the document it stores: a `Resource` written in the
+        // `execute-api:/…` shorthand is expanded to the method ARN it names, which is the
+        // spelling every later read reports.
+        "policy" => {
+            patch_optional_string(&mut entry.policy, patch, MAX_POLICY_CHARS)?;
+            let expanded = entry.policy.as_deref().map(|document| {
+                crate::state::expanded_policy_resources(document, &entry.region, &entry.id)
+            });
+            entry.policy = expanded;
+            Ok(())
+        }
         "disableExecuteApiEndpoint" => {
             patch_bool(&mut entry.disable_execute_api_endpoint, patch)
         }

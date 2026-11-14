@@ -32,13 +32,17 @@
 //!   policy examples are written in — where a value matching EITHER is about this call,
 //!   while an identity-based statement names it by the ARN alone;
 //! * the condition keys an invoke of this emulator can answer for ([`PUBLISHED_KEYS`]): the
-//!   VPC endpoint the request arrived through, which is the one property of a request that
-//!   this data plane reads off the endpoint host it was addressed on. A clause over any
-//!   other key is one this evaluation cannot decide, and an undecided clause never grants
-//!   while it still refuses;
+//!   VPC endpoint the request arrived through and the ADDRESS the request came from, the two
+//!   properties of a request this data plane reads off the connection it arrived on. A clause
+//!   over any other key is one this evaluation cannot decide, and an undecided clause never
+//!   grants while it still refuses;
 //! * who the request speaks for: a request to a method that authorizes nobody speaks for
 //!   nobody, which is the [`ANONYMOUS_PRINCIPAL`] a refusal names, and only a statement
-//!   whose `Principal` is the whole-element `"*"` is about it ([`Caller`]).
+//!   whose `Principal` is the whole-element `"*"` is about it ([`Caller`]). An authenticated
+//!   caller is named by EVERY spelling a statement may name it by — the session ARN STS
+//!   reports and the ARN of the IAM role behind an assumed-role session, because a
+//!   resource-based statement naming a ROLE is about every session of that role — while the
+//!   principal a refusal names is the session's own.
 //!
 //! ## What an UNSTATED document does, and why that depends on the method
 //!
@@ -73,15 +77,21 @@ pub const INVALIDATE_CACHE_ACTION: &str = "execute-api:InvalidateCache";
 /// api's policy is pinned to one of its interface endpoints with.
 pub const SOURCE_VPCE_KEY: &str = "aws:SourceVpce";
 
+/// The condition key naming the ADDRESS a request came from — the key an api's policy is
+/// pinned to a network range with, under IAM's own IP-address operators (`IpAddress`,
+/// `NotIpAddress`).
+pub const SOURCE_IP_KEY: &str = "aws:SourceIp";
+
 /// The condition keys an invoke MODELS: the ones whose absence from the context means the
 /// request really carries no value for them rather than that this emulator cannot answer
 /// for them.
 ///
-/// Only the source VPC endpoint, because the endpoint host a request was addressed on is
-/// the one such property this data plane can read. Every other key AWS publishes for an
-/// invoke (the source VPC, the source address, the caller's own tags) is one this
-/// evaluation cannot answer, so a clause over it is left undecided rather than guessed at.
-const PUBLISHED_KEYS: &[&str] = &[SOURCE_VPCE_KEY];
+/// The source VPC endpoint and the source address, because the endpoint host a request was
+/// addressed on and the connection it arrived over are the properties this data plane can
+/// read. Every other key AWS publishes for an invoke (the source VPC, the caller's own
+/// tags) is one this evaluation cannot answer, so a clause over it is left undecided rather
+/// than guessed at.
+const PUBLISHED_KEYS: &[&str] = &[SOURCE_VPCE_KEY, SOURCE_IP_KEY];
 
 /// The principal a request to a method that authorizes nobody speaks for, as AWS names it
 /// in the sentence it refuses such a request with.
@@ -102,7 +112,17 @@ pub enum Caller<'a> {
     /// The method is authorized by IAM and the emulator verified the credential, so the
     /// request speaks for this principal — whose identity-based policies are evaluated
     /// beside the document by [`super::invoke::execute_api_authorization`].
-    Signed(&'a str),
+    Signed {
+        /// The principal a refusal NAMES: the ARN `sts:GetCallerIdentity` reports for the
+        /// credential the request signed with, which for a federated session is the
+        /// session's own ARN.
+        named: &'a str,
+        /// Every spelling a statement's `Principal` element may name this caller by — the
+        /// session ARN AND the ARN of the IAM role behind it, since a resource-based
+        /// statement naming a role is about every session of that role. Empty where the
+        /// caller has no spelling but the one it is named by.
+        spellings: &'a [String],
+    },
 }
 
 /// What one invoke asks the api's resource policy about.
@@ -142,6 +162,11 @@ pub struct Call<'a> {
     /// The VPC endpoint the request arrived through, when the endpoint it was addressed on
     /// names one.
     pub source_vpce: Option<&'a str>,
+    /// The address the request came from, as the data plane reads it off the connection —
+    /// `None` where the decision is taken about no connection at all (a SIMULATED call made
+    /// through the control plane), which carries no address for a clause to be decided
+    /// against.
+    pub source_ip: Option<&'a str>,
     /// Who the request speaks for; see [`Caller`].
     pub caller: Caller<'a>,
 }
@@ -180,21 +205,41 @@ impl Call<'_> {
         )
     }
 
+    /// The resource a REFUSAL of this call names, which is the method's own ARN with the
+    /// account masked: the `execute-api` endpoint reports all but the last four digits of the
+    /// account as `*` in the sentence it refuses an unauthorized call with, so the sentence
+    /// does not publish the whole account id to whoever reached the endpoint.
+    ///
+    /// Only the REPORTED resource is masked. The ARN the decision is taken about
+    /// ([`Self::method_arn`]) carries the account itself, because that is the ARN a policy
+    /// statement names the method by and the one an authorizer is handed.
+    ///
+    /// `pub(crate)` because the IDENTITY-based gate beside this module reports the same
+    /// resource in the same sentence about the same call
+    /// ([`super::invoke::execute_api_authorization`]) — one masking, so the two gates cannot
+    /// publish different accounts for one method.
+    #[must_use]
+    pub(crate) fn reported_resource(&self) -> String {
+        masked_account(&self.method_arn())
+    }
+
     /// The principal a refusal of this call names.
     fn principal_named(&self) -> &str {
         match self.caller {
             Caller::Anonymous => ANONYMOUS_PRINCIPAL,
-            Caller::Signed(principal) => principal,
+            Caller::Signed { named, .. } => named,
         }
     }
 
     /// Every spelling of the caller a statement's `Principal` element may name it by: the
-    /// authenticated principal, and nothing at all for a method that authorizes nobody —
-    /// where only the whole-element `"*"` is about the request.
+    /// authenticated principal and the ARNs it is reachable under ([`Caller::Signed`]), and
+    /// nothing at all for a method that authorizes nobody — where only the whole-element
+    /// `"*"` is about the request.
     fn principals(&self) -> Vec<String> {
         match self.caller {
             Caller::Anonymous => Vec::new(),
-            Caller::Signed(principal) => vec![principal.to_string()],
+            Caller::Signed { named, spellings: [] } => vec![named.to_string()],
+            Caller::Signed { spellings, .. } => spellings.to_vec(),
         }
     }
 }
@@ -205,8 +250,18 @@ impl Call<'_> {
 /// `policy` is the document the api carries; an api carrying none is not asked at all.
 #[must_use]
 pub fn denial(policy: &str, call: &Call<'_>) -> Option<String> {
-    let refused = refuses(decision(policy, call, INVOKE_ACTION), call);
-    refused.then(|| not_authorized(INVOKE_ACTION, call.principal_named(), &call.method_arn()))
+    let stated = decision(policy, call, INVOKE_ACTION);
+    if !refuses(stated, call) {
+        return None;
+    }
+    let sentence = not_authorized(INVOKE_ACTION, call.principal_named(), &call.reported_resource());
+    // An explicit `Deny` is a fact about the document, and the clause IAM closes such a
+    // refusal with is what tells the caller no grant will lift it. A document that merely
+    // states nothing refused the call by leaving it ungranted, which is the sentence alone.
+    Some(match stated {
+        Decision::Denied => format!("{sentence} {RESOURCE_EXPLICIT_DENY}"),
+        Decision::Allowed | Decision::NotStated => sentence,
+    })
 }
 
 /// Whether the document the api carries explicitly ALLOWS this call to invoke the method.
@@ -248,7 +303,7 @@ pub fn invalidation_not_authorized(call: &Call<'_>) -> String {
     not_authorized(
         INVALIDATE_CACHE_ACTION,
         call.principal_named(),
-        &call.method_arn(),
+        &call.reported_resource(),
     )
 }
 
@@ -275,10 +330,13 @@ fn refuses(stated: Decision, call: &Call<'_>) -> bool {
 fn decision(policy: &str, call: &Call<'_>, action: &str) -> Decision {
     let document = PreparedDocument::read(policy);
     let principals = call.principals();
-    let context: Vec<(String, String)> = call
-        .source_vpce
-        .map(|endpoint| vec![(SOURCE_VPCE_KEY.to_string(), endpoint.to_string())])
-        .unwrap_or_default();
+    let context: Vec<(String, String)> = [
+        (SOURCE_VPCE_KEY, call.source_vpce),
+        (SOURCE_IP_KEY, call.source_ip),
+    ]
+    .into_iter()
+    .filter_map(|(key, value)| value.map(|value| (key.to_string(), value.to_string())))
+    .collect();
     let mut allowed = false;
     for resource in [call.method_arn(), call.scoped_resource()] {
         let request = iam::Request::new(action, &resource, &principals)
@@ -315,6 +373,42 @@ pub(crate) fn not_authorized(action: &str, principal: &str, method_arn: &str) ->
     format!("User: {principal} is not authorized to perform: {action} on resource: {method_arn}")
 }
 
+/// The clause IAM closes a refusal with when the document the API carries DENIES the action
+/// rather than merely not allowing it: no grant anywhere lifts such a deny, which is what the
+/// clause tells whoever reads the refusal.
+const RESOURCE_EXPLICIT_DENY: &str = "with an explicit deny in a resource-based policy";
+
+/// How many trailing digits of the account an `execute-api` refusal reports unmasked.
+const UNMASKED_ACCOUNT_DIGITS: usize = 4;
+
+/// The character the masked part of the account is reported as.
+const ACCOUNT_MASK: char = '*';
+
+/// `arn` with all but the last [`UNMASKED_ACCOUNT_DIGITS`] of its ACCOUNT field replaced by
+/// [`ACCOUNT_MASK`], which is how the `execute-api` endpoint reports a resource in the
+/// sentence it refuses an unauthorized call with ([`Call::reported_resource`]).
+///
+/// The field is the fifth of the six an ARN is written in, so the resource that follows it —
+/// which may carry colons of its own — is left exactly as it was.
+fn masked_account(arn: &str) -> String {
+    let mut fields: Vec<&str> = arn.splitn(6, ':').collect();
+    let Some(account) = fields.get(4).copied() else {
+        return arn.to_string();
+    };
+    let masked: String = account
+        .char_indices()
+        .map(|(index, digit)| {
+            if index + UNMASKED_ACCOUNT_DIGITS < account.len() {
+                ACCOUNT_MASK
+            } else {
+                digit
+            }
+        })
+        .collect();
+    fields[4] = &masked;
+    fields.join(":")
+}
+
 #[cfg(test)]
 mod tests {
     //! The pure rules this module owns: the shape of the resource an invoke names, and
@@ -324,8 +418,26 @@ mod tests {
 
     use super::*;
 
-    /// The principal a signed row speaks for.
+    /// The principal a signed row speaks for, in the two spellings a resource policy may
+    /// name it by: the session STS reports, and the IAM role behind it.
     const PRINCIPAL: &str = "arn:aws:sts::000000000000:assumed-role/pool-guest/session";
+    const ROLE: &str = "arn:aws:iam::000000000000:role/pool-guest";
+
+    /// That caller as a statement may name it; see [`Caller::Signed`].
+    fn signed_as<'a>(spellings: &'a [String]) -> Caller<'a> {
+        Caller::Signed {
+            named: PRINCIPAL,
+            spellings,
+        }
+    }
+
+    /// The spellings of [`PRINCIPAL`] a statement may name it by.
+    fn spellings() -> Vec<String> {
+        vec![PRINCIPAL.to_string(), ROLE.to_string()]
+    }
+
+    /// The address every row's request came from.
+    const CLIENT_ADDRESS: &str = "198.51.100.17";
 
     /// One invoke of `GET /whoami` on stage `s` of api `abc1230000`, arriving through
     /// `source_vpce` and speaking for `caller` — a method carrying no path parameter, so the
@@ -339,6 +451,7 @@ mod tests {
             resource_path: "/whoami",
             request_path: "/whoami",
             source_vpce,
+            source_ip: Some(CLIENT_ADDRESS),
             caller,
         }
     }
@@ -437,7 +550,10 @@ mod tests {
         let other_path = "{\"Statement\":[{\"Effect\":\"Allow\",\"Principal\":\"*\",\
                           \"Action\":\"execute-api:Invoke\",\
                           \"Resource\":\"execute-api:/s/GET/other\"}]}";
-        let signed = Caller::Signed(PRINCIPAL);
+        let signed = Caller::Signed {
+            named: PRINCIPAL,
+            spellings: &[],
+        };
         // Rows differ along the effect the document states about this call and along the
         // method's own authorization — the two things the reading depends on.
         type Row<'a> = (&'a str, &'a str, Caller<'a>, bool);
@@ -481,11 +597,65 @@ mod tests {
             ("an explicit deny", Some(deny_all), false),
         ];
         for (case, document, allows) in rows {
-            let read = allows_invoke(*document, &call(None, Caller::Signed(PRINCIPAL)));
+            let read = allows_invoke(*document, &call(None, signed_as(&[])));
             assert_eq!(
                 read, *allows,
                 "case {case}: expected an explicit allow == {allows}, got {read}"
             );
+        }
+    }
+
+    /// RULE: a statement naming the IAM ROLE behind an assumed-role session is about that
+    /// session, and so is one naming the session itself; a statement naming another
+    /// principal is about neither.
+    #[test]
+    fn a_statement_naming_the_role_behind_a_session_is_about_that_session() {
+        let grant = |principal: &str| {
+            format!(
+                "{{\"Version\":\"2012-10-17\",\"Statement\":[{{\"Effect\":\"Allow\",\
+                 \"Principal\":{{\"AWS\":\"{principal}\"}},\
+                 \"Action\":\"execute-api:Invoke\",\"Resource\":\"execute-api:/*\"}}]}}"
+            )
+        };
+        let held = spellings();
+        // Rows differ along the spelling the statement names the caller by: the session, the
+        // role behind it, another role of the same account, and another session of the same
+        // role.
+        let rows: &[(&str, String, bool)] = &[
+            ("the session itself", grant(PRINCIPAL), true),
+            ("the role behind the session", grant(ROLE), true),
+            (
+                "another role of the account",
+                grant("arn:aws:iam::000000000000:role/other"),
+                false,
+            ),
+            (
+                "another session of the same role",
+                grant("arn:aws:sts::000000000000:assumed-role/pool-guest/other"),
+                false,
+            ),
+        ];
+        for (case, document, allows) in rows {
+            let read = allows_invoke(Some(document), &call(None, signed_as(&held)));
+            assert_eq!(
+                read, *allows,
+                "case {case}: expected an explicit allow == {allows}, got {read}"
+            );
+            // The same spellings decide a DENY, and the refusal names the session rather
+            // than whichever spelling the statement used.
+            let denying = document.replace("Allow", "Deny");
+            let refusal = denial(&denying, &call(None, signed_as(&held)));
+            assert_eq!(
+                refusal.is_some(),
+                *allows,
+                "case {case}: expected the deny to refuse == {allows}, got {refusal:?}"
+            );
+            if let Some(refusal) = refusal {
+                assert!(
+                    refusal.starts_with(&format!("User: {PRINCIPAL} ")),
+                    "case {case}: expected the session named, got {refusal:?}"
+                );
+            }
         }
     }
 
@@ -496,9 +666,172 @@ mod tests {
         assert_eq!(
             refusal,
             "User: anonymous is not authorized to perform: execute-api:Invoke on resource: \
-             arn:aws:execute-api:us-west-2:000000000000:abc1230000/s/GET/whoami",
+             arn:aws:execute-api:us-west-2:********0000:abc1230000/s/GET/whoami",
             "case the refusal sentence: got {refusal:?}"
         );
+    }
+
+    /// RULE: the resource a refusal reports masks all but the last four digits of the
+    /// account, while the resource the DECISION is taken about carries the account itself.
+    #[test]
+    fn a_refusal_masks_the_account_of_the_resource_it_reports() {
+        let call = call(None, signed_as(&[]));
+        assert_eq!(
+            call.reported_resource(),
+            "arn:aws:execute-api:us-west-2:********0000:abc1230000/s/GET/whoami",
+            "case the reported resource: got {:?}",
+            call.reported_resource()
+        );
+        assert_eq!(
+            call.method_arn(),
+            format!(
+                "arn:aws:execute-api:us-west-2:{account}:abc1230000/s/GET/whoami",
+                account = ::engine::emulator_account_id()
+            ),
+            "case the resource the decision is about: got {:?}",
+            call.method_arn()
+        );
+        // Rows differ along the ARN the masking is applied to: the account every emulated
+        // resource carries, an account shorter than the unmasked tail, and a resource field
+        // carrying colons of its own.
+        let rows: &[(&str, &str, &str)] = &[
+            (
+                "a twelve-digit account",
+                "arn:aws:execute-api:us-west-2:123456789012:a/s/GET/p",
+                "arn:aws:execute-api:us-west-2:********9012:a/s/GET/p",
+            ),
+            (
+                "an account shorter than the unmasked tail",
+                "arn:aws:execute-api:us-west-2:12:a/s/GET/p",
+                "arn:aws:execute-api:us-west-2:12:a/s/GET/p",
+            ),
+            (
+                "a resource carrying colons",
+                "arn:aws:execute-api:us-west-2:000000000000:a/s/GET/p:q:r",
+                "arn:aws:execute-api:us-west-2:********0000:a/s/GET/p:q:r",
+            ),
+        ];
+        for (case, arn, expected) in rows {
+            let masked = masked_account(arn);
+            assert_eq!(&masked, expected, "case {case}: got {masked:?}");
+        }
+    }
+
+    /// RULE: a clause over the address the request came from is decided against that address,
+    /// so an `IpAddress` grant covers every request from the range it names and a
+    /// `NotIpAddress` deny refuses every request from outside it.
+    #[test]
+    fn a_source_ip_condition_decides_the_call_against_the_address_it_came_from() {
+        let statement = |effect: &str, operator: &str, range: &str| {
+            format!(
+                "{{\"Version\":\"2012-10-17\",\"Statement\":[{{\"Effect\":\"Allow\",\
+                 \"Principal\":\"*\",\"Action\":\"execute-api:Invoke\",\
+                 \"Resource\":\"execute-api:/*\"}},{{\"Effect\":\"{effect}\",\
+                 \"Principal\":\"*\",\"Action\":\"execute-api:Invoke\",\
+                 \"Resource\":\"execute-api:/*\",\"Condition\":{{\"{operator}\":\
+                 {{\"aws:SourceIp\":\"{range}\"}}}}}}]}}"
+            )
+        };
+        // Rows differ along the operator the clause is written under, the range it names and
+        // whether the address the request came from lies in it.
+        let rows: &[(&str, String, bool)] = &[
+            (
+                "a deny outside the range the request came from",
+                statement("Deny", "NotIpAddress", "198.51.100.0/24"),
+                true,
+            ),
+            (
+                "a deny outside a range the request is not in",
+                statement("Deny", "NotIpAddress", "203.0.113.0/24"),
+                false,
+            ),
+            (
+                "a deny inside the range the request came from",
+                statement("Deny", "IpAddress", "198.51.100.17"),
+                false,
+            ),
+            (
+                "a deny over every address",
+                statement("Deny", "IpAddress", "0.0.0.0/0"),
+                false,
+            ),
+        ];
+        for (case, document, allowed) in rows {
+            let refusal = denial(document, &call(None, signed_as(&[])));
+            assert_eq!(
+                refusal.is_none(),
+                *allowed,
+                "case {case}: expected allowed={allowed}, got {refusal:?}"
+            );
+        }
+
+        // A grant of its own, conditioned on the address: the ONE statement the document
+        // carries, so what it decides is the whole decision — which is what an allow has to
+        // report to the identity gate beside this one.
+        let grant = |range: &str| {
+            format!(
+                "{{\"Version\":\"2012-10-17\",\"Statement\":[{{\"Effect\":\"Allow\",\
+                 \"Principal\":\"*\",\"Action\":\"execute-api:Invoke\",\
+                 \"Resource\":\"execute-api:/*\",\"Condition\":{{\"IpAddress\":\
+                 {{\"aws:SourceIp\":\"{range}\"}}}}}}]}}"
+            )
+        };
+        // Rows differ along the range the grant names: every address, the block the request
+        // came from, a single address, and a block it is not in.
+        let grants: &[(&str, String, bool)] = &[
+            ("every address", grant("0.0.0.0/0"), true),
+            ("the block the request came from", grant("198.51.100.0/24"), true),
+            ("the address itself", grant(CLIENT_ADDRESS), true),
+            ("another block", grant("203.0.113.0/24"), false),
+        ];
+        for (case, document, allows) in grants {
+            let read = allows_invoke(Some(document), &call(None, signed_as(&[])));
+            assert_eq!(
+                read, *allows,
+                "case {case}: expected an explicit allow == {allows}, got {read}"
+            );
+        }
+
+        // A request carrying no address at all leaves such a clause UNDECIDED, which never
+        // grants while it still refuses.
+        let no_address = Call {
+            source_ip: None,
+            ..call(None, signed_as(&[]))
+        };
+        assert!(
+            !allows_invoke(Some(&grant("0.0.0.0/0")), &no_address),
+            "case \"no address at all\": expected an undecided clause to grant nothing"
+        );
+        assert!(
+            denial(&statement("Deny", "NotIpAddress", "203.0.113.0/24"), &no_address).is_some(),
+            "case \"no address at all\": expected an undecided clause to keep refusing"
+        );
+    }
+
+    /// RULE: an explicit deny in the document closes the refusal with the clause naming it,
+    /// while a document that merely states nothing refuses with the sentence alone.
+    #[test]
+    fn an_explicit_deny_closes_the_refusal_with_its_own_clause() {
+        let deny_all = "{\"Statement\":[{\"Effect\":\"Deny\",\"Principal\":\"*\",\
+                        \"Action\":\"execute-api:Invoke\",\"Resource\":\"execute-api:/*\"}]}";
+        let sentence = "User: anonymous is not authorized to perform: execute-api:Invoke on \
+                        resource: arn:aws:execute-api:us-west-2:********0000:\
+                        abc1230000/s/GET/whoami";
+        // Rows differ along WHAT the document stated about the call — an explicit deny, and
+        // nothing at all — which is what the closing clause reports.
+        let rows: &[(&str, &str, String)] = &[
+            (
+                "an explicit deny",
+                deny_all,
+                format!("{sentence} with an explicit deny in a resource-based policy"),
+            ),
+            ("a document stating nothing", "{\"Statement\":[]}", sentence.to_string()),
+        ];
+        for (case, document, expected) in rows {
+            let refusal = denial(document, &call(None, Caller::Anonymous))
+                .unwrap_or_else(|| panic!("case {case}: the call is refused"));
+            assert_eq!(&refusal, expected, "case {case}: got {refusal:?}");
+        }
     }
 
     #[test]
@@ -510,7 +843,10 @@ mod tests {
             )
         };
         let deny_invalidation = grant("execute-api:InvalidateCache").replace("Allow", "Deny");
-        let signed = Caller::Signed(PRINCIPAL);
+        let signed = Caller::Signed {
+            named: PRINCIPAL,
+            spellings: &[],
+        };
         // Rows differ along what the document states about the INVALIDATION action — the
         // action itself, another action of the same service, every action, nothing, an
         // explicit deny — and along the method's own authorization, which is what decides
@@ -565,7 +901,7 @@ mod tests {
         assert_eq!(
             refusal,
             "User: anonymous is not authorized to perform: execute-api:InvalidateCache on \
-             resource: arn:aws:execute-api:us-west-2:000000000000:abc1230000/s/GET/whoami",
+             resource: arn:aws:execute-api:us-west-2:********0000:abc1230000/s/GET/whoami",
             "case the refusal sentence: got {refusal:?}"
         );
     }

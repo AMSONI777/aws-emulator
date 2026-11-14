@@ -220,6 +220,16 @@ impl Deployed {
         )
     }
 
+    /// The ARN this api's own resources hang off:
+    /// `arn:aws:execute-api:{region}:{account}:{api-id}`, which is the prefix the
+    /// `execute-api:/…` shorthand of a stored statement is expanded under.
+    fn arn_prefix(&self) -> String {
+        format!(
+            "arn:aws:execute-api:{API_REGION}:000000000000:{api}",
+            api = self.api
+        )
+    }
+
     /// `UpdateRestApi` replacing `/policy` with `document` (or removing it for `None`),
     /// then `CreateDeployment` so the stage serves the api as it now stands. The stored
     /// document is read back through `GetRestApi`, so each case proves the round trip it
@@ -253,9 +263,15 @@ impl Deployed {
             read.status, read.body
         );
         match &stringified {
-            Some(document) => assert_eq!(
-                string_member(&read.body, "policy", case),
-                *document,
+            Some(_) => assert_eq!(
+                crate::execute_api_data_plane::policy_document_of(
+                    &string_member(&read.body, "policy", case),
+                    case
+                ),
+                crate::execute_api_data_plane::stored_policy_document(
+                    document.expect("the document a stringified case carries"),
+                    &self.arn_prefix()
+                ),
                 "case {case}: expected GetRestApi to report the policy that was set"
             ),
             None => assert!(
@@ -317,19 +333,34 @@ fn assert_served(case: &str, status: u16, body: &str) {
 }
 
 /// Assert that the request was refused as unauthorized: `403`, the authorization sentence
-/// naming the principal, the action and the method ARN, and NOTHING of the integration's
-/// body — a refused request never reached it.
-fn assert_refused(case: &str, status: u16, body: &str, principal: &str, method_arn: &str) {
+/// naming the principal, the action and the method ARN as the endpoint REPORTS it — the
+/// account masked but for its last four digits — closed by the explicit-deny clause where
+/// `expected` says the document DENIED the call, and NOTHING of the integration's body: a
+/// refused request never reached it.
+fn assert_refused(
+    case: &str,
+    status: u16,
+    body: &str,
+    principal: &str,
+    method_arn: &str,
+    expected: Expected,
+) {
     assert_eq!(
         status, 403,
         "case {case}: expected 403, got {status} with {body:?}"
     );
     let message = authorization_message(body, case);
+    let closing = if expected == Expected::DeniedExplicitly {
+        " with an explicit deny in a resource-based policy"
+    } else {
+        ""
+    };
     assert_eq!(
         message,
         format!(
             "User: {principal} is not authorized to perform: execute-api:Invoke on resource: \
-             {method_arn}"
+             {reported}{closing}",
+            reported = crate::stage_invoke_identity_policy::reported_resource(method_arn)
         ),
         "case {case}: expected the execute-api:Invoke authorization sentence, got {message:?}"
     );
@@ -365,6 +396,19 @@ fn source_vpce_is(endpoint: &str) -> Value {
     json!({ "StringEquals": { "aws:SourceVpce": endpoint } })
 }
 
+/// What the stage owes one row: the integration's own answer, or the refusal — whose
+/// sentence closes with the explicit-deny clause exactly where the document DENIED the call,
+/// rather than merely failing to allow it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Expected {
+    /// The document admits the call and the integration answers.
+    Served,
+    /// The document is the only grant there can be and states nothing about the call.
+    Refused,
+    /// The document carries an explicit `Deny` that covers the call.
+    DeniedExplicitly,
+}
+
 #[tokio::test]
 async fn the_apis_resource_policy_decides_every_invoke_of_its_deployed_stage() {
     let gateway = Gateway::new();
@@ -375,13 +419,13 @@ async fn the_apis_resource_policy_decides_every_invoke_of_its_deployed_stage() {
     // resource it names, the action and principal it names, the condition key it is written
     // over, and the endpoint the request arrives through — everything the rule generalises
     // over. `None` is an api carrying no document at all, which is not gated.
-    type Row<'a> = (&'a str, Option<Value>, Address, bool);
+    type Row<'a> = (&'a str, Option<Value>, Address, Expected);
     let rows: Vec<Row<'_>> = vec![
         (
             "no policy at all",
             None,
             Address::OwnHost,
-            true,
+            Expected::Served,
         ),
         (
             "an unconditional allow, in the scoped resource spelling",
@@ -393,7 +437,7 @@ async fn the_apis_resource_policy_decides_every_invoke_of_its_deployed_stage() {
                 None,
             )])),
             Address::OwnHost,
-            true,
+            Expected::Served,
         ),
         (
             "an unconditional allow naming the method's own ARN",
@@ -405,7 +449,7 @@ async fn the_apis_resource_policy_decides_every_invoke_of_its_deployed_stage() {
                 None,
             )])),
             Address::OwnHost,
-            true,
+            Expected::Served,
         ),
         (
             "an unconditional allow naming a wildcard ARN of every GET",
@@ -417,7 +461,7 @@ async fn the_apis_resource_policy_decides_every_invoke_of_its_deployed_stage() {
                 None,
             )])),
             Address::OwnHost,
-            true,
+            Expected::Served,
         ),
         (
             "an allow pinned to the endpoint, reached through that endpoint",
@@ -429,7 +473,7 @@ async fn the_apis_resource_policy_decides_every_invoke_of_its_deployed_stage() {
                 Some(source_vpce_is(ENDPOINT)),
             )])),
             Address::Endpoint(ENDPOINT),
-            true,
+            Expected::Served,
         ),
         (
             "an allow pinned to the endpoint, reached through that endpoint's zonal name",
@@ -441,7 +485,7 @@ async fn the_apis_resource_policy_decides_every_invoke_of_its_deployed_stage() {
                 Some(source_vpce_is(ENDPOINT)),
             )])),
             Address::ZonalEndpoint(ENDPOINT),
-            true,
+            Expected::Served,
         ),
         (
             "an allow pinned to the endpoint, reached through ANOTHER endpoint",
@@ -453,7 +497,7 @@ async fn the_apis_resource_policy_decides_every_invoke_of_its_deployed_stage() {
                 Some(source_vpce_is(ENDPOINT)),
             )])),
             Address::Endpoint(OTHER_ENDPOINT),
-            false,
+            Expected::Refused,
         ),
         (
             "an allow pinned to the endpoint, reached through no endpoint at all",
@@ -465,7 +509,7 @@ async fn the_apis_resource_policy_decides_every_invoke_of_its_deployed_stage() {
                 Some(source_vpce_is(ENDPOINT)),
             )])),
             Address::OwnHost,
-            false,
+            Expected::Refused,
         ),
         (
             "an allow beside a deny of every other endpoint, through the named one",
@@ -486,7 +530,7 @@ async fn the_apis_resource_policy_decides_every_invoke_of_its_deployed_stage() {
                 ),
             ])),
             Address::Endpoint(ENDPOINT),
-            true,
+            Expected::Served,
         ),
         (
             "an allow beside a deny of every other endpoint, through another one",
@@ -507,7 +551,7 @@ async fn the_apis_resource_policy_decides_every_invoke_of_its_deployed_stage() {
                 ),
             ])),
             Address::Endpoint(OTHER_ENDPOINT),
-            false,
+            Expected::DeniedExplicitly,
         ),
         (
             "an explicit deny of everything",
@@ -519,7 +563,7 @@ async fn the_apis_resource_policy_decides_every_invoke_of_its_deployed_stage() {
                 None,
             )])),
             Address::OwnHost,
-            false,
+            Expected::DeniedExplicitly,
         ),
         (
             "an allow of ANOTHER resource path",
@@ -531,7 +575,7 @@ async fn the_apis_resource_policy_decides_every_invoke_of_its_deployed_stage() {
                 None,
             )])),
             Address::OwnHost,
-            false,
+            Expected::Refused,
         ),
         (
             "an allow of another VERB of the same path",
@@ -543,7 +587,7 @@ async fn the_apis_resource_policy_decides_every_invoke_of_its_deployed_stage() {
                 None,
             )])),
             Address::OwnHost,
-            false,
+            Expected::Refused,
         ),
         (
             "an allow of another ACTION",
@@ -555,7 +599,7 @@ async fn the_apis_resource_policy_decides_every_invoke_of_its_deployed_stage() {
                 None,
             )])),
             Address::OwnHost,
-            false,
+            Expected::Refused,
         ),
         (
             "an allow naming one principal rather than every one",
@@ -567,7 +611,7 @@ async fn the_apis_resource_policy_decides_every_invoke_of_its_deployed_stage() {
                 None,
             )])),
             Address::OwnHost,
-            false,
+            Expected::Refused,
         ),
         (
             "an allow conditioned on a key this endpoint cannot answer for",
@@ -579,23 +623,32 @@ async fn the_apis_resource_policy_decides_every_invoke_of_its_deployed_stage() {
                 Some(json!({ "StringEquals": { "aws:SourceVpc": "vpc-0123456789abcdef0" } })),
             )])),
             Address::Endpoint(ENDPOINT),
-            false,
+            Expected::Refused,
         ),
         (
             "a document stating nothing at all",
             Some(policy(Vec::new())),
             Address::OwnHost,
-            false,
+            Expected::Refused,
         ),
     ];
 
-    for (case, document, address, served) in &rows {
+    for (case, document, address, expected) in &rows {
         deployed.set_policy(&gateway, case, document.as_ref()).await;
         let (status, body) = deployed.invoke(&gateway, *address).await;
-        if *served {
-            assert_served(case, status, &body);
-        } else {
-            assert_refused(case, status, &body, ANONYMOUS, &method_arn);
+        match expected {
+            Expected::Served => assert_served(case, status, &body),
+            Expected::Refused => {
+                assert_refused(case, status, &body, ANONYMOUS, &method_arn, Expected::Refused);
+            }
+            Expected::DeniedExplicitly => assert_refused(
+                case,
+                status,
+                &body,
+                ANONYMOUS,
+                &method_arn,
+                Expected::DeniedExplicitly,
+            ),
         }
     }
 }
@@ -630,7 +683,7 @@ async fn re_pinning_the_policy_to_another_endpoint_closes_the_stage_and_restorin
         if *served {
             assert_served(case, status, &body);
         } else {
-            assert_refused(case, status, &body, ANONYMOUS, &method_arn);
+            assert_refused(case, status, &body, ANONYMOUS, &method_arn, Expected::Refused);
         }
     }
 }
@@ -743,6 +796,7 @@ async fn the_methods_own_authorization_decides_how_an_unstated_document_is_read(
                 &answered.body,
                 ANONYMOUS,
                 &deployed.path_method_arn(path),
+                Expected::Refused,
             );
         }
     }
@@ -773,5 +827,6 @@ async fn the_methods_own_authorization_decides_how_an_unstated_document_is_read(
         &answered.body,
         &iam_principal,
         &deployed.path_method_arn(&signed),
+        Expected::DeniedExplicitly,
     );
 }

@@ -184,13 +184,18 @@ quick-xml = "0.41"
 # how many have been minted. The maintained generator the sibling services in this tree draw
 # their assigned identifiers with, at the same version.
 rand = "0.9"
+# The payload hash and the canonical-request hash of the SigV4 canonical request a deployed
+# stage quotes back when a signature does not match
+# (`service::invoke::sigv4_authentication::canonical_request`) — the digest SigV4 defines
+# those over, from the maintained implementation of it this workspace already builds, and
+# `hex` for the lowercase hexadecimal the grammar states them in.
+sha2 = { workspace = true }
+hex = { workspace = true }
 
 [build-dependencies]
 emulator-core-build-support = { workspace = true }
 
 [dev-dependencies]
-sha2 = { workspace = true }
-hex = { workspace = true }
 # A deployed method whose integration is `AWS_PROXY` is served by invoking a Lambda
 # function, and what the handler wrote is asserted where a client reads it — in the
 # DynamoDB table the handler put the item in — so both services are mounted on the test's

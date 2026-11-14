@@ -305,6 +305,9 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
             resource_path: request_path,
             request_path,
             source_vpce: None,
+            // A SIMULATED call arrived over no connection, so it carries no address for a
+            // policy clause to be decided against.
+            source_ip: None,
             caller: crate::service::resource_policy::Caller::Anonymous,
         }
         .method_arn();

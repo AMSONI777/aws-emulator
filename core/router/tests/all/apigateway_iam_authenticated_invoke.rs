@@ -10,10 +10,13 @@
 //! > before anything else is decided about it: the access key id in its SigV4 credential must
 //! > name a credential this emulator holds, and the signature must be the one that
 //! > credential's secret produces over the canonical request — in the `Authorization` header
-//! > or in a presigned URL's query. An access key id that names no credential, a credential
-//! > whose scope names another service, and a real one signed with any other secret or over
-//! > any other request, are refused HTTP `403` with no integration performed, each carrying
-//! > the sentence AWS words its class with. A method
+//! > or in a presigned URL's query. An access key id that names no
+//! > credential, a credential whose scope names another service, and a real one signed with
+//! > any other secret or over any other request, are refused HTTP `403` with no integration
+//! > performed, each carrying the sentence AWS words its class with — and a signature that
+//! > does not match carries, after that sentence, the canonical request and the
+//! > string-to-sign the endpoint computed, so the caller can diff them against its own. A
+//! > method
 //! > that authenticates nobody (`authorizationType` `NONE`) is served whatever its request's
 //! > `Authorization` header says, because AWS authenticates no caller for one.
 //!
@@ -549,13 +552,43 @@ fn an_iam_authorized_method_authenticates_the_credential_its_request_presents() 
                             );
                         }
                         Expected::Refused(message) => {
+                            let answered = answer.message();
                             assert_eq!(
-                                (answer.status, answer.message().as_str()),
-                                (403, message),
+                                answer.status, 403,
                                 "case {:?}: expected the stage's 403 for the class, got {}",
                                 row.case,
                                 answer.summary()
                             );
+                            assert!(
+                                answered.starts_with(message),
+                                "case {:?}: expected the stage's sentence for the class, got {}",
+                                row.case,
+                                answer.summary()
+                            );
+                            if message == SIGNATURE_MISMATCH {
+                                // A mismatch is answered with the canonical request and the
+                                // string-to-sign the endpoint computed, so the caller can
+                                // diff them against its own signer's.
+                                assert!(
+                                    answered.contains(
+                                        "The Canonical String for this request should have been"
+                                    ) && answered
+                                        .contains("The String-to-Sign should have been")
+                                        && answered
+                                            .contains(&format!("/{STAGE}/{}", row.path)),
+                                    "case {:?}: expected the canonical request the signature \
+                                     should have covered, got {}",
+                                    row.case,
+                                    answer.summary()
+                                );
+                            } else {
+                                assert_eq!(
+                                    answered, message,
+                                    "case {:?}: expected the class's sentence alone, got {}",
+                                    row.case,
+                                    answer.summary()
+                                );
+                            }
                             assert_ne!(
                                 answer.text.trim(),
                                 IAM_BODY,

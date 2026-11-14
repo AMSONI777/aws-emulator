@@ -52,7 +52,6 @@ mod stage_scoped_lambda_permission;
 // one spans API Gateway, AWS Lambda and Amazon CloudWatch Logs at once.
 #[path = "all/test_invoke_method_stage_segment_grants.rs"]
 mod test_invoke_method_stage_segment_grants;
-// Declared here, at the head, for the reason the entry at the top of this file records: what
 // a simulated invocation of a method whose integration `uri` names a function, version or
 // alias that resolves to nothing is answered — and logged — with spans API Gateway, AWS
 // Lambda and Amazon CloudWatch Logs at once.
@@ -657,3 +656,8 @@ mod test_invoke_authorizer_user_pool_audience;
 // reports its page under once the collection has been emptied.
 #[path = "all/emptied_collection_page_member.rs"]
 mod emptied_collection_page_member;
+// Appended for the reason the note above gives: the two things the api's own resource policy
+// decides that no sibling suite carries — a clause written over the ADDRESS the request came
+// from, and what the refusal of a document that explicitly denies the call reports.
+#[path = "all/stage_resource_policy_source_ip.rs"]
+mod stage_resource_policy_source_ip;

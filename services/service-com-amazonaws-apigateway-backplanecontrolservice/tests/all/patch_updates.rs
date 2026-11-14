@@ -1118,9 +1118,12 @@ async fn a_patched_rest_api_member_is_stored_and_read_back() {
             vec![("apiKeySource", json!("AUTHORIZER"))],
         ),
         (
+            // "A stringified JSON policy document": the member is reported as the
+            // document's text ENCODED as a JSON string, so the quotes the patch set come
+            // back escaped.
             "replace the resource policy",
             vec![replace("/policy", "{\"Version\":\"2012-10-17\"}")],
-            vec![("policy", json!("{\"Version\":\"2012-10-17\"}"))],
+            vec![("policy", json!("{\\\"Version\\\":\\\"2012-10-17\\\"}"))],
         ),
         (
             "set the minimum compression size to its lower bound",

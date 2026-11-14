@@ -4370,3 +4370,9 @@ pub use custom_domain_endpoint::*;
 /// How the identifiers this service ASSIGNS are drawn, and the width each kind of record's
 /// id is spelled at; see that module.
 pub mod identifier;
+
+/// The two things API Gateway does to a stored resource-policy document that the caller's
+/// own text does not say — what it NORMALIZES before storing it and how it REPORTS it back;
+/// re-exported whole, so a handler still reaches each name as `crate::state::…`.
+mod stringified_policy;
+pub use stringified_policy::*;

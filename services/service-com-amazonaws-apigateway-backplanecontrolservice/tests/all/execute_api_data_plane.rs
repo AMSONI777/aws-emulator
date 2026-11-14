@@ -143,6 +143,62 @@ const SIGNED: &str =
     "AWS4-HMAC-SHA256 Credential=AKIDEXAMPLE/20260101/us-east-1/apigateway/aws4_request, \
      SignedHeaders=host, Signature=0123456789abcdef";
 
+/// The POLICY DOCUMENT an api's reported `policy` member carries: the member is "a
+/// stringified JSON policy document", reported as the document's text ENCODED as a JSON
+/// string, so a reader decodes that string once to get the document back.
+///
+/// `pub(crate)` because every suite that sets a resource policy and reads it back decodes
+/// it the same way (`private_api_resource_policy`, `private_proxy_backend_answer`,
+/// `stage_resource_policy_source_ip`).
+pub(crate) fn policy_document_of(reported: &str, case: &str) -> String {
+    ::serde_json::from_str::<String>(&format!("\"{reported}\"")).unwrap_or_else(|error| {
+        panic!(
+            "case {case}: the reported policy {reported:?} must be a JSON-encoded string, got \
+             {error}"
+        )
+    })
+}
+
+/// The document the api STORES for `document`: API Gateway NORMALIZES a resource policy
+/// before storing it, expanding every `Resource`/`NotResource` written in the
+/// `execute-api:/{stage}/{verb}/{path}` shorthand to the ARN of the method of this api it
+/// names — `arn_prefix` is `arn:aws:execute-api:{region}:{account}:{api-id}`, which the
+/// shorthand's own leading `/` follows. Every other value is stored as it was written.
+///
+/// `pub(crate)` for the same suites: a document each writes in the shorthand is read back in
+/// this form.
+pub(crate) fn stored_policy_document(document: &Value, arn_prefix: &str) -> String {
+    let mut document = document.clone();
+    if let Some(statements) = document.get_mut("Statement").and_then(Value::as_array_mut) {
+        for statement in statements {
+            for element in ["Resource", "NotResource"] {
+                match statement.get_mut(element) {
+                    Some(Value::String(resource)) => {
+                        *resource = expanded_resource(resource, arn_prefix);
+                    }
+                    Some(Value::Array(resources)) => {
+                        for resource in resources.iter_mut() {
+                            if let Value::String(resource) = resource {
+                                *resource = expanded_resource(resource, arn_prefix);
+                            }
+                        }
+                    }
+                    _ => {}
+                }
+            }
+        }
+    }
+    document.to_string()
+}
+
+/// One resource value as the api stores it; see [`stored_policy_document`].
+fn expanded_resource(resource: &str, arn_prefix: &str) -> String {
+    match resource.strip_prefix("execute-api:") {
+        Some(path) if path.starts_with('/') => format!("{arn_prefix}{path}"),
+        _ => resource.to_string(),
+    }
+}
+
 /// `PutMethod` for `verb` on `resource`, with `request` as its body.
 ///
 /// `pub(crate)` because the sibling `stage_export` suite stands a method up the same way

@@ -931,10 +931,11 @@ fn access_denied(message: String) -> GatewayRefusal {
 /// class with and the exception class the endpoint reports it in, so a client tells a
 /// credential it must replace from a signature it must recompute.
 fn invalid_signature(class: sigv4_authentication::Unauthenticated) -> GatewayRefusal {
+    let error_type = class.error_type();
     GatewayRefusal {
         response_type: "INVALID_SIGNATURE",
+        error_type: Some(error_type),
         message: class.message(),
-        error_type: Some(class.error_type()),
         validation_detail: Cow::Borrowed(""),
         message_member: MESSAGE_MEMBER,
     }
@@ -1612,7 +1613,7 @@ async fn serving<Eng: Send + Sync + 'static>(
                         stage = %stage.stage_name,
                         path = %matched_path,
                         verb = %verb,
-                        class = ?unauthenticated,
+                        class = %unauthenticated.label(),
                         "the credential this invoke presented does not authenticate"
                     );
                     break 'planned Planned::answered(refusal_response(
@@ -1637,7 +1638,6 @@ async fn serving<Eng: Send + Sync + 'static>(
                     SystemTime::now(),
                 )
             });
-            let signed_as = signing.as_ref().map(|caller| caller.arn.clone());
             // A credential the clock has already run out on speaks for nobody, so nothing
             // below has a principal to decide about: it is refused here, BEFORE the api's own
             // document is asked, rather than letting a wildcard `Principal` match a
@@ -1658,6 +1658,7 @@ async fn serving<Eng: Send + Sync + 'static>(
             // policies let it invoke that method, whether the document the api carries does,
             // and whether that document lets the caller ask for the stage's cached response
             // to be reloaded.
+            let source_ip = source_address_of(req);
             let call_of = resource_policy::Call {
                 // The api's own Region, from the record: an api lives in exactly one
                 // Region, so the ARN a statement names its methods by carries the Region
@@ -1674,8 +1675,19 @@ async fn serving<Eng: Send + Sync + 'static>(
                 // statement is written about the paths a client reaches.
                 request_path: &resource_path,
                 source_vpce: resolved.source_vpce,
-                caller: match signed_as.as_deref() {
-                    Some(principal) => resource_policy::Caller::Signed(principal),
+                // The address the request came from, which a statement conditions a grant or
+                // a deny on under IAM's IP-address operators — read off the request by the
+                // one reader of it, the same value `$context.identity.sourceIp` reports.
+                source_ip: Some(source_ip.as_str()),
+                // Who the request speaks for: the principal a refusal names, and EVERY
+                // spelling a statement's `Principal` element may name that caller by — the
+                // ARN of the IAM role behind a session included, since a resource-based
+                // statement naming a role is about every session of that role.
+                caller: match signing.as_ref() {
+                    Some(signing) => resource_policy::Caller::Signed {
+                        named: &signing.arn,
+                        spellings: signing.spellings(),
+                    },
                     None => resource_policy::Caller::Anonymous,
                 },
             };
