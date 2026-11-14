@@ -1,15 +1,21 @@
 // SPDX-License-Identifier: CC0-1.0
 
 //! @op EnableIpamPolicy
-//! SCAFFOLDED, NOT IMPLEMENTED: this operation answers HTTP 501 `NotImplemented` and
-//! asserts NOTHING about `EnableIpamPolicy`'s real behaviour. Implement it here — this is
-//! the ONLY file to touch for this operation.
+//! IMPLEMENTED: enables the IPAM policy the request names for the account, or for the
+//! Amazon Web Services Organizations entity it names, and answers the `IpamPolicyId` the
+//! store now holds as enabled. This is the ONLY file to touch for this operation.
 //!
-//! A 501 from this operation means "nobody has written it yet", never "the emulator is
-//! broken". Replace the `Err(..)` in [`EnableIpamPolicy::handle`] with real behaviour and
-//! delete the SCAFFOLDED marker line above; that line is the machine-readable record of
-//! which operations are still stubs (`grep -rl '^//! SCAFFOLDED, NOT IMPLEMENTED:' */src/ops/`),
-//! so leaving it on an implemented operation under-reports progress.
+//! The account has ONE enabled policy or none — `GetEnabledIpamPolicy` reports a single
+//! `IpamPolicyId` — so enabling a second policy REPLACES the first rather than adding to it.
+//!
+//! The refusals, in the order the service answers them: something that is not an
+//! `IpamPolicyId` at all is `InvalidIpamPolicyId.Malformed`, before there is anything to look
+//! up; a `DryRun` request a caller holds the permissions for is `DryRunOperation` and writes
+//! nothing, because the flag asks whether the CALLER MAY make the request ("without actually
+//! making the request", `DryRun`) rather than anything about the named policy; then a
+//! well-formed id this account holds no policy for is `InvalidIpamPolicyId.NotFound`, and a
+//! policy whose deletion has already been asked for is `IncorrectState` — there is no policy
+//! left to put in service.
 //!
 //! ## Shape of an operation
 //!
@@ -79,6 +85,7 @@
 
 #[allow(unused_imports)]
 use super::types::*;
+use crate::state;
 
 // `#[operation_error]` below expands to an invocation of the LOCAL declarative
 // `smithy!` macro, which this line is what emits into the module. Without it the
@@ -147,18 +154,59 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         input: Self::Input,
         ctx: &smithy_server_runtime::OperationContext<'_>,
     ) -> Result<Self::Output, Self::Error> {
-        // The engine is reachable from `&self` (constructor-injected); `ctx` carries
-        // request metadata. Both are bound here so an implementer has them in scope.
-        let _ = (&input, ctx, &self.engine);
-        // Implement `EnableIpamPolicy` here, then delete the SCAFFOLDED marker at the top of
-        // this file. Return modeled failures as
-        // `Err(EnableIpamPolicyErrorModeled::Variant(..).into())` — the `From` impl above lifts it.
-        //
-        // To refuse a bad request this operation models no error for, return
-        // `Err(crate::scaffolded::Scaffolded::validation("..."))` — a 400
-        // `ValidationException`. Do NOT answer 501 for it: 501 means "not written yet",
-        // not "bad request". Modeled constraints are already refused BEFORE this
-        // handler runs, so reaching here means the input satisfies every one of them.
-        Err(crate::scaffolded::Scaffolded::not_implemented("EnableIpamPolicy"))
+        // `ctx` carries request metadata only; this operation reads none of it — the policy
+        // is named in the request and the account is this emulator's own. The store is
+        // reached through the engine held on `self`.
+        let _ = ctx;
+
+        let policy_id = input.ipam_policy_id.as_str();
+        // The request's own FORM first, before anything is resolved: "not an id of this kind"
+        // is a malformed request rather than a missing resource, and it is not answered by
+        // the DryRun arm below.
+        state::require_well_formed_ipam_policy_id(policy_id)?;
+
+        // "A check for whether you have the required permissions for the action without
+        // actually making the request" (`DryRun`): a question about the CALLER, answered once
+        // the request's own form has been checked and before anything is resolved or written;
+        // every caller of this emulator is permitted.
+        if input.dry_run == Some(true) {
+            return Err(state::dry_run_operation());
+        }
+
+        let handle = state::require_service_state(&*self.engine)?;
+        let mut store = handle.lock();
+        // The clock first: a policy whose `delete-complete` has fallen due is already there,
+        // so every question below is asked of the state the store is ACTUALLY in. That move
+        // was owed at this instant whether or not anybody called.
+        store.materialize_due_transitions();
+
+        // The policy the request names, resolved against the account's policies now that the
+        // request's own form has been accepted and the DryRun question answered: an id this
+        // account holds no policy for is `.NotFound`.
+        let record = state::lookup_ipam_policy(&store, policy_id)?;
+        // A policy a delete has been asked for is on its way out, so there is nothing left to
+        // put in service: the same state question `DeleteIpamPolicy` refuses a second delete
+        // with.
+        if record.is_deleting() {
+            let current = record.state().to_string();
+            return Err(state::incorrect_state(format!(
+                "The IPAM policy '{policy_id}' is in state '{current}', which is not a state \
+                 it can be enabled from"
+            )));
+        }
+
+        // "The ID of the Amazon Web Services Organizations target for which to enable the
+        // IPAM policy. … When IPAM is not integrated with Amazon Web Services Organizations,
+        // omit this parameter and the policy will apply to the current account"
+        // (`OrganizationTargetId`): the target the enablement is recorded for, which is also
+        // what `GetEnabledIpamPolicy` reads its `ManagedBy` off.
+        let enabled_id = store.enable_ipam_policy(policy_id, input.organization_target_id.as_deref());
+
+        Ok(EnableIpamPolicyOutput {
+            // "The ID of the IPAM policy that was enabled" (`IpamPolicyId`): answered out of
+            // the store's own record, so the enable reports exactly what a later
+            // `GetEnabledIpamPolicy` will.
+            ipam_policy_id: Some(enabled_id),
+        })
     }
 }

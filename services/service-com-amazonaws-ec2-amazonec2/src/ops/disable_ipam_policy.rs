@@ -1,15 +1,21 @@
 // SPDX-License-Identifier: CC0-1.0
 
 //! @op DisableIpamPolicy
-//! SCAFFOLDED, NOT IMPLEMENTED: this operation answers HTTP 501 `NotImplemented` and
-//! asserts NOTHING about `DisableIpamPolicy`'s real behaviour. Implement it here — this is
-//! the ONLY file to touch for this operation.
+//! IMPLEMENTED: turns off the enablement the request names — the IPAM policy, for the
+//! account or for the Amazon Web Services Organizations entity named beside it — and answers
+//! `Return` true. This is the ONLY file to touch for this operation.
 //!
-//! A 501 from this operation means "nobody has written it yet", never "the emulator is
-//! broken". Replace the `Err(..)` in [`DisableIpamPolicy::handle`] with real behaviour and
-//! delete the SCAFFOLDED marker line above; that line is the machine-readable record of
-//! which operations are still stubs (`grep -rl '^//! SCAFFOLDED, NOT IMPLEMENTED:' */src/ops/`),
-//! so leaving it on an implemented operation under-reports progress.
+//! An enablement is the PAIR of a policy and the target it was enabled for, so a disable
+//! clears only the enablement it names and can never turn another one off.
+//!
+//! The refusals, in the order the service answers them: something that is not an
+//! `IpamPolicyId` at all is `InvalidIpamPolicyId.Malformed`, before there is anything to look
+//! up; a `DryRun` request a caller holds the permissions for is `DryRunOperation` and writes
+//! nothing, because the flag asks whether the CALLER MAY make the request ("without actually
+//! making the request", `DryRun`) rather than anything about the named policy; then a
+//! well-formed id this account holds no policy for is `InvalidIpamPolicyId.NotFound`, and a
+//! policy that is not enabled for the named target is `IncorrectState` — there is no
+//! enablement to turn off, so answering `Return` true would claim work nothing did.
 //!
 //! ## Shape of an operation
 //!
@@ -78,6 +84,7 @@
 
 #[allow(unused_imports)]
 use super::types::*;
+use crate::state;
 
 // `#[operation_error]` below expands to an invocation of the LOCAL declarative
 // `smithy!` macro, which this line is what emits into the module. Without it the
@@ -146,18 +153,54 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         input: Self::Input,
         ctx: &smithy_server_runtime::OperationContext<'_>,
     ) -> Result<Self::Output, Self::Error> {
-        // The engine is reachable from `&self` (constructor-injected); `ctx` carries
-        // request metadata. Both are bound here so an implementer has them in scope.
-        let _ = (&input, ctx, &self.engine);
-        // Implement `DisableIpamPolicy` here, then delete the SCAFFOLDED marker at the top of
-        // this file. Return modeled failures as
-        // `Err(DisableIpamPolicyErrorModeled::Variant(..).into())` — the `From` impl above lifts it.
-        //
-        // To refuse a bad request this operation models no error for, return
-        // `Err(crate::scaffolded::Scaffolded::validation("..."))` — a 400
-        // `ValidationException`. Do NOT answer 501 for it: 501 means "not written yet",
-        // not "bad request". Modeled constraints are already refused BEFORE this
-        // handler runs, so reaching here means the input satisfies every one of them.
-        Err(crate::scaffolded::Scaffolded::not_implemented("DisableIpamPolicy"))
+        // `ctx` carries request metadata only; this operation reads none of it — the policy
+        // is named in the request and the account is this emulator's own. The store is
+        // reached through the engine held on `self`.
+        let _ = ctx;
+
+        let policy_id = input.ipam_policy_id.as_str();
+        // The request's own FORM first, before anything is resolved: "not an id of this kind"
+        // is a malformed request rather than a missing resource, and it is not answered by
+        // the DryRun arm below.
+        state::require_well_formed_ipam_policy_id(policy_id)?;
+
+        // "A check for whether you have the required permissions for the action without
+        // actually making the request" (`DryRun`): a question about the CALLER, answered once
+        // the request's own form has been checked and before anything is resolved or written;
+        // every caller of this emulator is permitted.
+        if input.dry_run == Some(true) {
+            return Err(state::dry_run_operation());
+        }
+
+        let handle = state::require_service_state(&*self.engine)?;
+        let mut store = handle.lock();
+        // The clock first: a policy whose `delete-complete` has fallen due is already there,
+        // so every question below is asked of the state the store is ACTUALLY in. That move
+        // was owed at this instant whether or not anybody called.
+        store.materialize_due_transitions();
+
+        // The policy the request names, resolved against the account's policies: an id this
+        // account holds no policy for is `.NotFound`.
+        state::lookup_ipam_policy(&store, policy_id)?;
+
+        // "The ID of the Amazon Web Services Organizations target for which to disable the
+        // IPAM policy. … omit this parameter and the policy will be disabled for the current
+        // account" (`OrganizationTargetId`): the enablement a disable turns off is the pair
+        // of the policy and that target, so one named by neither is not one to turn off.
+        let target = input.organization_target_id.as_deref();
+        if !store.disable_ipam_policy(policy_id, target) {
+            let scope = target.map_or_else(String::new, |target| {
+                format!(" for the organization target '{target}'")
+            });
+            return Err(state::incorrect_state(format!(
+                "The IPAM policy '{policy_id}' is not enabled{scope}"
+            )));
+        }
+
+        Ok(DisableIpamPolicyOutput {
+            // "Returns true if the IPAM policy was successfully disabled" (`Return`) — the
+            // enablement is gone from the store, which a `GetEnabledIpamPolicy` now reports.
+            r#return: Some(true),
+        })
     }
 }

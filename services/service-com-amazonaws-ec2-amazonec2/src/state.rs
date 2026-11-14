@@ -2660,6 +2660,7 @@ mod image_usage_report_store;
 mod capacity_billing_and_recycle_bins;
 mod ipam;
 mod ipam_deletion;
+mod ipam_policy_enablement;
 mod ipam_prefix_list_resolver_deletion;
 mod ipam_pool_cidrs;
 mod vpc_endpoints_and_transit_gateway_attachments;
@@ -2769,6 +2770,7 @@ pub use host_reservations::*;
 pub use vpc_endpoints_and_transit_gateway_attachments::*;
 pub use ipam::*;
 pub use ipam_deletion::*;
+pub use ipam_policy_enablement::*;
 pub use ipam_prefix_list_resolver_deletion::*;
 pub use ipam_pool_cidrs::*;
 pub use capacity_billing_and_recycle_bins::*;
@@ -3522,6 +3524,22 @@ impl ComAmazonawsEc2Amazonec2State {
     /// stay charged to the store's budget, which still holds them, the same arrangement as
     /// [`Self::begin_secondary_network_deletion`].
     pub fn begin_ipam_policy_deletion(&mut self, policy_id: &str) -> Option<IpamPolicy> {
+        if !self.ipam_policies.contains_key(policy_id) {
+            return None;
+        }
+        // A policy on its way out is not a policy in service, so the account's enablement of
+        // it goes with it: `GetEnabledIpamPolicy` reports nothing enabled from here on, and
+        // the bytes that enablement held go back to the budget. The enablement of any OTHER
+        // policy is left alone. Cleared BEFORE the state below moves, which is while this
+        // policy's enablement still resolves.
+        let enabled_target = self
+            .enabled_ipam_policy
+            .as_ref()
+            .filter(|held| held.ipam_policy_id == policy_id)
+            .map(|held| held.organization_target_id.clone());
+        if let Some(target) = enabled_target {
+            self.disable_ipam_policy(policy_id, target.as_deref());
+        }
         let record = self.ipam_policies.get_mut(policy_id)?;
         let message = IPAM_POLICY_DELETE_IN_PROGRESS_MESSAGE.to_string();
         let charged = message.len();

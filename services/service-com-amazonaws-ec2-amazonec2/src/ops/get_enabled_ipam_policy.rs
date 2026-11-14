@@ -1,15 +1,16 @@
 // SPDX-License-Identifier: CC0-1.0
 
 //! @op GetEnabledIpamPolicy
-//! SCAFFOLDED, NOT IMPLEMENTED: this operation answers HTTP 501 `NotImplemented` and
-//! asserts NOTHING about `GetEnabledIpamPolicy`'s real behaviour. Implement it here — this is
-//! the ONLY file to touch for this operation.
+//! IMPLEMENTED: reports which IPAM policy of the account is enabled — whether one is, which
+//! policy it is and the entity that manages it — out of the one enablement the store holds
+//! ([`crate::state::ComAmazonawsEc2Amazonec2State::enabled_ipam_policy`], written by
+//! `EnableIpamPolicy` and cleared by `DisableIpamPolicy`). This is the ONLY file to touch
+//! for this operation.
 //!
-//! A 501 from this operation means "nobody has written it yet", never "the emulator is
-//! broken". Replace the `Err(..)` in [`GetEnabledIpamPolicy::handle`] with real behaviour and
-//! delete the SCAFFOLDED marker line above; that line is the machine-readable record of
-//! which operations are still stubs (`grep -rl '^//! SCAFFOLDED, NOT IMPLEMENTED:' */src/ops/`),
-//! so leaving it on an implemented operation under-reports progress.
+//! A REPORTING operation: nothing is written, so two calls either side of it answer the
+//! same, and an account that has enabled nothing is REPORTED as having nothing enabled
+//! rather than refused — `IpamPolicyEnabled` is the member that says so. The only refusal is
+//! `DryRun`'s `DryRunOperation`, the request carrying no other member.
 //!
 //! ## Shape of an operation
 //!
@@ -73,6 +74,7 @@
 
 #[allow(unused_imports)]
 use super::types::*;
+use crate::state;
 
 // `#[operation_error]` below expands to an invocation of the LOCAL declarative
 // `smithy!` macro, which this line is what emits into the module. Without it the
@@ -141,18 +143,39 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         input: Self::Input,
         ctx: &smithy_server_runtime::OperationContext<'_>,
     ) -> Result<Self::Output, Self::Error> {
-        // The engine is reachable from `&self` (constructor-injected); `ctx` carries
-        // request metadata. Both are bound here so an implementer has them in scope.
-        let _ = (&input, ctx, &self.engine);
-        // Implement `GetEnabledIpamPolicy` here, then delete the SCAFFOLDED marker at the top of
-        // this file. Return modeled failures as
-        // `Err(GetEnabledIpamPolicyErrorModeled::Variant(..).into())` — the `From` impl above lifts it.
-        //
-        // To refuse a bad request this operation models no error for, return
-        // `Err(crate::scaffolded::Scaffolded::validation("..."))` — a 400
-        // `ValidationException`. Do NOT answer 501 for it: 501 means "not written yet",
-        // not "bad request". Modeled constraints are already refused BEFORE this
-        // handler runs, so reaching here means the input satisfies every one of them.
-        Err(crate::scaffolded::Scaffolded::not_implemented("GetEnabledIpamPolicy"))
+        // `ctx` carries request metadata only, and this report reads none of it: the policy
+        // a request asks about is the account's, and the account is this emulator's own.
+        let _ = ctx;
+
+        // `DryRun` is this request's only member, so the flag's question ("would this
+        // request have succeeded?") is answered ahead of the read: a dry run reports nothing
+        // about the account's enablement. "If you have the required permissions, the error
+        // response is DryRunOperation" (`DryRun`) — every caller of this emulator is
+        // permitted.
+        if input.dry_run == Some(true) {
+            return Err(state::dry_run_operation());
+        }
+
+        let handle = state::require_service_state(&*self.engine)?;
+        let store = handle.lock();
+        // A pure READ of the one enablement the store holds. Nothing is written, not even a
+        // move the clock owes: an enablement naming a policy whose deletion has been asked
+        // for already reports nothing enabled while that deletion is under way, so the clock
+        // finishing it cannot change this answer.
+        let enabled = store.enabled_ipam_policy();
+
+        Ok(GetEnabledIpamPolicyOutput {
+            // "Indicates whether the IPAM policy is enabled" (`IpamPolicyEnabled`): the
+            // member that lets an account with no enabled policy be reported rather than
+            // refused.
+            ipam_policy_enabled: Some(enabled.is_some()),
+            // "The ID of the enabled IPAM policy" (`IpamPolicyId`) — there is none to name
+            // when nothing is enabled.
+            ipam_policy_id: enabled.map(|record| record.ipam_policy_id.clone()),
+            // "The entity that manages the IPAM policy" (`ManagedBy`), read off that same
+            // stored enablement: the account enabled the policy for itself, or a delegated
+            // administrator for IPAM enabled it for an entity of the organization.
+            managed_by: enabled.map(|record| record.managed_by().to_string()),
+        })
     }
 }

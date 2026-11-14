@@ -1098,6 +1098,10 @@ mod ipam_internet_registry_associations;
 mod ipam_internet_registry_association_reports;
 #[path = "all/ipam_policies.rs"]
 mod ipam_policies;
+// Which IPAM policy of the account is enabled: the report, and the enable and disable that
+// write what it reports.
+#[path = "all/ipam_policy_enablement.rs"]
+mod ipam_policy_enablement;
 #[path = "all/ipam_pools.rs"]
 mod ipam_pools;
 // Deleting an IPAM pool, what it refuses while the pool still holds resources, and what

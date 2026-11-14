@@ -2852,6 +2852,14 @@ pub struct ComAmazonawsEc2Amazonec2State {
     /// every well-formed id until it is written, exactly as the real service does for a
     /// policy that does not exist.
     pub ipam_policies: BTreeMap<String, IpamPolicyRecord>,
+    /// The ONE policy of [`Self::ipam_policies`] that is ENABLED for the account, and the
+    /// Organizations target the enablement was made for — see [`EnabledIpamPolicyRecord`]
+    /// and the `ipam_policy_enablement` module for why there is at most one.
+    ///
+    /// `EnableIpamPolicy` writes it, `DisableIpamPolicy` clears it and
+    /// `GetEnabledIpamPolicy` reports it; a fresh account has enabled nothing, so it starts
+    /// `None` and that report says no policy is enabled.
+    pub enabled_ipam_policy: Option<EnabledIpamPolicyRecord>,
     /// Every IPAM scope the account holds, by `IpamScopeId`, as the modelled [`IpamScope`]
     /// shape itself — "the highest-level container within IPAM" (`IpamScope`), which is what
     /// `CreateIpamPool` resolves its `IpamScopeId` against and takes the pool's IPAM, Region
@@ -3675,6 +3683,8 @@ impl Default for ComAmazonawsEc2Amazonec2State {
             byoasns: BTreeMap::new(),
             asn_association_moves: BTreeMap::new(),
             ipam_policies: BTreeMap::new(),
+            // A fresh account holds no policy, so none of them is enabled either.
+            enabled_ipam_policy: None,
             ipam_scopes: BTreeMap::new(),
             ipam_scope_create_complete_at: BTreeMap::new(),
             ipam_scope_delete_at: BTreeMap::new(),
