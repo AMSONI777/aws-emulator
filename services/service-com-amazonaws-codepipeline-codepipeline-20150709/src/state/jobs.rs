@@ -27,11 +27,17 @@
 //!   job has not recorded and is accepted as the no-op it is, because what the service
 //!   refuses is a job "updated with the same status, but different result or output
 //!   variables";
-//! * a nonce no dispatch of the job published, and any nonce at all once a worker has
-//!   claimed the job, does not claim it (`InvalidNonceException`), which is what makes
-//!   the claim exclusive — while the job is still waiting, EVERY nonce a poll
-//!   published for it claims it, because a redelivery does not take the job away from
-//!   the worker that was handed it first;
+//! * a nonce no dispatch of the job published does not claim it
+//!   (`InvalidNonceException`), and neither does another dispatch's nonce once a worker
+//!   has claimed the job, which is what makes the claim exclusive — while the job is
+//!   still waiting, EVERY nonce a poll published for it claims it, because a redelivery
+//!   does not take the job away from the worker that was handed it first, and the nonce
+//!   that DID claim it keeps reaching it for as long as the claim lasts, so the worker
+//!   may repeat the acknowledgement it is unsure arrived;
+//! * a job whose work has ended takes no acknowledgement either, but the condition is
+//!   that its receipt was already recorded rather than a nonce that does not claim it,
+//!   so it is the validation failure the operation models for exactly that
+//!   (`ValidationException`);
 //! * a job whose ACTION is no longer running — abandoned by a stop, or finished without
 //!   the job reporting it — is not work any more, so it is swept away ([`super::ComAmazonawsCodepipelineCodepipeline20150709State::retire_finished_jobs`])
 //!   and a call naming it is answered `JobNotFoundException`, exactly as `PollForJobs`
@@ -147,16 +153,25 @@ pub enum JobProblem {
 ///
 /// `AcknowledgeJob` "confirms a job worker has received the specified job", which is what
 /// makes that worker the one whose result the job accepts: the job moves to `InProgress`
-/// and its claim is no longer open to another worker. Two conditions follow, and both are
-/// `InvalidNonceException`:
+/// and its claim is no longer open to another worker. The nonce a poll published is the
+/// worker's handle on the job for the whole CLAIM WINDOW — from the dispatch that
+/// published it until the job's work ends — so three conditions follow:
 ///
-/// * a job that is no longer waiting to be claimed takes no acknowledgement — the claim
-///   it already granted is what "worked on by only one job worker" means, so no nonce
-///   reaches it any more;
-/// * while it IS waiting, the nonce has to be one a poll published for it — any of them:
-///   a job that resurfaced with a fresh nonce is still the job the earlier dispatch
-///   handed out, so the earlier nonce claims it just as well, and claiming through one of
-///   them is what closes the others.
+/// * while the job is still waiting, the nonce has to be one a poll published for it —
+///   any of them: a job that resurfaced with a fresh nonce is still the job the earlier
+///   dispatch handed out, so the earlier nonce claims it just as well, and claiming
+///   through one of them is what closes the others;
+/// * while the job is being worked on, the nonce that claimed it still reaches it, and
+///   the acknowledgement it repeats is the no-op it asks for: the receipt is already
+///   recorded, so the job stays exactly where it is and its status is reported again.
+///   Another dispatch's nonce reaches it no more — that is what "worked on by only one
+///   job worker" means — and is refused `InvalidNonceException`, the answer that tells
+///   that worker the job is not its to claim;
+/// * once the job's work has ENDED there is no claim window left to confirm a receipt
+///   in, and the acknowledgement is refused with the validation failure the operation
+///   models for a receipt that was already recorded
+///   ([`super::already_acknowledged_message`]) rather than with a nonce refusal: the
+///   value the worker presented is the one the service published for it.
 pub fn acknowledge(
     state: &mut State,
     job_id: &str,
@@ -167,6 +182,16 @@ pub fn acknowledge(
     // is the sweep every job-worker operation performs first.
     state.retire_finished_jobs();
     let job = job_mut(state, job_id, super::job_not_found_message)?;
+    if job.has_terminated() {
+        return Err(JobProblem::InvalidState(
+            super::already_acknowledged_message(job_id),
+        ));
+    }
+    // The worker holding the claim, re-confirming a receipt the job already carries: the
+    // status it asks for is the one recorded, so nothing moves.
+    if job.is_claimed_with(nonce) {
+        return Ok(job.status.clone());
+    }
     if job.status != JOB_STATUS_QUEUED || !job.admits_nonce(nonce) {
         return Err(JobProblem::InvalidNonce(super::invalid_nonce_message(
             job_id,

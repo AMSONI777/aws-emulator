@@ -329,11 +329,29 @@ impl JobRecord {
     /// Whether `nonce` is one of the values that still claims this job.
     ///
     /// Every nonce a poll published for the job while it was unclaimed does, and none
-    /// does once a claim has closed them ([`Self::claim`]).
+    /// does once a claim has closed them ([`Self::claim`]) — the worker that was
+    /// granted the claim keeps reaching the job through the nonce it claimed with
+    /// ([`Self::is_claimed_with`]) rather than through this set.
     pub fn admits_nonce(&self, nonce: &str) -> bool {
         self.outstanding_nonces
             .iter()
             .any(|issued| issued == nonce)
+    }
+
+    /// Whether this job is being worked on by the worker that presented `nonce`: it
+    /// holds the claim this nonce was granted.
+    ///
+    /// The nonce a worker claimed the job with stays that worker's handle on it for as
+    /// long as the claim lasts, which is what makes a repeated acknowledgement the
+    /// no-op it is: the claim it asks for is the one already recorded.
+    pub fn is_claimed_with(&self, nonce: &str) -> bool {
+        self.status == JOB_STATUS_IN_PROGRESS && self.nonce.as_deref() == Some(nonce)
+    }
+
+    /// Whether this job's work has ended ([`TERMINAL_JOB_STATUSES`]), so it is past the
+    /// window in which a worker claims it.
+    pub fn has_terminated(&self) -> bool {
+        TERMINAL_JOB_STATUSES.contains(&self.status.as_str())
     }
 
     /// Record that the worker presenting `nonce` has claimed this job: it is being
@@ -407,6 +425,17 @@ pub fn third_party_job_not_found_message(job_id: &str) -> String {
 /// refuses a nonce words it the same way.
 pub fn invalid_nonce_message(job_id: &str) -> String {
     format!("Invalid nonce for job id {job_id}")
+}
+
+/// What `ValidationException` states where a worker acknowledges a job whose claim
+/// window has closed: the receipt it is confirming was already recorded, and the work
+/// it was confirming has since ended.
+///
+/// One source for both job planes (`AcknowledgeJob` and `AcknowledgeThirdPartyJob`,
+/// which model the same error for the same condition), worded over the job the REQUEST
+/// named and nothing of the status the store holds.
+pub fn already_acknowledged_message(job_id: &str) -> String {
+    format!("Job with id {job_id} has already been acknowledged")
 }
 
 /// One artifact of a job, named and placed where its bytes live — or, for an artifact
@@ -576,11 +605,12 @@ impl ThirdPartyJobRecord {
 
     /// Whether `nonce` is the value that admits a worker to this job.
     ///
-    /// The job's current nonce, and only while the job is still live: the nonce is
-    /// there to "ensure that the job is being worked on by only one job worker", and a
-    /// job whose work has ended is being worked on by none, so no nonce admits it.
+    /// The job's current nonce: the nonce is there to "ensure that the job is being
+    /// worked on by only one job worker", so the one value the job published is the one
+    /// that reaches it, and any other never did. Whether the job is still in the window
+    /// a worker claims it in is the separate question [`Self::is_terminal`] answers.
     pub fn admits_nonce(&self, nonce: &str) -> bool {
-        !self.is_terminal() && self.nonce == nonce
+        self.nonce == nonce
     }
 
     /// Record that a job worker has confirmed receipt of this job, which is what

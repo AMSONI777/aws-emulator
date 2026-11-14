@@ -172,8 +172,9 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
                     message: Some(message),
                 })
             }
-            // A job another worker already claimed, or one that is already complete, is
-            // not this worker's to confirm receipt of.
+            // A job the service is no longer holding a claim window for: the receipt the
+            // call confirms was already recorded, which is the validation failure the
+            // operation models rather than a nonce that never claimed the job.
             crate::state::JobProblem::InvalidState(message)
             | crate::state::JobProblem::OutputVariablesTooLarge(message) => {
                 AcknowledgeJobErrorModeled::ValidationException(ValidationException {

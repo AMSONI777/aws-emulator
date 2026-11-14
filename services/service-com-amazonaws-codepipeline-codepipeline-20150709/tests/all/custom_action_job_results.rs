@@ -521,13 +521,26 @@ async fn only_the_worker_holding_the_job_may_report_for_it() {
         );
     }
 
-    // The claim is exclusive: once it is granted, the nonce that granted it no longer
-    // claims the job.
+    // The claim is exclusive, but the nonce that was granted it still reaches the job:
+    // the worker holding the claim may repeat its acknowledgement, and another
+    // dispatch's nonce is what no longer claims the job.
     emulator
         .ok("AcknowledgeJob", &json!({"jobId": job_id, "nonce": nonce}))
         .await;
+    let repeated = emulator
+        .ok("AcknowledgeJob", &json!({"jobId": job_id, "nonce": nonce}))
+        .await;
+    assert_eq!(
+        repeated["status"],
+        json!("InProgress"),
+        "the claiming worker's repeated acknowledgement reports the job's status, \
+         got {repeated}"
+    );
     let (status, code) = emulator
-        .refusal("AcknowledgeJob", &json!({"jobId": job_id, "nonce": nonce}))
+        .refusal(
+            "AcknowledgeJob",
+            &json!({"jobId": job_id, "nonce": "not-the-nonce"}),
+        )
         .await;
     assert_eq!(
         (status, code.as_str()),

@@ -769,7 +769,7 @@ async fn a_polled_job_is_held_until_its_claim_lapses() {
 /// RULE: a redelivery does not take the job away from the worker that was handed it
 /// first. Every nonce a poll published for a job still WAITING to be claimed claims
 /// it, whichever dispatch published it, and the acknowledgement is what closes the
-/// set: once one of them has claimed the job, none of them claims it any more.
+/// set: once one of them has claimed the job, only that one reaches it any more.
 ///
 /// The rows differ along which of the outstanding dispatches acknowledges — the first,
 /// a middle one, the newest — because the rule is about the whole set and not about
@@ -828,13 +828,29 @@ async fn every_nonce_a_poll_published_claims_the_job_until_one_of_them_has() {
              got {acknowledged}"
         );
 
-        // And the claim closes the set: every nonce the job ever published — the one
-        // that claimed it included — and any nonce it never published are refused with
-        // the error the operation models, worded over the job the nonce was presented
-        // for.
+        // The nonce that claimed it keeps reaching it for as long as the claim lasts:
+        // the worker that was granted the claim may repeat the acknowledgement it is
+        // unsure arrived, and is answered the status the job carries.
+        let repeated = emulator
+            .ok(
+                "AcknowledgeJob",
+                &json!({"jobId": job_id, "nonce": nonces[claiming]}),
+            )
+            .await;
+        assert_eq!(
+            repeated["status"],
+            json!("InProgress"),
+            "case {case:?}: the claiming worker's repeat is the no-op it asks for, \
+             got {repeated}"
+        );
+
+        // And the claim closes the REST of the set: every other nonce the job published,
+        // and any nonce it never published, are refused with the error the operation
+        // models, worded over the job the nonce was presented for.
         let refused: Vec<(String, String)> = nonces
             .iter()
             .enumerate()
+            .filter(|(index, _)| *index != claiming)
             .map(|(index, nonce)| (format!("dispatch {}", index + 1), nonce.clone()))
             .chain(std::iter::once((
                 "a nonce no dispatch published".to_string(),

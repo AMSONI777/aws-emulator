@@ -11,9 +11,10 @@
 //!   modelled pattern, so only whether a job is filed under the id decides this;
 //! * a job reached with a `clientToken` other than the one it was handed out with is
 //!   refused `InvalidClientTokenException`;
-//! * a `nonce` that is not the job's current one — and any nonce at all once the
-//!   job's work has ended — is refused `InvalidNonceException`, so one job is granted
-//!   to only one worker;
+//! * a `nonce` that is not the job's current one is refused `InvalidNonceException`,
+//!   so one job is granted to only one worker;
+//! * a job whose work has already ENDED takes no acknowledgement at all: the receipt
+//!   the call confirms was recorded long since, which is `ValidationException`;
 //! * otherwise the receipt is recorded: the job moves to `InProgress` in the store,
 //!   the response reports that persisted status, repeating the call is idempotent,
 //!   and `PutThirdPartyJobSuccessResult` — which accepts a result only for a job a
@@ -565,11 +566,11 @@ async fn a_job_admits_only_the_client_token_and_nonce_it_was_handed_out_with() {
     }
 }
 
-/// The job's own status decides whether its nonce still admits a worker, over the
-/// whole catalog of modelled `JobStatus` values (`JOB_STATUS_VALUES`): a job whose
-/// work has ended ([`TERMINAL_JOB_STATUSES`]) is being worked on by nobody, so no
-/// nonce admits it, while every live status accepts the job's nonce and reports
-/// `InProgress`.
+/// The job's own status decides whether a worker may still confirm receipt of it, over
+/// the whole catalog of modelled `JobStatus` values (`JOB_STATUS_VALUES`): a job whose
+/// work has ended ([`TERMINAL_JOB_STATUSES`]) is past the window a receipt is confirmed
+/// in, so the acknowledgement is refused as the already-recorded receipt it is, while
+/// every live status accepts the job's nonce and reports `InProgress`.
 #[tokio::test]
 async fn a_jobs_status_decides_whether_its_nonce_still_admits_a_worker() {
     for status_value in JOB_STATUS_VALUES {
@@ -584,8 +585,14 @@ async fn a_jobs_status_decides_whether_its_nonce_still_admits_a_worker() {
         if TERMINAL_JOB_STATUSES.contains(status_value) {
             assert_eq!(
                 (status, error_code(&body).as_str()),
-                (400, "InvalidNonceException"),
-                "case {status_value:?}: a finished job admits no worker, got {status} {body}"
+                (400, "ValidationException"),
+                "case {status_value:?}: a finished job takes no acknowledgement, \
+                 got {status} {body}"
+            );
+            assert_eq!(
+                error_message(&body),
+                format!("Job with id {job_id} has already been acknowledged"),
+                "case {status_value:?}: unexpected refusal wording, got {body}"
             );
             assert_eq!(
                 emulator.job(&job_id).status.as_str(),

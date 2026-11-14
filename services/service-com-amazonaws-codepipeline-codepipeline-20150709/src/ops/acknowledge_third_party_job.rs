@@ -13,8 +13,11 @@
 //! * a `clientToken` other than the one the job was handed out with does not
 //!   "verify that the calling entity is allowed access to the job" ->
 //!   `InvalidClientTokenException`;
-//! * a `nonce` that is not the job's current one does not admit a worker to the job
-//!   (nor does any nonce once the job's work has ended) -> `InvalidNonceException`;
+//! * a job whose work has already ENDED is past the window a worker confirms receipt
+//!   in, and the receipt it would confirm was recorded long since ->
+//!   `ValidationException`;
+//! * inside that window, a `nonce` that is not the job's current one does not admit a
+//!   worker to the job -> `InvalidNonceException`;
 //! * otherwise the receipt is recorded — the job is now being worked on, so it
 //!   carries `InProgress` and its outcome is that worker's to report through
 //!   `PutThirdPartyJobSuccessResult` — and that PERSISTED status is what the response
@@ -207,11 +210,27 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
             }
         };
 
-        // Only the nonce the job currently carries admits a worker to it, and only
-        // while the job is still live: the nonce exists so that the job "is being
-        // worked on by only one job worker", so a stale nonce — or any nonce for a
-        // job whose work has already ended — is refused. The message names the job
-        // the check was made against and never repeats the rejected value.
+        // A job whose work has ENDED is past the window a worker confirms receipt in:
+        // the receipt it is confirming was already recorded, which is the validation
+        // failure this operation models for that condition — the same statement the
+        // custom-action plane's `AcknowledgeJob` answers it with, since the window is
+        // one rule over both job planes and is a property of the JOB, settled before
+        // the value the call presents for it is looked at.
+        if job.is_terminal() {
+            let message = crate::state::already_acknowledged_message(&input.job_id);
+            audit(ctx, &input.job_id, "refused: job already acknowledged");
+            return Err(AcknowledgeThirdPartyJobErrorModeled::ValidationException(
+                ValidationException {
+                    message: Some(message),
+                },
+            )
+            .into());
+        }
+
+        // Inside that window only the nonce the job carries admits a worker to it: the
+        // nonce exists so that the job "is being worked on by only one job worker", so
+        // a nonce the job never published is refused. The message names the job the
+        // check was made against and never repeats the rejected value.
         if !job.admits_nonce(&input.nonce) {
             let message = format!(
                 "the nonce given does not grant job {} to a worker",
