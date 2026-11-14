@@ -557,6 +557,9 @@ fn seed_log_alarm(logs: &Logs, alarm: &str, query_arn: Option<&str>) {
                 ..cloudwatch::ops::types::LogAlarm::default()
             },
             tags: Vec::new(),
+            // The alarm's own evaluation holds the runs of its managed query and the values they
+            // produced; a seeded alarm has had none.
+            ..cloudwatch::state::StoredLogAlarm::default()
         },
     );
 }

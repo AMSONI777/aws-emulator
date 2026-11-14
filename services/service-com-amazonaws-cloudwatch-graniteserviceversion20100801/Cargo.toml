@@ -57,6 +57,12 @@ aws-sdk-ec2 = { version = "1", default-features = false }
 # resource-based policy (`state::alarm_actions::lambda_actions`). Only the generated client is
 # needed — the emulator supplies the transport.
 aws-sdk-lambda = { version = "1", default-features = false }
+# The AWS SDK for Amazon CloudWatch Logs, driven over the same in-process callback: a LOG
+# alarm's state is what the executions of its service-managed scheduled query make it, and that
+# query reads log events, which belong to CloudWatch Logs — so each execution is that service's
+# own `StartQuery`/`GetQueryResults` pair (`state::log_alarm_evaluation::scheduled_runs`). Only
+# the generated client is needed — the emulator supplies the transport.
+aws-sdk-cloudwatchlogs = { version = "1", default-features = false }
 # The AWS SDK for AWS Systems Manager, driven over the same in-process callback through the
 # shared client construction in `service-common`: an alarm's SSM OPSITEM action opens the
 # OpsCenter work item its ARN names (`state::alarm_actions::ssm_ops_item_actions`), whose

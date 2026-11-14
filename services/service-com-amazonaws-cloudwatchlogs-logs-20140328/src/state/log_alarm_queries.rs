@@ -15,6 +15,10 @@
 //! module therefore DERIVES the query from the alarm rather than keeping a second copy of it
 //! beside the queries callers create: one write to the alarm cannot leave the two disagreeing.
 //!
+//! The RUNS of such a query are CloudWatch's too — the alarm's state is what their aggregates
+//! make it — so they are derived from the alarm as well, which is what a reader of the managed
+//! query's trigger history reports.
+//!
 //! The alarm store is read with no log-store guard held, so the two services' stores are never
 //! locked at once.
 
@@ -42,11 +46,10 @@ pub fn service_managed_scheduled_query<Eng: Send + Sync + 'static>(
 ) -> Option<ScheduledQueryRecord> {
     let state = cloudwatch::state::service_state(engine)?;
     let store = state.lock();
-    let alarm = &store
+    let stored = store
         .log_alarms
-        .get(scheduled_query_name_from_identifier(identifier))?
-        .alarm;
-    derived(alarm, region)
+        .get(scheduled_query_name_from_identifier(identifier))?;
+    derived(stored, region)
 }
 
 /// EVERY service-managed scheduled query this account holds — one per log alarm whose
@@ -73,7 +76,7 @@ pub fn service_managed_scheduled_queries<Eng: Send + Sync + 'static>(
     let mut queries: Vec<ScheduledQueryRecord> = store
         .log_alarms
         .values()
-        .filter_map(|stored| derived(&stored.alarm, region))
+        .filter_map(|stored| derived(stored, region))
         .collect();
     queries.sort_by(|left, right| left.name.cmp(&right.name));
     queries
@@ -122,9 +125,10 @@ fn managed_query_refusal_message(name: &str, attempted: &str) -> String {
 /// The ONE derivation both readers above share, so a query reported by a lookup and the same
 /// query reported by an enumeration cannot disagree.
 fn derived(
-    alarm: &cloudwatch::ops::types::LogAlarm,
+    stored: &cloudwatch::state::StoredLogAlarm,
     region: &str,
 ) -> Option<ScheduledQueryRecord> {
+    let alarm = &stored.alarm;
     let name = alarm.alarm_name.as_deref()?;
     let configuration = alarm.scheduled_query_configuration.as_ref()?;
     let schedule = &configuration.schedule_configuration;
@@ -151,6 +155,17 @@ fn derived(
     // the scheduled query's own offsets are.
     query.start_time_offset = Some(schedule.start_time_offset);
     query.end_time_offset = schedule.end_time_offset;
+    // The RUNS of this query are the ones CloudWatch made for the alarm, held on the alarm
+    // beside the configuration that describes them: "a record of a scheduled query execution,
+    // including execution status, timestamp" (`TriggerHistoryRecord`), which is what
+    // `GetScheduledQueryHistory` reports and what `lastTriggeredTime` / `lastExecutionStatus`
+    // name the newest of. Derived here rather than copied into this store, for the same reason
+    // the configuration is: one write to the alarm cannot leave the two disagreeing.
+    query.trigger_history = executions(stored);
+    if let Some(newest) = query.trigger_history.last() {
+        query.last_triggered_time_ms = Some(newest.triggered_ms);
+        query.last_execution_status = Some(newest.status.clone());
+    }
     // "The time stamp of the last update to the alarm configuration"
     // (`LogAlarm$AlarmConfigurationUpdatedTimestamp`) is the instant the managed query was last
     // written, because the alarm's configuration IS that query's configuration. The alarm
@@ -162,4 +177,36 @@ fn derived(
         .and_then(|stamp| stamp.to_millis().ok());
 
     Some(query)
+}
+
+/// The runs of one log alarm's managed query as THIS service reports them: the alarm's own
+/// record of each execution, as the `TriggerHistoryRecord` a reader of the query's history
+/// answers with.
+///
+/// CloudWatch runs these executions and keeps what each one produced on the alarm, so a run is
+/// already over by the time it is reported here: its results are recorded and there is no
+/// destination for this service to process, which is why each record lands claimed and settled.
+fn executions(
+    stored: &cloudwatch::state::StoredLogAlarm,
+) -> Vec<super::ScheduledQueryExecution> {
+    stored
+        .query_executions
+        .iter()
+        .map(|execution| super::ScheduledQueryExecution {
+            query_id: execution.query_id.clone(),
+            // The alarm keeps the instant in epoch seconds; a stored execution of this service
+            // keeps it in the epoch milliseconds its own history orders runs by.
+            #[allow(clippy::cast_possible_truncation)]
+            triggered_ms: (execution.triggered_secs * 1_000.0) as i64,
+            status: execution.status.clone(),
+            error_message: execution.error_message.clone(),
+            // "Information about destination processing for this query execution"
+            // (`TriggerHistoryRecord$destinations`) — the query CloudWatch manages for an alarm
+            // delivers to the alarm's own evaluation rather than to a destination of its own, so
+            // it reports none.
+            destinations: Vec::new(),
+            run_landed: true,
+            run_claimed: true,
+        })
+        .collect()
 }

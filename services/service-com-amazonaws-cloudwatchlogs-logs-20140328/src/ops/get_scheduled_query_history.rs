@@ -283,8 +283,8 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
             .lock()
             .scheduled_query(&input.identifier)
             .map(|query| (query.name.clone(), query.arn.clone()));
-        let (name, arn) = match stored {
-            Some(identity) => {
+        let (name, arn, managed_history) = match stored {
+            Some((name, arn)) => {
                 // The runs the clock already owed this query are materialised, run and
                 // delivered before the history is read, so what is reported is what happened
                 // rather than what a read decided to make happen.
@@ -295,37 +295,47 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
                     &input.identifier,
                 )
                 .await;
-                identity
+                (name, arn, None)
             }
-            None => crate::state::log_alarm_queries::service_managed_scheduled_query(
-                &*self.engine,
-                &input.identifier,
-                &region,
-            )
-            .map(|query| (query.name.clone(), query.arn.clone()))
-            // An identifier this account holds no query under at all is refused as a scheduled
-            // query that is not there, naming the identifier the request asked for.
-            .ok_or_else(|| {
-                GetScheduledQueryHistoryError::from(
-                    GetScheduledQueryHistoryErrorModeled::ResourceNotFoundException(
-                        ResourceNotFoundException {
-                            message: Some(crate::state::scheduled_query_not_found_message(
-                                &input.identifier,
-                            )),
-                        },
-                    ),
+            None => {
+                let managed = crate::state::log_alarm_queries::service_managed_scheduled_query(
+                    &*self.engine,
+                    &input.identifier,
+                    &region,
                 )
-            })?,
+                // An identifier this account holds no query under at all is refused as a
+                // scheduled query that is not there, naming the identifier the request asked
+                // for.
+                .ok_or_else(|| {
+                    GetScheduledQueryHistoryError::from(
+                        GetScheduledQueryHistoryErrorModeled::ResourceNotFoundException(
+                            ResourceNotFoundException {
+                                message: Some(crate::state::scheduled_query_not_found_message(
+                                    &input.identifier,
+                                )),
+                            },
+                        ),
+                    )
+                })?;
+                (
+                    managed.name.clone(),
+                    managed.arn.clone(),
+                    Some(managed.trigger_history),
+                )
+            }
         };
 
-        let store = state.lock();
-        // A query CloudWatch manages for a log alarm is derived from that alarm rather than
-        // run here, so this store has recorded no execution of one: its history is empty.
-        let recorded: Vec<crate::state::ScheduledQueryExecution> = store
-            .scheduled_query(&input.identifier)
-            .map(|query| query.trigger_history.clone())
-            .unwrap_or_default();
-        drop(store);
+        // The runs of a query CloudWatch manages for a log alarm were made by that alarm's own
+        // evaluation, so they are reported from the record derived for it; the runs of a query a
+        // caller created are the ones this store recorded.
+        let recorded: Vec<crate::state::ScheduledQueryExecution> = match managed_history {
+            Some(history) => history,
+            None => state
+                .lock()
+                .scheduled_query(&input.identifier)
+                .map(|query| query.trigger_history.clone())
+                .unwrap_or_default(),
+        };
 
         // The window SELECTS which executions are reported — both of its ends included, the
         // way every window of this service is read, and in the epoch SECONDS this operation

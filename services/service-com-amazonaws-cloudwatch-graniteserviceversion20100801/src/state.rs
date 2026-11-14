@@ -17,7 +17,9 @@
 //!   ([`ComAmazonawsCloudwatchGraniteserviceversion20100801State::evaluate_composite_alarms`]).
 //! * [`ComAmazonawsCloudwatchGraniteserviceversion20100801State::log_alarms`] — the log
 //!   alarms written by `PutLogAlarm` and read back by `DescribeAlarms`, each carrying the
-//!   configuration of the CloudWatch Logs scheduled query it evaluates.
+//!   configuration of the CloudWatch Logs scheduled query it evaluates, the runs of that query
+//!   and the aggregated values they produced, which is what its state is EVALUATED from
+//!   ([`log_alarm_evaluation`]).
 //! * [`ComAmazonawsCloudwatchGraniteserviceversion20100801State::metric_streams`] — the
 //!   metric streams written by `PutMetricStream` and read back by `GetMetricStream`.
 //! * [`ComAmazonawsCloudwatchGraniteserviceversion20100801State::insight_rules`] — the
@@ -71,6 +73,13 @@ pub use alarm_mute_rules::*;
 
 /// A metric alarm's `StateValue`, computed from the datapoints this store holds.
 pub mod alarm_evaluation;
+
+/// A LOG alarm's `StateValue`, computed from the results the scheduled query this service manages
+/// for it produces, and the executions of that query. Re-exported below, so a handler reaches
+/// them as `crate::state::…` like every other part of this store.
+pub mod log_alarm_evaluation;
+
+pub use log_alarm_evaluation::{LogQueryExecution, LogQueryResult};
 
 /// What a READ of a metric alarm reports: the identity of the write that created it, and the
 /// metric identity it was configured with. Re-exported below, so a handler reaches them as
@@ -1148,13 +1157,30 @@ pub struct StoredCompositeAlarm {
 }
 
 /// A stored log alarm: the modelled shape `DescribeAlarms` returns, plus the tags
-/// `PutLogAlarm` accepted (no `LogAlarm` member carries them).
+/// `PutLogAlarm` accepted (no `LogAlarm` member carries them) and what the alarm's own scheduled
+/// query has produced for it.
 #[derive(Debug, Clone, Default)]
 pub struct StoredLogAlarm {
     /// The alarm as `DescribeAlarms` reports it.
     pub alarm: LogAlarm,
     /// The tags `PutLogAlarm` was given for this alarm.
     pub tags: Vec<Tag>,
+    /// The instant, in epoch seconds, from which the next execution of this alarm's managed
+    /// scheduled query is owed
+    /// ([`log_alarm_evaluation::QUERY_EXECUTION_SPAN_SECS`]).
+    ///
+    /// "When you create a log alarm, the operation creates a service-managed CloudWatch Logs
+    /// scheduled query that runs the query string you provide on the schedule you configure."
+    /// (`PutLogAlarm`) — so a write starts a span at the end of which that query's first run is
+    /// owed, and every run arms the next one. The instant is stored and never slept on.
+    pub query_execution_due_secs: f64,
+    /// The runs of that query, oldest first: what CloudWatch Logs reports as the managed query's
+    /// own trigger history, held here because the alarm's `ScheduledQueryConfiguration` is the
+    /// one home of that query.
+    pub query_executions: Vec<LogQueryExecution>,
+    /// The aggregated values those runs produced, oldest first — the "query results" the alarm's
+    /// M-out-of-N evaluation reads.
+    pub query_results: Vec<LogQueryResult>,
 }
 
 /// A stored alarm history item: the modelled shape `DescribeAlarmHistory` returns, plus the
@@ -3818,6 +3844,16 @@ impl AlarmStateSnapshot {
 
     /// One composite alarm's state.
     pub fn of_composite_alarm(alarm: &CompositeAlarm) -> Self {
+        Self {
+            state_value: alarm.state_value.clone(),
+            state_reason: alarm.state_reason.clone(),
+            state_reason_data: alarm.state_reason_data.clone(),
+            state_updated_secs: alarm.state_updated_timestamp.as_ref().map(from_timestamp),
+        }
+    }
+
+    /// One log alarm's state.
+    pub fn of_log_alarm(alarm: &LogAlarm) -> Self {
         Self {
             state_value: alarm.state_value.clone(),
             state_reason: alarm.state_reason.clone(),

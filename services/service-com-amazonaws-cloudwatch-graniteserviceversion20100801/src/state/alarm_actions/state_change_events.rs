@@ -137,6 +137,29 @@ impl AlarmStateChange {
         })
     }
 
+    /// The transition of a LOG alarm. Same three documents; the configuration is the scheduled
+    /// query the alarm evaluates rather than a metric or a rule.
+    #[must_use]
+    pub fn of_log_transition(
+        alarm: &crate::ops::types::LogAlarm,
+        previous: &crate::state::AlarmStateSnapshot,
+        at_secs: f64,
+    ) -> Option<Self> {
+        Some(Self {
+            alarm_name: alarm.alarm_name.clone()?,
+            alarm_arn: alarm.alarm_arn.clone(),
+            at_secs,
+            state: state_document(
+                alarm.state_value.as_deref()?,
+                alarm.state_reason.as_deref(),
+                alarm.state_reason_data.as_deref(),
+                Some(at_secs),
+            ),
+            previous_state: previous_document(previous),
+            configuration: log_alarm_configuration(alarm),
+        })
+    }
+
     /// The event's `detail`: the alarm's name and the three documents the transition is made
     /// of.
     ///
@@ -277,6 +300,54 @@ fn composite_alarm_configuration(alarm: &CompositeAlarm) -> Value {
             "actionsSuppressorExtensionPeriod".to_string(),
             Value::from(period),
         );
+    }
+    Value::Object(configuration)
+}
+
+/// A LOG alarm's `configuration`: its description and the scheduled query it evaluates — the
+/// query string, the log groups it reads, the aggregation its values are folded by, and the
+/// M-out-of-N comparison those values are graded with.
+fn log_alarm_configuration(alarm: &crate::ops::types::LogAlarm) -> Value {
+    let mut configuration = Map::new();
+    if let Some(description) = alarm.alarm_description.as_deref() {
+        configuration.insert("description".to_string(), Value::from(description));
+    }
+    if let Some(query) = alarm.scheduled_query_configuration.as_ref() {
+        configuration.insert(
+            "queryString".to_string(),
+            Value::from(query.query_string.clone()),
+        );
+        configuration.insert(
+            "logGroups".to_string(),
+            Value::Array(
+                query
+                    .log_group_identifiers
+                    .clone()
+                    .unwrap_or_default()
+                    .into_iter()
+                    .map(Value::from)
+                    .collect(),
+            ),
+        );
+        configuration.insert(
+            "aggregationExpression".to_string(),
+            Value::from(query.aggregation_expression.clone()),
+        );
+        if let Some(arn) = query.query_arn.as_deref() {
+            configuration.insert("queryArn".to_string(), Value::from(arn));
+        }
+    }
+    if let Some(threshold) = alarm.threshold {
+        configuration.insert("threshold".to_string(), Value::from(threshold));
+    }
+    if let Some(operator) = alarm.comparison_operator.as_deref() {
+        configuration.insert("comparisonOperator".to_string(), Value::from(operator));
+    }
+    if let Some(count) = alarm.query_results_to_evaluate {
+        configuration.insert("queryResultsToEvaluate".to_string(), Value::from(count));
+    }
+    if let Some(count) = alarm.query_results_to_alarm {
+        configuration.insert("queryResultsToAlarm".to_string(), Value::from(count));
     }
     Value::Object(configuration)
 }

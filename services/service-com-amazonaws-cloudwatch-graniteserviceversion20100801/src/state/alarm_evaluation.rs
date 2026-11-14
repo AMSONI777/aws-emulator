@@ -1853,19 +1853,22 @@ impl State {
 /// and the threshold, and the words an explanation states that test in.
 ///
 /// The two live together so a reason can never word a comparison the evaluation did not make.
+/// Reached by the LOG alarm fold as well ([`super::log_alarm_evaluation`]): an operator means the
+/// same thing to every alarm that compares a value against a threshold, so both folds read it
+/// here.
 #[derive(Debug, Clone, Copy)]
-struct Comparison {
+pub(crate) struct Comparison {
     /// Whether a datapoint BREACHES the threshold under this operator.
-    breaches: fn(f64, f64) -> bool,
+    pub(crate) breaches: fn(f64, f64) -> bool,
     /// How a `StateReason` reads the comparison: "… was <phrase> the threshold (<threshold>)",
     /// and negated ("was not <phrase> …") for the state in which it did not hold.
-    phrase: &'static str,
+    pub(crate) phrase: &'static str,
 }
 
 /// The comparison one `ComparisonOperator` makes between a datapoint and a STATIC threshold, or
 /// `None` for the anomaly-detection band operators, which compare against the pair of bounds a
 /// model draws ([`band_bound_of`]) rather than against a number.
-fn comparison_of(comparison: &str) -> Option<Comparison> {
+pub(crate) fn comparison_of(comparison: &str) -> Option<Comparison> {
     // The static-threshold members of the modelled `ComparisonOperator` enum
     // (`smithy_query(query="shape",shape="ComparisonOperator")`), each with the reading
     // CloudWatch's own alarm explanations give it.
@@ -2382,7 +2385,7 @@ fn reason_instant(secs: f64) -> Option<String> {
 
 /// One measured quantity as an explanation names it: a decimal that always carries a fraction,
 /// so a value and a threshold read as the measurements they are rather than as counts.
-fn decimal_text(value: f64) -> String {
+pub(crate) fn decimal_text(value: f64) -> String {
     if value.is_finite() && value.fract() == 0.0 {
         return format!("{value:.1}");
     }

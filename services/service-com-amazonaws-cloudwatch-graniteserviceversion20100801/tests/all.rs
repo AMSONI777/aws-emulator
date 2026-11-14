@@ -155,6 +155,8 @@ mod list_metric_streams;
 mod list_tags_for_resource_reads;
 #[path = "all/live_published_actions_split.rs"]
 mod live_published_actions_split;
+#[path = "all/log_alarm_query_evaluation.rs"]
+mod log_alarm_query_evaluation;
 #[path = "all/log_alarms.rs"]
 mod log_alarms;
 #[path = "all/managed_insight_rule_catalog.rs"]

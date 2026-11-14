@@ -302,180 +302,24 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         })?;
 
         let now = crate::state::now_secs();
-        let mut store = state.lock();
-
-        // "This name must be unique within the Amazon Web Services account and Region."
-        // (`PutLogAlarmInput$AlarmName`) — one name names ONE alarm, so a name an alarm of
-        // another kind already holds is not a name this call may take. It is a parameter
-        // this request cannot carry rather than a conflict with the state of the alarm
-        // already there, so it is refused with the service's own `ValidationError`
-        // (HTTP 400), exactly as the metric-alarm and composite-alarm writers refuse a name
-        // another kind of alarm holds — and the alarm already there is left untouched.
-        if store
-            .alarm_kind(&input.alarm_name)
-            .is_some_and(|kind| kind != crate::state::ALARM_TYPE_LOG)
+        // The store's guard is held for the WRITE only, and released before anything is settled
+        // below: a run of this alarm's scheduled query takes it itself, and the notifications
+        // the transitions it causes owe are delivered with it released.
         {
-            return Err(crate::scaffolded::Scaffolded::validation_error(format!(
-                "AlarmName [{}] is already used by another alarm of a different type",
-                input.alarm_name
-            )));
+            let mut store = state.lock();
+            write_alarm(&mut store, &input, &region, now)?;
         }
 
-        // "If you call this operation with the name of an existing log alarm, the operation
-        // replaces the previous configuration of that alarm." — the alarm this call replaces,
-        // when it replaces one: its STATE carries over (the write configures the alarm, it
-        // does not evaluate it) and its configuration is what the history document records as
-        // the configuration replaced.
-        let previous = store
-            .log_alarms
-            .get(&input.alarm_name)
-            .map(|stored| stored.alarm.clone());
-        let is_update = previous.is_some();
-
-        // "The quota for alarms for this customer has already been reached."
-        // (`LimitExceededFault`) — CloudWatch's published quota is 5,000 alarms per Region per
-        // account, counted over every kind of alarm. Replacing an alarm that already exists
-        // adds none, so it is never refused.
-        if !is_update && store.alarm_count() >= crate::state::MAX_ALARMS {
-            return Err(PutLogAlarmErrorModeled::LimitExceededFault(
-                LimitExceededFault {
-                    message: Some(format!(
-                        "the quota of {} alarms has already been reached",
-                        crate::state::MAX_ALARMS
-                    )),
-                },
-            )
-            .into());
-        }
-
-        // A new alarm has been configured but not yet evaluated: no scheduled query execution
-        // has produced a result for it, which is `INSUFFICIENT_DATA` and not a breach of the
-        // threshold — and "During the warm-up period, the alarm stays in INSUFFICIENT_DATA"
-        // (`WarmUpConfiguration`) makes the same state the configured one for a warm-up.
-        let carried = previous.as_ref().map(|alarm| {
-            (
-                alarm.state_value.clone(),
-                alarm.state_reason.clone(),
-                alarm.state_reason_data.clone(),
-                alarm.state_updated_timestamp,
-                alarm.state_transitioned_timestamp,
-                alarm.evaluation_state.clone(),
-            )
-        });
-        let (
-            state_value,
-            state_reason,
-            state_reason_data,
-            state_updated,
-            state_transitioned,
-            evaluation_state,
-        ) = carried.unwrap_or_else(|| {
-            (
-                Some(crate::state::ALARM_STATE_INSUFFICIENT_DATA.to_string()),
-                Some(INITIAL_STATE_REASON.to_string()),
-                None,
-                Some(crate::state::to_timestamp(now)),
-                Some(crate::state::to_timestamp(now)),
-                None,
-            )
-        });
-
-        // "When you create a log alarm, the operation creates a service-managed CloudWatch
-        // Logs scheduled query that runs the query string you provide on the schedule you
-        // configure." — the alarm's configuration therefore names that managed query, and
-        // `QueryARN` "is populated in DescribeAlarms responses"
-        // (`ScheduledQueryConfiguration$QueryARN`). The ARN is the service's to mint, so
-        // whatever the request carried in that member is replaced.
-        let scheduled_query_configuration = ScheduledQueryConfiguration {
-            query_arn: Some(crate::state::scheduled_query_arn(&region, &input.alarm_name)),
-            ..input.scheduled_query_configuration.clone()
-        };
-
-        let alarm = LogAlarm {
-            alarm_name: Some(input.alarm_name.clone()),
-            alarm_arn: Some(crate::state::alarm_arn(&region, &input.alarm_name)),
-            alarm_description: input.alarm_description.clone(),
-            alarm_configuration_updated_timestamp: Some(crate::state::to_timestamp(now)),
-            // "Indicates whether actions should be executed during any changes to the alarm
-            // state. The default is true." (`PutLogAlarmInput$ActionsEnabled`)
-            actions_enabled: Some(input.actions_enabled.unwrap_or(true)),
-            ok_actions: crate::state::configured_actions(input.ok_actions.as_deref()),
-            alarm_actions: crate::state::configured_actions(input.alarm_actions.as_deref()),
-            insufficient_data_actions: crate::state::configured_actions(
-                input.insufficient_data_actions.as_deref(),
-            ),
-            state_value,
-            state_reason,
-            state_reason_data,
-            state_updated_timestamp: state_updated,
-            scheduled_query_configuration: Some(scheduled_query_configuration),
-            query_results_to_evaluate: Some(input.query_results_to_evaluate),
-            query_results_to_alarm: Some(input.query_results_to_alarm),
-            threshold: Some(input.threshold),
-            comparison_operator: Some(input.comparison_operator.clone()),
-            // "If this parameter is omitted, the default behavior of missing is used."
-            // (`PutLogAlarmInput$TreatMissingData`)
-            treat_missing_data: Some(
-                input
-                    .treat_missing_data
-                    .clone()
-                    .unwrap_or_else(|| TREAT_MISSING_DATA_DEFAULT.to_string()),
-            ),
-            state_transitioned_timestamp: state_transitioned,
-            // An evaluation state reports what an EVALUATION found ("it indicates
-            // configuration errors in the alarm setup", `LogAlarm$EvaluationState`), so this
-            // write neither sets nor clears it: a new alarm has none, and one that replaces an
-            // alarm keeps the state value and evaluation state it carried.
-            evaluation_state,
-            // "The default is 0, which means no log lines are included."
-            // (`PutLogAlarmInput$ActionLogLineCount`)
-            action_log_line_count: Some(input.action_log_line_count.unwrap_or(0)),
-            action_log_line_role_arn: input.action_log_line_role_arn.clone(),
-            warm_up_configuration: input.warm_up_configuration.clone(),
-            action_configuration: input.action_configuration.clone(),
-        };
-
-        // "Data about the alarm, in JSON format." (`AlarmHistoryItem$HistoryData`) — the
-        // configuration this call stored, and the one it replaced when it replaced an alarm.
-        let history_data = crate::state::log_configuration_update_history_data(
-            previous.as_ref(),
-            &alarm,
-        );
-
-        // "If you are using this operation to update an existing alarm, any tags you specify
-        // in this parameter are ignored. To change the tags of an existing alarm, use
-        // TagResource or UntagResource." — the rule this service's other alarm writers follow
-        // (`PutMetricAlarmInput$Tags`, `PutCompositeAlarmInput$Tags`).
-        let tags = match is_update {
-            true => store
-                .log_alarms
-                .get(&input.alarm_name)
-                .map(|stored| stored.tags.clone())
-                .unwrap_or_default(),
-            false => input.tags.clone().unwrap_or_default(),
-        };
-
-        store.log_alarms.insert(
-            input.alarm_name.clone(),
-            crate::state::StoredLogAlarm { alarm, tags },
-        );
-        store.record_history(
-            &input.alarm_name,
-            now,
-            AlarmHistoryItem {
-                alarm_name: Some(input.alarm_name.clone()),
-                alarm_contributor_id: None,
-                alarm_type: Some(crate::state::ALARM_TYPE_LOG.to_string()),
-                timestamp: Some(crate::state::to_timestamp(now)),
-                history_item_type: Some("ConfigurationUpdate".to_string()),
-                history_summary: Some(crate::state::configuration_update_history_summary(
-                    &input.alarm_name,
-                    is_update,
-                )),
-                history_data: Some(history_data),
-                alarm_contributor_attributes: None,
-            },
-        );
+        // Every alarm evaluation and every scheduled query execution the clock has already made
+        // due is materialised, and the notifications the resulting transitions owe are
+        // delivered. This alarm's own first execution is not among them: it becomes due a span
+        // after this write, so a caller reading straight after it still sees the state this
+        // write left behind.
+        crate::state::alarm_actions::settle_alarms(&*self.engine, ctx).await;
+        // That first execution is owed a span from here and the caller makes no further
+        // CloudWatch call before it looks for what the alarm's transition delivers, so the clock
+        // that materialises it is started here.
+        crate::state::alarm_actions::drive_alarm_clock(&self.engine, ctx);
 
         Ok(PutLogAlarmOutput)
     }
@@ -484,6 +328,209 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
 /// The default `TreatMissingData`: "If this parameter is omitted, the default behavior of
 /// missing is used." (`PutLogAlarmInput$TreatMissingData`).
 const TREAT_MISSING_DATA_DEFAULT: &str = "missing";
+
+/// Store the log alarm this request configures, and record the history item for the write.
+///
+/// The whole write, so the one place that holds the store's lock is the caller's block: the
+/// alarm either replaces the alarm of its name or is added, and a refusal leaves the store
+/// exactly as it was.
+fn write_alarm(
+    store: &mut crate::state::ComAmazonawsCloudwatchGraniteserviceversion20100801State,
+    input: &PutLogAlarmInput,
+    region: &str,
+    now: f64,
+) -> Result<(), PutLogAlarmError> {
+    // "This name must be unique within the Amazon Web Services account and Region."
+    // (`PutLogAlarmInput$AlarmName`) — one name names ONE alarm, so a name an alarm of
+    // another kind already holds is not a name this call may take. It is a parameter
+    // this request cannot carry rather than a conflict with the state of the alarm
+    // already there, so it is refused with the service's own `ValidationError`
+    // (HTTP 400), exactly as the metric-alarm and composite-alarm writers refuse a name
+    // another kind of alarm holds — and the alarm already there is left untouched.
+    if store
+        .alarm_kind(&input.alarm_name)
+        .is_some_and(|kind| kind != crate::state::ALARM_TYPE_LOG)
+    {
+        return Err(crate::scaffolded::Scaffolded::validation_error(format!(
+            "AlarmName [{}] is already used by another alarm of a different type",
+            input.alarm_name
+        )));
+    }
+
+    // "If you call this operation with the name of an existing log alarm, the operation
+    // replaces the previous configuration of that alarm." — the alarm this call replaces,
+    // when it replaces one: its STATE carries over (the write configures the alarm, it
+    // does not evaluate it) and its configuration is what the history document records as
+    // the configuration replaced.
+    let previous = store
+        .log_alarms
+        .get(&input.alarm_name)
+        .map(|stored| stored.alarm.clone());
+    let is_update = previous.is_some();
+
+    // "The quota for alarms for this customer has already been reached."
+    // (`LimitExceededFault`) — CloudWatch's published quota is 5,000 alarms per Region per
+    // account, counted over every kind of alarm. Replacing an alarm that already exists
+    // adds none, so it is never refused.
+    if !is_update && store.alarm_count() >= crate::state::MAX_ALARMS {
+        return Err(PutLogAlarmErrorModeled::LimitExceededFault(LimitExceededFault {
+            message: Some(format!(
+                "the quota of {} alarms has already been reached",
+                crate::state::MAX_ALARMS
+            )),
+        })
+        .into());
+    }
+
+    // A new alarm has been configured but not yet evaluated: no scheduled query execution
+    // has produced a result for it, which is `INSUFFICIENT_DATA` and not a breach of the
+    // threshold — and "During the warm-up period, the alarm stays in INSUFFICIENT_DATA"
+    // (`WarmUpConfiguration`) makes the same state the configured one for a warm-up.
+    let carried = previous.as_ref().map(|alarm| {
+        (
+            alarm.state_value.clone(),
+            alarm.state_reason.clone(),
+            alarm.state_reason_data.clone(),
+            alarm.state_updated_timestamp,
+            alarm.state_transitioned_timestamp,
+            alarm.evaluation_state.clone(),
+        )
+    });
+    let (
+        state_value,
+        state_reason,
+        state_reason_data,
+        state_updated,
+        state_transitioned,
+        evaluation_state,
+    ) = carried.unwrap_or_else(|| {
+        (
+            Some(crate::state::ALARM_STATE_INSUFFICIENT_DATA.to_string()),
+            Some(INITIAL_STATE_REASON.to_string()),
+            None,
+            Some(crate::state::to_timestamp(now)),
+            Some(crate::state::to_timestamp(now)),
+            None,
+        )
+    });
+
+    // "When you create a log alarm, the operation creates a service-managed CloudWatch
+    // Logs scheduled query that runs the query string you provide on the schedule you
+    // configure." — the alarm's configuration therefore names that managed query, and
+    // `QueryARN` "is populated in DescribeAlarms responses"
+    // (`ScheduledQueryConfiguration$QueryARN`). The ARN is the service's to mint, so
+    // whatever the request carried in that member is replaced.
+    let scheduled_query_configuration = ScheduledQueryConfiguration {
+        query_arn: Some(crate::state::scheduled_query_arn(region, &input.alarm_name)),
+        ..input.scheduled_query_configuration.clone()
+    };
+
+    let alarm = LogAlarm {
+        alarm_name: Some(input.alarm_name.clone()),
+        alarm_arn: Some(crate::state::alarm_arn(region, &input.alarm_name)),
+        alarm_description: input.alarm_description.clone(),
+        alarm_configuration_updated_timestamp: Some(crate::state::to_timestamp(now)),
+        // "Indicates whether actions should be executed during any changes to the alarm
+        // state. The default is true." (`PutLogAlarmInput$ActionsEnabled`)
+        actions_enabled: Some(input.actions_enabled.unwrap_or(true)),
+        ok_actions: crate::state::configured_actions(input.ok_actions.as_deref()),
+        alarm_actions: crate::state::configured_actions(input.alarm_actions.as_deref()),
+        insufficient_data_actions: crate::state::configured_actions(
+            input.insufficient_data_actions.as_deref(),
+        ),
+        state_value,
+        state_reason,
+        state_reason_data,
+        state_updated_timestamp: state_updated,
+        scheduled_query_configuration: Some(scheduled_query_configuration),
+        query_results_to_evaluate: Some(input.query_results_to_evaluate),
+        query_results_to_alarm: Some(input.query_results_to_alarm),
+        threshold: Some(input.threshold),
+        comparison_operator: Some(input.comparison_operator.clone()),
+        // "If this parameter is omitted, the default behavior of missing is used."
+        // (`PutLogAlarmInput$TreatMissingData`)
+        treat_missing_data: Some(
+            input
+                .treat_missing_data
+                .clone()
+                .unwrap_or_else(|| TREAT_MISSING_DATA_DEFAULT.to_string()),
+        ),
+        state_transitioned_timestamp: state_transitioned,
+        // An evaluation state reports what an EVALUATION found ("it indicates
+        // configuration errors in the alarm setup", `LogAlarm$EvaluationState`), so this
+        // write neither sets nor clears it: a new alarm has none, and one that replaces an
+        // alarm keeps the state value and evaluation state it carried.
+        evaluation_state,
+        // "The default is 0, which means no log lines are included."
+        // (`PutLogAlarmInput$ActionLogLineCount`)
+        action_log_line_count: Some(input.action_log_line_count.unwrap_or(0)),
+        action_log_line_role_arn: input.action_log_line_role_arn.clone(),
+        warm_up_configuration: input.warm_up_configuration.clone(),
+        action_configuration: input.action_configuration.clone(),
+    };
+
+    // "Data about the alarm, in JSON format." (`AlarmHistoryItem$HistoryData`) — the
+    // configuration this call stored, and the one it replaced when it replaced an alarm.
+    let history_data =
+        crate::state::log_configuration_update_history_data(previous.as_ref(), &alarm);
+
+    // "If you are using this operation to update an existing alarm, any tags you specify
+    // in this parameter are ignored. To change the tags of an existing alarm, use
+    // TagResource or UntagResource." — the rule this service's other alarm writers follow
+    // (`PutMetricAlarmInput$Tags`, `PutCompositeAlarmInput$Tags`).
+    let tags = match is_update {
+        true => store
+            .log_alarms
+            .get(&input.alarm_name)
+            .map(|stored| stored.tags.clone())
+            .unwrap_or_default(),
+        false => input.tags.clone().unwrap_or_default(),
+    };
+
+    // The executions of the managed query that have already happened stay part of that
+    // query's history, which is why a write that replaces the alarm keeps them. The VALUES
+    // they produced do not: they were computed by the query string and the aggregation this
+    // write replaces, so the new configuration is evaluated on the results of its own runs.
+    let query_executions = store
+        .log_alarms
+        .get(&input.alarm_name)
+        .map(|stored| stored.query_executions.clone())
+        .unwrap_or_default();
+
+    store.log_alarms.insert(
+        input.alarm_name.clone(),
+        crate::state::StoredLogAlarm {
+            alarm,
+            tags,
+            // "the operation creates a service-managed CloudWatch Logs scheduled query that
+            // runs the query string you provide on the schedule you configure" — the first
+            // run of that query is owed a span after this write, so a caller reading
+            // straight back still sees the alarm before any run of it.
+            query_execution_due_secs: now
+                + crate::state::log_alarm_evaluation::QUERY_EXECUTION_SPAN_SECS,
+            query_executions,
+            query_results: Vec::new(),
+        },
+    );
+    store.record_history(
+        &input.alarm_name,
+        now,
+        AlarmHistoryItem {
+            alarm_name: Some(input.alarm_name.clone()),
+            alarm_contributor_id: None,
+            alarm_type: Some(crate::state::ALARM_TYPE_LOG.to_string()),
+            timestamp: Some(crate::state::to_timestamp(now)),
+            history_item_type: Some("ConfigurationUpdate".to_string()),
+            history_summary: Some(crate::state::configuration_update_history_summary(
+                &input.alarm_name,
+                is_update,
+            )),
+            history_data: Some(history_data),
+            alarm_contributor_attributes: None,
+        },
+    );
+    Ok(())
+}
 
 /// Refuse a request that satisfies every modelled constraint but breaks a rule the model
 /// states in prose only, or one that holds BETWEEN members.

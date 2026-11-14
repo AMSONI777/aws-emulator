@@ -1918,6 +1918,10 @@ mod apigateway_sns_service_integration;
 // crate's test target can drive it.
 #[path = "all/lambda_signed_write_to_an_aoss_collection_endpoint.rs"]
 mod lambda_signed_write_to_an_aoss_collection_endpoint;
+// (`apigateway_cognito_authorizer_app_client_audience` and
+// `cloudformation_metric_stream_estate_is_drainable` are declared in the head region and the
+// sorted span above: each was appended here as well while two branches were landing at once,
+// which declared it a second time and compiled neither.)
 // (`apigateway_cognito_authorizer_app_client_audience` is declared in the head region of
 // this file already: two branches landing in the same window each declared it, and a module
 // may be declared only once.)
@@ -1978,6 +1982,25 @@ mod cloudformation_metric_stream_estate_is_drainable;
 // cluster and then read the alarm's state.
 #[path = "all/redshift_health_alarms_evaluate.rs"]
 mod redshift_health_alarms_evaluate;
+// (`cloudwatch_alarm_ssm_ops_item_action` is declared in the head region above: a module may
+// be declared only once.)
+// stack-deployed metric-stream pipeline exports before and after an update rewrites its filter
+// spans CloudFormation, IAM, CloudWatch, Firehose and Amazon S3 at once, so no single service
+// crate's test target can deploy the pipeline and then read the objects it delivered.
+#[path = "all/cloudformation_metric_stream_filter_update.rs"]
+mod cloudformation_metric_stream_filter_update;
+// (`zz_probe` is declared once, further up this tail: it was appended here as well while two
+// (The metric-stream filter-update suite is declared ONCE, in the head region above: it was
+// appended here as well while two branches were landing at once.)
+// (`zz_probe` is declared ONCE, further up this tail.)
+// (`cloudformation_metric_stream_filter_update` is declared in the head region above: a module
+// (`zz_probe` is declared further up this tail already: a module may be declared only once.)
+// (`zz_probe` is declared once further up this tail: a module may be declared only once.)
+// (`zz_probe` is declared ONCE, further up this tail: it was appended here as well while two
+// branches were landing at once, which declared it a second time and compiled neither.)
+// (`cloudwatch_alarm_ssm_ops_item_action` is declared once, in the head region above: a
+// module may be declared only once.)
+// (`zz_probe` is declared ONCE, further up this tail: a module may be declared only once.)
 // (`cloudwatch_alarm_ssm_ops_item_action` is declared once, in the head region above: a
 // module may be declared only once.)
 // (`cloudformation_metric_stream_filter_update` is declared ONCE, in the head region above
@@ -2010,14 +2033,12 @@ mod redshift_health_alarms_evaluate;
 // only once.)
 // (`zz_probe` is declared further up this tail already: two branches landing in the same
 // window each appended it, and a module may be declared only once.)
+// (`zz_probe` is declared once, further up this tail: a module may be declared only once.)
+// (`cloudformation_metric_stream_filter_update` is declared ONCE, in the head region above
+// beside the other `cloudformation_…` suites: it was appended here as well while two
 // (`cloudformation_metric_stream_filter_update` is declared ONCE, in the sorted head above:
 // two branches landing in the same window appended a second declaration of it here, which is a
 // redefinition that compiled neither, so the duplicate is removed and the first stands.)
-// (The metric-stream filter-update suite is declared ONCE, in the head region above: it was
-// appended here as well while two branches were landing at once.)
-// (`zz_probe` is declared ONCE, further up this tail.)
-// (`cloudformation_metric_stream_filter_update` is declared in the head region above: a module
-// (`zz_probe` is declared further up this tail already: a module may be declared only once.)
 // (`zz_probe` is declared once, above.)
 // (`zz_probe` is declared ONCE, a few lines above: a module may be declared only once.)
 // (`zz_probe` is declared once, further up this tail: a module may be declared only once,
@@ -2221,6 +2242,13 @@ mod dynamodb_write_capacity_metrics_drive_the_alarm_chain;
 // Declared here, in this appended tail: whether a stack-deployed metric-stream estate can be
 // drained spans CloudFormation and the services the estate is built from, so no single
 // service crate's test target can deploy it and then drain it.
+// Declared here, in this appended tail: whether a SESv2 send's email events reach the Lambda
+// target of a rule on the bus its event destination names spans SESv2, EventBridge, Lambda,
+// CloudFormation, IAM and Amazon SQS, so no single service crate's test target can wire it.
+#[path = "all/ses_event_destination_reaches_an_eventbridge_rule_target.rs"]
+mod ses_event_destination_reaches_an_eventbridge_rule_target;
+// (`apigatewaymanagementapi_manage_connections_authorization` is declared once, further up
+// this tail: the entry was appended here as well while two branches were landing at once,
 // at the top of this file: the entry was appended here as well while two branches were
 // landing at once, which declared it a second time and compiled neither.)
 // (`zz_probe` is declared ONCE, further up this tail: the entry was appended here as well
@@ -2325,7 +2353,6 @@ mod cloudformation_rest_api_request_validation;
 // suite was appended here as well while two branches were landing at once, which declared it a
 // second time and compiled neither.)
 // head of this file: it was appended here as well while two branches were landing at once,
-// which declared it a second time and compiled neither.)
 // (`https_front_door_concurrent_pooled_producer` is declared ONCE, in the span above: it was
 // time and compiled neither.)
 // Declared beside the suite above, in this quiet span of the sorted list rather than at the
@@ -2551,6 +2578,11 @@ mod cloudformation_drift_detection_status_change_events;
 // have to agree for the chain to hold, so no single crate's test target can drive it.
 #[path = "all/s3_object_created_invalidates_the_distribution_edge.rs"]
 mod s3_object_created_invalidates_the_distribution_edge;
+// flat-rate CloudFront subscription may be sold over a distribution is decided by the web ACL
+// association CloudFront holds and by a web ACL only WAFv2 mints, so no single service crate's
+// test target can set the association and then ask Pricing Plan Manager for the subscription.
+#[path = "all/pricing_plan_subscription_resource_eligibility.rs"]
+mod pricing_plan_subscription_resource_eligibility;
 // ONCE, further down this tail: a module may be declared only once, and two branches landing
 // in the same window each appended their own copy here.)
 // Declared here, beside the other CloudFormation suites: whether a stack-deployed
@@ -2570,6 +2602,8 @@ mod s3_object_created_invalidates_the_distribution_edge;
 // branches landing in the same window declared it here as well, which compiled neither.)
 // (`cloudformation_metric_stream_estate_is_drainable` is declared ONCE, above: two branches
 // landing in the same window declared it here as well, which compiled neither.)
+// (`pricing_plan_subscription_resource_eligibility` is declared ONCE, further up this tail:
+// two branches landing in the same window each appended their own copy here.)
 #[path = "all/cloudformation_kms_encrypted_sns_sqs_pipeline.rs"]
 mod cloudformation_kms_encrypted_sns_sqs_pipeline;
 // be declared only once, and two branches landing at once each appended it here.)
@@ -2657,7 +2691,6 @@ mod sfn_relayed_dynamodb_request_id;
 // (`codebuild_s3_build_output`, `lambda_signed_write_to_an_aoss_collection_endpoint` and
 // `cloudformation_domain_endpoint_is_dialled_by_consumers` are each declared once, in the
 // spans above: a module may be declared only once.)
-// (`apigatewaymanagementapi_manage_connections_authorization` is declared once, further up
 // this tail: a module may be declared only once.)
 // conditioned identity policy decided against the tags of the session that signed the call
 // spans IAM (the role, its policy and its tags) and STS (the mint that attaches the tags) at

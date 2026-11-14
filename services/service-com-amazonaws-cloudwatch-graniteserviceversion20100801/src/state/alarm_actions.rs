@@ -250,6 +250,68 @@ impl AlarmNotification {
         }
         .build()
     }
+
+    /// The record a LOG alarm's transition to its current state owes. Same rule, same envelope:
+    /// the alarm's own three action lists, selected by the state it moved to.
+    ///
+    /// A log alarm reports WHAT it evaluated the way its own configuration states it — the log
+    /// groups the query read, the query string, the aggregation the values were folded by — and
+    /// the EXECUTION whose aggregate decided the transition, which is the run CloudWatch Logs
+    /// reports in that query's own trigger history: a consumer of the notification can resolve
+    /// the run the state rests on from it.
+    #[must_use]
+    pub fn of_log_transition(
+        alarm: &crate::ops::types::LogAlarm,
+        execution_id: &str,
+        previous: &super::AlarmStateSnapshot,
+        at_secs: f64,
+    ) -> Option<Self> {
+        let query = alarm.scheduled_query_configuration.as_ref();
+        Transition {
+            name: alarm.alarm_name.as_deref()?,
+            kind: super::ALARM_TYPE_LOG,
+            arn: alarm.alarm_arn.as_deref(),
+            description: alarm.alarm_description.as_deref(),
+            actions_enabled: alarm.actions_enabled.unwrap_or(true),
+            ok_actions: alarm.ok_actions.as_deref(),
+            alarm_actions: alarm.alarm_actions.as_deref(),
+            insufficient_data_actions: alarm.insufficient_data_actions.as_deref(),
+            configuration_updated_secs: alarm
+                .alarm_configuration_updated_timestamp
+                .as_ref()
+                .map(super::from_timestamp),
+            new_state_value: alarm.state_value.as_deref()?,
+            new_state_reason: alarm.state_reason.as_deref(),
+            old_state_value: previous.state_value.as_deref(),
+            at_secs,
+            // A log alarm watches a query over log groups rather than a metric, so it is
+            // dimensioned by nothing and monitors no instance of its own.
+            instance_id: None,
+            detail: vec![
+                (
+                    "LogGroups",
+                    string_list(
+                        query.and_then(|query| query.log_group_identifiers.as_deref()),
+                    ),
+                ),
+                (
+                    "QueryString",
+                    query.map_or(Value::Null, |query| Value::from(query.query_string.clone())),
+                ),
+                (
+                    "AggregationExpression",
+                    query.map_or(Value::Null, |query| {
+                        Value::from(query.aggregation_expression.clone())
+                    }),
+                ),
+                ("QueryExecutionId", Value::from(execution_id)),
+            ],
+            state_change: state_change_events::AlarmStateChange::of_log_transition(
+                alarm, previous, at_secs,
+            )?,
+        }
+        .build()
+    }
 }
 
 /// One alarm state transition, as a notification is built from it.
@@ -425,6 +487,11 @@ async fn settle<Eng: Send + Sync + 'static>(
         return;
     };
     let now = super::now_secs();
+    // The scheduled query executions this store's LOG alarms owe are made FIRST, because each
+    // one is a cross-service run that cannot happen under the store's guard: what the runs
+    // produce is recorded and folded into those alarms' states, so the transitions they cause
+    // are queued by the time this settle takes the queue below.
+    super::log_alarm_evaluation::scheduled_runs::settle_log_alarms(engine, callback).await;
     let owed = {
         // The evaluation pass is CPU-bound and runs under the store's lock, so it is moved
         // off the async worker: the runtime keeps serving every other request while it runs,
@@ -800,6 +867,10 @@ fn next_due_or_release(
                 .values()
                 .map(|stored| stored.evaluation_due_secs),
         )
+        // A LOG alarm is driven by the executions of its own scheduled query rather than by a
+        // fold over stored datapoints, so the instant its next RUN is owed is what the clock
+        // waits for on its behalf.
+        .chain(store.next_log_alarm_run_due_secs())
         .min_by(f64::total_cmp);
     if due.is_none() {
         release_alarm_clock(store, generation);
