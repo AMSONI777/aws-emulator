@@ -17,6 +17,8 @@ mod multipart_read_set_uploads;
 mod private_workflow_runs;
 #[path = "all/response_member_wire_form.rs"]
 mod response_member_wire_form;
+#[path = "all/resource_shares.rs"]
+mod resource_shares;
 #[path = "all/run_caches.rs"]
 mod run_caches;
 #[path = "all/run_groups.rs"]

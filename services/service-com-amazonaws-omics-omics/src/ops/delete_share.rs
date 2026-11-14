@@ -1,15 +1,12 @@
 // SPDX-License-Identifier: CC0-1.0
 
 //! @op DeleteShare
-//! SCAFFOLDED, NOT IMPLEMENTED: this operation answers HTTP 501 `NotImplemented` and
-//! asserts NOTHING about `DeleteShare`'s real behaviour. Implement it here — this is
-//! the ONLY file to touch for this operation.
-//!
-//! A 501 from this operation means "nobody has written it yet", never "the emulator is
-//! broken". Replace the `Err(..)` in [`DeleteShare::handle`] with real behaviour and
-//! delete the SCAFFOLDED marker line above; that line is the machine-readable record of
-//! which operations are still stubs (`grep -rl '^//! SCAFFOLDED, NOT IMPLEMENTED:' */src/ops/`),
-//! so leaving it on an implemented operation under-reports progress.
+//! Asks the share `CreateShare` stored to go away: this handler moves that record in
+//! [`crate::state`] to `DELETING` and leaves the `DELETED` the clock then owes it to
+//! [`crate::state::Share::settle`], so a caller reading straight afterwards still sees
+//! the delete in flight. A share that has already been asked to go away is answered "not
+//! found": it is no longer one this operation can act on, though `GetShare` still reports
+//! its terminal status.
 //!
 //! ## Shape of an operation
 //!
@@ -154,18 +151,69 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         input: Self::Input,
         ctx: &smithy_server_runtime::OperationContext<'_>,
     ) -> Result<Self::Output, Self::Error> {
-        // The engine is reachable from `&self` (constructor-injected); `ctx` carries
-        // request metadata. Both are bound here so an implementer has them in scope.
-        let _ = (&input, ctx, &self.engine);
-        // Implement `DeleteShare` here, then delete the SCAFFOLDED marker at the top of
-        // this file. Return modeled failures as
-        // `Err(DeleteShareErrorModeled::Variant(..).into())` — the `From` impl above lifts it.
+        let state = crate::state::service_state(&*self.engine).ok_or_else(|| {
+            crate::state::audit(
+                Self::NAME,
+                ctx,
+                crate::state::AuditOutcome::StoreUnavailable,
+                None,
+            );
+            DeleteShareErrorModeled::InternalServerException(InternalServerException {
+                message: "the omics share registry is unavailable".to_string(),
+            })
+        })?;
+
+        let now_ms = crate::state::now_epoch_millis();
+        let mut registry = state.lock();
+        // Settle first, so a share whose delete the clock has already completed is not
+        // asked to start one again just because nobody read it since.
+        registry.settle(now_ms);
+
+        // A share that has already been asked to go away is no longer a share this
+        // operation can act on: the recorded service answers a second delete with the
+        // modelled `ResourceNotFoundException` — to a delete a spent share is simply not
+        // there — even though the record is still readable through `GetShare` with the
+        // status that delete left it in. Both conditions are therefore the one refusal.
         //
-        // To refuse a bad request this operation models no error for, return
-        // `Err(crate::scaffolded::Scaffolded::validation("..."))` — a 400
-        // `ValidationException`. Do NOT answer 501 for it: 501 means "not written yet",
-        // not "bad request". Modeled constraints are already refused BEFORE this
-        // handler runs, so reaching here means the input satisfies every one of them.
-        Err(crate::scaffolded::Scaffolded::not_implemented("DeleteShare"))
+        // The one standing share is moved to `DELETING` here, and the `DELETED` the clock
+        // then owes it is left to `crate::state::Share::settle`; the span is this
+        // emulator's own, deliberately non-zero so the transient status and the state
+        // rules that go with it are observable.
+        let moved = match registry.share_mut(&input.share_id) {
+            Some(share) if share.offer_stands() => {
+                share.status = crate::state::SHARE_STATUS_DELETING.to_string();
+                share.update_time_ms = now_ms;
+                share.status_due_at_ms =
+                    Some(now_ms + crate::state::TRANSITION_DELAY.as_millis() as i64);
+                Some((share.id.clone(), share.status.clone()))
+            }
+            _ => None,
+        };
+
+        let Some((share_id, status)) = moved else {
+            crate::state::audit(
+                Self::NAME,
+                ctx,
+                crate::state::AuditOutcome::NotFound,
+                Some(&input.share_id),
+            );
+            return Err(DeleteShareErrorModeled::ResourceNotFoundException(
+                ResourceNotFoundException {
+                    message: crate::state::share_not_found_message(&input.share_id),
+                },
+            )
+            .into());
+        };
+
+        crate::state::audit(
+            Self::NAME,
+            ctx,
+            crate::state::AuditOutcome::ShareDeleted,
+            Some(&share_id),
+        );
+
+        Ok(DeleteShareOutput {
+            status: Some(status),
+        })
     }
 }

@@ -1,15 +1,10 @@
 // SPDX-License-Identifier: CC0-1.0
 
 //! @op CreateShare
-//! SCAFFOLDED, NOT IMPLEMENTED: this operation answers HTTP 501 `NotImplemented` and
-//! asserts NOTHING about `CreateShare`'s real behaviour. Implement it here — this is
-//! the ONLY file to touch for this operation.
-//!
-//! A 501 from this operation means "nobody has written it yet", never "the emulator is
-//! broken". Replace the `Err(..)` in [`CreateShare::handle`] with real behaviour and
-//! delete the SCAFFOLDED marker line above; that line is the machine-readable record of
-//! which operations are still stubs (`grep -rl '^//! SCAFFOLDED, NOT IMPLEMENTED:' */src/ops/`),
-//! so leaving it on an implemented operation under-reports progress.
+//! Offers a resource this emulator holds to another account and PERSISTS the offer in
+//! [`crate::state`]: this handler resolves the `resourceArn` against the store, mints the
+//! share id, and answers from the record it wrote, which `GetShare` then reports and
+//! `DeleteShare` moves.
 //!
 //! ## Shape of an operation
 //!
@@ -161,18 +156,173 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         input: Self::Input,
         ctx: &smithy_server_runtime::OperationContext<'_>,
     ) -> Result<Self::Output, Self::Error> {
-        // The engine is reachable from `&self` (constructor-injected); `ctx` carries
-        // request metadata. Both are bound here so an implementer has them in scope.
-        let _ = (&input, ctx, &self.engine);
-        // Implement `CreateShare` here, then delete the SCAFFOLDED marker at the top of
-        // this file. Return modeled failures as
-        // `Err(CreateShareErrorModeled::Variant(..).into())` — the `From` impl above lifts it.
-        //
-        // To refuse a bad request this operation models no error for, return
-        // `Err(crate::scaffolded::Scaffolded::validation("..."))` — a 400
-        // `ValidationException`. Do NOT answer 501 for it: 501 means "not written yet",
-        // not "bad request". Modeled constraints are already refused BEFORE this
-        // handler runs, so reaching here means the input satisfies every one of them.
-        Err(crate::scaffolded::Scaffolded::not_implemented("CreateShare"))
+        let state = crate::state::service_state(&*self.engine).ok_or_else(|| {
+            crate::state::audit(
+                Self::NAME,
+                ctx,
+                crate::state::AuditOutcome::StoreUnavailable,
+                None,
+            );
+            CreateShareErrorModeled::InternalServerException(InternalServerException {
+                message: "the omics share registry is unavailable".to_string(),
+            })
+        })?;
+
+        // `resourceArn` and `principalSubscriber` are modelled as plain strings with no
+        // length or pattern, so the centralized walk admits any text for them and the
+        // rules below are this handler's to apply.
+        let Some((resource_type, resource_id)) =
+            crate::state::shareable_resource(&input.resource_arn)
+        else {
+            crate::state::audit(
+                Self::NAME,
+                ctx,
+                crate::state::AuditOutcome::ValidationRefused,
+                None,
+            );
+            return Err(CreateShareErrorModeled::ValidationException(ValidationException {
+                message: format!(
+                    "resourceArn {} is not the ARN of a resource that supports cross-account \
+                     sharing; HealthOmics variant stores, HealthOmics annotation stores and \
+                     private workflows can be shared",
+                    input.resource_arn
+                ),
+            })
+            .into());
+        };
+        let resource_id = resource_id.to_string();
+
+        let owner_id = ::engine::emulator_account_id().to_string();
+        // From this operation's own documentation: the offer goes to "the principal
+        // subscriber (an Amazon Web Services user with a different account than the
+        // resource owner)", so the value has to BE an account id — read through
+        // `service_common::arn`'s one reading of that form — and it cannot be the account
+        // that owns the resource.
+        if !::service_common::arn::is_account_id(&input.principal_subscriber)
+            || input.principal_subscriber == owner_id
+        {
+            crate::state::audit(
+                Self::NAME,
+                ctx,
+                crate::state::AuditOutcome::ValidationRefused,
+                None,
+            );
+            return Err(CreateShareErrorModeled::ValidationException(ValidationException {
+                message: "principalSubscriber must be the ID of an Amazon Web Services \
+                          account other than the account that owns the resource"
+                    .to_string(),
+            })
+            .into());
+        }
+
+        let now_ms = crate::state::now_epoch_millis();
+        let mut registry = state.lock();
+        registry.settle(now_ms);
+
+        // A share is backed by a resource this emulator actually holds: an ARN naming one
+        // it does not is answered "not found" rather than stored as an offer of nothing.
+        // Of the three shareable resource types, only the private workflow is a resource
+        // this crate mints — `CreateVariantStore` and `CreateAnnotationStore` are still
+        // scaffolds — so no variant or annotation store can exist here and an ARN naming
+        // one resolves to nothing.
+        let holds_resource = match resource_type {
+            crate::state::WORKFLOW_RESOURCE_TYPE => registry.workflow(&resource_id).is_some(),
+            _ => false,
+        };
+        if !holds_resource {
+            crate::state::audit(
+                Self::NAME,
+                ctx,
+                crate::state::AuditOutcome::NotFound,
+                Some(&resource_id),
+            );
+            return Err(CreateShareErrorModeled::ResourceNotFoundException(
+                ResourceNotFoundException {
+                    message: crate::state::shared_resource_not_found_message(&input.resource_arn),
+                },
+            )
+            .into());
+        }
+
+        // One standing offer per (resource, subscriber) pair: while an earlier share of
+        // this resource to this account has not been asked to go away, a second offer
+        // cannot be applied to the resource in its current state. A share whose delete is
+        // in flight or complete no longer stands, so the resource can be offered again.
+        if let Some(standing) = registry.standing_share(&input.resource_arn, &input.principal_subscriber)
+        {
+            let share_id = standing.id.clone();
+            crate::state::audit(
+                Self::NAME,
+                ctx,
+                crate::state::AuditOutcome::Conflict,
+                Some(&share_id),
+            );
+            return Err(CreateShareErrorModeled::ConflictException(ConflictException {
+                message: format!(
+                    "resource {} is already shared with account {} by share {share_id}",
+                    input.resource_arn, input.principal_subscriber
+                ),
+            })
+            .into());
+        }
+
+        // The registry is finite: a create that would take it past its cap is refused
+        // rather than growing it, the way the service refuses one past its quota.
+        if registry.shares.len() >= crate::state::MAX_SHARES {
+            crate::state::audit(
+                Self::NAME,
+                ctx,
+                crate::state::AuditOutcome::QuotaExceeded,
+                None,
+            );
+            return Err(CreateShareErrorModeled::ServiceQuotaExceededException(
+                ServiceQuotaExceededException {
+                    message: format!(
+                        "this account already holds the maximum of {} resource shares",
+                        crate::state::MAX_SHARES
+                    ),
+                },
+            )
+            .into());
+        }
+
+        let key = registry.next_share_key();
+        let share = crate::state::Share {
+            id: crate::state::fresh_uuid(),
+            resource_arn: input.resource_arn,
+            resource_id,
+            principal_subscriber: input.principal_subscriber,
+            owner_id,
+            share_name: input.share_name,
+            // The offer waits for the subscriber's `AcceptShare`, which is a caller's
+            // action and not something the clock owes, so the share stays PENDING until
+            // one is made.
+            status: crate::state::SHARE_STATUS_PENDING.to_string(),
+            status_message: None,
+            creation_time_ms: now_ms,
+            update_time_ms: now_ms,
+            status_due_at_ms: None,
+        };
+        let response = reported(&share);
+        let share_id = share.id.clone();
+        registry.shares.insert(key, share);
+        crate::state::audit(
+            Self::NAME,
+            ctx,
+            crate::state::AuditOutcome::ShareCreated,
+            Some(&share_id),
+        );
+
+        Ok(response)
+    }
+}
+
+/// This operation's response for `share`, read from the stored record alone, so the
+/// create and a later `GetShare` cannot disagree about any member they both report.
+fn reported(share: &crate::state::Share) -> CreateShareOutput {
+    CreateShareOutput {
+        share_id: Some(share.id.clone()),
+        share_name: share.share_name.clone(),
+        status: Some(share.status.clone()),
     }
 }

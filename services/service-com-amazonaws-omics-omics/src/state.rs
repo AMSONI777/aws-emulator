@@ -26,7 +26,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use crate::ops::types::{
     ContainerRegistryMap, DefinitionRepository, DefinitionRepositoryDetails, SequenceStoreS3Access,
-    SseConfig, WorkflowParameter,
+    ShareDetails, SseConfig, WorkflowParameter,
 };
 
 /// The ARN service namespace for this service (`arnNamespace`/sigv4 name `omics`).
@@ -220,6 +220,26 @@ pub fn delete_workflow_version_not_found_message(
     format!("Workflow {workflow_id} version {version_name} not found")
 }
 
+/// What a share operation answers when the share the request names is not one it can act
+/// on — either no share this emulator holds carries that id, or (for `DeleteShare`) the
+/// share's delete has already been asked for, which is what the recorded service's choice
+/// of the modelled `ResourceNotFoundException` for that retry says: to a delete, a spent
+/// share is simply not there, even though `GetShare` still reports its terminal status.
+///
+/// The variable part is the share id the REQUEST carried; stated once because every share
+/// operation answering that condition words it the same way.
+pub fn share_not_found_message(share_id: &str) -> String {
+    format!("Share {share_id} not found")
+}
+
+/// What `CreateShare` answers when the resource the request offers is not one this
+/// emulator holds.
+///
+/// The variable part is the resource ARN the REQUEST carried.
+pub fn shared_resource_not_found_message(resource_arn: &str) -> String {
+    format!("Resource {resource_arn} not found")
+}
+
 /// What `DeleteWorkflow` answers when the workflow still holds versions.
 ///
 /// Fixed text: the refusal names no resource, because the rule is about the workflow in
@@ -248,6 +268,49 @@ pub const DEFAULT_RUN_WORKFLOW_TYPE: &str = WORKFLOW_TYPE_PRIVATE;
 ///
 /// From that member's own documentation: "The default value is `RETAIN`."
 pub const DEFAULT_RUN_RETENTION_MODE: &str = "RETAIN";
+
+/// `ShareStatus` a share carries from the moment `CreateShare` answers.
+///
+/// From the modelled `ShareStatus` enum's documentation for this value: "The share has
+/// been created but is not yet active". `CreateShare` makes an OFFER the principal
+/// subscriber accepts, so what moves a share out of this status is a caller's
+/// `AcceptShare` and never the clock: a share stays here until someone acts on it.
+pub const SHARE_STATUS_PENDING: &str = "PENDING";
+
+/// `ShareStatus` a share carries while the delete it was asked for is in flight: "The
+/// share is being deleted".
+pub const SHARE_STATUS_DELETING: &str = "DELETING";
+
+/// `ShareStatus` a deleted share settles on: "The share has been deleted".
+pub const SHARE_STATUS_DELETED: &str = "DELETED";
+
+/// The `ShareStatus` values in which a share no longer offers anything: the delete it
+/// was asked for is in flight or already complete, so the resource is free to be offered
+/// to that subscriber again.
+pub const SPENT_SHARE_STATUSES: &[&str] = &[SHARE_STATUS_DELETING, SHARE_STATUS_DELETED];
+
+/// The resource TYPES that can be shared across accounts, as the resource-type token a
+/// resource ARN carries (`service_common::arn::Arn::resource_type`).
+///
+/// From `CreateShare`'s own documentation: "The following resources support
+/// cross-account sharing: HealthOmics variant stores HealthOmics annotation stores
+/// Private workflows".
+pub const SHAREABLE_RESOURCE_TYPES: &[&str] = &[
+    VARIANT_STORE_RESOURCE_TYPE,
+    ANNOTATION_STORE_RESOURCE_TYPE,
+    WORKFLOW_RESOURCE_TYPE,
+];
+
+/// The resource type a workflow ARN names: what [`WORKFLOW_ARN_RESOURCE_PREFIX`] carries
+/// before its separator. Named on its own because a CALLER-supplied ARN is read by
+/// resource type through `service_common::arn`, not by prefix.
+pub const WORKFLOW_RESOURCE_TYPE: &str = "workflow";
+
+/// The resource type a variant store ARN names.
+pub const VARIANT_STORE_RESOURCE_TYPE: &str = "variantStore";
+
+/// The resource type an annotation store ARN names.
+pub const ANNOTATION_STORE_RESOURCE_TYPE: &str = "annotationStore";
 
 /// How long after the call that starts it a status transition this emulator owes to
 /// the clock becomes due.
@@ -301,6 +364,13 @@ pub const MAX_RUN_CACHES: usize = 500;
 /// quota. A create past it is refused with the modelled
 /// `ServiceQuotaExceededException`.
 pub const MAX_RUN_GROUPS: usize = 500;
+
+/// The most resource shares this emulator will hold. Emulator resource guard, not an AWS
+/// quota — HealthOmics publishes no share ceiling. A share is created by a caller and a
+/// deleted one is kept so its terminal status stays readable, so this growth site carries
+/// a cap like every other; a create past it is refused with the modelled
+/// `ServiceQuotaExceededException`.
+pub const MAX_SHARES: usize = 500;
 
 /// The most multipart read set uploads this emulator will hold for ONE sequence store.
 ///
@@ -774,6 +844,88 @@ impl RunGroup {
     }
 }
 
+/// One stored cross-account resource share: every member `GetShare` reports.
+#[derive(Debug, Clone, Default)]
+pub struct Share {
+    /// The id HealthOmics generates for the share; this record's identity on the wire.
+    pub id: String,
+    /// The ARN of the shared resource, exactly as the create named it.
+    pub resource_arn: String,
+    /// The id of the shared resource: the part of that ARN's resource path after its
+    /// type, so one value is never derived twice from the same ARN.
+    pub resource_id: String,
+    /// The account being offered access.
+    pub principal_subscriber: String,
+    /// The account that owns the resource and made the offer.
+    pub owner_id: String,
+    pub share_name: Option<String>,
+    pub status: String,
+    pub status_message: Option<String>,
+    pub creation_time_ms: i64,
+    /// When this record last changed, in epoch millis: the create, and then each status
+    /// move it makes.
+    pub update_time_ms: i64,
+    /// When the `DELETING` -> `DELETED` move the clock owes this share becomes due, in
+    /// epoch millis; `None` when it owes none.
+    pub status_due_at_ms: Option<i64>,
+}
+
+impl Share {
+    /// Apply the `DELETING` -> `DELETED` move the clock already owed this share by
+    /// `now_ms`.
+    ///
+    /// Reporting-only, like every other `settle` here: the move was due at the same
+    /// instant whether or not anybody called, and `updateTime` is stamped with the instant
+    /// it fell due rather than with the moment somebody noticed, so when the status landed
+    /// does not depend on when the read happened.
+    pub fn settle(&mut self, now_ms: i64) {
+        if let Some(due) = self.status_due_at_ms.filter(|due| *due <= now_ms) {
+            self.status = SHARE_STATUS_DELETED.to_string();
+            self.status_due_at_ms = None;
+            self.update_time_ms = due;
+        }
+    }
+
+    /// Whether this share still offers access: it has not been asked to go away, from
+    /// [`SPENT_SHARE_STATUSES`].
+    pub fn offer_stands(&self) -> bool {
+        !SPENT_SHARE_STATUSES.contains(&self.status.as_str())
+    }
+
+    /// This record as the `ShareDetails` every reader of a share reports, so each one
+    /// answers from the same members.
+    pub fn details(&self) -> ShareDetails {
+        ShareDetails {
+            share_id: Some(self.id.clone()),
+            resource_arn: Some(self.resource_arn.clone()),
+            resource_id: Some(self.resource_id.clone()),
+            principal_subscriber: Some(self.principal_subscriber.clone()),
+            owner_id: Some(self.owner_id.clone()),
+            status: Some(self.status.clone()),
+            status_message: self.status_message.clone(),
+            share_name: self.share_name.clone(),
+            creation_time: Some(timestamp(self.creation_time_ms)),
+            update_time: Some(timestamp(self.update_time_ms)),
+        }
+    }
+}
+
+/// Which resource `resource_arn` names when it names one that supports cross-account
+/// sharing, as the `(resource type, resource id)` pair — `None` for anything else.
+///
+/// A caller-supplied ARN is read through the ONE parse,
+/// `service_common::arn::parse_of`, against this service's own vendor namespace; the
+/// resource type must be one of [`SHAREABLE_RESOURCE_TYPES`] and must name a non-empty
+/// id, because a type with no id addresses no resource to offer.
+pub fn shareable_resource(resource_arn: &str) -> Option<(&'static str, &str)> {
+    let arn = ::service_common::arn::parse_of(resource_arn, ARN_SERVICE)?;
+    let resource_type = SHAREABLE_RESOURCE_TYPES
+        .iter()
+        .find(|shareable| **shareable == arn.resource_type())?;
+    let id = ::service_common::arn::resource_id_of_type(resource_arn, resource_type)?;
+    (!id.is_empty()).then_some((*resource_type, id))
+}
+
 /// Whether `status` is one a run stays in until something other than the clock moves
 /// it, from [`TERMINAL_RUN_STATUSES`].
 pub fn is_terminal_run_status(status: &str) -> bool {
@@ -821,6 +973,13 @@ pub struct ComAmazonawsOmicsOmicsState {
     pub run_caches: BTreeMap<u64, RunCache>,
     /// Every run group, keyed by its numeric id, in creation order for the same reason.
     pub run_groups: BTreeMap<u64, RunGroup>,
+    /// Every cross-account resource share, keyed by a counter so the map's own key order
+    /// is creation order, as it is for every other store here. A share's id is a minted
+    /// UUID rather than the decimal the other resources carry — the modelled `shareId` is
+    /// a plain string with no pattern — so the id a caller presents is matched against
+    /// the records themselves ([`ComAmazonawsOmicsOmicsState::share`]) and the key stays
+    /// the creation order a listing pages over.
+    pub shares: BTreeMap<u64, Share>,
     /// `(operation, requestId)` -> the numeric id of the resource that request
     /// created, so a replayed `@idempotencyToken` answers with the original resource
     /// instead of minting a second one.
@@ -831,6 +990,7 @@ pub struct ComAmazonawsOmicsOmicsState {
     next_multipart_read_set_upload_id: u64,
     next_run_cache_id: u64,
     next_run_group_id: u64,
+    next_share_key: u64,
 }
 
 impl ComAmazonawsOmicsOmicsState {
@@ -846,6 +1006,9 @@ impl ComAmazonawsOmicsOmicsState {
         }
         for store in self.sequence_stores.values_mut() {
             store.settle(now_ms);
+        }
+        for share in self.shares.values_mut() {
+            share.settle(now_ms);
         }
         // A run cache owes the clock nothing: no value of the modelled
         // `RunCacheStatus` enum is a transient "being created" state, so a cache is
@@ -909,6 +1072,40 @@ impl ComAmazonawsOmicsOmicsState {
     /// The run group the modelled `RunGroupId` `id` names, or `None`.
     pub fn run_group(&self, id: &str) -> Option<&RunGroup> {
         self.run_groups.get(&numeric_id(id)?)
+    }
+
+    /// The share the modelled `shareId` `id` names, or `None`.
+    ///
+    /// A share id is not a store key (see [`ComAmazonawsOmicsOmicsState::shares`]), so
+    /// the match is against the records; the store is bounded by [`MAX_SHARES`], and this
+    /// is the ONE place a share id is resolved, so every share operation agrees about
+    /// which record an id names.
+    pub fn share(&self, id: &str) -> Option<&Share> {
+        self.shares.values().find(|share| share.id == id)
+    }
+
+    /// The same record, for an operation that CHANGES the share, resolved by the same
+    /// rule.
+    pub fn share_mut(&mut self, id: &str) -> Option<&mut Share> {
+        self.shares.values_mut().find(|share| share.id == id)
+    }
+
+    /// The share that already offers `resource_arn` to `principal_subscriber`, if one
+    /// stands: a resource can be offered to an account once at a time, and a share whose
+    /// delete is in flight or complete no longer holds the offer.
+    pub fn standing_share(&self, resource_arn: &str, principal_subscriber: &str) -> Option<&Share> {
+        self.shares.values().find(|share| {
+            share.resource_arn == resource_arn
+                && share.principal_subscriber == principal_subscriber
+                && share.offer_stands()
+        })
+    }
+
+    /// Mint the next share store key, which is the creation order the map is read in.
+    pub fn next_share_key(&mut self) -> u64 {
+        let key = self.next_share_key;
+        self.next_share_key += 1;
+        key
     }
 
     /// Mint the next workflow id, as the decimal string the model's pattern wants
@@ -1232,9 +1429,10 @@ pub fn definition_digest(definition_zip: Option<&[u8]>) -> Option<String> {
 /// (`engine::emulator_account_id()`).
 ///
 /// A `workflowOwnerId` naming any other account asks for a workflow SHARED from that
-/// account. Cross-account sharing is its own slice (`CreateShare`/`AcceptShare` are still
-/// 501 in this crate), so no such workflow can be resolved and the request is answered
-/// "not found" rather than silently served from this account's own store.
+/// account. A share this emulator holds is an offer made BY this account, and the
+/// subscriber's side of it (`AcceptShare`) is its own slice, so no workflow owned
+/// elsewhere can be resolved and the request is answered "not found" rather than silently
+/// served from this account's own store.
 pub fn is_emulator_account(account_id: &str) -> bool {
     account_id == ::engine::emulator_account_id()
 }
@@ -1400,6 +1598,10 @@ pub enum AuditOutcome {
     RunCacheCreated,
     /// A run group was minted and stored.
     RunGroupCreated,
+    /// A cross-account resource share was minted and stored.
+    ShareCreated,
+    /// A stored share was asked to go away, and carries the status that move leaves it in.
+    ShareDeleted,
     /// A replayed `@idempotencyToken` changed nothing and answered with the resource the
     /// first call created.
     NoChange,
@@ -1434,6 +1636,8 @@ impl AuditOutcome {
             Self::MultipartReadSetUploadCreated => "multipart-read-set-upload-created",
             Self::RunCacheCreated => "run-cache-created",
             Self::RunGroupCreated => "run-group-created",
+            Self::ShareCreated => "share-created",
+            Self::ShareDeleted => "share-deleted",
             Self::NoChange => "no-change",
             Self::Reported => "reported",
             Self::ValidationRefused => "validation-refused",
