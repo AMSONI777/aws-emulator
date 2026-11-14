@@ -33,7 +33,9 @@ mod state_roundtrip;
 mod stop_mid_rollout_withdraws_the_release;
 #[path = "all/token_validation_and_lifetime.rs"]
 mod token_validation_and_lifetime;
-// A clock-driven suite: it waits out a rollout's growth intervals rather than writing a
-// percentage into the store, so its file name sorts it last.
+// Clock-driven suites: they wait out a rollout's growth intervals rather than writing a
+// percentage into the store, so their file names sort them last.
+#[path = "all/zz_growth_schedule_gates_sessions.rs"]
+mod zz_growth_schedule_gates_sessions;
 #[path = "all/zz_timing.rs"]
 mod zz_timing;
