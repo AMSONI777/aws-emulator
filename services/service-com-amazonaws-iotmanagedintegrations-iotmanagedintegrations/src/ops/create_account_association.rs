@@ -9,7 +9,9 @@
 //! and `ListAccountAssociations` report what this call was given. The record starts in
 //! `crate::state::INITIAL_ASSOCIATION_STATE` — leaving it needs the end user to
 //! authenticate at the third-party platform, which no clock in this emulator performs —
-//! and its `OAuthAuthorizationUrl` is `crate::state::NO_OAUTH_AUTHORIZATION_URL`. A
+//! and its `OAuthAuthorizationUrl` is the authorization request that end user completes,
+//! built from that destination's own OAuth configuration
+//! (`crate::state::o_auth_authorization_url`). A
 //! retry carrying the same `ClientToken` replays the first call's answer.
 //!
 //! ## Shape of an operation
@@ -254,6 +256,15 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         // opaque id satisfies.
         let id = crate::state::opaque_id();
         let arn = crate::state::account_association_arn(&region, &id);
+        // The authorization request this association's end user completes, built from the
+        // OAuth configuration of the destination resolved above — the modelled empty URL
+        // where that destination configures none, which is a General Authorization flow.
+        let o_auth_authorization_url = store
+            .connector_destination_in(&region, &input.connector_destination_id)
+            .map_or_else(
+                || crate::state::NO_OAUTH_AUTHORIZATION_URL.to_string(),
+                |destination| crate::state::o_auth_authorization_url(destination, &id),
+            );
         let association = crate::state::AccountAssociation {
             id: id.clone(),
             arn: arn.clone(),
@@ -264,7 +275,7 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
             association_state: crate::state::INITIAL_ASSOCIATION_STATE.to_string(),
             // An association that has not failed carries no error message.
             error_message: None,
-            o_auth_authorization_url: crate::state::NO_OAUTH_AUTHORIZATION_URL.to_string(),
+            o_auth_authorization_url,
             general_authorization: input.general_authorization,
             tags: input.tags.unwrap_or_default(),
             sequence,

@@ -186,7 +186,7 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
                 // with, naming no identifier; the identifier the request carried is
                 // reported on `ResourceId`.
                 GetAccountAssociationErrorModeled::ResourceNotFoundException(
-                    crate::state::account_association_not_found_on_read(
+                    crate::state::account_association_not_found(
                         &input.account_association_id,
                     ),
                 )

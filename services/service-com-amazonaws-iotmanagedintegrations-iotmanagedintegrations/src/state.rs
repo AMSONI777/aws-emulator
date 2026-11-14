@@ -778,8 +778,10 @@ pub struct AccountAssociation {
     /// association enters `ASSOCIATION_FAILED`, which no operation in this slice does.
     pub error_message: Option<String>,
     /// `OAuthAuthorizationUrlOutput` — the third-party OAuth authorization URL the end
-    /// user authenticates at. Always [`NO_OAUTH_AUTHORIZATION_URL`] here; see that
-    /// constant for why.
+    /// user authenticates at for the flow this record is in, as
+    /// [`o_auth_authorization_url`] builds it from the connector destination's own OAuth
+    /// configuration. [`NO_OAUTH_AUTHORIZATION_URL`] for a destination that configures no
+    /// OAuth, which is a General Authorization flow.
     pub o_auth_authorization_url: String,
     /// `GeneralAuthorizationName` exactly as the create supplied it, so a read reports
     /// the authorization material the caller named.
@@ -790,6 +792,26 @@ pub struct AccountAssociation {
     /// Monotonic insertion sequence. `ListAccountAssociations` pages by it, so a page
     /// token keeps resuming at the right place even when records are deleted in between.
     pub sequence: u64,
+}
+
+impl AccountAssociation {
+    /// Whether this association's deletion has already begun, so no new authorization flow
+    /// can be started for it ([`ASSOCIATION_STATE_DELETING`]).
+    pub fn is_deleting(&self) -> bool {
+        self.association_state == ASSOCIATION_STATE_DELETING
+    }
+
+    /// Put this association back into its authorization flow, which is what starting a
+    /// refresh of it DOES: its authorization and connection status are re-established from
+    /// scratch, so the record carries the in-progress state again
+    /// ([`INITIAL_ASSOCIATION_STATE`]), the error of the flow that ended is gone — a new
+    /// flow has not failed yet — and the URL the new flow's end user authenticates at
+    /// replaces the one the flow that ended named.
+    pub fn begin_authorization_refresh(&mut self, o_auth_authorization_url: String) {
+        self.association_state = INITIAL_ASSOCIATION_STATE.to_string();
+        self.error_message = None;
+        self.o_auth_authorization_url = o_auth_authorization_url;
+    }
 }
 
 /// The `AssociationState` a freshly created account association carries.
@@ -803,18 +825,99 @@ pub struct AccountAssociation {
 /// [`ASSOCIATION_STATE_VALUES`].
 pub const INITIAL_ASSOCIATION_STATE: &str = "ASSOCIATION_IN_PROGRESS";
 
-/// The `OAuthAuthorizationUrl` this emulator reports for an account association: none.
+/// The `OAuthAuthorizationUrl` an account association whose authorization needs no OAuth
+/// carries: none.
 ///
-/// The URL AWS answers with points at the third-party platform's OAuth authorization
-/// server, "backed with all the required parameters to perform end-user authentication" —
-/// a live handshake with a server outside this emulator, which no stored
-/// `ConnectorDestination` `AuthConfig` can stand in for: the association this URL belongs
-/// to is not resolved against a stored destination at all (see
-/// `crate::ops::create_account_association`). The modelled member has `@default ""` and
-/// AWS itself reports it empty "when using General Authorization flows that do not require
-/// OAuth", so the empty string is a modelled value rather than an invented one;
-/// synthesising an `https://…` URL for a handshake nothing performs would be fabrication.
+/// The modelled member has `@default ""`, and AWS reports it empty "when using General
+/// Authorization flows that do not require OAuth" — which is every association whose
+/// connector destination configures no `OAuthConfig` to authorize against, and the only case
+/// this emulator has no authorization server URL to state ([`o_auth_authorization_url`]).
 pub const NO_OAUTH_AUTHORIZATION_URL: &str = "";
+
+/// The `@length` maximum of `OAuthAuthorizationUrlOutput`, in characters
+/// (`smithy_query(query="shape",shape="OAuthAuthorizationUrlOutput")` reports len 0..1024,
+/// pattern `^$|^(https):\/\/.*$`), so a URL longer than this cannot be reported on the
+/// member at all.
+pub const MAX_O_AUTH_AUTHORIZATION_URL_LENGTH: usize = 1024;
+
+/// The scheme `OAuthAuthorizationUrlOutput`'s `@pattern` admits: a URL of any other scheme
+/// cannot be reported on that member.
+const O_AUTH_AUTHORIZATION_URL_SCHEME: &str = "https";
+
+/// The `response_type` parameter of an OAuth authorization request, and the grant an
+/// authorization URL of this service asks for: the authorization CODE the service then
+/// exchanges at the destination's `TokenUrl` for the tokens it refreshes — which is the
+/// grant a destination configuring a token endpoint and a refresh-token renewal is in
+/// (`smithy_query(query="shape",shape="OAuthConfig")` -> `tokenUrl`,
+/// `proactiveRefreshTokenRenewal`).
+const OAUTH_RESPONSE_TYPE_PARAMETER: &str = "response_type";
+const OAUTH_AUTHORIZATION_CODE_RESPONSE_TYPE: &str = "code";
+
+/// The `scope` parameter, which carries the scope the destination's OAuth configuration
+/// names (`smithy_query(query="shape",shape="OAuthConfig")` -> `scope`).
+const OAUTH_SCOPE_PARAMETER: &str = "scope";
+
+/// The `state` parameter, which is what ties a completed authorization back to the account
+/// association it was started for: the association's own identifier.
+const OAUTH_STATE_PARAMETER: &str = "state";
+
+/// The `OAuthAuthorizationUrl` of an account association against `destination`: the
+/// authorization-server URL that destination's OAuth configuration names, carrying the
+/// parameters of the authorization request `association_id`'s end user completes.
+///
+/// AWS answers "Third party IoT platform OAuth authorization server URL backed with all the
+/// required parameters to perform end-user authentication", so both halves come from stored
+/// state: the server is the destination's own `AuthUrl`
+/// (`smithy_query(query="shape",shape="OAuthConfig")` -> `authUrl`), and the parameters are
+/// the grant asked for ([`OAUTH_AUTHORIZATION_CODE_RESPONSE_TYPE`]), the configured scope
+/// where there is one, and the association this authorization belongs to. Any query the
+/// configured URL already carries is kept, as it is part of the server's own address.
+///
+/// No `client_id` is added: a destination's OAuth client credentials live in the Secrets
+/// Manager secret it names, whose CONTENT this emulator never reads, so a client id here
+/// could only be invented. Nor is a `redirect_uri`: the endpoint an authorization is
+/// completed at belongs to the service's own OAuth-completion surface, which this emulator
+/// does not serve.
+///
+/// [`NO_OAUTH_AUTHORIZATION_URL`] where there is no authorization server to name: a
+/// destination configuring no OAuth at all (a General Authorization flow), or one whose
+/// `AuthUrl` the modelled output member cannot carry — it has to parse, to be
+/// [`O_AUTH_AUTHORIZATION_URL_SCHEME`] and to stay within
+/// [`MAX_O_AUTH_AUTHORIZATION_URL_LENGTH`] characters, the same way a destination's
+/// `OAuthCompleteRedirectUrl` is reported only where the output member's constraints admit
+/// it ([`ConnectorDestination::o_auth_complete_redirect_url`]).
+pub fn o_auth_authorization_url(destination: &ConnectorDestination, association_id: &str) -> String {
+    let Some(o_auth) = destination.auth_config.o_auth.as_ref() else {
+        return NO_OAUTH_AUTHORIZATION_URL.to_string();
+    };
+    let Ok(mut url) = ::url::Url::parse(&o_auth.auth_url) else {
+        return NO_OAUTH_AUTHORIZATION_URL.to_string();
+    };
+    if url.scheme() != O_AUTH_AUTHORIZATION_URL_SCHEME {
+        return NO_OAUTH_AUTHORIZATION_URL.to_string();
+    }
+    {
+        let mut parameters = url.query_pairs_mut();
+        parameters.append_pair(
+            OAUTH_RESPONSE_TYPE_PARAMETER,
+            OAUTH_AUTHORIZATION_CODE_RESPONSE_TYPE,
+        );
+        if let Some(scope) = o_auth.scope.as_deref().filter(|scope| !scope.is_empty()) {
+            parameters.append_pair(OAUTH_SCOPE_PARAMETER, scope);
+        }
+        parameters.append_pair(OAUTH_STATE_PARAMETER, association_id);
+    }
+    let authorization_url = String::from(url);
+    if authorization_url.chars().count() > MAX_O_AUTH_AUTHORIZATION_URL_LENGTH {
+        return NO_OAUTH_AUTHORIZATION_URL.to_string();
+    }
+    authorization_url
+}
+
+/// The `AssociationState` of an account association whose deletion has begun: a member of
+/// [`ASSOCIATION_STATE_VALUES`], and the one state no authorization flow can be started
+/// from, because the record it would belong to is on its way out of the store.
+pub const ASSOCIATION_STATE_DELETING: &str = "ASSOCIATION_DELETING";
 
 /// The `ResourceType` this service reports an account association under — the Smithy
 /// resource name, as [`MANAGED_THING_RESOURCE_TYPE`] is for a managed thing. It is also
@@ -1417,6 +1520,42 @@ impl ComAmazonawsIotmanagedintegrationsIotmanagedintegrationsState {
         self.account_associations
             .get_mut(id)
             .filter(|association| association.region == region)
+    }
+
+    /// Start a new authorization flow for the account association `region`'s endpoint holds
+    /// under `id`, and answer the `OAuthAuthorizationUrl` its end user completes it at.
+    ///
+    /// `None` when this region holds no such association. `Err` carrying the record's
+    /// `AssociationState` when that state admits no new flow — an association whose deletion
+    /// has begun ([`AccountAssociation::is_deleting`]) — in which case nothing is written.
+    ///
+    /// The URL is computed from the connector destination the association was created
+    /// against AS IT STANDS NOW ([`o_auth_authorization_url`]), so a flow started after that
+    /// destination's OAuth configuration was updated authorizes against the updated one; a
+    /// destination deleted since leaves nothing to authorize against, which is the modelled
+    /// empty URL rather than a stale one.
+    pub fn begin_account_association_refresh(
+        &mut self,
+        region: &str,
+        id: &str,
+    ) -> Option<Result<String, String>> {
+        let association = self.account_association_in(region, id)?;
+        if association.is_deleting() {
+            return Some(Err(association.association_state.clone()));
+        }
+        let (association_id, connector_destination_id) = (
+            association.id.clone(),
+            association.connector_destination_id.clone(),
+        );
+        let authorization_url = self
+            .connector_destination_in(region, &connector_destination_id)
+            .map_or_else(
+                || NO_OAUTH_AUTHORIZATION_URL.to_string(),
+                |destination| o_auth_authorization_url(destination, &association_id),
+            );
+        self.account_association_in_mut(region, id)?
+            .begin_authorization_refresh(authorization_url.clone());
+        Some(Ok(authorization_url))
     }
 
     /// The tags of the resource the `IoTManagedIntegrationsResourceARN` `arn` names, as
@@ -2548,17 +2687,37 @@ fn capitalized(word: &str) -> String {
     }
 }
 
-/// The modelled `ResourceNotFoundException` a READ answers for an account association the
-/// store does not hold under the identifier a request named: the sentence this resource's
-/// backend words its absence with ([`subject_not_found_message`]) plus the `ResourceId` and
-/// `ResourceType` members the recorded body carries.
-pub fn account_association_not_found_on_read(identifier: &str) -> ResourceNotFoundException {
+/// The modelled `ResourceNotFoundException` EVERY operation of this service answers for an
+/// account association the store does not hold under the identifier a request named: the
+/// sentence this resource's backend words its absence with ([`subject_not_found_message`])
+/// plus the `ResourceId` and `ResourceType` members the recorded body carries.
+///
+/// ONE reason, read and mutation alike, as a cloud connector's 404s carry
+/// ([`cloud_connector_not_found`]): [`subject_not_found_message`] is the sentence a resource
+/// whose backend words its absence that way carries from EVERY operation that resolves one
+/// and finds none, so the account association's own paths — its read, and the refresh that
+/// re-initiates its authorization — state it the same way.
+pub fn account_association_not_found(identifier: &str) -> ResourceNotFoundException {
     ResourceNotFoundException {
         message: Some(subject_not_found_message(
             ACCOUNT_ASSOCIATION_RESOURCE_SUBJECT,
         )),
         ..resource_not_found(ACCOUNT_ASSOCIATION_RESOURCE_TYPE, identifier)
     }
+}
+
+/// How this service states that the account association a call named cannot start a new
+/// authorization flow, because the state its record carries admits none.
+///
+/// The text is BUILT FROM THE STORE — the state at fault is the one the record holds, so the
+/// sentence names the rule and the association's own state rather than a value of the
+/// request, as every other refusal this service words does
+/// ([`runtime_logging_unsupported_message`]).
+pub fn account_association_not_refreshable_message(association_state: &str) -> String {
+    format!(
+        "{ACCOUNT_ASSOCIATION_RESOURCE_SUBJECT} is in {association_state} state, so its \
+         authorization cannot be refreshed"
+    )
 }
 
 /// How a CREATE states that the resource it was to mint is already there: the resource as

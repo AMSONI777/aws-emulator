@@ -1,15 +1,17 @@
 // SPDX-License-Identifier: CC0-1.0
 
 //! @op StartAccountAssociationRefresh
-//! SCAFFOLDED, NOT IMPLEMENTED: this operation answers HTTP 501 `NotImplemented` and
-//! asserts NOTHING about `StartAccountAssociationRefresh`'s real behaviour. Implement it here — this is
-//! the ONLY file to touch for this operation.
 //!
-//! A 501 from this operation means "nobody has written it yet", never "the emulator is
-//! broken". Replace the `Err(..)` in [`StartAccountAssociationRefresh::handle`] with real behaviour and
-//! delete the SCAFFOLDED marker line above; that line is the machine-readable record of
-//! which operations are still stubs (`grep -rl '^//! SCAFFOLDED, NOT IMPLEMENTED:' */src/ops/`),
-//! so leaving it on an implemented operation under-reports progress.
+//! Starts a new authorization flow for the account association `crate::state`'s
+//! `account_associations` store holds under the `AccountAssociationId` the request names,
+//! and answers that association's `OAuthAuthorizationUrl` — the address the end user
+//! authenticates at for the flow this call starts. A MUTATION: the stored record carries
+//! the in-progress association state again and the error of the flow that ended is dropped
+//! ([`crate::state::AccountAssociation::begin_authorization_refresh`]), which
+//! `GetAccountAssociation` and `ListAccountAssociations` report. An identifier this
+//! region's endpoint holds no association under is the modelled
+//! `ResourceNotFoundException`, and an association whose deletion has begun admits no new
+//! flow, which is the modelled `ConflictException`.
 //!
 //! ## Shape of an operation
 //!
@@ -128,6 +130,21 @@ pub struct StartAccountAssociationRefresh<Eng> {
     engine: ::std::sync::Arc<Eng>,
 }
 
+/// Record this state-changing call for attribution: the access key id the caller presented
+/// (a public identifier, never a secret), the region the association lives in and how the
+/// call ended. No account-association id and no authorization material: a log sink needs
+/// neither to attribute the change.
+fn audit(akid: &str, region: &str, outcome: &str) {
+    ::tracing::info!(
+        target: "emulator::audit",
+        operation = "StartAccountAssociationRefresh",
+        akid = %akid,
+        region = %region,
+        outcome = %outcome,
+        "state-changing operation"
+    );
+}
+
 impl<Eng> StartAccountAssociationRefresh<Eng> {
     /// Construct the operation from the shared engine. INFALLIBLE — the engine is a
     /// construction-time dependency, so engine access is guaranteed by the time any
@@ -154,18 +171,67 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         input: Self::Input,
         ctx: &smithy_server_runtime::OperationContext<'_>,
     ) -> Result<Self::Output, Self::Error> {
-        // The engine is reachable from `&self` (constructor-injected); `ctx` carries
-        // request metadata. Both are bound here so an implementer has them in scope.
-        let _ = (&input, ctx, &self.engine);
-        // Implement `StartAccountAssociationRefresh` here, then delete the SCAFFOLDED marker at the top of
-        // this file. Return modeled failures as
-        // `Err(StartAccountAssociationRefreshErrorModeled::Variant(..).into())` — the `From` impl above lifts it.
-        //
-        // To refuse a bad request this operation models no error for, return
-        // `Err(crate::scaffolded::Scaffolded::validation("..."))` — a 400
-        // `ValidationException`. Do NOT answer 501 for it: 501 means "not written yet",
-        // not "bad request". Modeled constraints are already refused BEFORE this
-        // handler runs, so reaching here means the input satisfies every one of them.
-        Err(crate::scaffolded::Scaffolded::not_implemented("StartAccountAssociationRefresh"))
+        // The credential scope's access key id is read only to ATTRIBUTE the change
+        // ([`audit`]); the region it names is the region whose association is refreshed.
+        let akid = ::emulator_server::extract_akid(&ctx.parts().headers);
+        let region = crate::state::request_region(ctx.parts());
+
+        let state = crate::state::service_state(&*self.engine).ok_or_else(|| {
+            audit(&akid, &region, "unavailable");
+            StartAccountAssociationRefreshErrorModeled::InternalServerException(
+                InternalServerException {
+                    message: Some("the account-association store is unavailable".to_string()),
+                },
+            )
+        })?;
+
+        // The store is consulted and written under ONE lock, so two refreshes of the same
+        // association cannot both read the state the other is about to replace. An account
+        // association is regional, as every resource of this service is: only the region
+        // that created it resolves it.
+        let started = state
+            .lock()
+            .begin_account_association_refresh(&region, &input.account_association_id);
+
+        match started {
+            // No such association in this region: nothing was written.
+            None => {
+                audit(&akid, &region, "not-found");
+                Err(
+                    StartAccountAssociationRefreshErrorModeled::ResourceNotFoundException(
+                        crate::state::account_association_not_found(
+                            &input.account_association_id,
+                        ),
+                    )
+                    .into(),
+                )
+            }
+            // An association on its way out of the store starts no new flow, and the state
+            // it carries is what the refusal states.
+            Some(Err(association_state)) => {
+                audit(&akid, &region, "conflict");
+                Err(
+                    StartAccountAssociationRefreshErrorModeled::ConflictException(
+                        ConflictException {
+                            message: Some(
+                                crate::state::account_association_not_refreshable_message(
+                                    &association_state,
+                                ),
+                            ),
+                        },
+                    )
+                    .into(),
+                )
+            }
+            // The URL the end user authenticates at for the flow this call started: the one
+            // the record now carries, built from the connector destination's own OAuth
+            // configuration.
+            Some(Ok(o_auth_authorization_url)) => {
+                audit(&akid, &region, "refreshing");
+                Ok(StartAccountAssociationRefreshOutput {
+                    o_auth_authorization_url,
+                })
+            }
+        }
     }
 }
