@@ -477,10 +477,15 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         // the service itself owns.
         crate::state::stack_tags::validate_optional_tags(input.tags.as_deref())
             .map_err(crate::scaffolded::Scaffolded::validation_error)?;
-        // The documented `TemplateBody` maximum, which the model carries no `@length` for:
-        // a stored body is caller-sized otherwise.
-        crate::state::validate_template_body(&template_body)
-            .map_err(crate::scaffolded::Scaffolded::validation_error)?;
+        // The ceiling the SOURCE that carried this template is held to: the documented
+        // `TemplateBody` maximum for a body the request carried inline, which the model
+        // carries no `@length` for, and the documented maximum of a template read from an
+        // object for one a reference resolved.
+        crate::state::validate_submitted_template_body(
+            &template_body,
+            input.template_url.is_some(),
+        )
+        .map_err(crate::scaffolded::Scaffolded::validation_error)?;
         // "Only one of the Capabilities and ResourceType parameters can be specified": the
         // two members state two different bounds on this create, so a request stating both
         // states no one bound and is refused for its SHAPE, before either bound is weighed

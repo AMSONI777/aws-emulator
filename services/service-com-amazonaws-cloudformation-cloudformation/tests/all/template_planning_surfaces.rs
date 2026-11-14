@@ -809,9 +809,11 @@ async fn a_template_url_is_refused_for_the_kind_of_location_it_is() {
             "TemplateURL must be a supported URL.",
         ),
         (
+            // Text no URL reader will read carries no https location either, so it is
+            // refused for the scheme the documentation fixes.
             "text no URL reader will read at all",
             "a-bucket/a-template.json",
-            "TemplateURL must be a supported URL.",
+            "The location for an Amazon S3 bucket must start with https://",
         ),
         (
             "a bucket's static website endpoint",

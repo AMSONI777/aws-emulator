@@ -515,6 +515,7 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         // it addresses is read from this emulator's own Amazon S3 and becomes the body this
         // update deploys, so a template submitted by reference and the same one submitted
         // inline apply the same update (`crate::state::template_url`).
+        let from_reference = input.template_url.is_some();
         if let Some(url) = input.template_url.take() {
             let body = crate::state::template_url::fetch(
                 ctx,
@@ -606,9 +607,11 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         // the stack already carries that body's processed stage.
         let submitted = match &input.template_body {
             Some(body) => {
-                // The documented `TemplateBody` maximum, which the model carries no
-                // `@length` for.
-                crate::state::validate_template_body(body)
+                // The ceiling the SOURCE that carried this template is held to: the
+                // documented `TemplateBody` maximum for a body the request carried inline,
+                // and the documented maximum of a template read from an object for one the
+                // reference above resolved.
+                crate::state::validate_submitted_template_body(body, from_reference)
                     .map_err(crate::scaffolded::Scaffolded::validation_error)?;
                 // The documented per-template quotas, the ceilings
                 // `DescribeAccountLimits` advertises for this account: a body past one is

@@ -814,7 +814,7 @@ pub fn insufficient_capabilities_message(missing: &[String]) -> String {
 /// reader will not read declares no resources and no outputs rather than a subset of them.
 /// [`not_well_formed`] is how every operation refuses such a body.
 pub fn parse(body: &str) -> Option<Template> {
-    parse_within(body, super::TEMPLATE_BODY_MAX_BYTES)
+    parse_within(body, super::TEMPLATE_MAX_BYTES)
 }
 
 /// [`parse`] under the caller's OWN ceiling on the body ([`document_within`]): the maximum
@@ -927,7 +927,7 @@ fn yaml_failure_position(body: &str) -> Option<(usize, usize)> {
 
     // The same guard the reader itself applies, so a body refused for its nesting is not
     // scanned a second time.
-    guard_yaml_body(body, super::TEMPLATE_BODY_MAX_BYTES)?;
+    guard_yaml_body(body, super::TEMPLATE_MAX_BYTES)?;
     let error = ::yaml_rust2::parser::Parser::new_from_str(body)
         .load(&mut Discard, true)
         .err()?;
@@ -1015,7 +1015,7 @@ pub fn resources_refusal(declared: &Template) -> Option<String> {
 /// `DescribeAccountLimits` advertises, and an advertised ceiling a write is not held to is
 /// no ceiling.
 pub fn quota_violation(body: &str) -> Option<String> {
-    quota_violation_within(body, super::TEMPLATE_BODY_MAX_BYTES)
+    quota_violation_within(body, super::TEMPLATE_MAX_BYTES)
 }
 
 /// [`quota_violation`] under the caller's OWN ceiling on the body, for an operation that reads
@@ -1133,7 +1133,7 @@ pub(crate) fn s3_uri_parts(uri: &str) -> Option<(&str, &str, Option<&str>)> {
 /// of it), and `serde_json`'s own limit bounds nesting depth rather than size, so a large
 /// FLAT body would otherwise be read and copied unbounded.
 pub(crate) fn document(body: &str) -> Option<Value> {
-    document_within(body, super::TEMPLATE_BODY_MAX_BYTES)
+    document_within(body, super::TEMPLATE_MAX_BYTES)
 }
 
 /// [`document`] under the caller's OWN ceiling on the body.
@@ -3871,8 +3871,8 @@ pub const MAX_EXPANDED_ENTRIES: usize = 10_000;
 
 /// The most bytes one template's expansion may materialise, counted before any copy is
 /// made: entries alone do not bound the work, because one entry can be a large subtree.
-/// Eight times the documented submitted-body maximum.
-pub const MAX_EXPANDED_BYTES: usize = 8 * super::TEMPLATE_BODY_MAX_BYTES;
+/// Eight times the largest template this service reads.
+pub const MAX_EXPANDED_BYTES: usize = 8 * super::TEMPLATE_MAX_BYTES;
 
 /// The deepest the expander descends into a template document.
 ///
@@ -4011,13 +4011,13 @@ pub fn process(body: &str) -> Processed {
 /// `Default`; one with no value in force at all leaves the directive unresolved, which is a
 /// stage this service reports as unavailable rather than guessing a count for.
 pub fn process_with_parameters(body: &str, supplied: &BTreeMap<String, String>) -> Processed {
-    // The documented submitted-body maximum, enforced here too: every handler checks it
-    // before storing a body, and this is the expander's own guard so no caller reaches the
-    // expansion with a body past that bound.
-    if body.len() > super::TEMPLATE_BODY_MAX_BYTES {
+    // The largest template this service reads at all, enforced here too: this is the
+    // expander's own guard, so no caller reaches the expansion with a body past the bound
+    // every reading of a template is held to.
+    if body.len() > super::TEMPLATE_MAX_BYTES {
         return Processed::Unavailable(format!(
             "the template body exceeds {} bytes",
-            super::TEMPLATE_BODY_MAX_BYTES
+            super::TEMPLATE_MAX_BYTES
         ));
     }
     let declared = body_declared_transforms(body);

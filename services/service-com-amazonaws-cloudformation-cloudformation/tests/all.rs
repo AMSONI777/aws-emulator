@@ -85,6 +85,8 @@ mod change_set_preview;
 mod change_set_recreation;
 #[path = "all/change_set_status_refusals.rs"]
 mod change_set_status_refusals;
+#[path = "all/change_set_template_sources.rs"]
+mod change_set_template_sources;
 #[path = "all/client_request_tokens.rs"]
 mod client_request_tokens;
 #[path = "all/cloudformation_ec2_instance_rollback.rs"]

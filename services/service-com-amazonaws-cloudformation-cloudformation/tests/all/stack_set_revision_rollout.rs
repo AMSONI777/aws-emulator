@@ -75,8 +75,7 @@ const REVISED_TEMPLATE: &str = r#"{"Parameters":{"Shown":{"Type":"String","Defau
 /// The refusal for a request that does not name exactly one source for the template it
 /// submits, spelled out here rather than read from the crate: the sentence IS the
 /// requirement, so a reworded one must fail this suite.
-const ONE_TEMPLATE_SOURCE: &str =
-    "You must specify exactly one of TemplateBody, TemplateURL or UsePreviousTemplate";
+const ONE_TEMPLATE_SOURCE: &str = "Either Template URL or Template Body must be specified.";
 
 /// The refusal for a request that names the template BOTH by value and by reference, spelled
 /// out here for the same reason.

@@ -198,15 +198,25 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         // that execution rather than told the change set never existed
         // ([`crate::state::StoredChangeSet::plan_discarded`]).
         let executed = change_set.execution_began();
+        // "If IncludeNestedStacks specifies True during the creation of the nested change
+        // set, then DeleteChangeSet will delete all change sets that belong to the stacks
+        // hierarchy": a nested change set exists only as part of the change set that created
+        // it, so what this discards is the hierarchy below this one as well as this one
+        // ([`crate::state::nested_change_set::hierarchy_of`]).
+        let hierarchy = crate::state::nested_change_set::hierarchy_of(&store, &change_set_id);
         if executed {
-            if let Some(discarded) = store.resolve_change_set_mut(&region, &change_set_id, None) {
+            for discarded in store
+                .change_sets
+                .iter_mut()
+                .filter(|candidate| hierarchy.contains(&candidate.change_set_id))
+            {
                 discarded.plan_discarded = true;
             }
             return Ok(DeleteChangeSetOutput {});
         }
         store
             .change_sets
-            .retain(|candidate| candidate.change_set_id != change_set_id);
+            .retain(|candidate| !hierarchy.contains(&candidate.change_set_id));
 
         Ok(DeleteChangeSetOutput {})
     }

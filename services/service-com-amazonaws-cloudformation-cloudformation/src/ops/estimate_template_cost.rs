@@ -272,11 +272,15 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
                 ))
             }
         };
-        // The documented `TemplateBody` maximum and the documented per-template quotas,
-        // which the model carries no constraint for — the same rules every operation that
-        // takes a body is held to, each refused for the bound it is past.
-        crate::state::validate_template_body(template_body)
-            .map_err(crate::scaffolded::Scaffolded::validation_error)?;
+        // The ceiling the SOURCE that carried this template is held to and the documented
+        // per-template quotas, which the model carries no constraint for — the same rules
+        // every operation that takes a body is held to, each refused for the bound it is
+        // past.
+        crate::state::validate_submitted_template_body(
+            template_body,
+            input.template_url.is_some(),
+        )
+        .map_err(crate::scaffolded::Scaffolded::validation_error)?;
         crate::state::validate_template_quotas(template_body)
             .map_err(crate::scaffolded::Scaffolded::validation_error)?;
         // Read by the SAME reader every other operation reads a template with, so an

@@ -36,9 +36,10 @@
 //! endpoint — "URLs from S3 static websites are not supported" — which is refused for the
 //! endpoint it is, before the URL is read for an object at all ([`names_s3_website`]).
 //!
-//! Text that addresses no object is likewise refused for what it is: text that is no Amazon
-//! S3 location at all (a scheme the documentation does not allow, a host naming neither
-//! addressing style and carrying no object in its path) is not a SUPPORTED url, while an
+//! Text that addresses no object is likewise refused for what it is: text that carries no
+//! `https` location at all (a scheme the documentation does not allow, and text no URL reader
+//! will read) is refused for the scheme the documentation fixes, a host naming neither
+//! addressing style and carrying no object in its path is not a SUPPORTED url, while an
 //! Amazon S3 endpoint carrying no bucket and key references no object ([`object`]).
 //!
 //! A member whose own model admits the direct `s3://<bucket>/<key>` form beside those two
@@ -52,15 +53,16 @@
 //! for the request's own reference, and WHICH refusal it is decides how that is worded — two
 //! sentences, each CloudFormation's own:
 //!
-//! * a key or a version the bucket does not hold is an object CloudFormation could see was
-//!   ABSENT, reported as that, naming the bucket and key the URL addressed and the code
-//!   Amazon S3 gave ([`unreadable_object`]);
-//! * every OTHER refusal — a bucket that is not there, a read Amazon S3 will not serve, a
-//!   body that stopped mid-stream — is reported as what Amazon S3 ANSWERED, under the prefix
-//!   CloudFormation reports another service's refusal under and followed by the line that
-//!   error is documented on ([`s3_error`]); where Amazon S3 worded nothing, what it
-//!   classified the refusal as stands in its place, so no refusal this module cannot place
-//!   becomes a claim that the object is not there.
+//! * a key the bucket does not hold is an object CloudFormation could see was ABSENT,
+//!   reported as that, naming the bucket and key the URL addressed and the code Amazon S3
+//!   gave ([`unreadable_object`]);
+//! * every OTHER refusal — a bucket that is not there, a read Amazon S3 will not serve, one
+//!   version of an object it would not hand over, a body that stopped mid-stream — is
+//!   reported as what Amazon S3 ANSWERED, under the prefix CloudFormation reports another
+//!   service's refusal under and followed by the line that error is documented on
+//!   ([`s3_error`]); where Amazon S3 worded nothing, what it classified the refusal as stands
+//!   in its place, so no refusal this module cannot place becomes a claim that the object is
+//!   not there.
 //!
 //! Both sentences are the SAME for every operation that fetches a reference, so the same
 //! unreadable object is never reported three ways; an operation of the STACK SETS control
@@ -71,11 +73,12 @@
 //!
 //! ## Bounds
 //!
-//! The object is caller-supplied, so at most [`super::TEMPLATE_BODY_MAX_BYTES`] of it are
-//! held — the one ceiling this service holds every template body to, and the size past
-//! which its template reader ([`super::template::document`]) will not read a document at
-//! all. A larger object is refused with the wording that ceiling owns
-//! ([`super::template_body_too_long`]) rather than read into a body nothing can process.
+//! The object is caller-supplied, so at most [`super::TEMPLATE_MAX_BYTES`] of it are held —
+//! the largest template CloudFormation reads at all ("the URL must point to a template (max
+//! size: 1 MB)"), which is what the request's own reference may address: the documented
+//! 51,200-byte quota is a constraint on the `TemplateBody` MEMBER, and this object is not
+//! that member. A larger object is refused for the ceiling on a template
+//! ([`super::template_too_large`]) rather than read into a body nothing can process.
 
 /// The scheme a `TemplateURL` must carry: "The location for an Amazon S3 bucket must start
 /// with `https://`. URLs from S3 static websites are not supported."
@@ -166,6 +169,15 @@ fn s3_error(message: &str) -> String {
 /// ([`unreadable_object`]) rather than as what Amazon S3 answered.
 const ABSENT_OBJECT_CODES: &[&str] = &["NoSuchKey", "NoSuchVersion"];
 
+/// What Amazon S3 answers a caller that may read an object but not its VERSIONS, which is
+/// what CloudFormation reports for a version it could not read.
+///
+/// A read that addressed one version of an object establishes nothing about whether that
+/// version is there: telling a caller which versions a bucket holds is a different permission
+/// from reading an object, so Amazon S3 refuses such a read rather than reporting the
+/// version's absence — and CloudFormation reports that refusal, never a missing version.
+const VERSION_READ_REFUSED: &str = "Access Denied";
+
 /// How a refused READ is worded for the OPERATION that took the reference.
 ///
 /// The SENTENCE is the same for every operation that fetches a reference — which refusal it
@@ -217,7 +229,9 @@ fn with_control_plane_envelope(sentence: &str) -> String {
 /// Amazon S3's own classification of it, and [`UNIDENTIFIED_FAILURE`] where it carried
 /// neither — the read was not served, and nothing on the other end identified the problem.
 /// Only a code that reports an absence can be reported AS an absence, so no refusal is turned
-/// into a claim that the object is not there.
+/// into a claim that the object is not there — and a read that addressed one VERSION of an
+/// object reports no absence either, because such a read is answered by the permission to
+/// read versions rather than by the version ([`VERSION_READ_REFUSED`]).
 fn refused_read_message(
     object: &Object,
     refused: Refused,
@@ -225,7 +239,10 @@ fn refused_read_message(
     message: Option<&str>,
 ) -> String {
     let sentence = match (code, message) {
-        (Some(code), _) if ABSENT_OBJECT_CODES.contains(&code) => unreadable_object(object, code),
+        (Some(code), _) if ABSENT_OBJECT_CODES.contains(&code) => match object.version {
+            Some(_) => s3_error(VERSION_READ_REFUSED),
+            None => unreadable_object(object, code),
+        },
         (_, Some(message)) => s3_error(message),
         (Some(code), None) => s3_error(code),
         (None, None) => s3_error(UNIDENTIFIED_FAILURE),
@@ -276,8 +293,8 @@ pub async fn fetch_as(
         ctx,
         region,
         &object,
-        super::TEMPLATE_BODY_MAX_BYTES,
-        &super::template_body_too_long(None),
+        super::TEMPLATE_MAX_BYTES,
+        &super::template_too_large(),
         refused,
     )
     .await
@@ -406,10 +423,10 @@ async fn read_bytes_as(
 ///
 /// `Err(message)` is the refusal for text that addresses no readable object, and WHICH
 /// refusal it is follows from what the URL is: a bucket's static WEBSITE endpoint is refused
-/// for that endpoint, a location addressed over any scheme but `https` for the scheme the
-/// documentation fixes, an Amazon S3 endpoint carrying no bucket and key references no
-/// object, and text that is no location at all — text no URL reader will read, or a host
-/// naming no Amazon S3 endpoint and carrying no object in its path either — is not a
+/// for that endpoint, text carrying no `https` location — a location addressed over any other
+/// scheme, and text no URL reader will read — for the scheme the documentation fixes, an
+/// Amazon S3 endpoint carrying no bucket and key references no object, and an `https` URL
+/// whose host names no Amazon S3 endpoint and carries no object in its path either is not a
 /// SUPPORTED url.
 pub fn object(template_url: &str) -> Result<Object, String> {
     object_of(TEMPLATE_URL, template_url)
@@ -418,7 +435,17 @@ pub fn object(template_url: &str) -> Result<Object, String> {
 /// [`object`] for a reference given on ANOTHER member: the same addressing styles and the
 /// same refusals, each worded for the member the request carried the text on.
 pub fn object_of(member: &str, url: &str) -> Result<Object, String> {
-    let parsed = ::url::Url::parse(url).map_err(|_| unsupported_url(member))?;
+    let Ok(parsed) = ::url::Url::parse(url) else {
+        // Text no URL reader will read at all is held to the SCHEME the documentation fixes,
+        // read off the text itself: a reference that does not address a location over
+        // `https` is refused for that, and one that does but spells no readable location is
+        // refused as an unsupported url.
+        return Err(if carries_https_scheme(url) {
+            unsupported_url(member)
+        } else {
+            S3_LOCATION_SCHEME.to_string()
+        });
+    };
     if names_s3_website(&parsed) {
         return Err(S3_WEBSITE_URL.to_string());
     }
@@ -432,6 +459,17 @@ pub fn object_of(member: &str, url: &str) -> Result<Object, String> {
             unsupported_url(member)
         }
     })
+}
+
+/// Whether the text spells the one scheme a location may be addressed over
+/// ([`HTTPS_SCHEME`]).
+///
+/// Read from the TEXT rather than from a parsed URL, so text that is no URL at all is still
+/// held to the documented scheme: "the location for an Amazon S3 bucket must start with
+/// `https://`".
+fn carries_https_scheme(url: &str) -> bool {
+    url.split_once("://")
+        .is_some_and(|(scheme, _)| scheme.eq_ignore_ascii_case(HTTPS_SCHEME))
 }
 
 /// Whether a URL's host names an Amazon S3 endpoint, in either documented addressing style
@@ -668,7 +706,12 @@ mod tests {
             (
                 "no scheme at all",
                 "assets.s3.amazonaws.com/main.json",
-                unsupported_url(TEMPLATE_URL),
+                S3_LOCATION_SCHEME.to_string(),
+            ),
+            (
+                "text that is no url at all",
+                "not a url",
+                S3_LOCATION_SCHEME.to_string(),
             ),
             (
                 "an http URL",
@@ -764,15 +807,17 @@ mod tests {
     /// control plane's own refusal envelope for an operation of that control plane.
     #[test]
     fn a_refused_read_is_reported_as_the_class_of_refusal_it_was() {
-        let object = Object {
+        let addressed = |version: Option<&str>| Object {
             bucket: "assets".to_string(),
             key: "templates/main.json".to_string(),
-            version: None,
+            version: version.map(str::to_string),
         };
-        /// One row: the case, the operation's wording, the code and message Amazon S3
-        /// answered, and the message CloudFormation reports for it.
+        /// One row: the case, the version the read addressed (where it addressed one), the
+        /// operation's wording, the code and message Amazon S3 answered, and the message
+        /// CloudFormation reports for it.
         type Row = (
             &'static str,
+            Option<&'static str>,
             Refused,
             Option<&'static str>,
             Option<&'static str>,
@@ -781,6 +826,7 @@ mod tests {
         let rows: &[Row] = &[
             (
                 "a key the bucket does not hold",
+                None,
                 Refused::AbsenceAsAbsence,
                 Some("NoSuchKey"),
                 Some("The specified key does not exist."),
@@ -790,6 +836,7 @@ mod tests {
             ),
             (
                 "the same key, on a stack set operation",
+                None,
                 Refused::AsAStackSetsControlPlaneOperation,
                 Some("NoSuchKey"),
                 Some("The specified key does not exist."),
@@ -799,16 +846,28 @@ mod tests {
                 ),
             ),
             (
-                "a version the bucket does not hold",
+                "a version the bucket would not hand over",
+                Some("3HL4kqtJlcpXroDTDmjVBH40Nrjfkd"),
                 Refused::AbsenceAsAbsence,
                 Some("NoSuchVersion"),
                 None,
-                "S3 object does not exist. Bucket: assets, Key: templates/main.json. Error: \
-                 NoSuchVersion"
+                "S3 error: Access Denied\nFor more information check \
+                 http://docs.aws.amazon.com/AmazonS3/latest/API/ErrorResponses.html"
+                    .to_string(),
+            ),
+            (
+                "a key the bucket does not hold, addressed by version",
+                Some("3HL4kqtJlcpXroDTDmjVBH40Nrjfkd"),
+                Refused::AbsenceAsAbsence,
+                Some("NoSuchKey"),
+                Some("The specified key does not exist."),
+                "S3 error: Access Denied\nFor more information check \
+                 http://docs.aws.amazon.com/AmazonS3/latest/API/ErrorResponses.html"
                     .to_string(),
             ),
             (
                 "a bucket that is not there",
+                None,
                 Refused::AbsenceAsAbsence,
                 Some("NoSuchBucket"),
                 Some("The specified bucket does not exist"),
@@ -818,6 +877,7 @@ mod tests {
             ),
             (
                 "a read Amazon S3 will not serve",
+                None,
                 Refused::AbsenceAsAbsence,
                 Some("AccessDenied"),
                 Some("Access Denied"),
@@ -827,6 +887,7 @@ mod tests {
             ),
             (
                 "a refusal that classified itself but worded nothing",
+                None,
                 Refused::AbsenceAsAbsence,
                 Some("AccessDenied"),
                 None,
@@ -836,6 +897,7 @@ mod tests {
             ),
             (
                 "a refusal that identified nothing at all",
+                None,
                 Refused::AsAStackSetsControlPlaneOperation,
                 None,
                 None,
@@ -845,8 +907,9 @@ mod tests {
                 ),
             ),
         ];
-        for (case, refused, code, message, expected) in rows {
-            let reported = refused_read_message(&object, *refused, *code, *message);
+        for (case, version, refused, code, message, expected) in rows {
+            let reported =
+                refused_read_message(&addressed(*version), *refused, *code, *message);
             assert_eq!(
                 reported, *expected,
                 "case {case:?}: expected {expected:?}, got {reported:?}"

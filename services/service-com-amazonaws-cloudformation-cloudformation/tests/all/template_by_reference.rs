@@ -502,17 +502,16 @@ async fn a_template_url_that_resolves_to_no_readable_object_is_refused() {
             ),
         },
         Unresolvable {
-            // The same absence, for a well-formed version id the bucket holds no version
-            // under: the code Amazon S3 named for it travels into the same sentence.
+            // A read that addressed one VERSION of an object establishes nothing about the
+            // object: listing an object's versions is a different permission from reading
+            // one, so what CloudFormation reports is the refusal Amazon S3 answers such a
+            // read with, never a missing version.
             case: "an object version the staging bucket does not hold",
             url: format!(
                 "{}?versionId=3HL4kqtJlcpXroDTDmJ1rmSpXd3dIbrH",
                 Style::VirtualHostedRegional.url(key)
             ),
-            message: format!(
-                "S3 object does not exist. Bucket: {STAGING_BUCKET}, Key: {key}. Error: \
-                 NoSuchVersion"
-            ),
+            message: s3_error("Access Denied"),
         },
         Unresolvable {
             // A bucket that is not there establishes nothing about an object, so what

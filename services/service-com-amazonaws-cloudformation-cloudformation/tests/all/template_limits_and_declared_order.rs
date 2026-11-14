@@ -90,8 +90,7 @@ const TEMPLATE_URL: &str = "https://s3.us-east-1.amazonaws.com/templates/other.j
 const BOTH_TEMPLATE_SOURCES: &str = "You cannot specify both Template URL and Template Body.";
 const PREVIOUS_AND_SUBMITTED: &str =
     "You cannot specify both usePreviousTemplate and Template Body/Template URL.";
-const NO_TEMPLATE_SOURCE: &str =
-    "You must specify exactly one of TemplateBody, TemplateURL or UsePreviousTemplate";
+const NO_TEMPLATE_SOURCE: &str = "Either Template URL or Template Body must be specified.";
 
 /// One row of the template-source table: what the request states beside the template members
 /// it needs, and the sentence it is refused with.

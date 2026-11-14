@@ -119,6 +119,16 @@ pub struct StoredChangeSet {
     /// [`change_set_hooks`]). Bounded at [`change_set_hooks::MAX_CHANGE_SET_HOOKS`],
     /// oldest reclaimed first.
     pub hooks: Vec<change_set_hooks::StoredChangeSetHook>,
+    /// `DescribeChangeSetOutput$ParentChangeSetId`: "the change set ID of the parent change
+    /// set in the current nested change set hierarchy" — the change set whose own change on a
+    /// nested stack names this one ([`nested_change_set`]). `None` for a change set a request
+    /// created, which is the top of its hierarchy.
+    pub parent_change_set_id: Option<String>,
+    /// `DescribeChangeSetOutput$RootChangeSetId`: "the change set ID of the root change set in
+    /// the current nested change set hierarchy" — the change set the request created, which is
+    /// the one an execution of the hierarchy is driven from. `None` for that change set
+    /// itself, which is the root of nothing it reports.
+    pub root_change_set_id: Option<String>,
 }
 
 impl StoredChangeSet {

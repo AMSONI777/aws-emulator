@@ -181,6 +181,7 @@ pub fn import_change(
         details: Vec::new(),
         policy_action: None,
         resource_drift_status: None,
+        nested_change_set_id: None,
     }
 }
 
@@ -432,6 +433,7 @@ mod tests {
             details: Vec::new(),
             policy_action: None,
             resource_drift_status: None,
+            nested_change_set_id: None,
         };
         let taken = vec![NamedResource {
             logical_id: "Adopted".to_string(),
@@ -632,6 +634,7 @@ mod tests {
                 details: Vec::new(),
                 policy_action: None,
                 resource_drift_status: None,
+                nested_change_set_id: None,
             }
         };
         /// `(case, the plan's changes, the identifiers its imports report)`.

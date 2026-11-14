@@ -212,9 +212,13 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
             };
             if let Some(body) = template_body.as_deref() {
                 // The template rules every operation that SUBMITS a body is held to, so a
-                // refactor cannot record a final state a stack could not be given.
-                crate::state::validate_template_body(body)
-                    .map_err(crate::scaffolded::Scaffolded::validation_error)?;
+                // refactor cannot record a final state a stack could not be given — the size
+                // under the ceiling the SOURCE that carried this template is held to.
+                crate::state::validate_submitted_template_body(
+                    body,
+                    definition.template_url.is_some(),
+                )
+                .map_err(crate::scaffolded::Scaffolded::validation_error)?;
                 crate::state::validate_template_quotas(body)
                     .map_err(crate::scaffolded::Scaffolded::validation_error)?;
                 crate::state::validate_resource_types(body)

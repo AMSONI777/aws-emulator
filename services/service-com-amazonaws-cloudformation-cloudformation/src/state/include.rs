@@ -220,11 +220,11 @@ pub async fn process(
         return Processed::Unchanged;
     }
     let processed = document.to_string();
-    if processed.len() > super::TEMPLATE_BODY_MAX_BYTES {
+    if processed.len() > super::TEMPLATE_MAX_BYTES {
         return Processed::Failed(failure(&format!(
             "the template the snippets are included in is larger than the {} bytes a \
              template may carry.",
-            super::TEMPLATE_BODY_MAX_BYTES
+            super::TEMPLATE_MAX_BYTES
         )));
     }
     Processed::Expanded(processed)

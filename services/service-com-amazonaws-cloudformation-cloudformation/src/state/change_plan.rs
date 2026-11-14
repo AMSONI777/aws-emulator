@@ -194,6 +194,14 @@ pub struct StoredResourceChange {
     /// for drift-aware change sets" — so `None` for every change computed from the templates
     /// alone.
     pub resource_drift_status: Option<String>,
+    /// `ResourceChange$ChangeSetId`: "the change set ID of the nested change set" — the plan
+    /// of the child stack this change would change, created when the change set was created
+    /// for the whole stack hierarchy ([`super::nested_change_set`]).
+    ///
+    /// `None` for every other change: a change on a resource that is not a nested stack has
+    /// no hierarchy below it, and one on a child stack that does not exist yet has no stack
+    /// to hold a change set of its own.
+    pub nested_change_set_id: Option<String>,
 }
 
 /// The revision of a stack a change set is computed AGAINST: the template in force on it,
@@ -904,6 +912,7 @@ fn addition(resource: &template::DeclaredResource) -> StoredResourceChange {
         details: Vec::new(),
         policy_action: None,
         resource_drift_status: None,
+        nested_change_set_id: None,
     }
 }
 
@@ -922,6 +931,7 @@ fn removal(
         details: Vec::new(),
         policy_action: None,
         resource_drift_status: None,
+        nested_change_set_id: None,
     }
 }
 
@@ -947,6 +957,7 @@ fn modification(
         policy_action: (replaces != replacement::FALSE)
             .then(|| replace_action(resource).to_string()),
         resource_drift_status: None,
+        nested_change_set_id: None,
     }
 }
 
@@ -999,6 +1010,7 @@ pub fn drift_change(drifted: &super::drift::DriftedResource) -> StoredResourceCh
         // The resource's properties were modified outside CloudFormation, which is what
         // `MODIFIED` states.
         resource_drift_status: Some(super::resource_drift_status::MODIFIED.to_string()),
+        nested_change_set_id: None,
     }
 }
 

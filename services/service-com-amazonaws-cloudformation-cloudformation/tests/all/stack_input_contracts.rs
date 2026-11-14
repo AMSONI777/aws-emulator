@@ -614,8 +614,8 @@ fn template_of_size(bytes: usize, pad: char) -> String {
 }
 
 /// The value a refusal of `body` quotes, as the RULE states it: the body itself where it
-/// fits the quoted width, else as much of its leading text as fits beside the marker naming
-/// how many characters it holds in all, cut at a separator where the kept text has one.
+/// fits the quoted width, else its leading characters exactly, as many of them as the width
+/// admits, beside the marker naming how many characters it holds in all.
 ///
 /// Spelled here from the rule rather than taken from the handler, so the suite would catch
 /// the handler quoting something else.
@@ -625,10 +625,6 @@ fn quoted(body: &str) -> String {
         return body.to_string();
     }
     let kept: String = body.chars().take(state::QUOTED_TEMPLATE_PREFIX).collect();
-    let kept = match kept.rfind(' ') {
-        Some(last) => kept[..last + 1].to_string(),
-        None => kept,
-    };
     format!("{kept}...<{characters} chars total>")
 }
 

@@ -348,6 +348,7 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         // body everything below plans from, so a template submitted by reference and the
         // same one submitted inline produce the same change set
         // (`crate::state::template_url`).
+        let from_reference = input.template_url.is_some();
         if let Some(url) = input.template_url.take() {
             let body = crate::state::template_url::fetch(
                 ctx,
@@ -415,9 +416,11 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         )
         .map_err(crate::scaffolded::Scaffolded::validation_error)?;
         if let Some(body) = &input.template_body {
-            // The documented `TemplateBody` maximum, which the model carries no `@length`
-            // for.
-            crate::state::validate_template_body(body)
+            // The ceiling the SOURCE that carried this template is held to: the documented
+            // `TemplateBody` maximum for a body this request carried inline, and the
+            // documented maximum of a template read from an object for one the reference
+            // above resolved.
+            crate::state::validate_submitted_template_body(body, from_reference)
                 .map_err(crate::scaffolded::Scaffolded::validation_error)?;
             // The documented per-template quotas, the ceilings `DescribeAccountLimits`
             // advertises for this account: a body past one is refused before the change
@@ -496,6 +499,21 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
             values.extend(supplied.clone());
             values
         });
+        // "If you create a change set for a stack that contains nested stacks, set
+        // IncludeNestedStacks to True to create the change set for the entire stack
+        // hierarchy": each child stack of that hierarchy is planned too, so the template the
+        // submitted declaration addresses for each of them is read HERE, before the lock,
+        // exactly as this request's own template was ([`crate::state::nested_change_set`]).
+        let nested_children = if input.include_nested_stacks == Some(true) {
+            crate::state::nested_change_set::fetched_children(
+                ctx,
+                &region,
+                declared_submitted.as_ref(),
+            )
+            .await
+        } else {
+            crate::state::nested_change_set::Children::new()
+        };
         // The PARAMETER RESOLUTION stage: a template parameter whose type puts its value in
         // AWS Systems Manager Parameter Store carries the NAME of a parameter there, and
         // CloudFormation resolves it while it computes the plan — so the plan is computed
@@ -1306,6 +1324,24 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
                 || crate::state::DRIFT_STATUS_NOT_CHECKED.to_string(),
                 |stack| stack.drift_status.clone(),
             );
+        // The hierarchy below this change set: every change on a child stack that exists is
+        // planned as a change set of that child, and the change names it by id — "the change
+        // set ID of the nested change set", which is how a caller walks into the child's own
+        // changes ([`crate::state::nested_change_set`]). A request that did not ask for the
+        // hierarchy read no child template above, so nothing is expanded.
+        let nested_change_sets = crate::state::nested_change_set::expand(
+            &store,
+            crate::state::nested_change_set::Parent {
+                region: &region,
+                change_set_id: &change_set_id,
+                change_set_name: &input.change_set_name,
+                // The change set the REQUEST created is the top of its own hierarchy.
+                root_change_set_id: &change_set_id,
+            },
+            &nested_children,
+            &mut changes,
+            now,
+        );
         store.change_sets.push(StoredChangeSet {
             stack_drift_status,
             change_set_id: change_set_id.clone(),
@@ -1350,7 +1386,14 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
             // target an operation (see `state::change_set_hooks`), so there is no Hook for
             // a resource of this plan to be evaluated against.
             hooks: Vec::new(),
+            // The change set the request created is the top of its hierarchy, so it names
+            // neither a parent nor a root.
+            parent_change_set_id: None,
+            root_change_set_id: None,
         });
+        // ...and the change sets of the children below it, stored beside the parent's own so
+        // `DescribeChangeSet` answers for every id the plan reports.
+        store.change_sets.extend(nested_change_sets);
 
         Ok(CreateChangeSetOutput {
             id: Some(change_set_id),

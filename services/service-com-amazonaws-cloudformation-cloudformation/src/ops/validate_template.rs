@@ -199,10 +199,14 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
                 ))
             }
         };
-        // The documented `TemplateBody` maximum, which the model carries no `@length`
-        // for — the same rule every operation that takes a body is held to.
-        crate::state::validate_template_body(template_body)
-            .map_err(crate::scaffolded::Scaffolded::validation_error)?;
+        // The ceiling the SOURCE that carried this template is held to, which the model
+        // carries no `@length` for — the same rule every operation that takes a body is
+        // held to.
+        crate::state::validate_submitted_template_body(
+            template_body,
+            input.template_url.is_some(),
+        )
+        .map_err(crate::scaffolded::Scaffolded::validation_error)?;
         // The documented per-template quotas, named one by one: a body past one of them is
         // refused for the quota it is past rather than for the form it has, which is the
         // same verdict the operations that SUBMIT a template for deployment give it.

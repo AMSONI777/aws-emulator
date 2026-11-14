@@ -161,6 +161,10 @@ use crate::state::{StoredChangeDetail, StoredResourceChange};
 /// details imply. `Replacement` is absent for an `Add` and a `Remove`, where the model
 /// declares it does not apply ("For the `Modify` action, indicates whether CloudFormation
 /// will replace the resource").
+///
+/// `ChangeSetId` is "the change set ID of the nested change set" for a change on a child
+/// stack the change set was expanded into ([`crate::state::nested_change_set`]), and absent
+/// for every other change.
 fn change_view(stored: &StoredResourceChange) -> Change {
     Change {
         r#type: Some(crate::state::CHANGE_TYPE_RESOURCE.to_string()),
@@ -176,7 +180,7 @@ fn change_view(stored: &StoredResourceChange) -> Change {
             resource_drift_status: stored.resource_drift_status.clone(),
             resource_drift_ignored_attributes: None,
             details: Some(stored.details.iter().map(detail_view).collect()),
-            change_set_id: None,
+            change_set_id: stored.nested_change_set_id.clone(),
             module_info: None,
             before_context: None,
             after_context: None,
@@ -378,8 +382,13 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
             changes: Some(changes),
             next_token,
             include_nested_stacks: Some(change_set.include_nested_stacks),
-            parent_change_set_id: None,
-            root_change_set_id: None,
+            // The hierarchy this change set belongs to, for one a change set created for a
+            // whole stack hierarchy expanded into: the change set whose change names this
+            // one, and the one at the top. Both absent for a change set a request created,
+            // which is the root of its own hierarchy
+            // (`crate::state::nested_change_set`).
+            parent_change_set_id: change_set.parent_change_set_id.clone(),
+            root_change_set_id: change_set.root_change_set_id.clone(),
             on_stack_failure: change_set.on_stack_failure.clone(),
             import_existing_resources: Some(change_set.import_existing_resources),
             deployment_mode: change_set.deployment_mode.clone(),
