@@ -61,13 +61,17 @@ const CONVERSATIONAL_ONLY_MEMBERS: &[&str] = &[
 
 /// The members of the record `featuresSupported` is.
 const FEATURE_MEMBERS: &[&str] = &[
-    "batchInference",
     "countTokens",
     "intelligentPromptRouting",
     "latencyOptimization",
     "promptCaching",
     "promptOptimization",
+    "provisionedThroughput",
 ];
+
+/// The members of the record `featuresSupported.batchInference` is: batch inference is
+/// published per region scope, so it answers for each scope rather than with one boolean.
+const BATCH_INFERENCE_MEMBERS: &[&str] = &["crossRegion", "inRegion"];
 
 /// The members of the record `batchSupported` is.
 const BATCH_MEMBERS: &[&str] = &[
@@ -207,11 +211,29 @@ async fn a_capability_is_reported_as_the_record_that_names_what_is_supported() {
                 "case {case:?}: featuresSupported must answer for {member}, got {features:?}"
             );
         }
+        // Batch inference is more than one bit: it answers per region scope, so it is a
+        // record and never a bare boolean.
+        let batch_inference = &features["batchInference"];
+        assert!(
+            batch_inference.is_object(),
+            "case {case:?}: featuresSupported.batchInference must be the record naming each \
+             region scope, got {batch_inference:?}"
+        );
+        for member in BATCH_INFERENCE_MEMBERS {
+            assert_eq!(
+                batch_inference.get(member).and_then(Value::as_bool),
+                Some(runs_batch),
+                "case {case:?}: expected featuresSupported.batchInference.{member} \
+                 {runs_batch:?}, got {batch_inference:?}"
+            );
+        }
+        // Reserved capacity is offered for a model the catalogue publishes it under.
+        let provisioned = model.inference_types_supported.contains(&"PROVISIONED");
         assert_eq!(
-            features["batchInference"].as_bool(),
-            Some(runs_batch),
-            "case {case:?}: expected featuresSupported.batchInference {runs_batch:?}, got \
-             {features:?}"
+            features["provisionedThroughput"].as_bool(),
+            Some(provisioned),
+            "case {case:?}: expected featuresSupported.provisionedThroughput {provisioned:?}, \
+             got {features:?}"
         );
         // A token count is the model's own tokenizer's, so it is served for the one family
         // this emulator's inference plane carries a tokenizer for.
@@ -243,6 +265,14 @@ async fn a_capability_is_reported_as_the_record_that_names_what_is_supported() {
             "case {case:?}: expected converse.reasoningSupported.isSupported {:?}, got \
              {converse:?}",
             expected_reasoning_supported(model)
+        );
+        // Reasoning arrives in a block of its own for every model this catalogue publishes,
+        // so nothing a client reads has to be parsed out of the answer text.
+        assert_eq!(
+            converse["reasoningSupported"]["embedded"].as_bool(),
+            Some(false),
+            "case {case:?}: expected converse.reasoningSupported.embedded false, got \
+             {converse:?}"
         );
         // The formats a turn may carry TO the model follow the modalities it takes.
         let images = converse["userImageTypesSupported"]

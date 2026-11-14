@@ -91,6 +91,8 @@ mod explicit_deny_names_the_addressed_guardrail;
 mod foundation_model_agreement_offers;
 #[path = "all/foundation_model_availability.rs"]
 mod foundation_model_availability;
+#[path = "all/foundation_model_capability_member_shapes.rs"]
+mod foundation_model_capability_member_shapes;
 #[path = "all/foundation_model_capability_projection.rs"]
 mod foundation_model_capability_projection;
 #[path = "all/foundation_model_capability_records.rs"]

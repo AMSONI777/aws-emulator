@@ -2052,28 +2052,49 @@ pub fn model_inference_apis_supported(model: &FoundationModel) -> Vec<String> {
     apis
 }
 
+/// Whether a model invocation job may run `model` over a dataset, as the record the FEATURE
+/// record reports it in: a job runs the model from the region the model is offered in, and
+/// from another region, and each scope is its own answer.
+///
+/// The same published fact [`model_batch_support`] reports, read per region scope, so the
+/// feature record and `batchSupported` cannot disagree about the model: a job that may run
+/// the base model may run it from either scope, and a model no batch-inference table lists
+/// may be run from neither.
+#[must_use]
+pub fn model_batch_inference_support(model: &FoundationModel) -> BatchInferenceSupport {
+    let supported = model_batch_supported(model);
+    BatchInferenceSupport {
+        cross_region: Some(supported),
+        in_region: Some(supported),
+    }
+}
+
 /// The features published for `model` ([`FoundationModel::features_supported`]), as the
 /// record a summary reports them in: one member per feature of
 /// [`PUBLISHED_FEATURE_VALUES`], naming whether the catalog publishes that feature for the
-/// model, beside the two features that follow from what the model IS rather than from a
-/// supported-models table — a token count ([`model_count_tokens_supported`]) and prompt
-/// optimization ([`model_prompt_optimization_supported`]) — so a client tests one feature by
-/// name.
+/// model, beside the three features that follow from what the model IS rather than from a
+/// supported-models table — a token count ([`model_count_tokens_supported`]), prompt
+/// optimization ([`model_prompt_optimization_supported`]) and Provisioned Throughput
+/// ([`supports_provisioned_throughput`], the same fact that decides whether one can be
+/// bought over the model) — so a client tests one feature by name.
 ///
 /// The same set the capability members beside it report one by one, so the record and those
 /// members cannot disagree: a feature is named supported here exactly while the row
 /// publishes it — and a model no feature's supported-models table lists, where a freshly
-/// offered model starts, has every member of the record answer no.
+/// offered model starts, has every member of the record answer no. Batch inference answers
+/// with a RECORD of its own ([`model_batch_inference_support`]), because it is published per
+/// region scope rather than as one bit.
 #[must_use]
 pub fn model_features_supported(model: &FoundationModel) -> FeaturesSupport {
     let published = |feature: &str| Some(model_publishes_feature(model, feature));
     FeaturesSupport {
-        batch_inference: published(FEATURE_BATCH_INFERENCE),
+        batch_inference: Some(model_batch_inference_support(model)),
         count_tokens: Some(model_count_tokens_supported(model)),
         intelligent_prompt_routing: published(FEATURE_INTELLIGENT_PROMPT_ROUTING),
         latency_optimization: published(FEATURE_LATENCY_OPTIMIZATION),
         prompt_caching: published(FEATURE_PROMPT_CACHING),
         prompt_optimization: Some(model_prompt_optimization_supported(model)),
+        provisioned_throughput: Some(supports_provisioned_throughput(model)),
     }
 }
 
@@ -2121,13 +2142,17 @@ pub(super) const COUNT_TOKENS_MODEL_PROVIDER: &str = "Anthropic";
 ///   published nowhere.
 /// * `systemRoleSupported` holds of a model Converse reaches: a system role is part of the
 ///   conversation the API carries rather than of any one model's integration.
-/// * `reasoningSupported` is published per model ([`REASONING_MODELS`]).
+/// * `reasoningSupported` is published per model ([`REASONING_MODELS`]), and names where the
+///   reasoning arrives as well as whether it is asked for
+///   ([`model_reasoning_support`]).
 /// * `stopSequencesDefault` is empty: a conversation halts at the stop sequences the
 ///   REQUEST carries, and no model publishes one of its own.
-/// * `userDocumentTypesSupported`, `userImageTypesSupported` and
-///   `userVideoTypesSupported` are the formats a turn may carry TO the model, so each one
-///   is the format set of a modality the model takes ([`FoundationModel::input_modalities`])
-///   and empty for a modality it does not.
+/// * `userImageTypesSupported` and `userVideoTypesSupported` are the formats a turn may
+///   carry TO the model in a modality the model TAKES
+///   ([`FoundationModel::input_modalities`]), and empty for a modality it does not take;
+///   `userDocumentTypesSupported` is published per model
+///   ([`model_user_document_formats`]) and absent for a model no document block reaches,
+///   because a document is a FILE a turn carries rather than a modality the model declares.
 /// * `additionalRequestFieldsSchema` is absent: the schema of a model's provider-specific
 ///   request fields is published per model, and this catalog publishes one for no row.
 #[must_use]
@@ -2149,13 +2174,52 @@ pub fn model_converse_support(model: &FoundationModel) -> Option<ConverseSupport
         additional_request_fields_schema: None,
         max_tokens_default: None,
         max_tokens_maximum: model_max_output_tokens(model),
-        reasoning_supported: Some(capability_support(model_reasoning_supported(model))),
+        reasoning_supported: Some(model_reasoning_support(model)),
         stop_sequences_default: Some(Vec::new()),
         system_role_supported: Some(true),
-        user_document_types_supported: Some(formats(takes(MODALITY_TEXT), CONVERSE_DOCUMENT_FORMATS)),
+        user_document_types_supported: model_user_document_formats(model),
         user_image_types_supported: Some(formats(takes(MODALITY_IMAGE), CONVERSE_IMAGE_FORMATS)),
         user_video_types_supported: Some(formats(takes(MODALITY_VIDEO), CONVERSE_VIDEO_FORMATS)),
     })
+}
+
+/// The document formats a turn of a conversation may carry to `model`, or `None` for a
+/// model no document block reaches at all.
+///
+/// PUBLISHED per model rather than implied by a modality the model takes: `ModelModality`
+/// declares no value for a document (`crate::ops::types::MODEL_MODALITY_VALUES` is
+/// EMBEDDING/IMAGE/TEXT), and a document block carries a FILE for the model's integration
+/// to parse rather than text the model is prompted with — so a model that takes text is not
+/// thereby a model a document may be sent to, and the formats it parses are published for
+/// the provider line it belongs to ([`CONVERSE_PROVIDER_DOCUMENT_FORMATS`]).
+///
+/// A model whose line publishes no document input carries NO member rather than the whole
+/// `DocumentFormat` vocabulary, because reporting a format set for it would tell a client a
+/// turn may carry a document the model cannot read.
+#[must_use]
+pub fn model_user_document_formats(model: &FoundationModel) -> Option<Vec<String>> {
+    CONVERSE_PROVIDER_DOCUMENT_FORMATS
+        .iter()
+        .find(|(provider, _)| *provider == model.provider_name)
+        .map(|(_, formats)| formats.iter().map(|format| (*format).to_string()).collect())
+}
+
+/// Whether EXTENDED REASONING may be asked of `model`, as the record the Converse record
+/// reports it in: whether the provider publishes reasoning for the model
+/// ([`model_reasoning_supported`]), and whether the reasoning arrives EMBEDDED in the
+/// answer text.
+///
+/// Embedded reasoning is the exception a catalog publishes: the Converse API carries a
+/// model's reasoning in a block of its own (`ReasoningContentBlock` of the Amazon Bedrock
+/// Runtime model, which is what a `Converse` answer carries reasoning in), and this
+/// emulator's inference plane answers every model it serves that way, so no model of this
+/// catalog embeds its reasoning in the text a client would then have to parse.
+#[must_use]
+pub fn model_reasoning_support(model: &FoundationModel) -> ReasoningSupport {
+    ReasoningSupport {
+        is_supported: Some(model_reasoning_supported(model)),
+        embedded: Some(false),
+    }
 }
 
 /// The ceiling on generated tokens the provider publishes for `model` ("Inference parameters
@@ -2235,15 +2299,32 @@ pub(super) const REASONING_MODELS: &[&str] = &[
     "qwen.qwen3-next-80b-a3b",
 ];
 
-/// The document formats a turn of a conversation may carry to a model that takes TEXT
-/// (`DocumentFormat` in the Amazon Bedrock Runtime model, which is what `Converse` accepts
-/// a document block in).
-pub(super) const CONVERSE_DOCUMENT_FORMATS: &[&str] = &[
-    "pdf", "csv", "doc", "docx", "xls", "xlsx", "html", "txt", "md",
-];
+/// The document formats each provider's Converse integration accepts, by `providerName`:
+/// the values of `DocumentFormat` (the Amazon Bedrock Runtime shape a `Converse` document
+/// block names its format with, `pdf`/`csv`/`doc`/`docx`/`xls`/`xlsx`/`html`/`txt`/`md`)
+/// that the provider's models parse, in the order the provider publishes them.
+///
+/// Amazon Bedrock publishes document chat per model ("Supported models and model features"
+/// in the Amazon Bedrock User Guide) rather than for every conversational model, and of the
+/// providers this catalog carries it is the Anthropic Claude line that is published with
+/// document input, as PDF. A provider in no row publishes none, so a turn to its models
+/// carries no document at all — which is what [`model_user_document_formats`] reports by
+/// leaving the member out.
+pub(super) const CONVERSE_PROVIDER_DOCUMENT_FORMATS: &[(&str, &[&str])] =
+    &[(DOCUMENT_MODEL_PROVIDER, DOCUMENTS_PDF)];
 
-/// The image formats a turn may carry to a model that takes IMAGE (`ImageFormat`).
-pub(super) const CONVERSE_IMAGE_FORMATS: &[&str] = &["png", "jpeg", "gif", "webp"];
+/// The `providerName` whose Converse integration parses a document a turn carries.
+pub(super) const DOCUMENT_MODEL_PROVIDER: &str = "Anthropic";
+
+/// `DocumentFormat` — the one document format a provider line that parses a document is
+/// published with.
+pub(super) const DOCUMENTS_PDF: &[&str] = &["pdf"];
+
+/// The image formats a turn may carry to a model that takes IMAGE (`ImageFormat` of the
+/// Amazon Bedrock Runtime model), in the order Amazon Bedrock publishes them for a user
+/// turn — which is the order they are reported in, because a client that takes the FIRST
+/// supported format as its default reads a different default from a different order.
+pub(super) const CONVERSE_IMAGE_FORMATS: &[&str] = &["jpeg", "png", "gif", "webp"];
 
 /// The video formats a turn may carry to a model that takes video (`VideoFormat`). The
 /// modality is written as the rule the other two are — the formats of a modality the model

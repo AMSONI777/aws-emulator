@@ -1498,7 +1498,7 @@ pub struct ConverseSupport {
     pub additional_request_fields_schema: Option<String>,
     pub max_tokens_default: Option<i32>,
     pub max_tokens_maximum: Option<i32>,
-    pub reasoning_supported: Option<CapabilitySupport>,
+    pub reasoning_supported: Option<ReasoningSupport>,
     pub stop_sequences_default: Option<Vec<String>>,
     pub system_role_supported: Option<bool>,
     pub user_document_types_supported: Option<Vec<String>>,
@@ -1551,7 +1551,7 @@ bedrock_schema_and_codec!(
         "reasoningSupported",
         5,
         opt,
-        struct_of(CapabilitySupport)
+        struct_of(ReasoningSupport)
     ),
     (
         M_STOP_SEQUENCES_DEFAULT,
@@ -1617,6 +1617,30 @@ bedrock_schema_and_codec!(
     (M_IS_SUPPORTED, is_supported, "isSupported", 0, opt, boolean),
 );
 
+/// Whether EXTENDED REASONING may be asked of a published foundation model, as the
+/// `reasoningSupported` member of the Converse record carries it.
+///
+/// RECORDED behaviour, not modelled, like [`CapabilitySupport`], and a record of its own
+/// rather than that one because reasoning answers TWO questions a client has to settle
+/// before it asks for it: whether the model reasons at all, and WHERE the reasoning arrives
+/// — in a block of its own beside the answer, or embedded in the answer text, which a
+/// client has to parse out of the text itself.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ReasoningSupport {
+    pub is_supported: Option<bool>,
+    pub embedded: Option<bool>,
+}
+
+bedrock_schema_and_codec!(
+    ReasoningSupport,
+    FOUNDATION_MODEL_REASONING_SUPPORT_SCHEMA,
+    "com.amazonaws.bedrock#FoundationModelReasoningSupport",
+    "com.amazonaws.bedrock",
+    "FoundationModelReasoningSupport",
+    (M_IS_SUPPORTED, is_supported, "isSupported", 0, opt, boolean),
+    (M_EMBEDDED, embedded, "embedded", 1, opt, boolean),
+);
+
 /// Whether a model invocation job may run a model over a dataset, as the `batchSupported`
 /// member of a `FoundationModelSummary` / `FoundationModelDetails` carries it.
 ///
@@ -1662,21 +1686,49 @@ bedrock_schema_and_codec!(
     ),
 );
 
+/// Whether a model invocation job may run one model over a dataset FROM the region the
+/// request addresses and from ANOTHER region, as the `batchInference` member of the feature
+/// record carries it.
+///
+/// RECORDED behaviour, not modelled, like [`BatchSupport`], and a record rather than a bare
+/// boolean for the same reason: batch inference is published per REGION SCOPE — a model a
+/// job may run where it is offered is not thereby one a job in another region may run — so
+/// the feature answers one member per scope, and a client reads the scope it is submitting
+/// a job from.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct BatchInferenceSupport {
+    pub cross_region: Option<bool>,
+    pub in_region: Option<bool>,
+}
+
+bedrock_schema_and_codec!(
+    BatchInferenceSupport,
+    FOUNDATION_MODEL_BATCH_INFERENCE_SUPPORT_SCHEMA,
+    "com.amazonaws.bedrock#FoundationModelBatchInferenceSupport",
+    "com.amazonaws.bedrock",
+    "FoundationModelBatchInferenceSupport",
+    (M_CROSS_REGION, cross_region, "crossRegion", 0, opt, boolean),
+    (M_IN_REGION, in_region, "inRegion", 1, opt, boolean),
+);
+
 /// The Amazon Bedrock features published for one foundation model, as the
 /// `featuresSupported` member of a `FoundationModelSummary` / `FoundationModelDetails`
 /// carries it: a RECORD whose members are the features themselves, so a client tests one
 /// feature by name instead of searching a list.
 ///
 /// A feature the catalog does not publish for the model answers NO rather than being left
-/// out, so a client that tests one feature by name always gets an answer.
+/// out, so a client that tests one feature by name always gets an answer. A feature whose
+/// answer is more than one bit answers with a record of its own — batch inference does
+/// ([`BatchInferenceSupport`]), because it is published per region scope.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct FeaturesSupport {
-    pub batch_inference: Option<bool>,
+    pub batch_inference: Option<BatchInferenceSupport>,
     pub count_tokens: Option<bool>,
     pub intelligent_prompt_routing: Option<bool>,
     pub latency_optimization: Option<bool>,
     pub prompt_caching: Option<bool>,
     pub prompt_optimization: Option<bool>,
+    pub provisioned_throughput: Option<bool>,
 }
 
 bedrock_schema_and_codec!(
@@ -1691,7 +1743,7 @@ bedrock_schema_and_codec!(
         "batchInference",
         0,
         opt,
-        boolean
+        struct_of(BatchInferenceSupport)
     ),
     (M_COUNT_TOKENS, count_tokens, "countTokens", 1, opt, boolean),
     (
@@ -1723,6 +1775,14 @@ bedrock_schema_and_codec!(
         prompt_optimization,
         "promptOptimization",
         5,
+        opt,
+        boolean
+    ),
+    (
+        M_PROVISIONED_THROUGHPUT,
+        provisioned_throughput,
+        "provisionedThroughput",
+        6,
         opt,
         boolean
     ),

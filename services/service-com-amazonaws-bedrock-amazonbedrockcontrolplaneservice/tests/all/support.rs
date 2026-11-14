@@ -166,14 +166,21 @@ pub fn profile_model_id(profile_arn: &str) -> String {
 ///   text and about nothing else, and is applied beside the invocation rather than built
 ///   into the model's integration, so nothing else is needed of the model.
 /// * `featuresSupported` names each Amazon Bedrock feature the row publishes support for,
-///   beside `countTokens`, which is published for the family a token count is served for;
+///   beside the three that follow from what the model IS: `countTokens`, published for the
+///   family a token count is served for, `promptOptimization`, and `provisionedThroughput`,
+///   which the inference types the row is offered under decide;
 ///   `explicitPromptCaching`, `intelligentPromptRouting`, `latencyOptimizationSupported`
 ///   and `batchSupported` each report that one feature — each is a published per-model
 ///   fact, so a model no feature's supported-models table lists supports none of them. A
-///   capability is reported as the RECORD naming what is supported, and batch inference's
-///   record answers for the base model, for another region and for a customization of the
-///   model, that last one only where the model accepts a customization at all.
-/// * `converse` reports what a conversation may carry to the model and ask of it.
+///   capability is reported as the RECORD naming what is supported: batch inference's
+///   `batchSupported` record answers for the base model, for another region and for a
+///   customization of the model (that last one only where the model accepts a
+///   customization at all), and its `featuresSupported.batchInference` record answers per
+///   region scope.
+/// * `converse` reports what a conversation may carry to the model and ask of it: a format
+///   set per modality the model takes, the document formats its provider line publishes
+///   (absent for a line no document reaches), and whether reasoning may be asked for and
+///   where it arrives.
 ///
 /// Here rather than in one suite because the listing suite, the read suite and the
 /// capability suite all compare a response against it, and the projection they compare
@@ -238,13 +245,24 @@ pub fn expected_foundation_model_projection(
         "supported": true,
         "streamingSupported": model.response_streaming_supported,
         "systemRoleSupported": true,
-        "reasoningSupported": { "isSupported": expected_reasoning_supported(model) },
+        // Reasoning names whether it may be asked for and WHERE it arrives; a reasoning
+        // block of its own is how every model of this catalogue answers, so none embeds it
+        // in the answer text.
+        "reasoningSupported": {
+            "isSupported": expected_reasoning_supported(model),
+            "embedded": false,
+        },
         "stopSequencesDefault": Vec::<&str>::new(),
-        "userDocumentTypesSupported": formats(takes("TEXT"), DOCUMENT_FORMATS),
         "userImageTypesSupported": formats(takes("IMAGE"), IMAGE_FORMATS),
         // No modality the model declares is video, so no row takes one.
         "userVideoTypesSupported": Vec::<&str>::new(),
     });
+    // A document is a FILE a turn carries rather than a modality the model declares, so the
+    // formats are published per provider line and the member is absent for a model no
+    // document block reaches.
+    if let Some(documents) = expected_user_document_formats(model) {
+        converse["userDocumentTypesSupported"] = json!(documents);
+    }
     if let Some(ceiling) = expected_max_output_tokens(model) {
         converse["maxTokensMaximum"] = json!(ceiling);
     }
@@ -252,7 +270,11 @@ pub fn expected_foundation_model_projection(
     projection["modelFamily"] = json!(model.model_family);
     projection["inferenceAPIsSupported"] = json!(apis);
     projection["featuresSupported"] = json!({
-        "batchInference": published("BATCH_INFERENCE"),
+        // Batch inference is published per region scope, so it answers with a record.
+        "batchInference": {
+            "crossRegion": published("BATCH_INFERENCE"),
+            "inRegion": published("BATCH_INFERENCE"),
+        },
         "countTokens": expected_count_tokens_supported(model),
         "intelligentPromptRouting": published("INTELLIGENT_PROMPT_ROUTING"),
         "latencyOptimization": published("LATENCY_OPTIMIZATION"),
@@ -260,6 +282,9 @@ pub fn expected_foundation_model_projection(
         // A prompt optimization job rewrites a prompt template for the models it targets,
         // so it needs of a model only that a prompt is what the model is given.
         "promptOptimization": conversational,
+        // Reserved capacity may be bought for a model the catalogue offers it under, which
+        // is the same fact that decides whether a purchase over the model is accepted.
+        "provisionedThroughput": model.inference_types_supported.contains(&"PROVISIONED"),
     });
     projection["explicitPromptCaching"] = json!({ "isSupported": published("PROMPT_CACHING") });
     projection["intelligentPromptRouting"] =
@@ -275,14 +300,24 @@ pub fn expected_foundation_model_projection(
     projection
 }
 
-/// The document formats a turn of a conversation may carry to a model that takes TEXT
-/// (`DocumentFormat` in the Amazon Bedrock Runtime model).
-const DOCUMENT_FORMATS: &[&str] = &[
-    "pdf", "csv", "doc", "docx", "xls", "xlsx", "html", "txt", "md",
-];
+/// The document formats the catalogue publishes for the row's provider line, or `None` for
+/// a line no document block reaches — stated HERE rather than read off the service, for the
+/// same reason as the reasoning set below.
+///
+/// Amazon Bedrock publishes document chat per model ("Supported models and model features"
+/// in the Amazon Bedrock User Guide) rather than for every model a prompt is given to, and
+/// of the providers this catalogue carries it is the Anthropic Claude line that is
+/// published with document input, as PDF.
+pub fn expected_user_document_formats(
+    model: &bedrock::state::FoundationModel,
+) -> Option<&'static [&'static str]> {
+    (model.provider_name == "Anthropic").then_some(&["pdf"][..])
+}
 
-/// The image formats a turn may carry to a model that takes IMAGE (`ImageFormat`).
-const IMAGE_FORMATS: &[&str] = &["png", "jpeg", "gif", "webp"];
+/// The image formats a turn may carry to a model that takes IMAGE (`ImageFormat` of the
+/// Amazon Bedrock Runtime model), in the published order: the format a client that takes
+/// the first supported one as its default would pick comes first.
+const IMAGE_FORMATS: &[&str] = &["jpeg", "png", "gif", "webp"];
 
 /// Whether the provider publishes extended reasoning for the row, stated HERE rather than
 /// read off the service: the suites assert that the summary reports what the catalogue

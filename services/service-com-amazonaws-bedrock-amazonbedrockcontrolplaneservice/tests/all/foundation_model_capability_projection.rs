@@ -403,10 +403,18 @@ async fn a_capability_holds_of_exactly_the_models_whose_attributes_establish_it(
         // `featuresSupported` names each published feature, and the capability members
         // below report one feature at a time, so the record and those members agree.
         let features = bedrock::state::model_features_supported(model);
+        let batch_inference = features.batch_inference.clone().unwrap_or_else(|| {
+            panic!(
+                "case {name:?}: featuresSupported.batchInference must be the record naming each \
+                 region scope, got {features:?}"
+            )
+        });
+        // Batch inference answers per region scope, so it is a record and never one bit.
         assert_eq!(
-            features.batch_inference,
-            Some(case.batch),
-            "case {name:?}: expected featuresSupported.batchInference {:?}, got {features:?}",
+            (batch_inference.in_region, batch_inference.cross_region),
+            (Some(case.batch), Some(case.batch)),
+            "case {name:?}: expected featuresSupported.batchInference to answer {:?} in region \
+             and across regions, got {batch_inference:?}",
             case.batch
         );
         assert_eq!(
