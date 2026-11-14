@@ -102,6 +102,8 @@
 #[allow(unused_imports)]
 use super::types::*;
 
+use crate::state::account_vpcs::account_holds_vpc_id;
+use crate::state::vpc_association_authority::{caller_arn, not_authorized_message};
 use crate::state::{
     conflicting_domain_exists, no_such_hosted_zone, normalize_zone_id, vpc_id_is_well_formed,
     vpc_region_is_modelled, MAX_VPCS_PER_HOSTED_ZONE,
@@ -180,7 +182,7 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
     async fn handle(
         &self,
         input: Self::Input,
-        _ctx: &smithy_server_runtime::OperationContext<'_>,
+        ctx: &smithy_server_runtime::OperationContext<'_>,
     ) -> Result<Self::Output, Self::Error> {
         let state = crate::state::service_state(&*self.engine).ok_or_else(|| {
             // Unreachable under the router, which always mounts this service on
@@ -216,6 +218,14 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
             .into());
         }
 
+        // Half of the authorization decision: whether the VPC is one the calling
+        // account created, which is a fact of its Amazon EC2 inventory. Read — with
+        // the caller's own identity, and only when the VPC is NOT the account's, since
+        // nothing else needs it — BEFORE this service's store is locked, so no handler
+        // holds two services' locks at once.
+        let vpc_is_the_accounts = account_holds_vpc_id(&*self.engine, vpc_id);
+        let foreign_caller = (!vpc_is_the_accounts).then(|| caller_arn(&*self.engine, ctx));
+
         // The caller may pass the bare id or the `/hostedzone/`-prefixed `Id` a
         // HostedZone handed it back; both name the same zone.
         let zone_id = normalize_zone_id(&input.hosted_zone_id).to_string();
@@ -244,6 +254,29 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
                 },
             )
             .into());
+        }
+
+        // The other half of the authorization decision: a VPC the account did not
+        // create is associable only while this zone authorizes it, which is what
+        // `CreateVPCAssociationAuthorization` grants and
+        // `DeleteVPCAssociationAuthorization` withdraws. The refusal is taken here,
+        // before the zone is looked at any further and so before anything about it
+        // could change: an association the caller may not make leaves the zone
+        // reporting exactly the VPCs it legitimately holds.
+        if let Some(caller) = &foreign_caller {
+            if zone.vpc_authorization_position(vpc_id).is_none() {
+                return Err(AssociateVPCWithHostedZoneErrorModeled::NotAuthorizedException(
+                    NotAuthorizedException {
+                        message: Some(not_authorized_message(
+                            caller,
+                            Self::NAME,
+                            vpc_id,
+                            vpc_region,
+                        )),
+                    },
+                )
+                .into());
+            }
         }
 
         // An association list is a SET keyed by VPC id, so associating a VPC the

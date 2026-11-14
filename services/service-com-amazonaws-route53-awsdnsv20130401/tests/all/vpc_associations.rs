@@ -30,16 +30,30 @@
 //! harness `hosted_zone_records` uses, so what is asserted is the HTTP/restXml
 //! behaviour a Route 53 client sees.
 
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use smithy_server_runtime::MultiServiceRouter;
 
-use crate::hosted_zone_records::{call, create_zone_body, escape_xml, router, Reply};
+use crate::hosted_zone_records::{
+    call, create_zone_body, escape_xml, router, router_holding_vpcs, Reply,
+};
 
 /// The region the zones in this suite are first associated with, which is also
 /// a value of the modelled `VPCRegion` enum
 /// (smithy_query(query="shape",shape="VPCRegion")).
 pub(crate) const HOME_REGION: &str = "us-east-1";
+
+/// The `Status` a change reports once it has propagated (`ChangeStatus` enum).
+const STATUS_INSYNC: &str = "INSYNC";
+
+/// How long a poll for the clock-owed `PENDING` -> `INSYNC` transition keeps looking.
+///
+/// Generous on purpose: nothing here is a timing assertion, so the deadline exists only
+/// so a change that never propagates FAILS instead of hanging the suite.
+const PROPAGATION_DEADLINE: Duration = Duration::from_secs(30);
+
+/// How long the poll waits between two reads of the same change.
+const PROPAGATION_POLL: Duration = Duration::from_millis(25);
 
 /// The VPC every private zone in this suite is created with.
 pub(crate) const CREATION_VPC: &str = "vpc-9f8e7d6c";
@@ -205,7 +219,12 @@ async fn associating_vpcs_appends_them_to_the_zone_the_read_reports() {
         },
     ];
 
-    let router = router();
+    // The account CREATED every VPC this table associates, as it created the one its
+    // private zone was created with: a VPC of the calling account is associable on its
+    // own, which is the permission under test in `vpc_association_authority`.
+    let mut held = vec![(CREATION_VPC, HOME_REGION)];
+    held.extend(rows.iter().map(|row| (row.vpc_id, row.region)));
+    let router = router_holding_vpcs(&held);
     let zone_id = create_private_zone(
         &router,
         "multi-vpc.example.com",
@@ -296,32 +315,40 @@ async fn associating_vpcs_appends_them_to_the_zone_the_read_reports() {
         change_ids.len(),
         "each association must get its own change id, got {change_ids:?}"
     );
-    // The clock owes the PENDING -> INSYNC transition; nothing polls for it.
-    // A blocking sleep, because this crate's tokio does not enable the `time`
-    // feature; each test owns its runtime, so nothing else is waiting on it.
-    std::thread::sleep(Duration::from_millis(700));
+    // The clock owes the PENDING -> INSYNC transition. Each change is POLLED until it
+    // reports INSYNC — the transition is what is waited for, not a span of time — and the
+    // deadline is only there so a change that never propagates fails instead of hanging.
     for (row, change_id) in rows.iter().zip(change_ids.iter()) {
         let bare = change_id.trim_start_matches("/change/");
-        let got = call(&router, "GET", &format!("/2013-04-01/change/{bare}"), "").await;
-        assert_eq!(
-            got.status, 200,
-            "case {:?}: expected 200 from GetChange, got {} with body {}",
-            row.case, got.status, got.body
-        );
-        assert_eq!(
-            got.first("ChangeInfo/Id"),
-            Some(change_id.as_str()),
-            "case {:?}: GetChange must return the persisted change; body {}",
-            row.case,
-            got.body
-        );
-        assert_eq!(
-            got.first("ChangeInfo/Status"),
-            Some("INSYNC"),
-            "case {:?}: the change must have reached INSYNC; body {}",
-            row.case,
-            got.body
-        );
+        let deadline = Instant::now() + PROPAGATION_DEADLINE;
+        loop {
+            let got = call(&router, "GET", &format!("/2013-04-01/change/{bare}"), "").await;
+            assert_eq!(
+                got.status, 200,
+                "case {:?}: expected 200 from GetChange, got {} with body {}",
+                row.case, got.status, got.body
+            );
+            assert_eq!(
+                got.first("ChangeInfo/Id"),
+                Some(change_id.as_str()),
+                "case {:?}: GetChange must return the persisted change; body {}",
+                row.case,
+                got.body
+            );
+            if got.first("ChangeInfo/Status") == Some(STATUS_INSYNC)
+                || Instant::now() >= deadline
+            {
+                assert_eq!(
+                    got.first("ChangeInfo/Status"),
+                    Some(STATUS_INSYNC),
+                    "case {:?}: the change must reach INSYNC; body {}",
+                    row.case,
+                    got.body
+                );
+                break;
+            }
+            ::tokio::time::sleep(PROPAGATION_POLL).await;
+        }
     }
 }
 
@@ -330,13 +357,15 @@ async fn re_associating_a_vpc_leaves_the_association_set_as_it_was() {
     // The rule: the set is keyed by VPC id, so the same VPC is held once
     // however many times it is associated — and the repeat is accepted, with
     // its own change, rather than refused.
-    let router = router();
+    // Both VPCs are the account's own, so the association itself is the thing under
+    // test rather than the authorization gate.
+    let extra = "vpc-0123456789abcdef0";
+    let router = router_holding_vpcs(&[(CREATION_VPC, HOME_REGION), (extra, "eu-west-2")]);
     let zone_id =
         create_private_zone(&router, "repeat.example.com", "associate-repeat", CREATION_VPC).await;
 
     // The rows differ along which already-held VPC is associated again, and
     // along whether the request repeats the region it was stored with.
-    let extra = "vpc-0123456789abcdef0";
     let first = associate(
         &router,
         &zone_id,
@@ -689,8 +718,13 @@ async fn associating_a_vpc_with_an_unknown_zone_is_a_not_found() {
 
 #[tokio::test]
 async fn a_vpc_cannot_be_associated_with_two_zones_of_the_same_name() {
-    let router = router();
     let shared_vpc = "vpc-0abcdef012345678a";
+    // Every VPC here is one the account created, so each association is refused (or
+    // accepted) on the domain conflict alone.
+    let router = router_holding_vpcs(&[
+        (shared_vpc, HOME_REGION),
+        ("vpc-1111222233334444a", HOME_REGION),
+    ]);
     // The zone that already serves `shared.example.com` for the VPC.
     let first = create_private_zone(&router, "shared.example.com", "conflict-first", shared_vpc)
         .await;

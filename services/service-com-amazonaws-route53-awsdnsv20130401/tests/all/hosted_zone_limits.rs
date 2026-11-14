@@ -32,10 +32,11 @@ use service_com_amazonaws_route53_awsdnsv20130401::state::{
 
 use crate::account_limits::reported;
 use crate::hosted_zone_records::{
-    call, change_batch_body, change_element, create_zone_ok, router, RecordRow, Reply,
+    call, change_batch_body, change_element, create_zone_ok, router, router_holding_vpcs,
+    RecordRow, Reply,
 };
 use crate::refusal_message_rules::message_of;
-use crate::vpc_associations::{associations, create_private_zone, get_zone, vpc_block};
+use crate::vpc_associations::{associations, create_private_zone, get_zone, vpc_block, HOME_REGION};
 use crate::vpc_disassociation::{associate_ok, disassociate};
 
 /// Ask one zone for one of its limits.
@@ -309,10 +310,22 @@ const VPC_ROWS: &[VpcRow] = &[
     },
 ];
 
+/// The VPCs of [`VPC_ROWS`], as the account's Amazon EC2 inventory holds them: the
+/// association path takes a VPC the calling account created, so a suite that associates
+/// one gives the account that VPC first.
+fn held_vpc_rows() -> Vec<(&'static str, &'static str)> {
+    VPC_ROWS
+        .iter()
+        .map(|row| (row.vpc_id, row.region))
+        .collect()
+}
+
 #[tokio::test]
 async fn the_association_count_follows_the_vpcs_the_private_zone_holds() {
-    let router = router();
     let creation_vpc = "vpc-9a8b7c6d";
+    let mut held = held_vpc_rows();
+    held.push((creation_vpc, HOME_REGION));
+    let router = router_holding_vpcs(&held);
     let zone = create_private_zone(
         &router,
         "private.limits.example.com",
@@ -383,7 +396,7 @@ async fn each_zone_reports_its_own_population_for_the_kind_that_was_asked_about(
     // Two private zones holding DIFFERENT populations, so a count read off the
     // account rather than off the named zone, or off the wrong entity kind,
     // fails here.
-    let router = router();
+    let router = router_holding_vpcs(&held_vpc_rows());
     let busy = create_private_zone(
         &router,
         RECORD_ZONE,
@@ -613,7 +626,7 @@ async fn reading_a_limit_leaves_the_zone_exactly_as_it_was() {
     // The rule is a report, so repeating it answers the same thing and consumes
     // nothing: the record sets and the associations after any number of reads
     // are still the ones the zone held.
-    let router = router();
+    let router = router_holding_vpcs(&held_vpc_rows());
     let zone = create_private_zone(
         &router,
         RECORD_ZONE,

@@ -351,7 +351,15 @@ async fn the_last_association_of_a_zone_cannot_be_removed() {
         },
     ];
 
-    let router = router();
+    // Every VPC in this suite is one the account created: the authorization gate on the
+    // association path is `vpc_association_authority`'s subject, not this suite's.
+    let mut held = vec![(CREATION_VPC, HOME_REGION)];
+    held.extend(rows.iter().flat_map(|row| row.extra.iter().copied()));
+    let seconds: Vec<String> = (0..rows.len())
+        .map(|index| format!("vpc-{index:017x}"))
+        .collect();
+    held.extend(seconds.iter().map(|second| (second.as_str(), "us-west-2")));
+    let router = router_holding_vpcs(&held);
     for (index, row) in rows.iter().enumerate() {
         let (case, survivor) = (row.case, row.survivor);
         let zone_id = create_private_zone(
@@ -422,7 +430,7 @@ async fn the_last_association_of_a_zone_cannot_be_removed() {
         );
 
         // The identical request succeeds once a second VPC is associated.
-        let second = format!("vpc-{index:017x}");
+        let second = seconds[index].clone();
         associate_ok(&router, &zone_id, &second, "us-west-2").await;
         let reply = disassociate(
             &router,
@@ -470,7 +478,19 @@ async fn the_last_association_of_a_zone_cannot_be_removed() {
 
 #[tokio::test]
 async fn disassociating_a_vpc_the_zone_does_not_hold_is_a_not_found() {
-    let router = router();
+    // A second association, so the zone is never refused for holding only one.
+    let spare = "vpc-00ff00ff00ff00ff0";
+    // One that was associated and then removed, so its id is known to the zone's
+    // history but not to its set.
+    let removed = "vpc-0abc0abc0abc0abc0";
+    // A VPC associated with ANOTHER zone, which is no association of this one.
+    let elsewhere = "vpc-0c0ffee0c0ffee0c0";
+    let router = router_holding_vpcs(&[
+        (CREATION_VPC, HOME_REGION),
+        (spare, "eu-west-1"),
+        (removed, "ap-northeast-1"),
+        (elsewhere, HOME_REGION),
+    ]);
     let zone_id = create_private_zone(
         &router,
         "not-associated.example.com",
@@ -478,12 +498,7 @@ async fn disassociating_a_vpc_the_zone_does_not_hold_is_a_not_found() {
         CREATION_VPC,
     )
     .await;
-    // A second association, so the zone is never refused for holding only one.
-    let spare = "vpc-00ff00ff00ff00ff0";
     associate_ok(&router, &zone_id, spare, "eu-west-1").await;
-    // One that was associated and then removed, so its id is known to the zone's
-    // history but not to its set.
-    let removed = "vpc-0abc0abc0abc0abc0";
     associate_ok(&router, &zone_id, removed, "ap-northeast-1").await;
     let gone = disassociate(
         &router,
@@ -497,8 +512,6 @@ async fn disassociating_a_vpc_the_zone_does_not_hold_is_a_not_found() {
         "removing the association first: expected 200, got {} with body {}",
         gone.status, gone.body
     );
-    // A VPC associated with ANOTHER zone, which is no association of this one.
-    let elsewhere = "vpc-0c0ffee0c0ffee0c0";
     let other_zone =
         create_private_zone(&router, "elsewhere.example.com", "other-zone", elsewhere).await;
 
@@ -735,7 +748,10 @@ async fn a_request_that_names_no_valid_vpc_is_refused() {
         },
     ];
 
-    let router = router();
+    let router = router_holding_vpcs(&[
+        (CREATION_VPC, HOME_REGION),
+        ("vpc-0a1b2c3d4e5f60718", "eu-north-1"),
+    ]);
     let zone_id = create_private_zone(
         &router,
         "bad-vpc-disassociate.example.com",
@@ -844,7 +860,8 @@ async fn a_disassociated_vpc_can_be_associated_again() {
         ("re-associated in another region", "ap-east-1"),
     ];
 
-    let router = router();
+    let subject = "vpc-0f1e2d3c4b5a69788";
+    let router = router_holding_vpcs(&[(CREATION_VPC, HOME_REGION), (subject, "eu-west-3")]);
     let zone_id = create_private_zone(
         &router,
         "inverse.example.com",
@@ -852,7 +869,6 @@ async fn a_disassociated_vpc_can_be_associated_again() {
         CREATION_VPC,
     )
     .await;
-    let subject = "vpc-0f1e2d3c4b5a69788";
 
     for (case, second_region) in rows {
         associate_ok(&router, &zone_id, subject, "eu-west-3").await;

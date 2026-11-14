@@ -55,6 +55,11 @@ service-com-amazonaws-cloudwatch-graniteserviceversion20100801 = { workspace = t
 # answers from — so the VPC a Route 53 request names is resolved against that store through
 # the shared engine, which needs the owning service's state TYPE.
 service-com-amazonaws-ec2-amazonec2 = { workspace = true }
+# The STS store, for the identity an access key id speaks for: the principal
+# `sts:GetCallerIdentity` answers for the credentials a request signed with, which is the
+# principal an unauthorized association is refused in the name of
+# (`state::vpc_association_authority`).
+service-com-amazonaws-sts-awssecuritytokenservicev20110615 = { workspace = true }
 # A key-signing key publishes the PUBLIC half of the customer managed key it names, which
 # lives in the KMS emulator's own key store: it is reached through the shared engine and
 # needs the owning service's state TYPE.

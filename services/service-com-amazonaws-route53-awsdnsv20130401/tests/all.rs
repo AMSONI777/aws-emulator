@@ -192,6 +192,10 @@ mod traffic_policy_version_listing;
 mod traffic_policy_versions;
 #[path = "all/vpc_association_authorizations.rs"]
 mod vpc_association_authorizations;
+// Declared beside the association suites: this one is the AUTHORIZATION gate an
+// association is held to — which VPCs the calling account may associate at all.
+#[path = "all/vpc_association_authority.rs"]
+mod vpc_association_authority;
 #[path = "all/vpc_associations.rs"]
 mod vpc_associations;
 #[path = "all/vpc_authorization_deletion.rs"]

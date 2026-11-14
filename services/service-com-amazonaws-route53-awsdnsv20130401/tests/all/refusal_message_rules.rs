@@ -37,7 +37,7 @@
 
 use service_com_amazonaws_route53_awsdnsv20130401::state::TRAFFIC_POLICY_FORMAT_VERSION;
 
-use crate::hosted_zone_records::{router, Reply};
+use crate::hosted_zone_records::{router, router_holding_vpcs, Reply};
 use crate::hosted_zones_by_vpc::list_by_vpc;
 use crate::traffic_policies::{create_policy, document_with_start_endpoint};
 use crate::vpc_association_authorizations::{authorize_ok, list_authorizations};
@@ -321,8 +321,12 @@ async fn a_domain_conflict_names_the_vpc_its_region_and_the_zone_holding_it() {
 
     for (index, row) in rows.iter().enumerate() {
         // A router of its own per row, so one row's zones cannot be read as
-        // another's.
-        let router = router();
+        // another's. Both VPCs are the account's own, so each association is decided
+        // on the domain conflict rather than on the authorization gate.
+        let router = router_holding_vpcs(&[
+            (row.held_vpc, HOME_REGION),
+            (row.other_vpc, HOME_REGION),
+        ]);
         let holding_zone = create_private_zone(
             &router,
             row.zone_name,

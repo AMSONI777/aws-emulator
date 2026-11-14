@@ -55,6 +55,10 @@ pub mod monitored_alarm;
 /// against.
 pub mod account_vpcs;
 
+/// Who may associate a VPC with a private hosted zone, and the sentence a caller
+/// that may not is refused with.
+pub mod vpc_association_authority;
+
 /// The DNSSEC key material a key-signing key publishes, computed from the public
 /// half of the customer managed key the KSK was created from.
 pub mod signing_key;

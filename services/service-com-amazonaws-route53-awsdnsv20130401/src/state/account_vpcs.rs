@@ -41,6 +41,28 @@ pub fn account_holds_vpc<Eng: Send + Sync + 'static>(
     store.vpcs.contains_key(vpc_id) && store.vpc_is_in_region(Some(vpc_id), vpc_region)
 }
 
+/// Whether the account holds the VPC `vpc_id` at all, in whichever Region it was
+/// created in.
+///
+/// What a question about the VPC's OWNERSHIP asks — did this account create it —
+/// rather than a question about where it can be reached. An Amazon VPC id
+/// identifies the VPC on its own, which is why a zone keys its associations by
+/// the id alone ([`super::vpc_position_in`]) and carries the Region alongside as
+/// what a reader needs to find the VPC again; so an account either created the
+/// VPC an id names or it did not, and the Region a request states cannot make a
+/// VPC of the account one it never created.
+///
+/// Answers `true` on an engine with no Amazon EC2 store for the same reason
+/// [`account_holds_vpc`] does: with no inventory to resolve against, no VPC can
+/// be shown to be one the account does not hold.
+pub fn account_holds_vpc_id<Eng: Send + Sync + 'static>(engine: &Eng, vpc_id: &str) -> bool {
+    let Some(state) = ec2::state::service_state(engine) else {
+        return true;
+    };
+    let store = state.lock();
+    store.vpcs.contains_key(vpc_id)
+}
+
 /// The sentence Route 53 refuses a request about a VPC the calling account does
 /// not hold with (`AccessDenied`, HTTP 403).
 ///

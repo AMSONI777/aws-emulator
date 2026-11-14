@@ -27,7 +27,7 @@
 //! service through the same router a socket-served request goes through.
 
 use crate::error_envelope::ZoneOperation;
-use crate::hosted_zone_records::{call, create_zone_ok, router};
+use crate::hosted_zone_records::{call, create_zone_ok, router, router_holding_vpcs};
 use crate::reusable_delegation_sets::create_set;
 use crate::vpc_associations::{
     associations, create_private_zone, get_zone, vpc_block, CREATION_VPC, HOME_REGION,
@@ -280,7 +280,16 @@ async fn the_last_vpc_refusal_is_one_constant_sentence() {
         },
     ];
 
-    let router = router();
+    // Every VPC a row associates is one the account created, so each disassociation is
+    // reached at all: the association path takes a VPC of the calling account.
+    let mut held = vec![(CREATION_VPC, HOME_REGION)];
+    held.extend(rows.iter().map(|row| (row.survivor, row.region)));
+    held.extend(rows.iter().flat_map(|row| row.transient.iter().copied()));
+    let seconds: Vec<String> = (0..rows.len())
+        .map(|index| format!("vpc-{index:08x}"))
+        .collect();
+    held.extend(seconds.iter().map(|second| (second.as_str(), "us-west-2")));
+    let router = router_holding_vpcs(&held);
     let mut messages: Vec<String> = Vec::new();
     for (index, row) in rows.iter().enumerate() {
         let case = row.case;
@@ -383,7 +392,7 @@ async fn the_last_vpc_refusal_is_one_constant_sentence() {
             "case {case:?}: the refusal must leave the association intact, expected {before:?}, \
              got {after:?}"
         );
-        let second = format!("vpc-{index:08x}");
+        let second = seconds[index].clone();
         associate_ok(&router, &zone_id, &second, "us-west-2").await;
         let accepted = disassociate(
             &router,

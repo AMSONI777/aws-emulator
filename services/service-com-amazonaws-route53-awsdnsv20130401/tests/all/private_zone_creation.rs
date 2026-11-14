@@ -30,7 +30,7 @@
 
 use smithy_server_runtime::MultiServiceRouter;
 
-use crate::hosted_zone_records::{call, router};
+use crate::hosted_zone_records::{call, router, router_holding_vpcs};
 use crate::vpc_associations::{
     associate, associations, bare_zone_id, create_zone, get_zone, vpc_block, HOME_REGION,
 };
@@ -415,7 +415,11 @@ async fn a_vpc_only_private_zone_takes_further_associations() {
     ];
     let creation_vpc = "vpc-0a1b2c3d4e5f60718";
 
-    let router = router();
+    // The account created every VPC this zone is given, as an account does for the VPCs
+    // of its own private zone.
+    let mut held = vec![(creation_vpc, HOME_REGION)];
+    held.extend(further);
+    let router = router_holding_vpcs(&held);
     let created = create_zone(
         &router,
         "split-horizon.example.com",
