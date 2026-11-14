@@ -19,6 +19,9 @@
 pub mod data_plane;
 pub mod harvest_destination;
 pub mod harvest_export;
+pub mod ingest_addressing;
+
+pub use ingest_addressing::{announced_ingest_origin, INGEST_ORIGIN_PREFIX};
 
 use crate::ops::types::{
     Authorization, Channel, CmafPackage, CmafPackageCreateOrUpdateParameters, DashPackage,
@@ -2701,8 +2704,17 @@ impl ComAmazonawsMediapackageMediapackageState {
     /// characters each), and stored on the channel record, so every later read of the
     /// channel returns exactly these values. The URL embeds the endpoint id, so it stays
     /// valid for exactly that endpoint.
-    pub fn mint_ingest_endpoints(&mut self, region: &str, channel_id: &str) -> Vec<IngestEndpoint> {
-        let hostname = media_hostname(region);
+    ///
+    /// `origin` is the scheme and authority every one of this channel's ingest URLs is
+    /// announced under — the endpoint the creating request reached
+    /// ([`announced_ingest_origin`]) — so the address an encoder is handed is one this
+    /// emulator answers the ingest plane on ([`data_plane`]).
+    pub fn mint_ingest_endpoints(
+        &mut self,
+        origin: &str,
+        region: &str,
+        channel_id: &str,
+    ) -> Vec<IngestEndpoint> {
         let channel_label = channel_path_label(channel_id, region);
         (0..INGEST_ENDPOINT_COUNT)
             .map(|_| {
@@ -2710,7 +2722,7 @@ impl ComAmazonawsMediapackageMediapackageState {
                 let (username, password) = self.mint_ingest_credentials();
                 IngestEndpoint {
                     url: Some(format!(
-                        "https://{hostname}{}",
+                        "{origin}{}",
                         data_plane::ingest_path(&channel_label, &id)
                     )),
                     id: Some(id),
@@ -3351,12 +3363,18 @@ pub fn packaging_refusal(supplied: &[&str]) -> ServiceError {
     )
 }
 
-/// The host MediaPackage serves this account in `region` on: the account's own stable
-/// label, then the regional service domain.
+/// The host AWS ITSELF serves this account's MediaPackage traffic in `region` on: the
+/// account's own stable label, then the regional service domain.
 ///
-/// The single statement of that rule: every URL this service hands a caller — the ingest
-/// URLs of a Channel and the playback URLs of an OriginEndpoint and its child manifests —
-/// names this host, so they cannot come to name different ones.
+/// The single statement of that rule, so every URL built from the host AWS publishes
+/// names the same one. It is what a client that resolves AWS's own hostnames is told: the
+/// ingest URLs of a Channel are announced under it only when this emulator has no own
+/// address to announce in its place ([`ingest_addressing`]).
+///
+/// Its other caller is [`playback_url_prefix`], which is still rooted on it for every
+/// caller: an OriginEndpoint's playback URL is the same class of announced address as an
+/// ingest URL and has its own open issue, so it is deliberately left as it is here rather
+/// than changed by a fix that owns neither its replay keys nor its tests.
 pub fn media_hostname(region: &str) -> String {
     let account_label = stable_label(&[::emulator_server::emulator_account_id(), region]);
     format!("{account_label}.mediapackage.{region}.amazonaws.com")

@@ -13,6 +13,8 @@
 // points it into `tests/all/`.
 #[path = "all/access_log_group_names.rs"]
 mod access_log_group_names;
+#[path = "all/announced_ingest_origin.rs"]
+mod announced_ingest_origin;
 #[path = "all/channel_lifecycle.rs"]
 mod channel_lifecycle;
 #[path = "all/cmaf_child_manifest_ids_are_unique.rs"]

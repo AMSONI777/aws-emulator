@@ -239,6 +239,27 @@ pub fn reached_emulator_endpoint(uri: &str, host_header: Option<&str>) -> Option
     (is_host_shaped(&host) && !names_a_service(&host)).then_some(host)
 }
 
+/// [`reached_emulator_endpoint`] for the request PARTS a handler is given, which is the
+/// form a service reads it in: the two places a request carries its host — the `Host`
+/// header and an absolute-form URI — are read off `parts` here, so no service repeats that
+/// extraction beside its own call of the reading above.
+///
+/// Services still carrying their own copy of this extraction, to be MIGRATED onto this
+/// function (they predate it):
+/// `services/service-com-amazonaws-mediapackagevod-mediapackagevod/src/state/egress_addressing.rs`
+/// and `services/service-com-amazonaws-acm-certificatemanager/src/state.rs`. Nothing new
+/// inlines it again — call this module.
+#[must_use]
+pub fn reached_emulator_endpoint_of_parts(parts: &::http::request::Parts) -> Option<String> {
+    reached_emulator_endpoint(
+        &parts.uri.to_string(),
+        parts
+            .headers
+            .get(::http::header::HOST)
+            .and_then(|value| value.to_str().ok()),
+    )
+}
+
 /// Whether `host` is a non-empty `host[:port]` written with the characters a hostname, an
 /// IP literal and a port carry, and no longer than a DNS name may be.
 #[must_use]
@@ -494,6 +515,24 @@ mod tests {
                 answered.as_deref(),
                 *expected,
                 "case ({uri:?}, {header:?}): expected {expected:?}, got {answered:?}"
+            );
+            // The same reading off the request PARTS a handler is given, which is where
+            // the two places a request carries its host are read from.
+            let mut request = ::http::Request::builder().uri(*uri);
+            if let Some(header) = header {
+                request = request.header(::http::header::HOST, *header);
+            }
+            let parts = request
+                .body(())
+                .expect("the row is a well-formed request")
+                .into_parts()
+                .0;
+            let from_parts = reached_emulator_endpoint_of_parts(&parts);
+            assert_eq!(
+                from_parts.as_deref(),
+                *expected,
+                "case ({uri:?}, {header:?}) off the parts: expected {expected:?}, got \
+                 {from_parts:?}"
             );
         }
     }

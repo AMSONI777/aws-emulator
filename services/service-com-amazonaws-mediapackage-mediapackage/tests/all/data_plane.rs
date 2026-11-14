@@ -36,7 +36,7 @@ use std::sync::Arc;
 
 /// A fresh emulator holding only this service, with request authentication off (this suite
 /// exercises behaviour, not signing).
-fn emulator() -> MultiServiceRouter {
+pub(crate) fn emulator() -> MultiServiceRouter {
     let engine: Arc<engine::InMemoryEngine> = Arc::new(engine::InMemoryEngine::new());
     let mut router = MultiServiceRouter::new();
     router.set_request_authentication(false);
@@ -45,11 +45,11 @@ fn emulator() -> MultiServiceRouter {
 }
 
 /// The Region every case below is served in.
-const REGION: &str = "us-west-2";
+pub(crate) const REGION: &str = "us-west-2";
 
 /// A SigV4 `Authorization` whose credential scope routes a CONTROL-plane request to
 /// `mediapackage` in [`REGION`]; the signature is never verified here.
-fn control_authorization() -> String {
+pub(crate) fn control_authorization() -> String {
     format!(
         "AWS4-HMAC-SHA256 Credential=AKIDTEST/20260101/{REGION}/mediapackage/aws4_request, \
          SignedHeaders=host, Signature=abc"
@@ -78,15 +78,15 @@ async fn control(
 }
 
 /// One answer of a data plane: the status, the headers and the bytes.
-struct Answer {
-    status: u16,
+pub(crate) struct Answer {
+    pub(crate) status: u16,
     headers: Vec<(String, String)>,
     body: Vec<u8>,
 }
 
 impl Answer {
     /// The value of `name`, when the answer carries it.
-    fn header(&self, name: &str) -> Option<&str> {
+    pub(crate) fn header(&self, name: &str) -> Option<&str> {
         self.headers
             .iter()
             .find(|(field, _)| field.eq_ignore_ascii_case(name))
@@ -94,13 +94,13 @@ impl Answer {
     }
 
     /// The body as text, for an assertion message.
-    fn text(&self) -> String {
+    pub(crate) fn text(&self) -> String {
         String::from_utf8_lossy(&self.body).to_string()
     }
 }
 
 /// One data-plane round trip to `url`, with `headers` and `body`.
-async fn plane(
+pub(crate) async fn plane(
     router: &MultiServiceRouter,
     method: &str,
     url: &str,
@@ -134,7 +134,7 @@ async fn plane(
 }
 
 /// The path of an `https://host/path` URL.
-fn path_of(url: &str) -> &str {
+pub(crate) fn path_of(url: &str) -> &str {
     url.strip_prefix("https://")
         .and_then(|rest| rest.find('/').map(|start| &rest[start..]))
         .unwrap_or("/")
@@ -170,7 +170,7 @@ impl Addressing {
 // ---------------------------------------------------------------------------
 
 /// `value` digested with MD5, hexadecimal, as RFC 2617 writes every digest in.
-fn md5_hex(value: &str) -> String {
+pub(crate) fn md5_hex(value: &str) -> String {
     use md5::Digest as _;
     hex::encode(md5::Md5::digest(value.as_bytes()))
 }
@@ -179,7 +179,7 @@ fn md5_hex(value: &str) -> String {
 ///
 /// A challenge is `<scheme> <parameters>`, so the scheme token is dropped before the
 /// parameters are read off it.
-fn challenge_parameter(challenge: &str, name: &str) -> String {
+pub(crate) fn challenge_parameter(challenge: &str, name: &str) -> String {
     let parameters = challenge
         .trim()
         .split_once(char::is_whitespace)
@@ -195,7 +195,7 @@ fn challenge_parameter(challenge: &str, name: &str) -> String {
 
 /// The `Authorization: Digest` header a client answers `challenge` with for `method` on
 /// `path`, computed as RFC 2617 §3.2.2 defines it — the client half of the exchange.
-fn digest_authorization(
+pub(crate) fn digest_authorization(
     challenge: &str,
     method: &str,
     path: &str,
@@ -229,10 +229,10 @@ fn basic_authorization(username: &str, password: &str) -> String {
 
 /// One ingest endpoint of a channel, as `CreateChannel` published it.
 #[derive(Debug, Clone)]
-struct Ingest {
-    url: String,
-    username: String,
-    password: String,
+pub(crate) struct Ingest {
+    pub(crate) url: String,
+    pub(crate) username: String,
+    pub(crate) password: String,
 }
 
 /// The ingest endpoints of a freshly created channel `id`.

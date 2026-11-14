@@ -4163,3 +4163,10 @@ mod lambda_in_function_cloudwatch_authorization;
 // this file and every service crate's `tests/all.rs`, which is why this fragment stands as
 // an ordinary comment rather than the `//!` a landing appended it as.
 // comment is legal only before the first item of a crate root, so a `//!` line in this tail is
+// header that a landing appended to this tail: a `//!` line past the first item is `E0753`
+// and compiles no suite in this target, so it stands as an ordinary comment.)
+// (A fragment of this file's own header that a landing appended to this tail: `//!` is
+// legal only before the first item, so these four lines stand as ordinary comments. The
+// rule they state — declare each suite ONCE, since this is one crate root and a second
+// `mod` for the same name is `E0428` — is in the header at the top of this file, and
+// `all/all_rs_declares_each_suite_once.rs` is what checks it for this file and for every
