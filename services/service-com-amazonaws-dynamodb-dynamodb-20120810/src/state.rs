@@ -4460,6 +4460,7 @@ pub use multi_item::*;
 pub mod consumed_capacity_metrics;
 
 pub use consumed_capacity_metrics::{
+    charge_refused_conditional_write, charge_refused_transactional_write,
     charge_reported_capacity, charge_reported_ledger, publish_pending_consumed, Consumed,
 };
 

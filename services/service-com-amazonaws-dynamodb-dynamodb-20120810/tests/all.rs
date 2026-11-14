@@ -187,6 +187,8 @@ mod query_indexes_and_projections;
 mod query_mixed_parameter_order;
 #[path = "all/refusal_contracts_and_expression_pre_images.rs"]
 mod refusal_contracts_and_expression_pre_images;
+#[path = "all/refused_conditional_write_metering.rs"]
+mod refused_conditional_write_metering;
 #[path = "all/required_member_refusals.rs"]
 mod required_member_refusals;
 #[path = "all/request_latency_metrics.rs"]

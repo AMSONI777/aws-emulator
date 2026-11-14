@@ -271,6 +271,79 @@ pub fn charge_reported_capacity(
     }
 }
 
+/// Count what ONE write REFUSED because its condition was not met consumed on the table it
+/// addressed.
+///
+/// A conditional write the service turns down stores nothing and reports NO capacity in band
+/// — its refusal carries no `ConsumedCapacity` member at all — but the write is metered just
+/// the same: "if you perform a conditional write that fails, you are charged for the write
+/// capacity units consumed" ("Capacity unit consumption for writes" in the Developer Guide).
+/// So the series a client graphs and alarms on carries the cost of a LOST
+/// optimistic-concurrency race exactly as it carries the cost of the write that won one, and
+/// a table whose writers keep losing races is not a table that reads as idle.
+///
+/// `stored` is the item the key HOLDS, which is what the refused write is weighed against
+/// ([`crate::state::Table::refused_write_capacity`]).
+pub fn charge_refused_conditional_write(
+    store: &mut crate::state::ComAmazonawsDynamodbDynamodb20120810State,
+    region: &str,
+    name: &str,
+    partition: &crate::state::AttributeValueKey,
+    stored: Option<&crate::state::Item>,
+    at: ::std::time::SystemTime,
+) {
+    charge_refused(store, region, name, partition, stored, 1.0, at);
+}
+
+/// [`charge_refused_conditional_write`] for one ELEMENT of a transaction whose condition was
+/// not met, which cancels the whole transaction.
+///
+/// A transactional write costs twice what the same single-item write costs
+/// ([`crate::state::TRANSACTIONAL_CAPACITY_FACTOR`]), and a refused one is charged on the
+/// same scale: "a failed conditional write of a 1 KB item would consume one write capacity
+/// unit. If the conditional write were part of a transaction, it would consume two write
+/// capacity units" ("Capacity unit consumption for writes" in the Developer Guide).
+pub fn charge_refused_transactional_write(
+    store: &mut crate::state::ComAmazonawsDynamodbDynamodb20120810State,
+    region: &str,
+    name: &str,
+    partition: &crate::state::AttributeValueKey,
+    stored: Option<&crate::state::Item>,
+    at: ::std::time::SystemTime,
+) {
+    charge_refused(
+        store,
+        region,
+        name,
+        partition,
+        stored,
+        crate::state::TRANSACTIONAL_CAPACITY_FACTOR,
+        at,
+    );
+}
+
+/// Charge a refused conditional write at `factor` times what one single-item write of it
+/// costs.
+///
+/// The request has already reached this table, so the name is one this region resolves; a
+/// table that is no longer there has no series to count into and is passed over rather than
+/// guessed at, exactly as in [`charge_reported_capacity`].
+fn charge_refused(
+    store: &mut crate::state::ComAmazonawsDynamodbDynamodb20120810State,
+    region: &str,
+    name: &str,
+    partition: &crate::state::AttributeValueKey,
+    stored: Option<&crate::state::Item>,
+    factor: f64,
+    at: ::std::time::SystemTime,
+) {
+    if let Ok(table) = store.table_mut(region, name) {
+        let mut capacity = table.refused_write_capacity(stored);
+        capacity.table *= factor;
+        table.charge_refused_item_write(partition, &capacity, at);
+    }
+}
+
 /// Count what one MULTI-ITEM request reported consuming into the series of each table it
 /// addressed, as the ledger it answers with itemises it.
 ///

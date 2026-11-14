@@ -30,7 +30,11 @@
 //! Conditional puts are served: `ConditionExpression` (or the legacy
 //! `Expected`/`ConditionalOperator`) is read against the item this put would replace,
 //! and an unmet condition is `ConditionalCheckFailedException`, carrying that item when
-//! `ReturnValuesOnConditionCheckFailure=ALL_OLD`. The expression language lives in
+//! `ReturnValuesOnConditionCheckFailure=ALL_OLD`. A refused put stores nothing and
+//! reports no `ConsumedCapacity`, and is METERED all the same: a conditional write that
+//! fails consumes the write capacity the item the key holds costs, counted into the
+//! table's consumption series ([`crate::state::charge_refused_conditional_write`]).
+//! The expression language lives in
 //! [`crate::state`], shared with `UpdateItem` and `DeleteItem`, and every substitution
 //! token the request defines must be referenced by one of its expressions
 //! ([`crate::state::Substitutions::check_all_referenced`]).
@@ -499,6 +503,19 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         )
         .map_err(lift)?;
         if !satisfied {
+            // The write is refused and nothing is stored, but it is METERED: a conditional
+            // write that fails consumes the write capacity of the item the key holds, so the
+            // table's consumption series carries the cost of a lost optimistic-concurrency
+            // race ([`crate::state::charge_refused_conditional_write`]). The refusal itself
+            // reports no capacity — the error carries no `ConsumedCapacity` member.
+            crate::state::charge_refused_conditional_write(
+                &mut store,
+                &region,
+                &name,
+                &key.partition,
+                replaced_before.as_ref(),
+                now,
+            );
             return Err(PutItemErrorModeled::ConditionalCheckFailedException(
                 ConditionalCheckFailedException {
                     message: Some(crate::state::CONDITION_FAILED_MESSAGE.to_string()),

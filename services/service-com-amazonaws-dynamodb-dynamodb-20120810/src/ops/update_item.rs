@@ -9,7 +9,9 @@
 //! `AttributeUpdates` map, never both; the write is conditional on
 //! `ConditionExpression` or the legacy `Expected`/`ConditionalOperator`, and an unmet
 //! condition is `ConditionalCheckFailedException` (carrying the item when
-//! `ReturnValuesOnConditionCheckFailure=ALL_OLD`). `ReturnValues` reports the item
+//! `ReturnValuesOnConditionCheckFailure=ALL_OLD`) — a refused update writes nothing and
+//! reports no `ConsumedCapacity`, and is metered like the write it would have made
+//! ([`crate::state::charge_refused_conditional_write`]). `ReturnValues` reports the item
 //! before or after the write, whole or projected to the attributes the update touched.
 //! An unknown — or not yet `ACTIVE` — table is `ResourceNotFoundException`.
 //!
@@ -479,6 +481,18 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         )
         .map_err(lift)?;
         if !satisfied {
+            // The update is refused and nothing is written, but it is METERED like the put
+            // of the same item: a conditional write that fails still consumes the write
+            // capacity the stored item costs
+            // ([`crate::state::charge_refused_conditional_write`]).
+            crate::state::charge_refused_conditional_write(
+                &mut store,
+                &region,
+                &name,
+                &key.partition,
+                before.as_ref(),
+                now,
+            );
             return Err(UpdateItemErrorModeled::ConditionalCheckFailedException(
                 ConditionalCheckFailedException {
                     message: Some(crate::state::CONDITION_FAILED_MESSAGE.to_string()),

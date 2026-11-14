@@ -584,6 +584,21 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         // whole transaction, and the reasons report what each action's own outcome was,
         // in request order.
         if planned.iter().any(|action| !action.satisfied) {
+            // Each element whose condition was not met is METERED, at twice what the same
+            // single-item write would cost: a transactional conditional write that fails
+            // consumes capacity all the same
+            // ([`crate::state::charge_refused_transactional_write`]). Nothing is applied and
+            // the cancellation reports no capacity in band.
+            for action in planned.iter().filter(|action| !action.satisfied) {
+                crate::state::charge_refused_transactional_write(
+                    &mut store,
+                    &region,
+                    &action.table,
+                    &action.key.partition,
+                    action.before.as_ref(),
+                    now,
+                );
+            }
             let codes: Vec<&str> = planned
                 .iter()
                 .map(|action| action.cancellation_code())

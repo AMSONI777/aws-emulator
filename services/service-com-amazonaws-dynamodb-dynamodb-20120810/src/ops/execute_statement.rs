@@ -738,6 +738,17 @@ fn update_item(
         .map_err(lift)?
         .unwrap_or(false);
     if !satisfied {
+        // The statement is refused and nothing is written, but it is METERED like the write
+        // it would have made: a conditional write that fails consumes the write capacity the
+        // stored item costs ([`crate::state::charge_refused_conditional_write`]).
+        crate::state::charge_refused_conditional_write(
+            store,
+            region,
+            name,
+            &key.partition,
+            before.as_ref(),
+            now,
+        );
         return Err(condition_failed(if return_old_on_failure {
             before
         } else {
@@ -843,6 +854,16 @@ fn delete_item(
         .map_err(lift)?
         .unwrap_or(false);
     if !satisfied {
+        // See [`update_item`]: the refused statement writes nothing and is metered all the
+        // same ([`crate::state::charge_refused_conditional_write`]).
+        crate::state::charge_refused_conditional_write(
+            store,
+            region,
+            name,
+            &key.partition,
+            before.as_ref(),
+            now,
+        );
         return Err(condition_failed(if return_old_on_failure {
             before
         } else {

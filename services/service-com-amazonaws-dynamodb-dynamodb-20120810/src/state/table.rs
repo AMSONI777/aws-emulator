@@ -1658,6 +1658,56 @@ impl Table {
         Ok(())
     }
 
+    /// The capacity ONE write consumes when the service REFUSES it because the condition
+    /// it stated was not met.
+    ///
+    /// Nothing is applied, so no secondary-index entry moves and no index is charged; what
+    /// the refusal costs is weighed on the item the key HOLDS — "if you perform a
+    /// conditional write that fails, you are charged for the write capacity units consumed:
+    /// if the item does not currently exist in the table, DynamoDB consumes one write
+    /// capacity unit; if the item does exist, then the number of write capacity units
+    /// consumed depends on the size of the item" ("Capacity unit consumption for writes" in
+    /// the Developer Guide) — and a key that holds nothing costs the one-unit minimum
+    /// [`write_capacity_units`] never goes below.
+    ///
+    /// The item is weighed as this table meters a write of it
+    /// ([`Self::metered_item_size`]), exactly as an applied write is
+    /// ([`Self::write_capacity`]), so the two cannot price the same item differently.
+    pub fn refused_write_capacity(&self, stored: Option<&Item>) -> WriteCapacity {
+        WriteCapacity {
+            table: write_capacity_units(stored.map_or(0, |item| self.metered_item_size(item))),
+            ..WriteCapacity::default()
+        }
+    }
+
+    /// Charge one write that was REFUSED because its condition was not met against this
+    /// table's throughput, and count it into the table's consumption series.
+    ///
+    /// Unlike [`Self::admit_item_write`] this answers nothing and refuses nothing: the
+    /// request has already been decided, and the units were spent reading the item and
+    /// turning the write down, so they are taken from the same two budgets an applied write
+    /// is admitted from whether or not those budgets have the room — a draw they are short
+    /// of leaves them in deficit by the shortfall, which repays at the rate in force
+    /// ([`CapacityBudget::take_borrowing`]), so the sustained rate either ceiling admits is
+    /// unchanged while the capacity this request consumed is still accounted.
+    pub fn charge_refused_item_write(
+        &mut self,
+        partition: &AttributeValueKey,
+        capacity: &WriteCapacity,
+        now: SystemTime,
+    ) {
+        if let Some(provisioned) = self.provisioned_write_rate() {
+            self.write_budget
+                .take_borrowing(provisioned, BURST_CAPACITY_WINDOW, capacity.total(), now);
+        }
+        self.key_write_budgets
+            .take_borrowing(partition, capacity.table, now);
+        // The units a refused conditional write consumed are the table's own throughput
+        // just as an applied write's are ([`crate::state::consumed_capacity_metrics`]), so
+        // a client's capacity graph carries the cost of a lost optimistic-concurrency race.
+        self.pending_consumed.charge_write(capacity, now);
+    }
+
     /// Whether the ceilings a write is admitted from could EVER cover this write — that
     /// is, whether waiting for capacity to refill could admit it at all.
     ///

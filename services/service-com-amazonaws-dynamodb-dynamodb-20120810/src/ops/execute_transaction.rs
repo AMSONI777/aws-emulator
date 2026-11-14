@@ -855,6 +855,19 @@ fn write_transaction<Eng: ::std::marker::Send + ::std::marker::Sync + 'static>(
     // transaction, and the reasons report what each statement's own outcome was, in
     // request order.
     if planned.iter().any(|statement| !statement.satisfied) {
+        // See [`crate::ops::transact_write_items`]: each statement whose predicate was not
+        // met is metered at twice what the same single-item write would cost
+        // ([`crate::state::charge_refused_transactional_write`]), though nothing is applied.
+        for statement in planned.iter().filter(|statement| !statement.satisfied) {
+            crate::state::charge_refused_transactional_write(
+                store,
+                region,
+                &statement.table,
+                &statement.key.partition,
+                statement.before.as_ref(),
+                now,
+            );
+        }
         let codes: Vec<&str> = planned.iter().map(Planned::cancellation_code).collect();
         let cancellation_reasons: Vec<CancellationReason> = planned
             .iter()

@@ -15,7 +15,9 @@
 //! Conditional deletes are served: `ConditionExpression` (or the legacy
 //! `Expected`/`ConditionalOperator`) is read against the item this delete would remove,
 //! and an unmet condition is `ConditionalCheckFailedException`, carrying that item when
-//! `ReturnValuesOnConditionCheckFailure=ALL_OLD`. The expression language lives in
+//! `ReturnValuesOnConditionCheckFailure=ALL_OLD`. A refused delete removes nothing and
+//! reports no `ConsumedCapacity`, and is metered like the delete it would have made
+//! ([`crate::state::charge_refused_conditional_write`]). The expression language lives in
 //! [`crate::state`], shared with `PutItem` and `UpdateItem` — including the rule that
 //! every substitution token the request defines is referenced by one of its expressions
 //! ([`crate::state::Substitutions::check_all_referenced`]).
@@ -417,6 +419,17 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         )
         .map_err(lift)?;
         if !satisfied {
+            // The delete is refused and the item stays where it was, but it is METERED: a
+            // conditional write that fails consumes the write capacity the item the key
+            // holds costs ([`crate::state::charge_refused_conditional_write`]).
+            crate::state::charge_refused_conditional_write(
+                &mut store,
+                &region,
+                &name,
+                &key.partition,
+                stored.as_ref(),
+                now,
+            );
             return Err(DeleteItemErrorModeled::ConditionalCheckFailedException(
                 ConditionalCheckFailedException {
                     message: Some(crate::state::CONDITION_FAILED_MESSAGE.to_string()),
