@@ -1,15 +1,11 @@
 // SPDX-License-Identifier: CC0-1.0
 
 //! @op ListTagsForResource
-//! SCAFFOLDED, NOT IMPLEMENTED: this operation answers HTTP 501 `NotImplemented` and
-//! asserts NOTHING about `ListTagsForResource`'s real behaviour. Implement it here — this is
-//! the ONLY file to touch for this operation.
-//!
-//! A 501 from this operation means "nobody has written it yet", never "the emulator is
-//! broken". Replace the `Err(..)` in [`ListTagsForResource::handle`] with real behaviour and
-//! delete the SCAFFOLDED marker line above; that line is the machine-readable record of
-//! which operations are still stubs (`grep -rl '^//! SCAFFOLDED, NOT IMPLEMENTED:' */src/ops/`),
-//! so leaving it on an implemented operation under-reports progress.
+//! IMPLEMENTED: reports the tags STORED for the resource `resourceArn` resolves to —
+//! exactly the set the create that carried them stored on the record — and changes
+//! nothing a later caller sees. An ARN that names no resource of this account in this
+//! Region is refused with the modelled `ResourceNotFoundException`; see
+//! [`crate::state::tagged_resource_not_found`].
 //!
 //! ## Shape of an operation
 //!
@@ -143,18 +139,39 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         input: Self::Input,
         ctx: &smithy_server_runtime::OperationContext<'_>,
     ) -> Result<Self::Output, Self::Error> {
-        // The engine is reachable from `&self` (constructor-injected); `ctx` carries
-        // request metadata. Both are bound here so an implementer has them in scope.
-        let _ = (&input, ctx, &self.engine);
-        // Implement `ListTagsForResource` here, then delete the SCAFFOLDED marker at the top of
-        // this file. Return modeled failures as
-        // `Err(ListTagsForResourceErrorModeled::Variant(..).into())` — the `From` impl above lifts it.
-        //
-        // To refuse a bad request this operation models no error for, return
-        // `Err(crate::scaffolded::Scaffolded::validation("..."))` — a 400
-        // `ValidationException`. Do NOT answer 501 for it: 501 means "not written yet",
-        // not "bad request". Modeled constraints are already refused BEFORE this
-        // handler runs, so reaching here means the input satisfies every one of them.
-        Err(crate::scaffolded::Scaffolded::not_implemented("ListTagsForResource"))
+        let _ = ctx;
+        let Some(state) = crate::state::service_state(&*self.engine) else {
+            return Err(ListTagsForResourceErrorModeled::InternalServerException(
+                InternalServerException {
+                    message: "the redshift-serverless store is unreachable".to_string(),
+                },
+            )
+            .into());
+        };
+        // `@readonly`, and nothing here writes: the tags a resource carries change only
+        // when a call changes them, so this read needs none of the clock-owed status
+        // transitions the status-reporting reads materialise.
+        let state = state.lock();
+
+        let Some(tags) = state.tags_for_resource_arn(&input.resource_arn) else {
+            // The ARN resolves to no resource of this account in this Region, so what the
+            // call got wrong is the resource it addressed: the modelled
+            // `ResourceNotFoundException`, worded from the ARN the request carried and
+            // carrying it in the member modelled for the resource not found.
+            return Err(ListTagsForResourceErrorModeled::ResourceNotFoundException(
+                ResourceNotFoundException {
+                    message: crate::state::tagged_resource_not_found(&input.resource_arn),
+                    resource_name: Some(input.resource_arn.clone()),
+                },
+            )
+            .into());
+        };
+
+        // Projected from the STORED record, never from the request. A resource created
+        // with no tags reports the EMPTY list rather than an absent member, so a caller
+        // reading an untagged resource gets the same shape as one reading a tagged one.
+        Ok(ListTagsForResourceOutput {
+            tags: Some(tags.to_vec()),
+        })
     }
 }

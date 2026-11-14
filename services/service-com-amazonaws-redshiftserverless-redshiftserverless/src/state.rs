@@ -272,6 +272,18 @@ fn arn_resource_id(arn: &str) -> &str {
     arn.rsplit_once('/').map_or(arn, |(_, id)| id)
 }
 
+/// How this service states that the `resourceArn` a tagging call addresses a resource by
+/// resolves to no resource of this account in this Region.
+///
+/// The call named the resource ONLY by that ARN, and no resource exists to take a name
+/// from, so the ARN is what the sentence carries — the same "<the resource> not found."
+/// form this service words a namespace miss with ([`namespace_not_found`]). It is the
+/// modelled `ResourceNotFoundException` at its own `@httpError` 404: what the request got
+/// wrong is the resource it addressed, not the shape of its input.
+pub fn tagged_resource_not_found(arn: &str) -> String {
+    format!("Resource {arn} not found.")
+}
+
 /// `arn:aws:redshift-serverless:<region>:<account>:namespace/<namespaceId>`.
 pub fn namespace_arn(region: &str, namespace_id: &str) -> String {
     ::engine::emulator_arn(ARN_NAMESPACE, region, &format!("namespace/{namespace_id}"))
@@ -563,6 +575,36 @@ impl ComAmazonawsRedshiftserverlessRedshiftserverlessState {
                 .workgroups
                 .values()
                 .any(|record| record.workgroup.workgroup_arn.as_deref() == Some(arn))
+    }
+
+    /// The tags stored for the resource `arn` names, or `None` when this store holds no
+    /// resource with that ARN.
+    ///
+    /// Tags are STATE attached to the resource: the create that carried them stored them
+    /// on the record ([`NamespaceRecord::tags`]), so every reader projects them from the
+    /// record the ARN resolves to rather than from any one request. Every taggable
+    /// resource this store holds is looked up — a namespace, a workgroup and a snapshot
+    /// are all addressed by the ARN their create returned — and the comparison is against
+    /// the STORED ARNs rather than a re-derived one, so an ARN of another account, Region
+    /// or partition resolves to nothing, exactly as it does for
+    /// [`holds_resource_arn`](Self::holds_resource_arn).
+    pub fn tags_for_resource_arn(&self, arn: &str) -> Option<&[Tag]> {
+        self.namespaces
+            .values()
+            .find(|record| record.namespace.namespace_arn.as_deref() == Some(arn))
+            .map(|record| record.tags.as_slice())
+            .or_else(|| {
+                self.workgroups
+                    .values()
+                    .find(|record| record.workgroup.workgroup_arn.as_deref() == Some(arn))
+                    .map(|record| record.tags.as_slice())
+            })
+            .or_else(|| {
+                self.snapshots
+                    .values()
+                    .find(|record| record.snapshot.snapshot_arn.as_deref() == Some(arn))
+                    .map(|record| record.tags.as_slice())
+            })
     }
 
     /// The id of the usage limit already covering (`resource_arn`, `usage_type`,

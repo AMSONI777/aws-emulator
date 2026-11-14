@@ -3546,3 +3546,6 @@ mod cloudformation_provisions_appsync_resources;
 // a suite that is declared nowhere compiles nowhere and never runs. One declaration each, here.
 // (The line that stood here was an inner doc comment too, for the same reason and with the
 // same fix.)
+// leaving a note here. (An ordinary comment: an inner doc comment may only appear before
+// an item, so a `//!` line in this appended tail is `E0753` and compiles no suite.)
+// same reason as the block above: `//!` is only legal before the first item.)
