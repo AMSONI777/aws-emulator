@@ -1,15 +1,16 @@
 // SPDX-License-Identifier: CC0-1.0
 
 //! @op ModifyInstanceEventWindow
-//! SCAFFOLDED, NOT IMPLEMENTED: this operation answers HTTP 501 `NotImplemented` and
-//! asserts NOTHING about `ModifyInstanceEventWindow`'s real behaviour. Implement it here — this is
-//! the ONLY file to touch for this operation.
 //!
-//! A 501 from this operation means "nobody has written it yet", never "the emulator is
-//! broken". Replace the `Err(..)` in [`ModifyInstanceEventWindow::handle`] with real behaviour and
-//! delete the SCAFFOLDED marker line above; that line is the machine-readable record of
-//! which operations are still stubs (`grep -rl '^//! SCAFFOLDED, NOT IMPLEMENTED:' */src/ops/`),
-//! so leaving it on an implemented operation under-reports progress.
+//! Writes the members the request names onto one stored event window — its name, and when
+//! it opens — and leaves every other member of the window as it was, so the window every
+//! later reader reports (`DescribeInstanceEventWindows` first of all) is the modified one.
+//! The two forms a schedule takes are read by the one reading of that rule this service has
+//! ([`crate::state::event_window_schedule_named`], shared with the create of a window), and
+//! the change is applied by its one writer
+//! ([`crate::state::ComAmazonawsEc2Amazonec2State::modify_instance_event_window`]). The
+//! window's TARGETS are not this call's: "to modify the targets associated with the event
+//! window, use the AssociateInstanceEventWindow and DisassociateInstanceEventWindow API".
 //!
 //! ## Shape of an operation
 //!
@@ -150,18 +151,129 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         input: Self::Input,
         ctx: &smithy_server_runtime::OperationContext<'_>,
     ) -> Result<Self::Output, Self::Error> {
-        // The engine is reachable from `&self` (constructor-injected); `ctx` carries
-        // request metadata. Both are bound here so an implementer has them in scope.
-        let _ = (&input, ctx, &self.engine);
-        // Implement `ModifyInstanceEventWindow` here, then delete the SCAFFOLDED marker at the top of
-        // this file. Return modeled failures as
-        // `Err(ModifyInstanceEventWindowErrorModeled::Variant(..).into())` — the `From` impl above lifts it.
+        use crate::scaffolded::Scaffolded;
+        use crate::state::{
+            event_window_schedule_named, event_window_with_change,
+            instance_event_window_limit_exceeded, instance_event_window_payload_bytes,
+            missing_parameter, require_service_state, unresolvable_instance_event_window_id,
+            InstanceEventWindowChange, MAX_STORED_BYTES,
+        };
+
+        // `ctx` carries request metadata only; this operation reads none of it — an event
+        // window carries no ARN and no Availability Zone, so nothing about it is derived
+        // from the Region the call was signed for. The store is reached through the engine
+        // held on `self`.
+        let _ = ctx;
+
+        // "The ID of the event window" (`InstanceEventWindowId`) is `@required`, so a
+        // request naming no id at all is refused at the boundary — but one that carries the
+        // parameter with NO VALUE satisfies that and reaches this handler as an empty
+        // string. A parameter the request did not really carry is EC2's `MissingParameter`,
+        // the answer the delete of a window gives it too.
+        if input.instance_event_window_id.is_empty() {
+            return Err(missing_parameter(
+                "The request must contain the parameter instanceEventWindowId",
+            ));
+        }
+        let window_id = input.instance_event_window_id.as_str();
+
+        // "You can define either a set of time ranges or a cron expression when modifying
+        // the event window, but not both" (`ModifyInstanceEventWindow`), and whichever form
+        // the request names has to satisfy the same constraints it does on a create — one
+        // reading of both rules ([`crate::state::event_window_schedule_named`]), so the two
+        // calls cannot admit different schedules. What THIS one answers a request that named
+        // both forms with is its own ([`both_schedule_forms_named`]).
         //
-        // To refuse a bad request this operation models no error for, return
-        // `Err(crate::scaffolded::Scaffolded::validation("..."))` — a 400
-        // `ValidationException`. Do NOT answer 501 for it: 501 means "not written yet",
-        // not "bad request". Modeled constraints are already refused BEFORE this
-        // handler runs, so reaching here means the input satisfies every one of them.
-        Err(crate::scaffolded::Scaffolded::not_implemented("ModifyInstanceEventWindow"))
+        // A request that names NEITHER form leaves the window opening when it already did:
+        // this call "modifies the specified event window", so a member it does not carry is
+        // a member it does not change — `Name` alone is a modify of the name alone.
+        let schedule = event_window_schedule_named(
+            input.cron_expression.as_deref(),
+            input.time_ranges.as_deref().unwrap_or_default(),
+            both_schedule_forms_named(),
+        )?;
+        let change = InstanceEventWindowChange {
+            name: input.name.clone(),
+            schedule,
+        };
+
+        let state = require_service_state(&*self.engine)?;
+        let mut store = state.lock();
+
+        // An id this account holds no event window for has nothing to modify, and one that
+        // is not an event window id at all is answered as malformed — the ordering every
+        // resource of this service keeps
+        // ([`crate::state::unresolvable_instance_event_window_id`]).
+        let record = store
+            .instance_event_windows
+            .get(window_id)
+            .ok_or_else(|| unresolvable_instance_event_window_id(window_id))?;
+
+        // A name, a cron expression and a list of time ranges are caller-chosen bytes the
+        // store keeps for as long as the window does, and this call REPLACES them, so the
+        // budget is asked about the NET change — counted by the one definition of that
+        // charge, over the record this modify would leave — before anything is written.
+        let refund = instance_event_window_payload_bytes(&record.view);
+        let charge =
+            instance_event_window_payload_bytes(&event_window_with_change(&record.view, &change));
+        if store.would_exceed_stored_bytes_after_refund(charge, refund) {
+            return Err(instance_event_window_limit_exceeded(format!(
+                "This emulator holds {} of at most {MAX_STORED_BYTES} bytes of \
+                 caller-supplied data, so it cannot store the {charge} bytes the event \
+                 window '{window_id}' would hold",
+                store.stored_bytes()
+            )));
+        }
+
+        // DryRun sits AFTER every parameter has been validated and the window resolved, and
+        // BEFORE the first write: the flag asks whether the request WOULD have worked, so
+        // one that would have been refused is refused with that reason instead, and one that
+        // would have succeeded leaves the store untouched.
+        if input.dry_run == Some(true) {
+            return Err(Scaffolded::dry_run_operation());
+        }
+
+        // A request that named nothing to change asks for no write, so it makes none: the
+        // window reported below is the one it already was. The window's lifecycle is
+        // untouched either way — modifying when a window opens neither restarts the
+        // `creating` -> `active` move the clock owes a fresh window nor starts a move of its
+        // own, so the state reported falls out of the window's own age, as it does on every
+        // other read of it.
+        if !change.is_empty() && !store.modify_instance_event_window(window_id, &change) {
+            return Err(Scaffolded::internal_error(format!(
+                "the event window '{window_id}' could not be written"
+            )));
+        }
+
+        // Read the response back OUT of the store, so the caller sees what a later
+        // DescribeInstanceEventWindows will see rather than the request object.
+        let now = ::std::time::Instant::now();
+        store
+            .instance_event_windows
+            .get(window_id)
+            .map(|record| ModifyInstanceEventWindowOutput {
+                instance_event_window: Some(record.view_at(now)),
+            })
+            .ok_or_else(|| {
+                Scaffolded::internal_error(format!(
+                    "the event window '{window_id}' could not be read back"
+                ))
+            })
     }
+}
+
+/// `InvalidParameterValue` (HTTP 400): the request said when its window opens in BOTH of the
+/// two ways — "you can define either a set of time ranges or a cron expression when
+/// modifying the event window, but not both" (`ModifyInstanceEventWindow`).
+///
+/// The class and the sentence THIS operation is recorded answering for that rule, kept here
+/// rather than beside the rule's one reading in [`crate::state`], because which refusal an
+/// operation answers is a fact of that operation: the create of a window answers an
+/// inadmissible COMBINATION of parameters for the same rule, in its own words. The sentence
+/// has no variable part — it names the two members of the request and nothing the caller
+/// sent.
+fn both_schedule_forms_named() -> ModifyInstanceEventWindowError {
+    crate::scaffolded::Scaffolded::invalid_parameter_value(
+        "The parameter cronExpression cannot be used with the timeRangesSet.",
+    )
 }

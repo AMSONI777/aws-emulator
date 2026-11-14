@@ -157,11 +157,10 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
     ) -> Result<Self::Output, Self::Error> {
         use crate::scaffolded::Scaffolded;
         use crate::state::{
-            instance_event_window_limit_exceeded, instance_event_window_payload_bytes,
-            require_service_state, tags_from_specifications,
-            validate_event_window_cron_expression, validate_event_window_time_ranges,
-            InstanceEventWindowSpec, MAX_INSTANCE_EVENT_WINDOWS, MAX_STORED_BYTES,
-            RESOURCE_TYPE_INSTANCE_EVENT_WINDOW, TRANSITION_DELAY,
+            event_window_schedule_named, instance_event_window_limit_exceeded,
+            instance_event_window_payload_bytes, require_service_state,
+            tags_from_specifications, InstanceEventWindowSpec, MAX_INSTANCE_EVENT_WINDOWS,
+            MAX_STORED_BYTES, RESOURCE_TYPE_INSTANCE_EVENT_WINDOW, TRANSITION_DELAY,
         };
 
         // `ctx` carries request metadata only; this operation reads none of it — an event
@@ -171,29 +170,23 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         let _ = ctx;
 
         // "You can define either a set of time ranges or a cron expression when creating
-        // the event window, but not both" (`CreateInstanceEventWindow`) — and a window has
-        // to say when it opens, so neither is as wrong as both. An empty `TimeRanges` list
-        // names no time range at all, so it counts as unspecified.
-        let requested_ranges = input.time_ranges.as_deref().unwrap_or_default();
-        let schedule = match (input.cron_expression.as_deref(), requested_ranges.is_empty()) {
-            (Some(_), false) => {
-                return Err(Scaffolded::invalid_parameter_combination(
-                    "Either cronExpression or timeRanges may be specified, not both",
-                ));
-            }
-            (None, true) => {
-                return Err(Scaffolded::missing_parameter(
-                    "Either cronExpression or timeRanges must be specified",
-                ));
-            }
-            (Some(cron_expression), true) => {
-                validate_event_window_cron_expression(cron_expression)?;
-                Schedule::Cron(cron_expression.to_string())
-            }
-            (None, false) => {
-                Schedule::TimeRanges(validate_event_window_time_ranges(requested_ranges)?)
-            }
-        };
+        // the event window, but not both" (`CreateInstanceEventWindow`) — read by the one
+        // reading of that rule this service has
+        // ([`crate::state::event_window_schedule_named`], shared with the modify of a
+        // window, which validates the same two members the same way). A window has to say
+        // when it opens, so for a CREATE neither is as wrong as both.
+        let schedule = event_window_schedule_named(
+            input.cron_expression.as_deref(),
+            input.time_ranges.as_deref().unwrap_or_default(),
+            // The refusal THIS call answers a request that said when its window opens in
+            // both of the two ways with.
+            Scaffolded::invalid_parameter_combination(
+                "Either cronExpression or timeRanges may be specified, not both",
+            ),
+        )?
+        .ok_or_else(|| {
+            Scaffolded::missing_parameter("Either cronExpression or timeRanges must be specified")
+        })?;
 
         // "The tags to apply to the event window"
         // (`CreateInstanceEventWindowRequest$TagSpecifications`): the window is the only
@@ -283,33 +276,3 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
     }
 }
 
-/// When an event window opens: "you can define either a set of time ranges or a cron
-/// expression when creating the event window, but not both" (`CreateInstanceEventWindow`),
-/// so a validated request carries exactly one of them and the stored window reports only
-/// the one it was given.
-enum Schedule {
-    /// The cron expression the window opens on.
-    Cron(String),
-    /// The time ranges the window opens in, as the model shapes a stored one.
-    TimeRanges(Vec<InstanceEventWindowTimeRange>),
-}
-
-impl Schedule {
-    /// The `CronExpression` the stored window carries: `None` for a window defined by time
-    /// ranges, which has no cron expression to report.
-    fn cron_expression(&self) -> Option<String> {
-        match self {
-            Self::Cron(expression) => Some(expression.clone()),
-            Self::TimeRanges(_) => None,
-        }
-    }
-
-    /// The `TimeRanges` the stored window carries: `None` for a window defined by a cron
-    /// expression, which has no time range to report.
-    fn time_ranges(&self) -> Option<Vec<InstanceEventWindowTimeRange>> {
-        match self {
-            Self::Cron(_) => None,
-            Self::TimeRanges(ranges) => Some(ranges.clone()),
-        }
-    }
-}

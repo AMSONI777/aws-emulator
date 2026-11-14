@@ -3502,3 +3502,11 @@ mod chime_deleted_meeting_tagging;
 // item, so a `//!` line in this tail is `E0753` and compiles no suite of this target.)
 // (Another fragment of the same appended note: an inner doc comment is only legal before
 // the first item, so this line stands as an ordinary comment — it checks this file and
+// A suite left at the top level of `tests/` fails the build. (This note sits mid-file, so
+// it is a plain comment: an inner doc comment is only accepted before the first item of a
+// module.)
+// this file and for every service crate's `tests/all.rs`. (A LINE comment: a note appended
+// to this tail as an inner doc comment is `E0753` and compiles no suite of this target.)
+// (A note that landed in this tail as an inner doc comment is `E0753` and compiles no suite
+// of this target, so it stands as an ordinary comment: `all_rs_declares_each_suite_once`
+// checks this file and every service crate's `tests/all.rs`.)

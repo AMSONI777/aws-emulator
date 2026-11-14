@@ -16,7 +16,12 @@
 //! create and the modify of a window share it, so it lives here:
 //! [`validate_event_window_cron_expression`] and [`validate_event_window_time_ranges`] are
 //! the one reading of the constraints `CreateInstanceEventWindowRequest$CronExpression`
-//! documents.
+//! documents, and [`event_window_schedule_named`] the one reading of WHICH of the two forms
+//! a request named — so the create and the modify of a window cannot admit a schedule the
+//! other refuses. Changing one is the same kind of shared rule:
+//! [`ComAmazonawsEc2Amazonec2State::modify_instance_event_window`] is the one writer of a
+//! window's name and schedule, applying the change [`event_window_with_change`] reads off a
+//! request so the byte probe and the write agree about what the window would hold.
 //!
 //! What a window is TARGETED at is a rule the association and the disassociation of one
 //! share, so it lives here too: [`require_one_event_window_target_kind`] is the one reading
@@ -316,6 +321,160 @@ impl ComAmazonawsEc2Amazonec2State {
         self.release_stored_bytes(refund);
         self.add_stored_bytes(charge);
         true
+    }
+
+    /// Apply `change` to one stored window — its name, and when it opens — and answer
+    /// whether a window of that id was there to write.
+    ///
+    /// The ONE writer of what a window is NAMED and of WHEN it opens, so the stored window
+    /// cannot be left saying one thing about its schedule and reporting another. A member
+    /// `change` leaves unset is a member the request did not name, which this leaves exactly
+    /// as it was ([`event_window_with_change`], the same reading the caller's byte probe
+    /// uses, so the probe cannot see less than this stores). The window's lifecycle —
+    /// [`InstanceEventWindowRecord::in_flight_state`] and
+    /// [`InstanceEventWindowRecord::active_at`] — is untouched: changing when a window opens
+    /// is not a change of the targets it is being attached to, so a window the clock still
+    /// owes a move keeps the move it was owed.
+    ///
+    /// The bytes the record held are given back and the bytes it now holds are charged, by
+    /// the one definition of that charge ([`instance_event_window_payload_bytes`]) — a
+    /// caller that could GROW the charge asks
+    /// [`Self::would_exceed_stored_bytes_after_refund`] about the net change first, the way
+    /// every other replacement path of this store does.
+    pub fn modify_instance_event_window(
+        &mut self,
+        instance_event_window_id: &str,
+        change: &InstanceEventWindowChange,
+    ) -> bool {
+        let Some(record) = self.instance_event_windows.get_mut(instance_event_window_id) else {
+            return false;
+        };
+        let refund = instance_event_window_payload_bytes(&record.view);
+        record.view = event_window_with_change(&record.view, change);
+        let charge = instance_event_window_payload_bytes(&record.view);
+        self.release_stored_bytes(refund);
+        self.add_stored_bytes(charge);
+        true
+    }
+}
+
+/// What one `ModifyInstanceEventWindow` changes about a stored window.
+///
+/// Each member is the new value for the one the request NAMED, and `None` for one it left
+/// out: "modifies the specified event window" (`ModifyInstanceEventWindow`) changes what the
+/// request speaks about and nothing else, so a call that renames a window cannot drop the
+/// schedule it opens on.
+#[derive(Debug, Clone, Default)]
+pub struct InstanceEventWindowChange {
+    /// "The name of the event window" (`ModifyInstanceEventWindowRequest$Name`), or `None`
+    /// for a request that left the name alone.
+    pub name: Option<String>,
+    /// When the window opens from now on, for a request that named one of the two forms a
+    /// schedule takes; `None` for one that named neither and so leaves the schedule as it
+    /// is.
+    pub schedule: Option<EventWindowSchedule>,
+}
+
+impl InstanceEventWindowChange {
+    /// Whether this change would leave the window exactly as it is: a request that named
+    /// neither a name nor a schedule asks for nothing to be written.
+    pub fn is_empty(&self) -> bool {
+        self.name.is_none() && self.schedule.is_none()
+    }
+}
+
+/// `window` with `change` applied: every member the change names replaced, and every other
+/// one left as it was.
+///
+/// Naming either form of schedule REPLACES the other, because a window says when it opens
+/// with exactly one of them — "you can define either a set of time ranges or a cron
+/// expression ..., but not both" (`ModifyInstanceEventWindow`) — so a window modified from a
+/// cron expression to time ranges reports only the time ranges.
+///
+/// The ONE reading of what a modify leaves stored, used both by the byte probe that asks the
+/// store's budget about the record the change WOULD leave and by
+/// [`ComAmazonawsEc2Amazonec2State::modify_instance_event_window`] that stores it, so the
+/// probe cannot see less than the write stores.
+pub fn event_window_with_change(
+    window: &InstanceEventWindow,
+    change: &InstanceEventWindowChange,
+) -> InstanceEventWindow {
+    let mut modified = window.clone();
+    if let Some(name) = change.name.as_deref() {
+        modified.name = Some(name.to_string());
+    }
+    if let Some(schedule) = change.schedule.as_ref() {
+        modified.cron_expression = schedule.cron_expression();
+        modified.time_ranges = schedule.time_ranges();
+    }
+    modified
+}
+
+/// When an event window opens: "you can define either a set of time ranges or a cron
+/// expression when creating the event window, but not both" (`CreateInstanceEventWindow`,
+/// and `ModifyInstanceEventWindow` for a window that already exists), so a window carries
+/// exactly one of the two forms and reports only the one it was given.
+#[derive(Debug, Clone)]
+pub enum EventWindowSchedule {
+    /// The cron expression the window opens on.
+    Cron(String),
+    /// The time ranges the window opens in, as the model shapes a stored one.
+    TimeRanges(Vec<InstanceEventWindowTimeRange>),
+}
+
+impl EventWindowSchedule {
+    /// The `CronExpression` a window on this schedule carries: `None` for one defined by
+    /// time ranges, which has no cron expression to report.
+    pub fn cron_expression(&self) -> Option<String> {
+        match self {
+            Self::Cron(expression) => Some(expression.clone()),
+            Self::TimeRanges(_) => None,
+        }
+    }
+
+    /// The `TimeRanges` a window on this schedule carries: `None` for one defined by a cron
+    /// expression, which has no time range to report.
+    pub fn time_ranges(&self) -> Option<Vec<InstanceEventWindowTimeRange>> {
+        match self {
+            Self::Cron(_) => None,
+            Self::TimeRanges(ranges) => Some(ranges.clone()),
+        }
+    }
+}
+
+/// The ONE reading of which of the two forms of schedule a request named, and of the
+/// constraints the named one has to satisfy: the schedule to store, or `None` for a request
+/// that named NEITHER form.
+///
+/// "You can define either a set of time ranges or a cron expression ..., but not both"
+/// (`CreateInstanceEventWindow`, `ModifyInstanceEventWindow`), so a request naming both is
+/// refused with `both_named` and no schedule is read out of it — and whichever form a
+/// request does name is held to the same constraints whichever call it was made to, so
+/// neither can admit a schedule the other refuses. An EMPTY `TimeRanges` list names no time
+/// range at all, so it counts as unspecified.
+///
+/// Two things about that refusal are the CALLER's rather than this reading's, because they
+/// are facts of the operation and not of the rule: the refusal itself, which is why
+/// `both_named` is passed in (each of the two operations carries the class and the sentence
+/// IT is recorded answering, the same way the delete of a window answers a not-found id with
+/// a code of its own); and what naming NEITHER form means, which is why that answers `None`
+/// (a create has to be told when its window opens, while a modify leaves a member it was not
+/// given alone).
+pub fn event_window_schedule_named<E>(
+    cron_expression: Option<&str>,
+    time_ranges: &[InstanceEventWindowTimeRangeRequest],
+    both_named: Scaffolded<E>,
+) -> Result<Option<EventWindowSchedule>, Scaffolded<E>> {
+    match (cron_expression, time_ranges.is_empty()) {
+        (Some(_), false) => Err(both_named),
+        (None, true) => Ok(None),
+        (Some(cron_expression), true) => {
+            validate_event_window_cron_expression(cron_expression)?;
+            Ok(Some(EventWindowSchedule::Cron(cron_expression.to_string())))
+        }
+        (None, false) => Ok(Some(EventWindowSchedule::TimeRanges(
+            validate_event_window_time_ranges(time_ranges)?,
+        ))),
     }
 }
 

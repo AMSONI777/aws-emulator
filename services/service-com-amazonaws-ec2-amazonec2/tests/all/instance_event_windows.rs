@@ -77,7 +77,10 @@ fn is_event_window_id(candidate: &str) -> bool {
 
 /// The modelled `WeekDay` member at `index` of the calendar week, from the service's own
 /// calendar-ordered table.
-fn week_day(index: usize) -> &'static str {
+///
+/// Shared with [`super::modify_instance_event_window`], which reschedules a window onto
+/// days of the same week, so one reading of that table serves every suite.
+pub(super) fn week_day(index: usize) -> &'static str {
     WEEK_DAYS_IN_ORDER[index % WEEK_DAYS_IN_ORDER.len()].0
 }
 
@@ -96,7 +99,10 @@ fn time_range(index: usize, start: (usize, i64), end: (usize, i64)) -> Params {
 }
 
 /// The whole `TimeRanges` list, each entry `(start day, start hour, end day, end hour)`.
-fn time_ranges(ranges: &[(usize, i64, usize, i64)]) -> Params {
+///
+/// Shared with [`super::modify_instance_event_window`], so the wire shape of a
+/// `TimeRange.N.*` group has one reading in the harness.
+pub(super) fn time_ranges(ranges: &[(usize, i64, usize, i64)]) -> Params {
     ranges
         .iter()
         .enumerate()
@@ -123,7 +129,10 @@ fn tag_specification(resource_type: Option<&str>, tags: &[(&str, &str)]) -> Para
 }
 
 /// The tags of an event window, for the one resource `CreateInstanceEventWindow` tags.
-fn window_tags(tags: &[(&str, &str)]) -> Params {
+///
+/// Shared with [`super::modify_instance_event_window`], whose windows are tagged so that
+/// what a modify leaves alone can be asserted.
+pub(super) fn window_tags(tags: &[(&str, &str)]) -> Params {
     tag_specification(Some("instance-event-window"), tags)
 }
 

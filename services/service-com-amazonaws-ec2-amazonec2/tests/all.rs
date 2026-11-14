@@ -1060,6 +1060,9 @@ mod instance_event_notification_attributes;
 mod instance_event_window_associations;
 #[path = "all/instance_event_windows.rs"]
 mod instance_event_windows;
+// What one call changes about an event window, and what it leaves alone.
+#[path = "all/modify_instance_event_window.rs"]
+mod modify_instance_event_window;
 // Every start of an instance's guest — its launch, a start of a stopped instance and a
 // queued reboot taking effect — as a BOOT of its own, appended to the console it writes.
 #[path = "all/instance_guest_boots.rs"]
