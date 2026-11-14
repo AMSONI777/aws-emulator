@@ -70,9 +70,11 @@ fn status_rank(status: &str) -> u8 {
 /// every job transition (`state::publish_job_state_changes`), reaching EventBridge
 /// through the in-process callback, and a rule on that bus delivers the event to its SQS
 /// queue targets: with neither mounted there is nowhere to publish, so the publication
-/// path would not be exercised at all. Each claims only requests scoped to its own
-/// signing name (`events`, `sqs`), so no Batch request below is routed any differently
-/// for their presence.
+/// path would not be exercised at all. CloudWatch Logs is mounted for the same reason:
+/// the log stream a placed job's container writes to is created where THAT service holds
+/// it (`state::job_logs`), so without it mounted there is nowhere for the stream to be.
+/// Each claims only requests scoped to its own signing name (`events`, `sqs`, `logs`), so
+/// no Batch request below is routed any differently for their presence.
 pub(crate) struct Batch {
     router: smithy_server_runtime::MultiServiceRouter,
     /// The SAME engine the mounted service holds, so a test can read or seed the store
@@ -92,6 +94,11 @@ impl Batch {
         router.register_service(service_com_amazonaws_sqs_amazonsqs::EmulatedService::new(
             Arc::clone(&engine),
         ));
+        router.register_service(
+            service_com_amazonaws_cloudwatchlogs_logs_20140328::EmulatedService::new(Arc::clone(
+                &engine,
+            )),
+        );
         Self { router, engine }
     }
 
@@ -124,6 +131,13 @@ impl Batch {
     /// `X-Amz-Target: AmazonSQS.<Operation>` and an `sqs`-scoped credential.
     pub(crate) async fn sqs(&self, operation: &str, body: Value) -> (u16, Value) {
         self.rpc("sqs", "AmazonSQS", "1.0", operation, body).await
+    }
+
+    /// Call one CloudWatch Logs operation the way a client does: `awsJson1_1`, `POST /`
+    /// with `X-Amz-Target: Logs_20140328.<Operation>` and a `logs`-scoped credential.
+    pub(crate) async fn logs(&self, operation: &str, body: Value) -> (u16, Value) {
+        self.rpc("logs", "Logs_20140328", "1.1", operation, body)
+            .await
     }
 
     /// One `awsJson` RPC call against the service whose signing name is `signing_name`.

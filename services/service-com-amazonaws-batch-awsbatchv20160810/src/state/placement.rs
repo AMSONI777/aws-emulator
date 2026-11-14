@@ -30,7 +30,9 @@
 //! have produced: no `exitCode` ("the exit code for the job attempt"), no `startedAt` (the
 //! `STARTING` -> `RUNNING` transition) and no `stoppedAt` (the `RUNNING` -> terminal one).
 //! It does carry the log stream its container's output would have gone to, which the
-//! placement already decides ([`job_log_stream_name`]).
+//! placement already decides ([`job_log_stream_name`]) — and that stream is MATERIALISED
+//! where CloudWatch Logs holds it, so a client can list, read or delete it
+//! ([`job_logs`]).
 
 use super::*;
 
@@ -257,7 +259,8 @@ impl ComAmazonawsBatchAwsbatchv20160810State {
     /// A placement is what makes a task: the attempt is recorded carrying the ARN of the
     /// task this job was placed as ("each container attempt receives a task ARN when they
     /// reach the `STARTING` status"), named under the compute environment that took it, and
-    /// the log stream that task's container writes to ([`job_log_stream_name`]); the job's
+    /// the log stream that task's container writes to ([`job_log_stream_name`], created
+    /// where CloudWatch Logs holds it by [`job_logs`]); the job's
     /// own container reports the same two — `ContainerDetail$taskArn` is "the Amazon Resource Name (ARN)
     /// of the Amazon ECS task that's associated with the container job". Nothing about the RUN is
     /// recorded here: the attempt has no exit code and no start instant until its container
@@ -289,20 +292,37 @@ impl ComAmazonawsBatchAwsbatchv20160810State {
         let task_id = self.new_uuid().replace('-', "");
         let task_arn = ecs_task_arn(&region, &cluster, &task_id);
         let log_stream_name = job_log_stream_name(&definition, &task_id);
+        // WHERE that stream is — and whether there is a CloudWatch Logs stream for this
+        // container at all — is decided by the log driver the job's container configures
+        // ([`job_log_target`]), so a container whose output goes to another driver reports
+        // no CloudWatch Logs stream and has none created for it.
+        let configuration = self
+            .jobs
+            .get(id)
+            .and_then(|job| job.container.as_ref())
+            .and_then(|container| container.log_configuration.clone());
+        let target = job_log_target(configuration.as_ref(), &log_stream_name, &region);
+        let reported_stream = target.as_ref().map(|target| target.log_stream.clone());
         if let Some(job) = self.jobs.get_mut(id) {
             job.attempts.push(JobAttempt {
                 task_arn: task_arn.clone(),
                 started_at: None,
                 stopped_at: None,
                 exit_code: None,
-                log_stream_name: Some(log_stream_name.clone()),
+                log_stream_name: reported_stream.clone(),
                 status_reason: None,
                 ended_at: None,
             });
             if let Some(container) = job.container.as_mut() {
                 container.task_arn = Some(task_arn);
-                container.log_stream_name = Some(log_stream_name);
+                container.log_stream_name = reported_stream;
             }
+        }
+        // Naming the stream is not holding it: the stream this placement named is created
+        // where CloudWatch Logs holds it, by the caller that drains this queue once the
+        // store's lock is released ([`job_logs`]).
+        if let Some(target) = target {
+            self.queue_log_stream(target);
         }
         true
     }

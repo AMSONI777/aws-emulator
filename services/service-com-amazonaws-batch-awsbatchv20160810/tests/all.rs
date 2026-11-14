@@ -47,6 +47,8 @@ mod job_definition_response_request_id;
 mod job_definition_validation;
 #[path = "all/job_lifecycle.rs"]
 mod job_lifecycle;
+#[path = "all/job_log_streams.rs"]
+mod job_log_streams;
 #[path = "all/job_phase_is_per_job.rs"]
 mod job_phase_is_per_job;
 #[path = "all/job_queue_snapshot.rs"]

@@ -38,6 +38,11 @@ service-common = { path = "../common" }
 # emulator supplies the transport, so the SDK's own HTTPS stack and runtime are
 # left out.
 aws-sdk-eventbridge = { version = "1", default-features = false }
+# The AWS SDK for CloudWatch Logs, driven over the same in-process callback: the log
+# stream a placed job's container writes to has to EXIST where CloudWatch Logs holds it,
+# so the placement creates it there (`state::job_logs`) rather than keeping a second copy
+# of the log store in this crate.
+aws-sdk-cloudwatchlogs = { version = "1", default-features = false }
 
 [build-dependencies]
 emulator-core-build-support = { workspace = true }
@@ -46,9 +51,12 @@ emulator-core-build-support = { workspace = true }
 # EventBridge and SQS are mounted beside Batch on one engine in the integration tests,
 # because Batch publishes a `Batch Job State Change` event onto the default event bus on
 # every job transition and a rule on that bus delivers it to an SQS queue: without them
-# mounted there is nothing for the publication to reach.
+# mounted there is nothing for the publication to reach. CloudWatch Logs is mounted there
+# too, because a placed job's log stream is created in it (`state::job_logs`) and the tests
+# read and delete that stream through its own API.
 service-com-amazonaws-eventbridge-awsevents = { workspace = true }
 service-com-amazonaws-sqs-amazonsqs = { workspace = true }
+service-com-amazonaws-cloudwatchlogs-logs-20140328 = { workspace = true }
 
 [lints]
 workspace = true

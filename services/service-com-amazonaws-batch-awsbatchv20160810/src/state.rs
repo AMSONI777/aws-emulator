@@ -74,9 +74,11 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 mod array_jobs;
+mod job_logs;
 mod placement;
 
 pub use array_jobs::*;
+pub use job_logs::*;
 pub use placement::*;
 
 use crate::ops::types::{
@@ -2465,6 +2467,14 @@ pub struct ComAmazonawsBatchAwsbatchv20160810State {
     /// released (see [`Self::take_pending_events`] and [`publish_job_state_changes`]).
     /// A ring bounded by [`MAX_PENDING_EVENTS`].
     pending_events: VecDeque<JobStateChange>,
+    /// The CloudWatch Logs streams this store's placements have named and nothing has
+    /// created yet, oldest first.
+    ///
+    /// Queued where the placement HAPPENS — under this store's lock, with no in-process
+    /// request — and drained by the operation that caused it once the lock is released (see
+    /// [`Self::take_pending_log_streams`] and [`job_logs`]). A ring bounded by
+    /// [`MAX_PENDING_LOG_STREAMS`].
+    pending_log_streams: VecDeque<JobLogStream>,
     /// Whether a clock pump ([`drive_job_clock`]) is already waiting on this store's
     /// due instants, so a second submit does not start a second one.
     clock_pump_running: bool,
@@ -3336,7 +3346,7 @@ impl ComAmazonawsBatchAwsbatchv20160810State {
     /// owed another wake-up (`now`, i.e. as soon as the pump's minimum tick allows)
     /// rather than the next call.
     pub fn next_job_due_or_release_pump(&mut self, now: i64, generation: u64) -> Option<i64> {
-        if !self.pending_events.is_empty() {
+        if !self.pending_events.is_empty() || self.has_pending_log_streams() {
             return Some(now);
         }
         match self.next_job_due_at() {
@@ -4533,6 +4543,10 @@ async fn publish_pending<Eng: Send + Sync + 'static>(
     let Some(state) = service_state(engine) else {
         return;
     };
+    // The other side effect a job transition leaves for this drain: the CloudWatch Logs
+    // stream a placement named is created where that service holds it, over the same
+    // callback and with this store's lock released (see [`job_logs`]).
+    open_pending_log_streams(callback, &state).await;
     // The guard is taken and dropped inside this statement: the records are moved
     // out here so nothing is published twice, and no lock is held across an await.
     let changes = state.lock().take_pending_events(MAX_PUBLISHED_PER_DRAIN);
