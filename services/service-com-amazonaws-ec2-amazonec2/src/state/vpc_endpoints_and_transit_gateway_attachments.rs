@@ -774,6 +774,27 @@ pub const TRANSIT_GATEWAY_ATTACHMENT_STATE_FAILING: &str = "failing";
 /// `failed` member.
 pub const TRANSIT_GATEWAY_ATTACHMENT_STATE_FAILED: &str = "failed";
 
+/// Whether an attachment in `attachment_state` has finished its lifecycle, so it attaches
+/// nothing any more.
+///
+/// The terminal members of the attachment state enum
+/// (`smithy_query(query="shape",shape="TransitGatewayAttachmentState")`) that are not "in
+/// service": one a delete has taken away, one the owner rejected, and one that could not be
+/// made. The ONE definition of "this attachment joins nothing", so every operation that has to
+/// ask it — a create deciding whether the VPC is already attached, a gateway delete deciding
+/// whether an attachment still holds its gateway, a delete deciding whether there is anything
+/// left to delete — asks the same question of the same states.
+pub fn transit_gateway_attachment_is_finished(attachment_state: Option<&str>) -> bool {
+    matches!(
+        attachment_state,
+        Some(
+            TRANSIT_GATEWAY_ATTACHMENT_STATE_DELETED
+                | TRANSIT_GATEWAY_ATTACHMENT_STATE_REJECTED
+                | TRANSIT_GATEWAY_ATTACHMENT_STATE_FAILED
+        )
+    )
+}
+
 /// `pendingAcceptance` as the OTHER state enum spells it:
 /// `TransitGatewayClientVpnAttachment$State` targets `TransitGatewayAttachmentStatusType`,
 /// whose members are hyphenated (`pending-acceptance`, `pending`, `rejected`, `available`,
@@ -2515,18 +2536,41 @@ pub fn invalid_transit_gateway_attachment_id_not_found<E>(attachment_id: &str) -
 
 /// Refuse a well-formed id of an attachment the TRANSIT GATEWAY owns as a resource — a VPC
 /// attachment or a transit gateway peering attachment — that this account holds none of: HTTP
-/// 400 [`INVALID_TRANSIT_GATEWAY_ATTACHMENT_ID_NOT_FOUND`].
+/// 400 [`INVALID_TRANSIT_GATEWAY_ATTACHMENT_ID_NOT_FOUND`], naming the RESOURCE the operation
+/// acts on.
 ///
-/// Worded the way the rest of the transit gateway family words the same refusal about its own
-/// resources — `<Resource> <id> was deleted or does not exist.`, the sentence
-/// [`invalid_transit_gateway_id_not_found`], [`invalid_transit_gateway_route_table_id_not_found`]
-/// and [`invalid_transit_gateway_multicast_domain_id_not_found`] already carry, with the id
-/// UNQUOTED and taken from the request.
-pub fn transit_gateway_attachment_deleted_or_absent<E>(attachment_id: &str) -> Scaffolded<E> {
+/// The ONE writer of that sentence, worded the way the rest of the transit gateway family words
+/// the same refusal about its own resources — `<Resource> <id> was deleted or does not exist.`,
+/// the sentence [`invalid_transit_gateway_id_not_found`],
+/// [`invalid_transit_gateway_route_table_id_not_found`] and
+/// [`invalid_transit_gateway_multicast_domain_id_not_found`] already carry, with the id UNQUOTED
+/// and taken from the request.
+///
+/// `resource` is that `<Resource>`, because WHICH resource the sentence names is a fact of the
+/// operation: an action whose subject is an attachment of any kind names the attachment
+/// ([`transit_gateway_attachment_deleted_or_absent`]), while one whose subject is a VPC
+/// attachment names that.
+pub fn transit_gateway_attachment_resource_deleted_or_absent<E>(
+    resource: &str,
+    attachment_id: &str,
+) -> Scaffolded<E> {
     Scaffolded::service_error(
         INVALID_TRANSIT_GATEWAY_ATTACHMENT_ID_NOT_FOUND,
         400,
-        format!("Transit Gateway Attachment {attachment_id} was deleted or does not exist."),
+        format!("{resource} {attachment_id} was deleted or does not exist."),
+    )
+}
+
+/// The `<Resource>` [`transit_gateway_attachment_resource_deleted_or_absent`] names for an action
+/// whose subject is an attachment of ANY kind: the attachment itself.
+pub const TRANSIT_GATEWAY_ATTACHMENT_RESOURCE_NAME: &str = "Transit Gateway Attachment";
+
+/// Refuse such an id for an action whose subject is an attachment of any kind — an acceptance or
+/// a rejection, which take one of several kinds ([`decide_transit_gateway_attachment`]).
+pub fn transit_gateway_attachment_deleted_or_absent<E>(attachment_id: &str) -> Scaffolded<E> {
+    transit_gateway_attachment_resource_deleted_or_absent(
+        TRANSIT_GATEWAY_ATTACHMENT_RESOURCE_NAME,
+        attachment_id,
     )
 }
 

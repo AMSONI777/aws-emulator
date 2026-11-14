@@ -2288,3 +2288,10 @@ mod delete_transit_gateway_connect_peer;
 // lands.
 #[path = "all/update_security_group_rule_descriptions_ingress.rs"]
 mod update_security_group_rule_descriptions_ingress;
+// What `DeleteTransitGatewayVpcAttachment` records: the stored VPC attachment the request names
+// written into the transient delete state of its own catalog with the clock owing it the terminal
+// one, answered and described with every other member unchanged — and the ids, the kinds, the
+// states, the dry run and the second delete it refuses without writing anything. Declared at the
+// tail of this file, which is where every new ec2 suite lands.
+#[path = "all/delete_transit_gateway_vpc_attachment.rs"]
+mod delete_transit_gateway_vpc_attachment;

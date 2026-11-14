@@ -1,15 +1,28 @@
 // SPDX-License-Identifier: CC0-1.0
 
 //! @op DeleteTransitGatewayVpcAttachment
-//! SCAFFOLDED, NOT IMPLEMENTED: this operation answers HTTP 501 `NotImplemented` and
-//! asserts NOTHING about `DeleteTransitGatewayVpcAttachment`'s real behaviour. Implement it here — this is
-//! the ONLY file to touch for this operation.
+//! IMPLEMENTED: deletes the stored VPC attachment the request names by leaving it in the
+//! transient `deleting` state with the clock owing it `deleted`, and answers the attachment as
+//! the store then holds it. This is the ONLY file to touch for this operation.
 //!
-//! A 501 from this operation means "nobody has written it yet", never "the emulator is
-//! broken". Replace the `Err(..)` in [`DeleteTransitGatewayVpcAttachment::handle`] with real behaviour and
-//! delete the SCAFFOLDED marker line above; that line is the machine-readable record of
-//! which operations are still stubs (`grep -rl '^//! SCAFFOLDED, NOT IMPLEMENTED:' */src/ops/`),
-//! so leaving it on an implemented operation under-reports progress.
+//! Nothing about the answer is built here: every member but the state is the one the writer of
+//! the attachment stored, and the state and the owed move are the record's own
+//! ([`crate::state::TransitGatewayAttachmentRecord::begin_move`]), so
+//! `DescribeTransitGatewayVpcAttachments` and `DescribeTransitGatewayAttachments` corroborate
+//! what this call answered. The record STAYS in the store once it reaches the terminal
+//! `deleted` member of its own state catalog — that is what a deleted attachment reads as —
+//! and from then on it attaches nothing, so the VPC it named can be attached again and the
+//! transit gateway it was on can be deleted.
+//!
+//! The refusals, in the order the service answers them: something that is not a
+//! `TransitGatewayAttachmentId` at all is `InvalidTransitGatewayAttachmentID.Malformed`, before
+//! there is anything to look up; a `DryRun` request a caller holds the permissions for is
+//! `DryRunOperation` and writes nothing, because the flag asks whether the CALLER MAY make the
+//! request rather than anything about the named attachment; then an id this account holds no
+//! VPC attachment under — including one naming an attachment of another kind — is
+//! `InvalidTransitGatewayAttachmentID.NotFound`, naming the VPC attachment this action's subject
+//! is, and an attachment that attaches nothing any
+//! more, because it is already leaving or has finished, is `IncorrectState`.
 //!
 //! ## Shape of an operation
 //!
@@ -135,18 +148,115 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         input: Self::Input,
         ctx: &smithy_server_runtime::OperationContext<'_>,
     ) -> Result<Self::Output, Self::Error> {
-        // The engine is reachable from `&self` (constructor-injected); `ctx` carries
-        // request metadata. Both are bound here so an implementer has them in scope.
-        let _ = (&input, ctx, &self.engine);
-        // Implement `DeleteTransitGatewayVpcAttachment` here, then delete the SCAFFOLDED marker at the top of
-        // this file. Return modeled failures as
-        // `Err(DeleteTransitGatewayVpcAttachmentErrorModeled::Variant(..).into())` — the `From` impl above lifts it.
+        // `ctx` carries request metadata only; this operation reads none of it — an attachment
+        // is named by id, which is unique across Regions in this store. The store is reached
+        // through the engine held on `self`.
+        let _ = ctx;
+        use crate::state;
+
+        let attachment_id = input.transit_gateway_attachment_id.as_str();
+        // The request's own FORM first, before anything is resolved: "not an id of this kind"
+        // is a malformed request rather than a missing attachment, and it is not answered by
+        // the DryRun arm below. Through the ONE place this resource's malformed refusal is
+        // worded, which every other reader of a `TransitGatewayAttachmentId` answers.
+        state::require_well_formed_transit_gateway_attachment_id(attachment_id)?;
+
+        // "Checks whether you have the required permissions for the action, WITHOUT ACTUALLY
+        // MAKING THE REQUEST, and provides an error response. If you have the required
+        // permissions, the error response is DryRunOperation. Otherwise, it is
+        // UnauthorizedOperation" (`DryRun`): the flag asks about PERMISSION, not about the
+        // attachment the request names, so it is answered once the request's own form has been
+        // checked and before anything is resolved or written — the order every other delete of
+        // this family answers it in — and every caller of this emulator is permitted.
+        if input.dry_run.unwrap_or(false) {
+            return Err(state::dry_run_operation());
+        }
+
+        let state_handle = state::require_service_state(&*self.engine)?;
+        let mut store = state_handle.lock();
+        // The clock first: an attachment whose owed move has fallen due is already in the state
+        // it was owed, so whether this delete is admissible is asked of the state the store is
+        // ACTUALLY in rather than of the one its last writer left it in.
+        store.materialize_due_transitions();
+
+        // "Deletes the specified VPC attachment": an id this account holds no VPC attachment
+        // under is a refusal, not a no-op — a caller that deletes twice has to be able to tell
+        // the deletion it performed from one it did not. Every attachment kind shares one id
+        // space, so an id naming an attachment of ANOTHER kind names no attachment THIS
+        // operation can delete and is refused as unknown, in the wording the transit gateway
+        // family answers for a resource of its own that is not there — naming the VPC
+        // attachment, which is what this action's subject is.
         //
-        // To refuse a bad request this operation models no error for, return
-        // `Err(crate::scaffolded::Scaffolded::validation("..."))` — a 400
-        // `ValidationException`. Do NOT answer 501 for it: 501 means "not written yet",
-        // not "bad request". Modeled constraints are already refused BEFORE this
-        // handler runs, so reaching here means the input satisfies every one of them.
-        Err(crate::scaffolded::Scaffolded::not_implemented("DeleteTransitGatewayVpcAttachment"))
+        // Resolved ONCE, mutably, so the checks below and the write that follows them are made
+        // of the very record this call then answers with.
+        let Some(record) = store
+            .transit_gateway_attachments
+            .get_mut(attachment_id)
+            .filter(|record| {
+                record.view.resource_type() == state::TRANSIT_GATEWAY_ATTACHMENT_RESOURCE_TYPE_VPC
+            })
+        else {
+            return Err(state::transit_gateway_attachment_resource_deleted_or_absent(
+                TRANSIT_GATEWAY_VPC_ATTACHMENT_RESOURCE_NAME,
+                attachment_id,
+            ));
+        };
+        // A delete takes the attachment away from the resources it joins, so there has to be an
+        // attachment still joining them: one already on its way out, or one the lifecycle has
+        // finished with, attaches nothing, and a second delete of it is refused with the
+        // attachment family's own `IncorrectState` rather than restarting the clock on it.
+        if !attachment_state_admits_deletion(record.view.state()) {
+            return Err(state::transit_gateway_attachment_invalid_state(
+                attachment_id,
+            ));
+        }
+
+        // The transient state of a deletion now, with the terminal one owed one span later —
+        // the span is never zero, so a caller reading straight after this call still sees the
+        // deletion under way, and nothing is slept for.
+        record.begin_move(
+            state::TRANSIT_GATEWAY_ATTACHMENT_STATE_DELETING,
+            state::TRANSIT_GATEWAY_ATTACHMENT_STATE_DELETED,
+        );
+
+        // "Information about the deleted VPC attachment" (`$TransitGatewayVpcAttachment`) as the
+        // STORE now holds it, so this answer and the describes of this attachment cannot drift
+        // apart.
+        let state::TransitGatewayAttachmentView::Vpc(attachment) = record.view.clone() else {
+            return Err(state::unexpected_attachment_kind(attachment_id));
+        };
+        Ok(DeleteTransitGatewayVpcAttachmentOutput {
+            transit_gateway_vpc_attachment: Some(attachment),
+        })
     }
+}
+
+/// The `<Resource>` the transit gateway family's not-found sentence names for THIS action: its
+/// subject is a VPC attachment ([`crate::state::TRANSIT_GATEWAY_ATTACHMENT_RESOURCE_NAME`] is what
+/// an action that takes an attachment of any kind names), which is the one wording this operation
+/// differs from the acceptances and rejections in. The sentence itself is built by the family's
+/// single writer, [`crate::state::transit_gateway_attachment_resource_deleted_or_absent`], and the
+/// id in it comes from the REQUEST.
+const TRANSIT_GATEWAY_VPC_ATTACHMENT_RESOURCE_NAME: &str = "Transit Gateway VPC Attachment";
+
+/// Whether a VPC attachment in `attachment_state` still attaches its VPC, so a delete has
+/// something to take away.
+///
+/// The states that admit no delete are the ones in which the attachment joins nothing any more:
+/// the terminal members of `TransitGatewayAttachmentState`
+/// (`smithy_query(query="shape",shape="TransitGatewayAttachmentState")`) that are not "in
+/// service" — deleted, rejected and failed, which
+/// [`crate::state::transit_gateway_attachment_is_finished`] is the one definition of — and the
+/// transient states on the way to each of them, which an earlier call has already started and
+/// which a second call cannot start again.
+fn attachment_state_admits_deletion(attachment_state: Option<&str>) -> bool {
+    !crate::state::transit_gateway_attachment_is_finished(attachment_state)
+        && !matches!(
+            attachment_state,
+            Some(
+                crate::state::TRANSIT_GATEWAY_ATTACHMENT_STATE_DELETING
+                    | crate::state::TRANSIT_GATEWAY_ATTACHMENT_STATE_REJECTING
+                    | crate::state::TRANSIT_GATEWAY_ATTACHMENT_STATE_FAILING
+            )
+        )
 }

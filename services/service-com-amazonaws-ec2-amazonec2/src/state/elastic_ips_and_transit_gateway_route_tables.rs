@@ -2496,15 +2496,18 @@ impl ComAmazonawsEc2Amazonec2State {
     /// id each is held under — what has to be taken away before the gateway itself can be
     /// deleted.
     ///
-    /// An attachment whose owner REJECTED it is attached to nothing, so it is not one of them;
-    /// every other stored attachment names this gateway for as long as it is stored, so it
-    /// holds the gateway exactly as a stored network interface holds its subnet.
+    /// An attachment the lifecycle has FINISHED with — one a delete took away, one the owner
+    /// rejected, one that could not be made ([`transit_gateway_attachment_is_finished`]) — is
+    /// attached to nothing, so it is not one of them: the refusal a held gateway answers is
+    /// about its "non-deleted" attachments. Every other stored attachment names this gateway
+    /// for as long as it is stored, so it holds the gateway exactly as a stored network
+    /// interface holds its subnet.
     pub fn transit_gateway_attachments_of<'a>(&'a self, transit_gateway_id: &str) -> Vec<&'a str> {
         self.transit_gateway_attachments
             .iter()
             .filter(|(_, record)| {
                 record.view.transit_gateway_id() == Some(transit_gateway_id)
-                    && record.view.state() != Some(record.view.states().rejected)
+                    && !transit_gateway_attachment_is_finished(record.view.state())
             })
             .map(|(attachment_id, _)| attachment_id.as_str())
             .collect()

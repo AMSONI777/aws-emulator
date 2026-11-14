@@ -324,7 +324,9 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
                     attachment,
                     &input.transit_gateway_id,
                     &input.peer_transit_gateway_id,
-                ) && !peering_is_finished(attachment.state.as_deref())
+                ) && !crate::state::transit_gateway_attachment_is_finished(
+                    attachment.state.as_deref(),
+                )
             })
             .map(|(attachment_id, _)| attachment_id.clone())
         {
@@ -464,22 +466,6 @@ fn peering_joins(
     let accepter = end(&attachment.accepter_tgw_info);
     (requester == transit_gateway_id && accepter == peer_transit_gateway_id)
         || (requester == peer_transit_gateway_id && accepter == transit_gateway_id)
-}
-
-/// Whether a peering attachment in `state` has finished its lifecycle, so it joins nothing
-/// any more and does not stand in the way of a new peering of the same pair.
-///
-/// The terminal states of the attachment state enum that are not "in service": one that was
-/// deleted, one the accepter rejected, and one that could not be made.
-fn peering_is_finished(attachment_state: Option<&str>) -> bool {
-    matches!(
-        attachment_state,
-        Some(
-            crate::state::TRANSIT_GATEWAY_ATTACHMENT_STATE_DELETED
-                | crate::state::TRANSIT_GATEWAY_ATTACHMENT_STATE_REJECTED
-                | crate::state::TRANSIT_GATEWAY_ATTACHMENT_STATE_FAILED
-        )
-    )
 }
 
 /// `DuplicateTransitGatewayAttachment` (HTTP 400): the two gateways are already joined by a

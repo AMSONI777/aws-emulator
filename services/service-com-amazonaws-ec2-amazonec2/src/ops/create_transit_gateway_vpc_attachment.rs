@@ -344,7 +344,7 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
             .find(|(_, attachment)| {
                 attachment.transit_gateway_id.as_deref() == Some(input.transit_gateway_id.as_str())
                     && attachment.vpc_id.as_deref() == Some(input.vpc_id.as_str())
-                    && !attachment_is_finished(attachment.state.as_deref())
+                    && !state::transit_gateway_attachment_is_finished(attachment.state.as_deref())
             })
             .map(|(attachment_id, _)| attachment_id.clone())
         {
@@ -437,23 +437,6 @@ fn resolve_option(
         Some(value) => state::transit_gateway_option_value(value, member),
         None => Ok(inherited.unwrap_or_else(|| default.to_string())),
     }
-}
-
-/// Whether a VPC attachment in `state` has finished its lifecycle, so it attaches nothing any
-/// more and does not stand in the way of a new attachment of the same VPC.
-///
-/// The terminal states of the attachment state enum that are not "in service"
-/// (`smithy_query(query="shape",shape="TransitGatewayAttachmentState")`): an attachment that
-/// was deleted, one the owner rejected, and one that could not be made.
-fn attachment_is_finished(attachment_state: Option<&str>) -> bool {
-    matches!(
-        attachment_state,
-        Some(
-            state::TRANSIT_GATEWAY_ATTACHMENT_STATE_DELETED
-                | state::TRANSIT_GATEWAY_ATTACHMENT_STATE_REJECTED
-                | state::TRANSIT_GATEWAY_ATTACHMENT_STATE_FAILED
-        )
-    )
 }
 
 /// `DuplicateTransitGatewayAttachment` (HTTP 400): the gateway already carries an attachment
