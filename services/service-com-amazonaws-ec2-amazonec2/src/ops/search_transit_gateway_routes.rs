@@ -299,13 +299,19 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         // state lock.
         let mut budget = state::MatchBudget::new(state::MAX_FILTER_MATCH_STEPS);
 
+        // What the table holds NOW: the static routes created in it beside the `propagated`
+        // routes its propagations put there ([`crate::state::ComAmazonawsEc2Amazonec2State::
+        // transit_gateway_route_set`] is the one answer to that question, so a prefix an
+        // attachment propagates is reported by the tables that propagate it and by no other).
+        let routes = store.transit_gateway_route_set(route_table_id);
+
         // The destinations of the table, once: the order they come out in is the order this
         // search reports and pages over, and the `route-search.longest-prefix-match` filters
         // are resolved over the WHOLE set before any route is selected
         // ([`crate::state::RouteSearch::resolve_longest_prefix`]).
-        let destinations: Vec<&str> = store
-            .transit_gateway_routes_of(route_table_id)
-            .map(|(destination, _)| destination)
+        let destinations: Vec<&str> = routes
+            .iter()
+            .map(|(destination, _)| destination.as_str())
             .collect();
         for search in &mut searches {
             search.resolve_longest_prefix(&destinations, &mut budget);
@@ -315,7 +321,7 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         // must then hold ("If you specify multiple filters, the filters are joined with an AND"
         // — `Filter`).
         let mut selected: Vec<(&str, &TransitGatewayRoute)> = Vec::new();
-        for (destination, route) in store.transit_gateway_routes_of(route_table_id) {
+        for (destination, route) in &routes {
             if budget.exhausted() {
                 break;
             }
@@ -324,7 +330,7 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
                     .iter()
                     .all(|search| search.matches(Some(destination), &mut budget))
             {
-                selected.push((destination, route));
+                selected.push((destination.as_str(), route));
             }
         }
         // A spent budget means the answer is INCOMPLETE, which is not something to report as a

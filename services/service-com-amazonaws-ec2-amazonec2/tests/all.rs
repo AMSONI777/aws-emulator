@@ -1609,6 +1609,13 @@ mod transit_gateway_route_tables;
 // size narrow it, and that the routes go when their table does.
 #[path = "all/transit_gateway_routes.rs"]
 mod transit_gateway_routes;
+// The PROPAGATED routes of a transit gateway route table: the routes
+// `EnableTransitGatewayRouteTablePropagation` puts in a table — one per address prefix the
+// propagating attachment's own resource holds — what `SearchTransitGatewayRoutes` reports for
+// them, that they are reported by the tables that propagate them and by no other, and that a
+// static route is the table's entry for its destination.
+#[path = "all/transit_gateway_propagated_routes.rs"]
+mod transit_gateway_propagated_routes;
 // `DescribeTransitGatewayAttachments` reports out of the attachment store — every kind of
 // attachment, as the kind-independent shape — how the id list, the documented filters and the
 // page size narrow it, and that the association a writer stored reads back through it.

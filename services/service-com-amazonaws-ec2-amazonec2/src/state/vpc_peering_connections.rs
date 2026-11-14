@@ -265,7 +265,11 @@ pub struct VpcPeeringConnectionRecord {
 /// Read off `Vpc$CidrBlockAssociationSet` through [`cidr_association_holds_its_block`], the
 /// one reader of that question, so a block on its way out of the VPC is not reported as one
 /// of its peered ranges.
-fn held_ipv4_cidr_blocks(vpc: &Vpc) -> Vec<String> {
+///
+/// The one definition of a VPC's own address space, so every reader of it agrees: the peered
+/// ranges below, and the prefixes a transit gateway VPC attachment propagates
+/// ([`ComAmazonawsEc2Amazonec2State::transit_gateway_route_set`]).
+pub fn held_ipv4_cidr_blocks(vpc: &Vpc) -> Vec<String> {
     vpc.cidr_block_association_set
         .iter()
         .flatten()
@@ -283,7 +287,7 @@ fn held_ipv4_cidr_blocks(vpc: &Vpc) -> Vec<String> {
 
 /// The IPv6 CIDR blocks `vpc` HOLDS, read off `Vpc$Ipv6CidrBlockAssociationSet` on the same
 /// terms as [`held_ipv4_cidr_blocks`].
-fn held_ipv6_cidr_blocks(vpc: &Vpc) -> Vec<String> {
+pub fn held_ipv6_cidr_blocks(vpc: &Vpc) -> Vec<String> {
     vpc.ipv6_cidr_block_association_set
         .iter()
         .flatten()
