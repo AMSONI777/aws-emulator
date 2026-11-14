@@ -891,3 +891,170 @@ async fn a_reported_sample_carries_every_stored_member() {
         );
     }
 }
+
+/// RULE: a page size the model puts outside its published range is a
+/// `ValidationException`, and one inside it is served.
+///
+/// The range is the model's own, not this suite's:
+/// `GetDevicePositionHistoryRequest$MaxResults` targets `Integer` with
+/// `range { min: 1, max: 100 }`
+/// (`smithy_query(query="operation",operation="GetDevicePositionHistory")`), so each
+/// published bound is served and the value one step past each bound is refused.
+#[tokio::test]
+async fn a_page_size_outside_the_modelled_range_is_refused() {
+    let router = emulator_with_samples().await;
+
+    // Rows: (case, MaxResults, served?) — the two published bounds, one step past
+    // each of them, and a value well inside the range.
+    let rows: [(&str, i64, bool); 5] = [
+        ("one below the minimum", 0, false),
+        ("the published minimum", 1, true),
+        ("inside the range", 50, true),
+        ("the published maximum", 100, true),
+        ("one above the maximum", 101, false),
+    ];
+
+    for (case, max_results, served) in rows {
+        let answer = history(
+            &router,
+            TRACKER,
+            DEVICE,
+            json!({
+                "StartTimeInclusive": wire_time(SAMPLES[0]),
+                "EndTimeExclusive": wire_time("2024-03-01T12:01:00Z"),
+                "MaxResults": max_results,
+            }),
+        )
+        .await;
+        if served {
+            assert_eq!(
+                answer.status, 200,
+                "case {case:?} (MaxResults={max_results}): expected 200, got {} {}",
+                answer.status, answer.body
+            );
+            let page = reported_sample_times(&answer);
+            let expected = (max_results as usize).min(SAMPLES.len());
+            assert_eq!(
+                page.len(),
+                expected,
+                "case {case:?} (MaxResults={max_results}): expected {expected} samples, \
+                 got {page:?}"
+            );
+        } else {
+            assert_eq!(
+                answer.status, 400,
+                "case {case:?} (MaxResults={max_results}): expected 400, got {} {}",
+                answer.status, answer.body
+            );
+            assert_eq!(
+                answer.error_code(),
+                "ValidationException",
+                "case {case:?} (MaxResults={max_results}): expected ValidationException, \
+                 got {} {}",
+                answer.error_code(),
+                answer.body
+            );
+        }
+    }
+}
+
+/// RULE: a position-history read reports, so a page a client fetches leaves the stored
+/// history exactly as the next caller finds it — walking every page, and refusing a
+/// page, consumes nothing.
+#[tokio::test]
+async fn reading_a_page_leaves_the_history_for_the_next_caller() {
+    let router = emulator_with_samples().await;
+    let all: Vec<i64> = SAMPLES.iter().map(|iso| iso_millis(iso)).collect();
+
+    // The whole window, read once up front: the baseline every later read must still
+    // report.
+    let whole_window = json!({
+        "StartTimeInclusive": wire_time(SAMPLES[0]),
+        "EndTimeExclusive": wire_time("2024-03-01T12:01:00Z"),
+    });
+    let before = history(&router, TRACKER, DEVICE, whole_window.clone()).await;
+    assert_eq!(
+        reported_sample_times(&before),
+        all,
+        "the baseline read must report the stored window, got {}",
+        before.body
+    );
+
+    // Rows: the kinds of read that must each leave the store alone — a full page, a
+    // paginated walk to exhaustion repeated twice, an empty window, a refused window
+    // and a refused cursor.
+    for round in 0..2 {
+        let mut token: Option<String> = None;
+        for page in 0..=SAMPLES.len() {
+            let mut body = whole_window.clone();
+            body["MaxResults"] = json!(2);
+            if let Some(token) = &token {
+                body["NextToken"] = json!(token);
+            }
+            let answer = history(&router, TRACKER, DEVICE, body).await;
+            assert_eq!(
+                answer.status, 200,
+                "walk {round} page {page}: expected 200, got {} {}",
+                answer.status, answer.body
+            );
+            token = next_token(&answer);
+            if token.is_none() {
+                break;
+            }
+        }
+        assert_eq!(
+            token, None,
+            "walk {round}: the walk must end with no NextToken, got {token:?}"
+        );
+    }
+
+    let empty = history(
+        &router,
+        TRACKER,
+        DEVICE,
+        json!({
+            "StartTimeInclusive": wire_time("2024-03-01T13:00:00Z"),
+            "EndTimeExclusive": wire_time("2024-03-01T14:00:00Z"),
+        }),
+    )
+    .await;
+    assert_eq!(
+        reported_sample_times(&empty),
+        Vec::<i64>::new(),
+        "a window past every sample must be empty, got {}",
+        empty.body
+    );
+
+    for (case, body) in [
+        (
+            "an inverted window",
+            json!({
+                "StartTimeInclusive": wire_time("2024-03-01T12:01:00Z"),
+                "EndTimeExclusive": wire_time(SAMPLES[0]),
+            }),
+        ),
+        (
+            "a cursor this service did not mint",
+            json!({
+                "StartTimeInclusive": wire_time(SAMPLES[0]),
+                "EndTimeExclusive": wire_time("2024-03-01T12:01:00Z"),
+                "NextToken": "not-a-cursor",
+            }),
+        ),
+    ] {
+        let refused = history(&router, TRACKER, DEVICE, body).await;
+        assert_eq!(
+            refused.status, 400,
+            "case {case:?}: expected 400, got {} {}",
+            refused.status, refused.body
+        );
+    }
+
+    let after = history(&router, TRACKER, DEVICE, whole_window).await;
+    assert_eq!(
+        reported_sample_times(&after),
+        all,
+        "after every read the stored window must be unchanged, expected {all:?}, got {}",
+        after.body
+    );
+}
