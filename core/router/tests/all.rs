@@ -2993,3 +2993,9 @@ mod cloudformation_task_definition_runs_an_ecs_service;
 // (The crate-level guidance two concurrent landings appended here belongs to the module
 // header at the top of this file, where it now stands: an inner doc comment may only precede
 // items, so a `//!` line in this appended tail is `E0753` and compiles nothing.)
+// (An appended note that repeats the rule the module doc at the HEAD of this file already
+// states — declare each suite exactly ONCE, since this is one crate root and a second `mod`
+// for the same name is `E0428`, which `all/all_rs_declares_each_suite_once.rs` checks for
+// this file and for every service crate's `tests/all.rs`. It is a LINE comment here: an
+// inner doc comment is only legal before the first item, so landing it in this tail failed
+// every suite in this target.)

@@ -209,6 +209,8 @@ mod missing_offering_refusals;
 mod missing_resource_refusals;
 #[path = "all/missing_resource_status.rs"]
 mod missing_resource_status;
+#[path = "all/notification_channel_configs.rs"]
+mod notification_channel_configs;
 #[path = "all/package_and_migration_authorization.rs"]
 mod package_and_migration_authorization;
 #[path = "all/package_association_listings.rs"]
