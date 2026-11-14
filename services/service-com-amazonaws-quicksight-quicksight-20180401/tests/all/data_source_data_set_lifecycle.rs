@@ -48,7 +48,55 @@ impl Harness {
         // These cases are about the handlers, not about signature verification.
         router.set_request_authentication(false);
         router.register_service(EmulatedService::new(Arc::clone(&engine)));
+        // Athena is mounted on the SAME engine because a data source's connection test
+        // resolves the Athena workgroup its parameters name against Athena's own store:
+        // a suite registers a workgroup by calling Athena, as a client would.
+        router.register_service(service_com_amazonaws_athena_amazonathena::EmulatedService::new(
+            Arc::clone(&engine),
+        ));
         Self { router, engine }
+    }
+
+    /// Invoke one Athena operation on the same emulator, and return `(status, body)`.
+    ///
+    /// Athena speaks awsJson1_1 over `POST /` with `x-amz-target`, and the router picks
+    /// the service from the SigV4 credential scope, so this is the wire path an Athena
+    /// SDK client would take.
+    pub(crate) async fn athena_call(&self, operation: &str, body: Value) -> (u16, Value) {
+        let request = http::Request::builder()
+            .method("POST")
+            .uri(format!("https://athena.{REGION}.amazonaws.com/"))
+            .header(
+                "authorization",
+                format!(
+                    "AWS4-HMAC-SHA256 Credential=AKIDEXAMPLE/20240101/{REGION}/athena/aws4_request, \
+                     SignedHeaders=host;x-amz-target, Signature=abc"
+                ),
+            )
+            .header("x-amz-target", format!("AmazonAthena.{operation}"))
+            .header("content-type", "application/x-amz-json-1.1")
+            .body(Bytes::from(
+                serde_json::to_vec(&body).expect("a JSON request body"),
+            ))
+            .expect("a well-formed request");
+        let response = self.router.dispatch(request).await;
+        let status = response.status().as_u16();
+        let parsed = if response.body().is_empty() {
+            Value::Null
+        } else {
+            serde_json::from_slice(response.body()).unwrap_or(Value::Null)
+        };
+        (status, parsed)
+    }
+
+    /// Register the Athena workgroup `name` through Athena's own `CreateWorkGroup`, so
+    /// a QuickSight data source may connect through it.
+    pub(crate) async fn create_athena_work_group(&self, name: &str) {
+        let (status, body) = self.athena_call("CreateWorkGroup", json!({ "Name": name })).await;
+        assert_eq!(
+            status, 200,
+            "fixture {name:?}: Athena CreateWorkGroup returned {status}: {body}"
+        );
     }
 
     /// Dispatch one request, signed for [`REGION`], and return its status and parsed

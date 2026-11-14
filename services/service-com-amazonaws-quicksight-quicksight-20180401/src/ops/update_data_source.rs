@@ -192,6 +192,18 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         let now = std::time::SystemTime::now();
         let updated_time = crate::state::now_timestamp(now);
 
+        // An update re-states how this data source connects, so QuickSight tests the
+        // connection again and the terminal status of the update IS that test's
+        // outcome. The test reads another service's store, so it runs before this
+        // service's guard is taken and the two are never held at once.
+        let error_info =
+            crate::state::connection_test_error(&*self.engine, input.data_source_parameters.as_ref());
+        let settled_status = if error_info.is_some() {
+            crate::state::RESOURCE_STATUS_UPDATE_FAILED
+        } else {
+            crate::state::RESOURCE_STATUS_UPDATE_SUCCESSFUL
+        };
+
         let key = (input.aws_account_id, input.data_source_id);
         let mut store = state.lock();
         let Some(record) = store.data_sources.get_mut(&key) else {
@@ -223,9 +235,12 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         // carries the non-terminal status this response reports and reaches the
         // terminal one when the clock owes it, which a later read materialises.
         record.status = crate::state::RESOURCE_STATUS_UPDATE_IN_PROGRESS.to_string();
-        record.settled_status = crate::state::RESOURCE_STATUS_UPDATE_SUCCESSFUL.to_string();
+        // The outcome of the connection test above, which replaces the outcome of the
+        // write that last addressed this data source: a test that passes clears the
+        // error a previous failure left, one that fails records its own.
+        record.settled_status = settled_status.to_string();
         record.status_settles_at = now + crate::state::DATA_SOURCE_LIFECYCLE_SPAN;
-        record.error_info = None;
+        record.error_info = error_info;
         // `input.credentials` is deliberately not stored, exactly as on create: the
         // member is `@sensitive`, no read returns it, and keeping a secret nothing can
         // reach only risks disclosing it.

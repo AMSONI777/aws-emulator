@@ -13,6 +13,8 @@
 mod account_subscription;
 #[path = "all/data_set_permissions.rs"]
 mod data_set_permissions;
+#[path = "all/data_source_connection_test.rs"]
+mod data_source_connection_test;
 #[path = "all/data_source_data_set_lifecycle.rs"]
 mod data_source_data_set_lifecycle;
 #[path = "all/data_source_not_found_arn.rs"]

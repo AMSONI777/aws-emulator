@@ -18021,6 +18021,7 @@ dependencies = [
  "percent-encoding",
  "rand 0.9.5",
  "serde_json",
+ "service-com-amazonaws-athena-amazonathena",
  "service-common",
  "sha2 0.10.9",
  "tokio",

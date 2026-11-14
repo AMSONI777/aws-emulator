@@ -12,6 +12,11 @@ engine = { workspace = true }
 # `RegisterUser` reads `Email` against; `arn`: its one reading of an ARN, which names the
 # IAM principal a federated user is registered for.
 service-common = { path = "../common" }
+# The account's Athena workgroups, read out of Athena's own store: an `ATHENA` data
+# source connects through the workgroup its `DataSourceParameters` name, so the
+# connection test a create or update settles on resolves that workgroup against the
+# service that owns it rather than reporting every data source as connected.
+service-com-amazonaws-athena-amazonathena = { workspace = true }
 smithy-macros = { workspace = true }
 aws-smithy-schema = { workspace = true }
 aws-smithy-schema-server = { workspace = true }

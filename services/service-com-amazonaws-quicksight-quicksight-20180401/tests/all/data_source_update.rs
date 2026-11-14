@@ -227,6 +227,10 @@ fn expected(update: &Value, member: &str) -> Value {
 #[tokio::test]
 async fn an_update_replaces_the_stored_configuration_and_reads_back() {
     let harness = Harness::new();
+    // One row moves its data source onto the Athena workgroup `reporting`. A data
+    // source's connection test resolves the workgroup its parameters name against
+    // Athena's own workgroups, so the account has to hold that one.
+    harness.create_athena_work_group("reporting").await;
 
     for case in cases() {
         let Case {

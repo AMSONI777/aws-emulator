@@ -11,6 +11,7 @@
 //! concern of its own, so it lives in [`refusals`] and is re-exported from here.
 
 mod authorization;
+mod connection_test;
 /// The impl block in this module adds the account's identity-store reading to the state
 /// struct, so it exports no name of its own and needs no re-export.
 mod identity_store;
@@ -18,6 +19,7 @@ mod refusals;
 mod users;
 
 pub use authorization::*;
+pub use connection_test::*;
 pub use refusals::*;
 pub use users::*;
 
@@ -803,7 +805,8 @@ pub struct DataSourceRecord {
     /// owes it falls due: the non-terminal status the create or the update reported.
     pub status: String,
     /// The `ResourceStatus` it reaches then — the terminal outcome of the create or
-    /// the update that last addressed it.
+    /// the update that last addressed it, which is the outcome of the connection test
+    /// that write started ([`crate::state::connection_test_error`]).
     pub settled_status: String,
     /// When the clock owes this data source its move from [`Self::status`] to
     /// [`Self::settled_status`]. Stored rather than waited on: a reader materialises
@@ -816,6 +819,10 @@ pub struct DataSourceRecord {
     pub ssl_properties: Option<SslProperties>,
     pub permissions: Vec<ResourcePermission>,
     pub tags: Vec<Tag>,
+    /// The failure [`Self::settled_status`] carries, and `None` when that status is a
+    /// successful one: the `ErrorInfo` of the connection test the create or the update
+    /// ran. It is part of the SETTLED outcome, so a read before the transition falls
+    /// due reports none — see [`Self::error_info_at`].
     pub error_info: Option<DataSourceErrorInfo>,
 }
 
@@ -829,6 +836,30 @@ impl DataSourceRecord {
         } else {
             &self.status
         }
+    }
+
+    /// This data source's `ErrorInfo` as of `now`: the error the terminal status
+    /// carries, from the instant that status falls due.
+    ///
+    /// A write in flight has no outcome yet — the connection test it started has not
+    /// been reported — so nothing is returned while the status is still the
+    /// non-terminal one, however the test will settle.
+    pub fn error_info_at(&self, now: SystemTime) -> Option<&DataSourceErrorInfo> {
+        if now >= self.status_settles_at {
+            self.error_info.as_ref()
+        } else {
+            None
+        }
+    }
+
+    /// Whether a data set may be built on this data source as of `now`: a data source
+    /// whose last connection test FAILED cannot serve a query, so it cannot back a
+    /// table. One still being created or updated has not failed its test.
+    pub fn connection_failed_at(&self, now: SystemTime) -> bool {
+        matches!(
+            self.status_at(now),
+            RESOURCE_STATUS_CREATION_FAILED | RESOURCE_STATUS_UPDATE_FAILED
+        )
     }
 
     /// The modelled `DataSource` structure this record describes, as of `now` — the
@@ -851,7 +882,7 @@ impl DataSourceRecord {
             alternate_data_source_parameters: None,
             vpc_connection_properties: self.vpc_connection_properties.clone(),
             ssl_properties: self.ssl_properties.clone(),
-            error_info: self.error_info.clone(),
+            error_info: self.error_info_at(now).cloned(),
             // Secret-based credentials are a separate feature of CreateDataSource's
             // `Credentials` member (`SecretArn`); nothing stores one yet.
             secret_arn: None,
@@ -1102,6 +1133,15 @@ pub const RESOURCE_STATUS_UPDATE_SUCCESSFUL: &str = "UPDATE_SUCCESSFUL";
 /// `ResourceStatus` of a resource whose last update is still in flight (same model
 /// enum) — what `UpdateDataSource` reports for the update it accepted.
 pub const RESOURCE_STATUS_UPDATE_IN_PROGRESS: &str = "UPDATE_IN_PROGRESS";
+
+/// `ResourceStatus` of a resource whose creation FAILED (same model enum): the
+/// terminal status a data source reaches when the connection test its create ran did
+/// not pass.
+pub const RESOURCE_STATUS_CREATION_FAILED: &str = "CREATION_FAILED";
+
+/// `ResourceStatus` of a resource whose last update FAILED (same model enum) — the
+/// terminal status of an update whose connection test did not pass.
+pub const RESOURCE_STATUS_UPDATE_FAILED: &str = "UPDATE_FAILED";
 
 /// How long a data source stays in the non-terminal status its create or its update
 /// reported before the clock owes it the terminal one. Chosen (QuickSight publishes no

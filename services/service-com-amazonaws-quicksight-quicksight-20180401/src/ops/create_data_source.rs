@@ -230,6 +230,18 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
         let now = std::time::SystemTime::now();
         let created_time = crate::state::now_timestamp(now);
 
+        // QuickSight tests the connection the submitted parameters describe, and the
+        // terminal status this data source settles in IS that test's outcome. The test
+        // reads another service's store, so it runs before this service's guard is
+        // taken and the two are never held at once.
+        let error_info =
+            crate::state::connection_test_error(&*self.engine, input.data_source_parameters.as_ref());
+        let settled_status = if error_info.is_some() {
+            crate::state::RESOURCE_STATUS_CREATION_FAILED
+        } else {
+            crate::state::RESOURCE_STATUS_CREATION_SUCCESSFUL
+        };
+
         let mut store = state.lock();
         let key = (input.aws_account_id.clone(), input.data_source_id.clone());
         if store.data_sources.contains_key(&key) {
@@ -291,7 +303,9 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
                 // reports and reaches the terminal one when the clock owes it, which a
                 // later read materialises.
                 status: crate::state::RESOURCE_STATUS_CREATION_IN_PROGRESS.to_string(),
-                settled_status: crate::state::RESOURCE_STATUS_CREATION_SUCCESSFUL.to_string(),
+                // The outcome of the connection test above: a test that passed settles
+                // the data source successfully, one that did not settles it failed.
+                settled_status: settled_status.to_string(),
                 status_settles_at: now + crate::state::DATA_SOURCE_LIFECYCLE_SPAN,
                 created_time,
                 last_updated_time: created_time,
@@ -300,8 +314,10 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
                 ssl_properties: input.ssl_properties,
                 permissions: input.permissions.unwrap_or_default(),
                 tags: input.tags.unwrap_or_default(),
-                // Nothing has failed, so the data source carries no error.
-                error_info: None,
+                // The error the settled status carries, which a read reports as
+                // `ErrorInfo` from the instant that status falls due; `None` when the
+                // connection test passed.
+                error_info,
             },
         );
         // `input.credentials` is deliberately not stored: QuickSight never returns it,

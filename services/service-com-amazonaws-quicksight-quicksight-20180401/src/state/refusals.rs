@@ -68,6 +68,13 @@ pub fn data_source_not_found_message(
     )
 }
 
+/// The refusal a data-set write reports for a physical table naming a data source
+/// whose connection test failed: the data source by the ARN the request carried, and
+/// the status that data source is in now. No trailing period.
+pub fn data_source_status_message(data_source_arn: &str, status: &str) -> String {
+    format!("{DATA_SOURCE} {data_source_arn} is in status {status}")
+}
+
 /// The per-data-set ceiling `CreateRefreshSchedule` reports once a data set already
 /// holds every refresh schedule it may hold.
 ///

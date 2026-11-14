@@ -302,7 +302,9 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
 
         // Every physical table reads a data source, named by ARN. A table naming an
         // ARN no stored data source in this account has is a reference to a resource
-        // that does not exist.
+        // that does not exist; one naming a data source whose connection test FAILED
+        // is a reference to a source that cannot serve a query, whichever import mode
+        // the data set uses.
         let mut table_keys: Vec<&String> = input.physical_table_map.keys().collect();
         table_keys.sort();
         for table_key in table_keys {
@@ -310,16 +312,26 @@ impl<Eng: ::std::marker::Send + ::std::marker::Sync + 'static> smithy_server_run
                 continue;
             };
             let data_source_arn = crate::state::physical_table_data_source_arn(table);
-            if store
-                .data_source_by_arn(&input.aws_account_id, data_source_arn)
-                .is_none()
-            {
+            let Some(data_source) = store.data_source_by_arn(&input.aws_account_id, data_source_arn)
+            else {
                 return Err(CreateDataSetErrorModeled::ResourceNotFoundException(
                     ResourceNotFoundException {
                         message: Some(format!(
                             "PhysicalTableMap entry {table_key} names data source {data_source_arn}, which does not exist."
                         )),
                         resource_type: Some("DATA_SOURCE".to_string()),
+                        request_id: Some(request_id),
+                    },
+                )
+                .into());
+            };
+            if data_source.connection_failed_at(now) {
+                return Err(CreateDataSetErrorModeled::InvalidParameterValueException(
+                    InvalidParameterValueException {
+                        message: Some(crate::state::data_source_status_message(
+                            data_source_arn,
+                            data_source.status_at(now),
+                        )),
                         request_id: Some(request_id),
                     },
                 )
