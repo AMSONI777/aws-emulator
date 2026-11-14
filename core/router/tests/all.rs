@@ -2927,3 +2927,10 @@ mod cloudformation_firehose_stream_direct_put_delivers;
 // tail, for the same reason.)
 // (`apigatewaymanagementapi_manage_connections_authorization` is declared once, in the span
 // above, for that same reason.)
+// bucket's notification configuration does for EVERY event class it names, and what the handler
+// it runs is told by the search domain it signs a request to, spans CloudFormation, Amazon S3,
+// Lambda, IAM/STS and Amazon OpenSearch Service at once, so no single service crate's test
+// target can write the object and then read what the handler did.
+#[path = "all/s3_object_events_update_their_search_index.rs"]
+mod s3_object_events_update_their_search_index;
+// `zz_probe` ONCE further up this tail: two landings each appended their own copy here, and a
